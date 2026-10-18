@@ -2,16 +2,16 @@
 
 <!-- sdd-workflow version: "5.1.0" -->
 
-This project follows AI-SDD (AI-driven Specification-Driven Development) workflow.
+このプロジェクトは AI-SDD（AI駆動仕様駆動開発）ワークフローに従います。
 
-### Document Operations
+### ドキュメント操作
 
-When operating files under `.sdd/` directory, refer to `.sdd/AI-SDD-PRINCIPLES.md` to ensure proper AI-SDD workflow compliance.
+`.sdd/` ディレクトリ配下のファイルを操作する際は、`.sdd/AI-SDD-PRINCIPLES.md` を参照し、AI-SDDワークフローに準拠してください。
 
-**Trigger Conditions**:
+**トリガー条件**:
 
-- Reading or modifying files under `.sdd/`
-- Creating new specifications, design docs, or requirement docs
-- Implementing features that reference `.sdd/` documents
+- `.sdd/` 配下のファイルの読み取りまたは変更
+- 新しい仕様書、設計書、要求仕様書の作成
+- `.sdd/` ドキュメントを参照する機能の実装
 
-For detailed directory structure, file naming convention, and document link convention, refer to `.claude/rules/ai-sdd-instructions.md`.
+詳細なディレクトリ構造・ファイル命名規則・ドキュメントリンク規約は、`.claude/rules/ai-sdd-instructions.md` を参照してください。

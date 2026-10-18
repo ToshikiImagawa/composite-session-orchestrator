@@ -1,6 +1,6 @@
 ---
 id: "prd-{feature-name}"
-title: "{Feature Name}"
+title: "{機能名}"
 type: "prd"
 status: "draft"
 created: "YYYY-MM-DD"
@@ -12,190 +12,190 @@ priority: "medium"
 risk: "medium"
 ---
 
-# PRD (Product Requirements Document) Template
+# PRD（要求仕様書）テンプレート
 
-This document is a template for creating PRD (Product Requirements Document) under `${SDD_REQUIREMENT_PATH}/`.
-The filename should be `{feature-name}.md`.
+このドキュメントは `${SDD_REQUIREMENT_PATH}/` 配下のPRD（要求仕様書）を作成する際のテンプレートです。
+ファイル名は `{機能名}.md` となります。
 
-> **Note**: This template is a fallback for the plugin.
-> When using in a project, customize it according to your project structure and
-> save it as `${SDD_ROOT}/PRD_TEMPLATE.md`.
+> **注意**: このテンプレートはプラグインのフォールバック用です。
+> プロジェクトで使用する際は、プロジェクト構成に合わせてカスタマイズし、
+> `${SDD_ROOT}/PRD_TEMPLATE.md` として保存してください。
 
-## Difference from the Downstream Documents
+## 下流ドキュメントとの違い
 
-| Document                               | SDD Phase              | Role and Focus                                                                            | Abstraction           | Persistence                                  |
-|----------------------------------------|------------------------|-------------------------------------------------------------------------------------------|-----------------------|----------------------------------------------|
-| `requirement/*.md` (this file)         | **Specify**            | **"What to build" "Why to build"** - Defines business requirements. No technical details  | Highest (Abstract)    | **Persistent**                               |
-| `specification/{feature-name}_spec.md` | **Specify**            | **"What to build"** - Defines abstract structure and behavior. No technical details       | High (Abstract)       | **Persistent**                               |
-| `task/{ticket-number}/design-draft.md` | **Plan (Design)**      | **"How to implement"** - Concrete technical plan for one ticket                           | Medium-Low (Concrete) | **Temporary** - deleted after implementation |
-| `adr/{feature-name}.md`                | **Implement & Review** | **"Why it was decided this way"** - Decisions, rationale, and rejected alternatives       | Medium                | **Persistent** (append-only)                 |
-
----
-
-# {Feature Name} Requirements Specification `<MUST>`
-
-## Overview `<MUST>`
-
-Briefly describe the purpose and scope of this document.
+| ドキュメント                                 | SDDフェーズ                 | 役割と焦点                                               | 抽象度      | 永続性                |
+|----------------------------------------|-------------------------|-----------------------------------------------------|----------|--------------------|
+| `requirement/*.md`（このファイル）              | **Specify（仕様化）**        | **「何を作るか」「なぜ作るか」** - ビジネス要求を定義。技術詳細は含めない            | 最高（抽象的）  | **永続**             |
+| `specification/{feature-name}_spec.md` | **Specify（仕様化）**        | **「何を作るか」** - システムの抽象的な構造と振る舞いを定義。技術的詳細は含めない        | 高（抽象的）   | **永続**             |
+| `task/{ticket-number}/design-draft.md` | **Plan（計画/設計）**         | **「どのように実現するか」** - 1チケット分の具体的な技術設計                  | 中〜低（具体的） | **一時** - 実装完了後に削除  |
+| `adr/{feature-name}.md`                | **Implement & Review**  | **「なぜそう決めたか」** - 決定・その理由・却下した代替案                    | 中        | **永続**（追記専用）       |
 
 ---
 
-# 1. How to Read Requirements Diagrams `<RECOMMENDED>`
+# {機能名} 要求仕様書 `<MUST>`
 
-## 1.1. Requirement Types
+## 概要 `<MUST>`
 
-- **requirement**: General requirement
-- **functionalRequirement**: Functional requirement
-- **performanceRequirement**: Performance requirement
-- **interfaceRequirement**: Interface requirement
-- **designConstraint**: Design constraint
-
-## 1.2. Risk Levels
-
-- **High**: High risk (Business critical, difficult to implement)
-- **Medium**: Medium risk (Important but alternatives exist)
-- **Low**: Low risk (Nice to have)
-
-## 1.3. Verification Methods
-
-- **Analysis**: Verification by analysis
-- **Test**: Verification by testing
-- **Demonstration**: Verification by demonstration
-- **Inspection**: Verification by inspection (review)
-
-## 1.4. Relationship Types
-
-- **contains**: Containment relationship (parent requirement contains child requirements)
-- **derives**: Derivation relationship (requirement derives another requirement)
-- **satisfies**: Satisfaction relationship (element satisfies requirement)
-- **verifies**: Verification relationship (test case verifies requirement)
-- **refines**: Refinement relationship (defines requirement in more detail)
-- **traces**: Trace relationship (traceability between requirements)
+このドキュメントの目的と対象範囲を簡潔に説明します。
 
 ---
 
-# 2. Requirements List `<MUST>`
+# 1. 要求図の読み方 `<RECOMMENDED>`
 
-## 2.1. Use Case Diagram (Overview) `<RECOMMENDED>`
+## 1.1. 要求タイプ
 
-Overview diagram showing the relationship between main functions and actors.
+- **requirement**: 一般的な要求
+- **functionalRequirement**: 機能要求
+- **performanceRequirement**: パフォーマンス要求
+- **interfaceRequirement**: インターフェース要求
+- **designConstraint**: 設計制約
+
+## 1.2. リスクレベル
+
+- **High**: 高リスク（ビジネスクリティカル、実装困難）
+- **Medium**: 中リスク（重要だが代替可能）
+- **Low**: 低リスク（Nice to have）
+
+## 1.3. 検証方法
+
+- **Analysis**: 分析による検証
+- **Test**: テストによる検証
+- **Demonstration**: デモンストレーションによる検証
+- **Inspection**: インスペクション（レビュー）による検証
+
+## 1.4. 関係タイプ
+
+- **contains**: 包含関係（親要求が子要求を含む）
+- **derives**: 派生関係（要求から別の要求が導出される）
+- **satisfies**: 満足関係（要素が要求を満たす）
+- **verifies**: 検証関係（テストケースが要求を検証する）
+- **refines**: 詳細化関係（要求をより詳細に定義する）
+- **traces**: トレース関係（要求間の追跡可能性）
+
+---
+
+# 2. 要求一覧 `<MUST>`
+
+## 2.1. ユースケース図（概要） `<RECOMMENDED>`
+
+主要機能とアクターの関係を示す概要図です。
 
 ```mermaid
 graph TB
-    subgraph "System Name"
-        Actor1((Actor 1))
-        Actor2((Actor 2))
-        Func1[Function 1]
-        Func2[Function 2]
-        Func3[Function 3]
+    subgraph "システム名"
+        Actor1((アクター1))
+        Actor2((アクター2))
+        Func1[機能1]
+        Func2[機能2]
+        Func3[機能3]
     end
 
     Actor1 --- Func1
     Actor1 --- Func2
     Actor2 --- Func3
-    Func1 -.->|"&lt;&lt;include&gt;&gt;"| Func3
+    Func1 -.->|"&lt;&lt;包含&gt;&gt;"| Func3
 ```
 
-## 2.2. Use Case Diagram (Detailed) `<OPTIONAL>`
+## 2.2. ユースケース図（詳細） `<OPTIONAL>`
 
-### {Function Category 1}
+### {機能カテゴリ1}
 
 ```mermaid
 graph TB
-    subgraph "Function Category 1"
-        Actor((Actor))
-        UseCase1[Use Case 1]
-        UseCase2[Use Case 2]
+    subgraph "機能カテゴリ1"
+        Actor((アクター))
+        UseCase1[ユースケース1]
+        UseCase2[ユースケース2]
 
-        subgraph "Details"
-            Detail1[Detail 1]
-            Detail2[Detail 2]
+        subgraph "詳細"
+            Detail1[詳細1]
+            Detail2[詳細2]
         end
     end
 
     Actor --- UseCase1
     Actor --- UseCase2
-    Detail1 -.->|"&lt;&lt;extend&gt;&gt;"| UseCase1
-    Detail2 -.->|"&lt;&lt;extend&gt;&gt;"| UseCase1
+    Detail1 -.->|"&lt;&lt;拡張&gt;&gt;"| UseCase1
+    Detail2 -.->|"&lt;&lt;拡張&gt;&gt;"| UseCase1
 ```
 
-## 2.3. Function List (Text Format) `<MUST>`
+## 2.3. 機能一覧（テキスト形式） `<MUST>`
 
-- Function Category 1
-    - Sub-function 1-1
-        - Detail 1-1-1
-        - Detail 1-1-2
-    - Sub-function 1-2
-- Function Category 2
-    - Sub-function 2-1
+- 機能カテゴリ1
+    - サブ機能1-1
+        - 詳細1-1-1
+        - 詳細1-1-2
+    - サブ機能1-2
+- 機能カテゴリ2
+    - サブ機能2-1
 
 ---
 
-# 3. Requirements Diagram (SysML Requirements Diagram) `<MUST>`
+# 3. 要求図（SysML Requirements Diagram） `<MUST>`
 
-## 3.1. Overall Requirements Diagram
+## 3.1. 全体要求図
 
 ```mermaid
 requirementDiagram
     requirement SystemRequirement {
         id: REQ_001
-        text: "Overall system requirement"
+        text: "システム全体の要求"
         risk: high
         verifymethod: demonstration
     }
 
     requirement CoreFunctionality {
         id: REQ_002
-        text: "Core functionality requirements"
+        text: "コア機能要求"
         risk: high
         verifymethod: demonstration
     }
 
     requirement Architecture {
         id: REQ_003
-        text: "Architecture requirements"
+        text: "アーキテクチャ要求"
         risk: high
         verifymethod: inspection
     }
 
     requirement Quality {
         id: REQ_004
-        text: "Quality requirements (Non-functional)"
+        text: "品質要求（非機能要求）"
         risk: high
         verifymethod: test
     }
 
     functionalRequirement Function1 {
         id: FR_001
-        text: "Functional requirement 1 description"
+        text: "機能要求1の説明"
         risk: high
         verifymethod: test
     }
 
     functionalRequirement Function2 {
         id: FR_002
-        text: "Functional requirement 2 description"
+        text: "機能要求2の説明"
         risk: medium
         verifymethod: test
     }
 
     performanceRequirement Performance1 {
         id: PR_001
-        text: "Performance requirement 1"
+        text: "パフォーマンス要求1"
         risk: high
         verifymethod: test
     }
 
     interfaceRequirement Interface1 {
         id: IR_001
-        text: "Interface requirement 1"
+        text: "インターフェース要求1"
         risk: high
         verifymethod: inspection
     }
 
     designConstraint Constraint1 {
         id: DC_001
-        text: "Design constraint 1"
+        text: "設計制約1"
         risk: high
         verifymethod: inspection
     }
@@ -212,29 +212,29 @@ requirementDiagram
     Performance1 - traces -> Function1
 ```
 
-## 3.2. Major Subsystem Detail Diagrams `<OPTIONAL>`
+## 3.2. 主要サブシステム詳細図 `<OPTIONAL>`
 
-### {Subsystem Name}
+### {サブシステム名}
 
 ```mermaid
 requirementDiagram
     requirement Subsystem {
         id: REQ_002
-        text: "Subsystem requirement"
+        text: "サブシステムの要求"
         risk: high
         verifymethod: demonstration
     }
 
     functionalRequirement SubFunction1 {
         id: FR_001_01
-        text: "Sub-function 1"
+        text: "サブ機能1"
         risk: high
         verifymethod: test
     }
 
     functionalRequirement SubFunction2 {
         id: FR_001_02
-        text: "Sub-function 2"
+        text: "サブ機能2"
         risk: medium
         verifymethod: test
     }
@@ -245,145 +245,145 @@ requirementDiagram
 
 ---
 
-# 4. Detailed Requirements Description `<MUST>`
+# 4. 要求の詳細説明 `<MUST>`
 
-## 4.1. Functional Requirements
+## 4.1. 機能要求
 
-### FR_001: {Functional Requirement Name}
+### FR_001: {機能要求名}
 
-{Detailed description of the function}
+{機能の詳細な説明}
 
-**Included functions:**
+**含まれる機能:**
 
-- FR_001_01: {Sub-function 1}
-- FR_001_02: {Sub-function 2}
+- FR_001_01: {サブ機能1}
+- FR_001_02: {サブ機能2}
 
-**Verification method:** Test
+**検証方法:** テストによる検証
 
-### FR_002: {Functional Requirement Name}
+### FR_002: {機能要求名}
 
-{Detailed description of the function}
+{機能の詳細な説明}
 
-**Verification method:** Test
+**検証方法:** テストによる検証
 
-## 4.2. Performance Requirements `<OPTIONAL>`
+## 4.2. パフォーマンス要求 `<OPTIONAL>`
 
-### PR_001: {Performance Requirement Name}
+### PR_001: {パフォーマンス要求名}
 
-{Detailed description and target values for performance requirement}
+{パフォーマンス要求の詳細な説明と目標値}
 
-**Verification method:** Test
+**検証方法:** テストによる検証
 
-## 4.3. Interface Requirements `<OPTIONAL>`
+## 4.3. インターフェース要求 `<OPTIONAL>`
 
-### IR_001: {Interface Requirement Name}
+### IR_001: {インターフェース要求名}
 
-{Detailed description of interface requirement}
+{インターフェース要求の詳細な説明}
 
-**Verification method:** Inspection
+**検証方法:** インスペクションによる検証
 
-## 4.4. Design Constraints `<OPTIONAL>`
+## 4.4. 設計制約 `<OPTIONAL>`
 
-### DC_001: {Design Constraint Name}
+### DC_001: {設計制約名}
 
-{Detailed description of design constraint}
+{設計制約の詳細な説明}
 
-**Verification method:** Inspection
-
----
-
-# 5. Constraints `<OPTIONAL>`
-
-## 5.1. Technical Constraints
-
-- Technical constraints
-
-## 5.2. Business Constraints
-
-- Business constraints (schedule, budget, etc.)
+**検証方法:** インスペクションによる検証
 
 ---
 
-# 6. Assumptions `<OPTIONAL>`
+# 5. 制約事項 `<OPTIONAL>`
 
-- Prerequisites for this feature to work
-- Dependent systems/features
+## 5.1. 技術的制約
 
----
+- 技術的な制約
 
-# 7. Out of Scope `<OPTIONAL>`
+## 5.2. ビジネス的制約
 
-The following are out of scope for this PRD:
-
-- Items not included in this feature
-- May be considered in the future but excluded for now
+- ビジネス的な制約（スケジュール、予算など）
 
 ---
 
-# 8. Glossary `<RECOMMENDED>`
+# 6. 前提条件 `<OPTIONAL>`
 
-> **Note**: If the glossary becomes large, consider managing it as a separate file (`glossary.md`).
-
-| Term   | Definition   |
-|--------|--------------|
-| [Term] | [Definition] |
+- この機能が動作するための前提
+- 依存する他システム・機能
 
 ---
 
-# Section Requirement Legend
+# 7. スコープ外 `<OPTIONAL>`
 
-| Marker          | Meaning     | Description                  |
-|-----------------|-------------|------------------------------|
-| `<MUST>`        | Required    | Must be included in all PRDs |
-| `<RECOMMENDED>` | Recommended | Include whenever possible    |
-| `<OPTIONAL>`    | Optional    | Include as needed            |
+以下は本PRDのスコープ外とします：
 
----
-
-# Guidelines
-
-## What to Include
-
-- ✅ Overview and purpose
-- ✅ Use case diagrams (overview and detailed)
-- ✅ SysML requirements diagrams (requirementDiagram syntax)
-- ✅ Detailed requirements descriptions (functional, performance, interface requirements, design constraints)
-- ✅ Requirement relationships (contains, derives, satisfies, verifies, refines, traces)
-- ✅ Constraints and assumptions
-- ✅ Explicit out of scope
-- ✅ Glossary
-
-## What NOT to Include (→ Spec / Design Doc)
-
-- ❌ Technical implementation details
-- ❌ Architecture and module structure
-- ❌ Technology stack selection
-- ❌ API definitions and type definitions
-- ❌ Database schema
-
-## Downstream Propagation Checklist for New Requirement IDs
-
-When adding or renaming requirement IDs (FR/PR/IR/DC, etc.), ensure all of the following:
-
-- [ ] IDs within the PRD remain in ascending order (`XX_001`, `XX_002`, ...)
-- [ ] Added corresponding rows to the traceability table in the spec
-- [ ] Added corresponding rows to the traceability table in the design
-- [ ] IDs follow the naming convention defined by the project (e.g., `FR_001`)
-- [ ] Ran the requirement-analyzer agent to verify consistency
-- [ ] Trace rows across all 3 layers (PRD / spec / design) are included in the same PR
+- この機能に含まれないこと
+- 将来的に検討する可能性があるが、今回は対象外
 
 ---
 
-# Customization Guidelines for Projects
+# 8. 用語集 `<RECOMMENDED>`
 
-When customizing this template for your project, update the following:
+> **注意**: 用語集が大きくなる場合は、別ファイル（`glossary.md`）として管理することを推奨します。
 
-1. **Requirement ID naming convention**: Adjust to project conventions (if using prefixes other than REQ/FR/PR/IR/DC)
-2. **Risk level classification**: Adjust to project's risk evaluation criteria
-3. **Verification method classification**: Adjust to project's verification process
-4. **Use case diagram style**: Adjust to project's actor and function structure
-5. **Glossary management**: Decide whether to manage as separate file or include in PRD
+| 用語   | 定義   |
+|------|------|
+| [用語] | [定義] |
 
 ---
 
-**This PRD serves as the source of truth for business requirements that AI agents reference during the Specify phase.**
+# セクション必須度の凡例
+
+| マーク             | 意味 | 説明                 |
+|-----------------|----|--------------------|
+| `<MUST>`        | 必須 | すべてのPRDで必ず記載してください |
+| `<RECOMMENDED>` | 推奨 | 可能な限り記載することを推奨します  |
+| `<OPTIONAL>`    | 任意 | 必要に応じて記載してください     |
+
+---
+
+# ガイドライン
+
+## 含めるべき内容
+
+- ✅ 概要と目的
+- ✅ ユースケース図（概要・詳細）
+- ✅ SysML要求図（requirementDiagram構文）
+- ✅ 要求の詳細説明（機能要求、パフォーマンス要求、インターフェース要求、設計制約）
+- ✅ 要求間の関係（contains, derives, satisfies, verifies, refines, traces）
+- ✅ 制約事項・前提条件
+- ✅ スコープ外の明示
+- ✅ 用語集
+
+## 含めないべき内容（→ Spec / Design Doc へ）
+
+- ❌ 技術的な実装詳細
+- ❌ アーキテクチャ・モジュール構成
+- ❌ 技術スタックの選定
+- ❌ API定義・型定義
+- ❌ データベーススキーマ
+
+## 新規要件追加時の下流伝播チェックリスト
+
+新規要件 ID（FR/PR/IR/DC 等）の追加・リネーム時に以下をすべて満たすこと：
+
+- [ ] PRD 内の ID が昇順（`XX_001`, `XX_002`, ...）を保っている
+- [ ] spec のトレーサビリティ表に対応行を追加した
+- [ ] design のトレーサビリティ表に対応行を追加した
+- [ ] ID 命名規約（プロジェクトで定義した規則。例: `FR_001`）を守っている
+- [ ] requirement-analyzer エージェントを実行して整合確認した
+- [ ] 3 層（PRD / spec / design）のトレース行が同一 PR に含まれている
+
+---
+
+# プロジェクトへのカスタマイズ指針
+
+このテンプレートをプロジェクト用にカスタマイズする際は、以下の項目を更新してください：
+
+1. **要求IDの命名規則**: プロジェクトの規約に合わせる（REQ/FR/PR/IR/DC以外のプレフィックスを使う場合）
+2. **リスクレベルの分類**: プロジェクトのリスク評価基準に合わせる
+3. **検証方法の分類**: プロジェクトの検証プロセスに合わせる
+4. **ユースケース図のスタイル**: プロジェクトのアクター・機能構成に合わせる
+5. **用語集の管理方法**: 別ファイル管理にするか、PRD内に含めるか決定する
+
+---
+
+**このPRDは、AIエージェントが仕様化（Specify）フェーズで参照する、ビジネス要求の真実の源となります。**

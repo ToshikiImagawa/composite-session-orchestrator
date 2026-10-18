@@ -1,6 +1,6 @@
 ---
 id: "design-{ticket-number}"
-title: "{Feature Name}"
+title: "{機能名}"
 type: "design"
 status: "draft"
 sdd-phase: "plan"
@@ -14,89 +14,88 @@ priority: "medium"
 risk: "medium"
 ---
 
-# Technical Design Document Template (Design Doc)
+# 技術設計書テンプレート (Design Doc)
 
-This document is a template for creating a Technical Design Document **draft** under `${SDD_TASK_PATH}/{ticket-number}/`.
-The filename is `design-draft.md`.
-This is a **temporary** file: delete it after implementation, once its key decisions are integrated into
-`adr/{feature-name}.md`.
+このドキュメントは `${SDD_TASK_PATH}/{ticket-number}/` 配下に置く技術設計書（Design Doc）の**ドラフト**を作成する際のテンプレートです。
+ファイル名は `design-draft.md` となります。
+このファイルは**一時ドラフト**であり、実装完了後、重要な決定事項を `adr/{feature-name}.md` へ統合したうえで削除します。
 
-> **Note**: This template is a fallback for the plugin.
-> When using in a project, customize it according to your programming language and project structure,
-> and save it as `${SDD_ROOT}/DESIGN_DOC_TEMPLATE.md`.
+> **注意**: このテンプレートはプラグインのフォールバック用です。
+> プロジェクトで使用する際は、プログラミング言語やプロジェクト構成に合わせてカスタマイズし、
+> `${SDD_ROOT}/DESIGN_DOC_TEMPLATE.md` として保存してください。
 
-## Difference from the Other Technical Documents
+## 他の技術ドキュメントとの違い
 
-| Document                                | SDD Phase              | Role and Focus                                                                                      | Abstraction           | Persistence                                  |
-|-----------------------------------------|------------------------|-----------------------------------------------------------------------------------------------------|-----------------------|----------------------------------------------|
-| `specification/{feature-name}_spec.md`  | **Specify**            | **"What to build" "Why to build"** - Defines abstract structure and behavior. No technical details  | High (Abstract)       | **Persistent**                               |
-| `task/{ticket-number}/design-draft.md` (this file) | **Plan (Design)** | **"How to implement"** - Concrete technical plan for one ticket                          | Medium-Low (Concrete) | **Temporary** - deleted after implementation |
-| `adr/{feature-name}.md`                 | **Implement & Review** | **"Why it was decided this way"** - Decisions, rationale, and rejected alternatives                 | Medium                | **Persistent** (append-only)                 |
-
----
-
-# {Feature Name} `<MUST>`
-
-**Related Spec:** [link to specification/{feature-name}_spec.md]
-**Related Decision Log:** [link to adr/{feature-name}.md]
-**Related PRD:** [link to requirement/{feature-name}.md]
+| ドキュメント                                        | SDDフェーズ                | 役割と焦点                                               | 抽象度      | 永続性               |
+|-----------------------------------------------|------------------------|-----------------------------------------------------|----------|-------------------|
+| `specification/{feature-name}_spec.md`        | **Specify（仕様化）**       | **「何を作るか」「なぜ作るか」** - システムの抽象的な構造と振る舞いを定義。技術的詳細は含めない | 高（抽象的）   | **永続**            |
+| `task/{ticket-number}/design-draft.md`（このファイル） | **Plan（計画/設計）**        | **「どのように実現するか」** - 1チケット分の具体的な技術設計                  | 中〜低（具体的） | **一時** - 実装完了後に削除 |
+| `adr/{feature-name}.md`                       | **Implement & Review** | **「なぜそう決めたか」** - 決定・その理由・却下した代替案                    | 中        | **永続**（追記専用）      |
 
 ---
 
-# 1. Implementation Status `<MUST>`
+# {機能名} `<MUST>`
 
-**Status:** 🟢 Implemented / 🟡 Partial / 🔴 Not Implemented
-
-## 1.1. Implementation Progress `<OPTIONAL>`
-
-| Module/Feature | Status   | Notes   |
-|----------------|----------|---------|
-| [Module]       | 🟢/🟡/🔴 | [Notes] |
+**関連 Spec:** [specification/{機能名}_spec.md へのリンク]
+**関連決定ログ:** [adr/{機能名}.md へのリンク]
+**関連 PRD:** [requirement/{機能名}.md へのリンク]
 
 ---
 
-# 2. Design Goals `<MUST>`
+# 1. 実装ステータス `<MUST>`
 
-Describe the main technical goals this design must achieve.
+**ステータス:** 🟢 実装済み / 🟡 部分実装 / 🔴 未実装
 
----
+## 1.1. 実装進捗 `<OPTIONAL>`
 
-# 3. Technology Stack `<MUST>`
-
-**Clearly document the rationale for why each technology was chosen.**
-
-| Area   | Technology | Selection Rationale |
-|--------|------------|---------------------|
-| [Area] | [Tech]     | [Rationale]         |
+| モジュール/機能 | ステータス    | 備考   |
+|----------|----------|------|
+| [モジュール]  | 🟢/🟡/🔴 | [備考] |
 
 ---
 
-# 4. Architecture `<MUST>`
+# 2. 設計目標 `<MUST>`
 
-## 4.1. System Architecture Diagram
+本設計が達成すべき主要な技術目標を記述します。
+
+---
+
+# 3. 技術スタック `<MUST>`
+
+**なぜその技術を選んだのか** という判断の根拠を明確に残します。
+
+| 領域   | 採用技術 | 選定理由 |
+|------|------|------|
+| [領域] | [技術] | [理由] |
+
+---
+
+# 4. アーキテクチャ `<MUST>`
+
+## 4.1. システム構成図
 
 ```mermaid
 graph TD
     A[Component A] --> B[Component B]
 ```
 
-## 4.2. Module Structure
+## 4.2. モジュール分割
 
-| Module Name | Responsibility   | Dependencies   | Location |
-|-------------|------------------|----------------|----------|
-| [Name]      | [Responsibility] | [Dependencies] | [Path]   |
+| モジュール名 | 責務   | 依存関係 | 配置場所 |
+|--------|------|------|------|
+| [名前]   | [責務] | [依存] | [パス] |
 
 ---
 
-# 5. Data Model `<OPTIONAL>`
+# 5. データモデル `<OPTIONAL>`
 
 <!--
-Modify the notation according to your project's programming language.
-e.g., TypeScript, Go, Python, Kotlin, etc.
+プロジェクトのプログラミング言語に合わせて記法を変更してください。
+例: TypeScript, Go, Python, Kotlin など
 -->
 
 ```
-// Describe data model according to your project's language
+// プロジェクトの言語に合わせたデータモデルを記載
 interface SomeEntity {
   id: string
   name: string
@@ -105,14 +104,14 @@ interface SomeEntity {
 
 ---
 
-# 6. Interface Definition `<OPTIONAL>`
+# 6. インターフェース定義 `<OPTIONAL>`
 
 <!--
-Modify the notation according to your project's programming language.
+プロジェクトのプログラミング言語に合わせて記法を変更してください。
 -->
 
 ```
-// Describe interface definitions according to your project's language
+// プロジェクトの言語に合わせたインターフェース定義を記載
 interface SomeRepository {
   fetch(): Promise<Data>
 }
@@ -120,138 +119,137 @@ interface SomeRepository {
 
 ---
 
-# 7. Non-Functional Requirements Implementation `<OPTIONAL>`
+# 7. 非機能要件実現方針 `<OPTIONAL>`
 
-| Requirement   | Implementation Approach |
-|---------------|-------------------------|
-| [Requirement] | [Approach]              |
-
----
-
-# 8. Test Strategy `<OPTIONAL>`
-
-| Test Level | Target   | Coverage Goal |
-|------------|----------|---------------|
-| [Level]    | [Target] | [Goal]        |
+| 要件   | 実現方針 |
+|------|------|
+| [要件] | [方針] |
 
 ---
 
-# 9. Design Decisions `<MUST>`
+# 8. テスト戦略 `<OPTIONAL>`
 
-## 9.1. Decisions Made
-
-| Decision   | Options   | Chosen   | Rationale   |
-|------------|-----------|----------|-------------|
-| [Decision] | [Options] | [Chosen] | [Rationale] |
-
-## 9.2. Unresolved Issues `<OPTIONAL>`
-
-| Issue   | Impact   | Proposed Resolution |
-|---------|----------|---------------------|
-| [Issue] | [Impact] | [Resolution]        |
+| テストレベル | 対象   | カバレッジ目標 |
+|--------|------|---------|
+| [レベル]  | [対象] | [目標]    |
 
 ---
 
-# 10. Change History `<OPTIONAL>`
+# 9. 設計判断 `<MUST>`
+
+## 9.1. 決定事項
+
+| 決定事項 | 選択肢 | 決定内容 | 理由   |
+|------|-----|------|------|
+| [事項] | [肢] | [決定] | [理由] |
+
+## 9.2. 未解決の課題 `<OPTIONAL>`
+
+| 課題   | 影響度 | 対応方針 |
+|------|-----|------|
+| [課題] | [度] | [方針] |
+
+---
+
+# 10. 変更履歴 `<OPTIONAL>`
 
 ## vX.X
 
-**Changes:**
+**変更内容:**
 
-- Change 1
+- 変更1
 
-**Migration Guide:**
+**移行ガイド:**
 
 <!--
-Modify the notation according to your project's programming language.
+プロジェクトのプログラミング言語に合わせて記法を変更してください。
 -->
 
 ```
-// ❌ Old code
-// ✅ New code
+// ❌ 旧コード
+// ✅ 新コード
 ```
 
 ---
 
-# Section Requirement Legend
+# セクション必須度の凡例
 
-> **Note:** These markers are author-facing guides that indicate section requirement levels. Remove them from the generated document — they must not appear in the final output.
+> **Note:** これらのマーカーはセクションの必須度を示す著者向けのガイド表記です。生成するドキュメントからは除去してください — 最終成果物に残してはいけません。
 
-| Marker          | Meaning     | Description                              |
-|-----------------|-------------|------------------------------------------|
-| `<MUST>`        | Required    | Must be included in all design documents |
-| `<RECOMMENDED>` | Recommended | Include whenever possible                |
-| `<OPTIONAL>`    | Optional    | Include as needed                        |
-
----
-
-# Guidelines
-
-## What to Include
-
-- ✅ Implementation status and progress
-- ✅ Technology stack selection rationale
-- ✅ Architecture and module structure
-- ✅ Implementation patterns and design patterns
-- ✅ Directory structure and file placement
-- ✅ Test strategy and coverage goals
-- ✅ Design decision records
-- ✅ Change history and migration guides
-
-## What NOT to Include (→ Spec)
-
-- ❌ Feature purpose and background
-- ❌ User stories and use cases
-- ❌ Public API (interface) definitions
-- ❌ Logical structure of data models
-- ❌ Abstract description of behavior
-- ❌ Functional and non-functional requirements
-- ❌ Glossary
+| マーク             | 意味 | 説明                   |
+|-----------------|----|----------------------|
+| `<MUST>`        | 必須 | すべての技術設計書で必ず記載してください |
+| `<RECOMMENDED>` | 推奨 | 可能な限り記載することを推奨します    |
+| `<OPTIONAL>`    | 任意 | 必要に応じて記載してください       |
 
 ---
 
-# Pseudocode Completeness Rules
+# ガイドライン
 
-Pseudocode in Design Docs (code examples for data models, interface definitions, processing flows, etc.)
-must remain **complete enough to be copied verbatim and still work**.
-When details diverge during transcription to implementation, they cause review findings and runtime errors.
+## 含めるべき内容
 
-Select, adapt, and extend the following according to the languages used in your project
-(keep the structure extensible with sub-sections for TypeScript / Go / Rust, etc.).
+- ✅ 実装ステータス・進捗
+- ✅ 技術スタックの選定理由
+- ✅ アーキテクチャ・モジュール構成
+- ✅ 実装パターン・デザインパターンの適用
+- ✅ ディレクトリ構造・ファイル配置
+- ✅ テスト戦略・カバレッジ目標
+- ✅ 設計判断の記録
+- ✅ 変更履歴・移行ガイド
 
-## Python (General)
+## 含めないべき内容（→ Spec へ）
 
-- Make all import statements explicit (including types referenced only in type annotations)
-- Be careful with `isinstance` checks and the BaseException hierarchy
-  (`asyncio.CancelledError` is not a subclass of `Exception` in Python 3.8+)
-- When `x` in `x if x else fallback` can be `""` / `[]` / `0`,
-  write `x if x is not None else fallback` explicitly
+- ❌ 機能の目的と背景
+- ❌ ユーザーストーリー・ユースケース
+- ❌ 公開API（インターフェース）の定義
+- ❌ データモデルの論理構造
+- ❌ 振る舞いの抽象的な記述
+- ❌ 機能要件・非機能要件
+- ❌ 用語集
+
+---
+
+# Pseudocode の完全性ルール
+
+Design Doc に記載する pseudocode（データモデル・インターフェース定義・処理フロー等のコード例）は、
+**verbatim でコピーしても動作する完全性**を維持してください。
+実装への転記段階で細部が乖離すると、レビュー指摘や実行時エラーの原因になります。
+
+以下はプロジェクトで使用する言語に合わせて取捨選択・追加してください（TypeScript / Go / Rust 等の
+sub-section を増やせる形を維持すること）。
+
+## Python 共通
+
+- すべての import 文を明示する（型注釈で参照する型も含む）
+- `isinstance` チェックは BaseException 階層に注意（`asyncio.CancelledError` は Python 3.8+ で
+  `Exception` のサブクラスではない）
+- `x if x else fallback` の `x` が `""` / `[]` / `0` を取りうる場合は
+  `x if x is not None else fallback` で明示する
 
 ## Pydantic v2
 
-- When reassigning inside `model_validator(mode='after')` on a model with `frozen=True`,
-  use `object.__setattr__(self, ...)`
-- `default_factory` is evaluated after `mode='before'` validators (mind the ordering)
+- `frozen=True` のモデルで `model_validator(mode='after')` 内に再代入する場合は
+  `object.__setattr__(self, ...)` を使用する
+- `default_factory` は `mode='before'` validator の後に評価される（順序に注意）
 
 ## SQLAlchemy / alembic
 
-- Keep alembic revision IDs ≤ 32 characters (`alembic_version.version_num` is `varchar(32)`)
-- Write CHECK constraints with conditions that do not block transitions (use auxiliary columns)
+- alembic revision ID は 32 文字以下にする（`alembic_version.version_num` が `varchar(32)`）
+- CHECK 制約は遷移を妨げない条件で書く（補助カラムを併用）
 
 ---
 
-# Customization Guidelines for Projects
+# プロジェクトへのカスタマイズ指針
 
-When customizing this template for your project, update the following:
+このテンプレートをプロジェクト用にカスタマイズする際は、以下の項目を更新してください：
 
-1. **Data model notation**: Adjust to project's programming language
-2. **Interface definition notation**: Adjust to project's programming language
-3. **Change history code examples**: Adjust to project's programming language
-4. **Module structure table columns**: Adjust to project's structure (package/module organization)
-5. **Technology stack table**: Adjust to technology areas used in the project
-6. **Pseudocode completeness rules**: Select and extend rules according to the pitfalls of the languages and frameworks used in the project
+1. **データモデルの記法**: プロジェクトのプログラミング言語に合わせる
+2. **インターフェース定義の記法**: プロジェクトのプログラミング言語に合わせる
+3. **変更履歴のコード例**: プロジェクトのプログラミング言語に合わせる
+4. **モジュール分割表のカラム**: プロジェクトの構成（パッケージ/モジュール構造）に合わせる
+5. **技術スタック表**: プロジェクトで使用する技術領域に合わせる
+6. **Pseudocode の完全性ルール**: プロジェクトで使用する言語・フレームワークの落とし穴に合わせて取捨選択・追加する
 
 ---
 
-**This Design Doc serves as the guideline for concrete code generation that AI agents reference during the Implement
-phase.**
+**この Design Docは、AIエージェントが実装（Implement）フェーズで参照する、具体的なコード生成のための指針となります。**

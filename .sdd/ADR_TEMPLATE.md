@@ -1,6 +1,6 @@
 ---
 id: "adr-{feature-name}"
-title: "{Feature Name} Decision Log"
+title: "{機能名} 決定ログ"
 type: "adr"
 status: "approved"
 sdd-phase: "implement"
@@ -11,90 +11,90 @@ tags: []
 category: ""
 ---
 
-# Architecture Decision Record Template (Decision Log)
+# アーキテクチャ決定記録テンプレート (Decision Log)
 
-This document is a template for the **persistent decision log** stored at
-`${SDD_ADR_PATH}/{feature-name}.md`. One file per feature, **append-only**: it preserves the rationale
-behind key decisions after the temporary `${SDD_TASK_PATH}/{ticket-number}/design-draft.md` is deleted.
+このドキュメントは `${SDD_ADR_PATH}/{feature-name}.md` に置く**永続的な決定ログ**のテンプレートです。
+1機能につき1ファイルで、**追記のみ（append-only）**。一時ドラフトである
+`${SDD_TASK_PATH}/{ticket-number}/design-draft.md` を削除した後も、重要な決定の根拠を残すために使います。
 
-> **Note**: `/sdd-init` copies this file to `${SDD_ROOT}/ADR_TEMPLATE.md`, and **that copy is the project's
-> template** — customize it there to match your conventions (re-running `/sdd-init` never overwrites it).
-> `/task-cleanup` reads `${SDD_ROOT}/ADR_TEMPLATE.md` when it exists, and falls back to the entry format in
-> `AI-SDD-PRINCIPLES.md` § Architecture Decision Record when it does not. A customized copy must therefore
-> keep the required entry items below, so the appended entries stay machine-readable.
+> **注意**: `/sdd-init` がこのファイルを `${SDD_ROOT}/ADR_TEMPLATE.md` にコピーし、
+> **そのコピーがプロジェクトのテンプレート**になります。規約に合わせたカスタマイズはコピー側で行ってください
+> （`/sdd-init` を再実行しても上書きされません）。`/task-cleanup` は `${SDD_ROOT}/ADR_TEMPLATE.md` があれば
+> それを読み、無い場合は `AI-SDD-PRINCIPLES.md` § Architecture Decision Record のエントリ形式を使います。
+> カスタマイズする場合も、追記されたエントリを機械的に読めるよう、下記の必須項目は維持してください。
 
-## File Shape
+## ファイルの構成
 
-One file holds **many entries** but only **one** front matter block:
+1ファイルに**複数のエントリ**が入りますが、front matter は**1つだけ**です。
 
-| Part                                | Count | Notes                                                                                                                                  |
-|:------------------------------------|:------|:---------------------------------------------------------------------------------------------------------------------------------------|
-| Front matter                        | 1     | Metadata for the **whole file** (see `front_matter_reference.md`). `status` is always `"approved"` — entries are recorded only after a decision is made |
-| `#` title                           | 1     | `# {Feature Name} Decision Log`                                                                                                        |
-| `##` entry                          | Many  | One block per decision, **appended at the end of the file**                                                                            |
+| 構成要素        | 個数 | 説明                                                                                                           |
+|:------------|:---|:-------------------------------------------------------------------------------------------------------------|
+| front matter | 1  | **ファイル全体**のメタデータ（詳細は `front_matter_reference.md`）。`status` は常に `"approved"`（決定が確定した後にのみ記録するため） |
+| `#` タイトル    | 1  | `# {機能名} 決定ログ`                                                                                               |
+| `##` エントリ   | 複数 | 決定1件につき1ブロック。**ファイル末尾に追記する**                                                                                 |
 
-Past entries are **never rewritten or removed**. Whenever a decision is finalized, append a new `##` block
-below the last one. The **latest** entry is the current decision; earlier entries are read as history.
+過去のエントリは**書き換えず、削除もしません**。決定が確定するたびに、最後のエントリの下へ新しい `##` ブロックを
+追記します。**最後のエントリが現行の決定**であり、それより前のエントリは履歴として読みます。
 
-## Entry Format
+## エントリのフォーマット
 
-| Item                                      | Required | Content                                                                                                                  |
-|:------------------------------------------|:---------|:-------------------------------------------------------------------------------------------------------------------------|
-| Heading: `## YYYY-MM-DD {decision title}` | Yes      | Date the decision was finalized, then a short title naming what was decided (no colon, so the anchor stays predictable)   |
-| `- **Decision**:`                         | Yes      | What was decided, in one or two sentences                                                                                |
-| `- **Rationale**:`                        | Yes      | Why it was chosen, including the constraint that forced it                                                               |
-| `- **Rejected alternatives**:`            | Yes      | Each alternative considered and the reason it lost. Write `None considered` when there were none — never invent one       |
-| `- **Supersedes**:`                       | No       | Only when this decision reverses an earlier entry **in the same file**: a link to that entry's heading, plus one line on what changed. Omit the item entirely otherwise |
+| 項目                                | 必須  | 内容                                                                                            |
+|:----------------------------------|:----|:----------------------------------------------------------------------------------------------|
+| 見出し: `## YYYY-MM-DD {決定のタイトル}`    | Yes | 決定が確定した日付 + 何を決めたかを表す短いタイトル（anchor が素直に生成されるようコロンは使わない）                                        |
+| `- **Decision**:`                 | Yes | 決めたこと（1〜2文）                                                                                   |
+| `- **Rationale**:`                | Yes | なぜそれを選んだか。選択を強制した制約を含める                                                                       |
+| `- **Rejected alternatives**:`    | Yes | 検討して却下した代替案とその理由。無い場合は `None considered` と書く（捏造しない）                                           |
+| `- **Supersedes**:`               | No  | **同一ファイル内の過去エントリを覆すときのみ**。対象エントリ見出しへのリンクと、何が変わったかを1行。覆しでなければ項目自体を省略する                        |
 
-Superseding is recorded **on the new entry only, in one direction**. The superseded entry is not edited —
-not even to add a back-pointer. The front matter fields `supersedes` / `superseded-by` are **not** used for
-entry-to-entry reversals; they retire a whole decision-log file (renamed, split, or merged feature).
+覆し（supersede）は**新しいエントリ側に一方向でのみ**記録します。覆された側のエントリは編集しません
+（back-pointer も追加しません）。front matter の `supersedes` / `superseded-by` はエントリ間の覆しには
+**使いません** — こちらは決定ログ**ファイル全体**の引退（機能のリネーム・分割・統合）を表します。
 
-## Filled Example
+## 記入例
 
-Two entries in one file, where the second reverses the first:
+1ファイル内の2エントリで、2つ目が1つ目を覆すケース:
 
 ```markdown
-# user-login Decision Log
+# user-login 決定ログ
 
-## 2025-11-02 Keep sessions in process memory
+## 2025-11-02 セッションをプロセスメモリで保持する
 
-- **Decision**: Store session state in the application process's memory.
-- **Rationale**: Single-instance deployment; an external store was not justified at launch scope.
-- **Rejected alternatives**: Redis — an extra operational component with no benefit at one instance.
+- **Decision**: セッション状態をアプリケーションプロセスのメモリに保持する。
+- **Rationale**: 単一インスタンス構成であり、ローンチ時のスコープでは外部ストアを導入する理由がなかった。
+- **Rejected alternatives**: Redis — 単一インスタンスでは利点がなく、運用コンポーネントが増えるだけだった。
 
-## 2026-02-14 Move the session store to Redis
+## 2026-02-14 セッションストアを Redis へ移す
 
-- **Decision**: Store session state in Redis, keyed by session id.
-- **Rationale**: The service now runs three instances behind a load balancer, so in-process sessions cannot survive request routing.
-- **Rejected alternatives**: Sticky sessions at the load balancer — keeps the store simple but loses sessions on instance restart. Database-backed sessions — adds write load to the primary for no durability requirement.
-- **Supersedes**: [2025-11-02 Keep sessions in process memory](#2025-11-02-keep-sessions-in-process-memory) — the instance count invalidated the constraint that decision rested on.
+- **Decision**: セッション状態を session id をキーにして Redis に保持する。
+- **Rationale**: ロードバランサ配下で3インスタンス構成になり、プロセス内セッションではリクエストの振り分けに耐えられない。
+- **Rejected alternatives**: ロードバランサのスティッキーセッション — ストアは単純なままだがインスタンス再起動でセッションが失われる。DB によるセッション保持 — 永続性の要件が無いのにプライマリへ書き込み負荷を追加する。
+- **Supersedes**: [2025-11-02 セッションをプロセスメモリで保持する](#2025-11-02-セッションをプロセスメモリで保持する) — インスタンス数の変化により、その決定が前提としていた制約が成立しなくなった。
 ```
 
-## What Does Not Belong Here
+## ここに書かないもの
 
-| Excluded                                | Where it goes instead                                           |
-|:----------------------------------------|:----------------------------------------------------------------|
-| Full technical design plans             | `${SDD_TASK_PATH}/{ticket-number}/design-draft.md` (temporary)  |
-| What the system does, abstractly        | `${SDD_SPECIFICATION_PATH}/{feature-name}_spec.md`              |
-| Work progress notes, investigation logs | Nowhere — deleted with `${SDD_TASK_PATH}/{ticket-number}/`      |
+| 対象外                | 代わりの置き場所                                                   |
+|:-------------------|:-----------------------------------------------------------|
+| 技術設計の全体プラン         | `${SDD_TASK_PATH}/{ticket-number}/design-draft.md`（一時ドラフト） |
+| システムが何をするかの抽象的な記述  | `${SDD_SPECIFICATION_PATH}/{feature-name}_spec.md`         |
+| 作業進捗メモ・調査ログ        | どこにも残さない — `${SDD_TASK_PATH}/{ticket-number}/` と共に削除する    |
 
 ---
 
-# {Feature Name} Decision Log `<MUST>`
+# {機能名} 決定ログ `<MUST>`
 
-## YYYY-MM-DD {decision title} `<MUST>`
+## YYYY-MM-DD {決定のタイトル} `<MUST>`
 
-- **Decision**: [What was decided, in one or two sentences]
-- **Rationale**: [Why this option was chosen, including the constraint that forced it]
-- **Rejected alternatives**: [Alternative — reason it lost], or `None considered`
+- **Decision**: [決めたこと（1〜2文）]
+- **Rationale**: [なぜそれを選んだか。選択を強制した制約を含める]
+- **Rejected alternatives**: [代替案 — 却下した理由]、無い場合は `None considered`
 
-## YYYY-MM-DD {next decision title} `<OPTIONAL: one block per additional decision>`
+## YYYY-MM-DD {次の決定のタイトル} `<OPTIONAL: 決定1件につき1ブロック>`
 
-- **Decision**: [What was decided, in one or two sentences]
-- **Rationale**: [Why this option was chosen, including the constraint that forced it]
-- **Rejected alternatives**: [Alternative — reason it lost], or `None considered`
-- **Supersedes**: [{earlier entry heading}](#yyyy-mm-dd-decision-title) — [what changed since that decision] `<OPTIONAL: only when reversing an earlier entry>`
+- **Decision**: [決めたこと（1〜2文）]
+- **Rationale**: [なぜそれを選んだか。選択を強制した制約を含める]
+- **Rejected alternatives**: [代替案 — 却下した理由]、無い場合は `None considered`
+- **Supersedes**: [{過去エントリの見出し}](#yyyy-mm-dd-決定のタイトル) — [その決定から何が変わったか] `<OPTIONAL: 過去エントリを覆すときのみ>`
 
-Append the next decision below this line as a new `## YYYY-MM-DD {decision title}` block, and leave the
-entries above untouched.
+次の決定は、この行の下に新しい `## YYYY-MM-DD {決定のタイトル}` ブロックとして追記し、上のエントリは
+そのまま残してください。

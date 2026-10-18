@@ -1,6 +1,6 @@
 ---
 id: "spec-{feature-name}"
-title: "{Feature Name}"
+title: "{機能名}"
 type: "spec"
 status: "draft"
 sdd-phase: "specify"
@@ -14,166 +14,165 @@ priority: "medium"
 risk: "medium"
 ---
 
-# Abstract Specification Template
+# 抽象仕様書テンプレート
 
-This document is a template for creating abstract specifications under `${SDD_SPECIFICATION_PATH}/`.
-The filename should be `{feature-name}_spec.md`.
+このドキュメントは `${SDD_SPECIFICATION_PATH}/` 配下の抽象仕様書を作成する際のテンプレートです。
+ファイル名は `{機能名}_spec.md` となります。
 
-> **Note**: This template is a fallback for the plugin.
-> When using in a project, customize it according to your programming language and project structure,
-> and save it as `${SDD_ROOT}/SPECIFICATION_TEMPLATE.md`.
+> **注意**: このテンプレートはプラグインのフォールバック用です。
+> プロジェクトで使用する際は、プログラミング言語やプロジェクト構成に合わせてカスタマイズし、
+> `${SDD_ROOT}/SPECIFICATION_TEMPLATE.md` として保存してください。
 
-## Difference from the Other Technical Documents
+## 他の技術ドキュメントとの違い
 
-| Document                                | SDD Phase              | Role and Focus                                                                                          | Abstraction           | Persistence                                        |
-|-----------------------------------------|------------------------|---------------------------------------------------------------------------------------------------------|-----------------------|----------------------------------------------------|
-| `{feature-name}_spec.md` (this file)    | **Specify**            | **"What to build" "Why to build"** - Defines abstract structure and behavior. No technical details      | High (Abstract)       | **Persistent**                                     |
-| `task/{ticket-number}/design-draft.md`  | **Plan (Design)**      | **"How to implement"** - Concrete technical plan for one ticket                                         | Medium-Low (Concrete) | **Temporary** - deleted after implementation       |
-| `adr/{feature-name}.md`                 | **Implement & Review** | **"Why it was decided this way"** - Append-only log of decisions, rationale, and rejected alternatives  | Medium                | **Persistent** (append-only)                       |
-
----
-
-# {Feature Name} `<MUST>`
-
-**Related Design Draft:** [link to task/{ticket-number}/design-draft.md] (temporary — may already be deleted)
-**Related Decision Log:** [link to adr/{feature-name}.md]
-**Related PRD:** [link to requirement/{feature-name}.md]
+| ドキュメント                                 | SDDフェーズ                    | 役割と焦点                                                  | 抽象度      | 永続性                    |
+|----------------------------------------|----------------------------|--------------------------------------------------------|----------|------------------------|
+| `{機能名}_spec.md`（このファイル）                | **Specify（仕様化）**           | **「何を作るか」「なぜ作るか」** - システムの抽象的な構造と振る舞いを定義。技術的詳細は含めない    | 高（抽象的）   | **永続**                 |
+| `task/{ticket-number}/design-draft.md` | **Plan（計画/設計）**            | **「どのように実現するか」** - 1チケット分の具体的な技術計画                     | 中〜低（具体的） | **一時** — 実装完了後に削除する    |
+| `adr/{機能名}.md`                         | **Implement & Review（実装）** | **「なぜそう決めたか」** - 決定・理由・却下した代替案の追記専用（append-only）ログ     | 中        | **永続**（append-only）    |
 
 ---
 
-# 1. Background `<MUST>`
+# {機能名} `<MUST>`
 
-Describe why this feature is needed.
+**関連 Design Draft:** [task/{ticket-number}/design-draft.md へのリンク]（一時ファイル。すでに削除済みの場合もある）
+**関連 Decision Log:** [adr/{機能名}.md へのリンク]
+**関連 PRD:** [requirement/{機能名}.md へのリンク]
 
-# 2. Overview `<MUST>`
+---
 
-Describe the purpose and main design principles of the feature.
-**Do not include technical implementation details; focus on "what to achieve".**
+# 1. 背景 `<MUST>`
 
-# 3. Requirements Definition `<RECOMMENDED>`
+なぜこの機能が必要なのかを説明します。
 
-## 3.1. Functional Requirements
+# 2. 概要 `<MUST>`
 
-| ID     | Requirement   | Priority | Rationale |
-|--------|---------------|----------|-----------|
-| FR-001 | [Requirement] | Required | [Reason]  |
+機能の目的と主要な設計原則を説明します。
+**技術的な実装詳細は含めず、「何を実現するか」に焦点を当てます。**
 
-## 3.2. Non-Functional Requirements `<OPTIONAL>`
+# 3. 要求定義 `<RECOMMENDED>`
 
-| ID      | Category    | Requirement   | Target   |
-|---------|-------------|---------------|----------|
-| NFR-001 | Performance | [Requirement] | [Target] |
+## 3.1. 機能要件 (Functional Requirements)
+
+| ID     | 要件   | 優先度 | 根拠   |
+|--------|------|-----|------|
+| FR-001 | [要件] | 必須  | [理由] |
+
+## 3.2. 非機能要件 (Non-Functional Requirements) `<OPTIONAL>`
+
+| ID      | カテゴリ | 要件   | 目標値  |
+|---------|------|------|------|
+| NFR-001 | 性能   | [要件] | [目標] |
 
 # 4. API `<MUST>`
 
-List of public APIs in table format.
+公開APIの一覧を表形式で記載します。
 
-| pkg (directory name) | class (filename) | member   | description   |
-|----------------------|------------------|----------|---------------|
-| [pkg]                | [class]          | [member] | [description] |
+| pkg (ディレクトリ名) | class(ファイル名) | member   | 概要   |
+|---------------|--------------|----------|------|
+| [pkg]         | [class]      | [member] | [概要] |
 
-## 4.1. Type Definitions `<OPTIONAL>`
+## 4.1. 型定義 `<OPTIONAL>`
 
 <!--
-Modify the notation according to your project's programming language.
-e.g., TypeScript, Go, Python, Kotlin, etc.
+プロジェクトのプログラミング言語に合わせて記法を変更してください。
+例: TypeScript, Go, Python, Kotlin など
 -->
 
 ```
-// Describe type definitions according to your project's language
+// プロジェクトの言語に合わせた型定義を記載
 interface SomeType {
   property: string
 }
 ```
 
-# 5. Glossary `<OPTIONAL>`
+# 5. 用語集 `<OPTIONAL>`
 
-| Term   | Description   |
-|--------|---------------|
-| [Term] | [Description] |
+| 用語   | 説明   |
+|------|------|
+| [用語] | [説明] |
 
-# 6. Usage Examples `<RECOMMENDED>`
+# 6. 使用例 `<RECOMMENDED>`
 
 <!--
-Modify the notation according to your project's programming language.
+プロジェクトのプログラミング言語に合わせて記法を変更してください。
 -->
 
 ```
-// Describe usage examples according to your project's language
+// プロジェクトの言語に合わせた使用例を記載
 ```
 
-# 7. Behavior Diagram `<OPTIONAL>`
+# 7. 振る舞い図 `<OPTIONAL>`
 
-Describe behavior in Mermaid format.
+Mermaid形式で振る舞いを記述します。
 
 ```mermaid
 sequenceDiagram
     participant User
     participant System
-    User ->> System: Operation
-    System -->> User: Result
+    User ->> System: 操作
+    System -->> User: 結果
 ```
 
-# 8. Constraints `<OPTIONAL>`
+# 8. 制約事項 `<OPTIONAL>`
 
-Describe business or technical constraints.
-
----
-
-# Section Requirement Legend
-
-> **Note:** These markers are author-facing guides that indicate section requirement levels. Remove them from the generated document — they must not appear in the final output.
-
-| Marker          | Meaning     | Description                            |
-|-----------------|-------------|----------------------------------------|
-| `<MUST>`        | Required    | Must be included in all specifications |
-| `<RECOMMENDED>` | Recommended | Include whenever possible              |
-| `<OPTIONAL>`    | Optional    | Include as needed                      |
+ビジネス制約や技術的制約を記載します。
 
 ---
 
-# Guidelines
+# セクション必須度の凡例
 
-## What to Include
+> **Note:** これらのマーカーはセクションの必須度を示す著者向けのガイド表記です。生成するドキュメントからは除去してください — 最終成果物に残してはいけません。
 
-- ✅ Feature purpose and background
-- ✅ User stories and use cases
-- ✅ Public API (interface) definitions
-- ✅ Logical structure of data models
-- ✅ Abstract description of behavior
-- ✅ Functional and non-functional requirements
-- ✅ Glossary
-
-## What NOT to Include
-
-Technical content goes to one of two other documents. Pick the destination by how long the content must live.
-
-### → `task/{ticket-number}/design-draft.md` (temporary draft, deleted after implementation)
-
-- ❌ Implementation status and progress
-- ❌ Architecture and module structure
-- ❌ Implementation patterns and design patterns
-- ❌ Directory structure and file placement
-- ❌ Test strategy and coverage goals
-- ❌ Change history and migration guides
-
-### → `adr/{feature-name}.md` (persistent, append-only decision log)
-
-- ❌ Design decision records — the decision, its rationale, and the rejected alternatives
-- ❌ Technology stack selection rationale
-
-**A decision that must outlive the ticket does not survive in the design draft.** The draft is deleted once
-implementation completes, so append its decisions, rationale, and rejected alternatives to
-`adr/{feature-name}.md` before deletion (the `task-cleanup` skill does this). Recording a decision only in the
-draft loses it.
+| マーク             | 意味 | 説明                 |
+|-----------------|----|--------------------|
+| `<MUST>`        | 必須 | すべての仕様書で必ず記載してください |
+| `<RECOMMENDED>` | 推奨 | 可能な限り記載することを推奨します  |
+| `<OPTIONAL>`    | 任意 | 必要に応じて記載してください     |
 
 ---
 
-# Customization Guidelines for Projects
+# ガイドライン
 
-When customizing this template for your project, update the following:
+## 含めるべき内容
 
-1. **Type definition notation**: Adjust to project's programming language
-2. **Usage example notation**: Adjust to project's programming language
-3. **API table columns**: Adjust to project's structure (package/module organization)
-4. **Related document link format**: Adjust to project's document management method
+- ✅ 機能の目的と背景
+- ✅ ユーザーストーリー・ユースケース
+- ✅ 公開API（インターフェース）の定義
+- ✅ データモデルの論理構造
+- ✅ 振る舞いの抽象的な記述
+- ✅ 機能要件・非機能要件
+- ✅ 用語集
+
+## 含めないべき内容
+
+技術的な内容は他の2つのドキュメントに書きます。**その内容がどれだけ長く残る必要があるか**で行き先を選んでください。
+
+### → `task/{ticket-number}/design-draft.md`（一時ドラフト。実装完了後に削除する）
+
+- ❌ 実装ステータス・進捗
+- ❌ アーキテクチャ・モジュール構成
+- ❌ 実装パターン・デザインパターンの適用
+- ❌ ディレクトリ構造・ファイル配置
+- ❌ テスト戦略・カバレッジ目標
+- ❌ 変更履歴・移行ガイド
+
+### → `adr/{機能名}.md`（永続。append-only の決定ログ）
+
+- ❌ 設計判断の記録 — 決定内容・その理由・却下した代替案
+- ❌ 技術スタックの選定理由
+
+**チケットより長く残すべき決定は、design draft には残りません。** ドラフトは実装完了後に削除されるため、
+決定内容・理由・却下した代替案は削除前に `adr/{機能名}.md` へ追記してください（`task-cleanup` スキルがこれを行います）。
+ドラフトだけに書いた決定は失われます。
+
+---
+
+# プロジェクトへのカスタマイズ指針
+
+このテンプレートをプロジェクト用にカスタマイズする際は、以下の項目を更新してください：
+
+1. **型定義の記法**: プロジェクトのプログラミング言語に合わせる
+2. **使用例の記法**: プロジェクトのプログラミング言語に合わせる
+3. **API表のカラム**: プロジェクトの構成（パッケージ/モジュール構造）に合わせる
+4. **関連ドキュメントのリンク形式**: プロジェクトのドキュメント管理方法に合わせる
