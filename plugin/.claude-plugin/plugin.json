@@ -1,0 +1,9 @@
+{
+  "name": "composite-session-orchestrator",
+  "description": "統合セッション 1 対 作業セッション n の木構造で Claude セッションを束ねるオーケストレーター",
+  "version": "0.0.0",
+  "author": {
+    "name": "Anthony-dena",
+    "url": "https://github.com/Anthony-dena"
+  }
+}

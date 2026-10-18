@@ -1,0 +1,16 @@
+{
+  "name": "composite-session-orchestrator",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Composite pattern orchestrator for Claude sessions (integrator 1 : n workers)",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@cso/cli",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"TODO: test runner\" && exit 0",
+    "lint": "echo \"TODO: linter\" && exit 0"
+  }
+}

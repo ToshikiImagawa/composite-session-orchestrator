@@ -1,0 +1,35 @@
+# composite-session-orchestrator
+
+複数の Claude セッションを「統合セッション 1 対 作業セッション n」の木構造（Composite パターン）で束ね、
+人間が最上位の統合セッションとだけ対話すれば、並列に進む実装・レビュー・調査を依頼・把握・判断できるようにするシステム。
+
+要求は [`.sdd/requirement/composite-session-orchestrator.md`](.sdd/requirement/composite-session-orchestrator.md) を参照。
+
+## 構成
+
+| パス | 役割 |
+|:--|:--|
+| `packages/core` | 木構造、状態遷移、回収判定、受信箱の整列。純粋関数のみで I/O を持たない |
+| `packages/daemon` | イベントログ、ランタイムアダプタ（sdk / desktop）、フック受付、HTML 画面 |
+| `packages/mcp` | MCP ツール定義、ロール別の公開、エラー設計 |
+| `packages/cli` | 人間用コマンド（`orch purge` など） |
+| `plugin` | Claude Code plugin（役割定義 skill、hooks、MCP 設定、起動コマンド） |
+| `docs/spikes` | 実装前の技術検証の手順と結果 |
+
+## 進め方
+
+1. `docs/spikes/` の技術検証を実施し、結果を記録する
+2. Claude Code で `/sdd-workflow:sdd-init` を実行し、CLAUDE.md と `CONSTITUTION.md` を整える
+3. PRD をレビューする（prd-reviewer / front-matter-reviewer、`/clarify composite-session-orchestrator`）
+4. `/generate-spec --ticket {チケット番号}` で仕様と設計に落とす
+
+## セットアップ
+
+```bash
+pnpm install
+pnpm -r build
+pnpm -r test
+```
+
+依存パッケージ（MCP TypeScript SDK、Claude Agent SDK、SQLite ドライバ、zod、テストランナー）は未追加。
+着手時点の最新版を確認し、各パッケージに追加して固定すること。
