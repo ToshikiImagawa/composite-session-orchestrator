@@ -1,21 +1,22 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { PRIORITIES_DESC, type Priority } from "../src/index.js";
+import type { Priority } from "../src/index.js";
 
-describe("PRIORITIES_DESC", () => {
-  it("blocking が最上位、info が最下位である", () => {
-    expect(PRIORITIES_DESC[0]).toBe("blocking");
-    expect(PRIORITIES_DESC.at(-1)).toBe("info");
+// 基盤の動作確認用。ドメインロジックの検証は、実装 PR で別途追加する。
+const ORDER: readonly Priority[] = ["blocking", "failed", "completed", "progress", "info"];
+const rank = (p: Priority): number => ORDER.indexOf(p);
+
+describe("test infrastructure smoke", () => {
+  it("Vitest が動く", () => {
+    expect(rank("blocking")).toBeLessThan(rank("info"));
   });
 
-  it("重複がなく、並べ替えても要素が保たれる（性質ベース）", () => {
+  it("fast-check で並べ替えが要素を保つ（性質ベース）", () => {
     fc.assert(
-      fc.property(fc.shuffledSubarray([...PRIORITIES_DESC]), (subset: Priority[]) => {
-        const ranked = [...subset].sort(
-          (a, b) => PRIORITIES_DESC.indexOf(a) - PRIORITIES_DESC.indexOf(b),
-        );
-        expect(ranked).toHaveLength(subset.length);
-        expect(new Set(ranked)).toEqual(new Set(subset));
+      fc.property(fc.array(fc.constantFrom(...ORDER)), (items) => {
+        const sorted = [...items].sort((a, b) => rank(a) - rank(b));
+        expect(sorted).toHaveLength(items.length);
+        expect(sorted.map(rank)).toEqual([...sorted.map(rank)].sort((a, b) => a - b));
       }),
     );
   });

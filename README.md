@@ -32,6 +32,8 @@ pnpm install --frozen-lockfile
 pnpm check   # lint、typecheck、build、test、plugin 検証をまとめて実行（CI と同じ）
 ```
 
+`pnpm validate:plugin` は `plugin/.claude-plugin/plugin.json` の JSON 構文、必須項目（name、version、description）、name の kebab-case、version の semver、`plugin/{agents,hooks,skills}` の存在を確認します。
+
 個別に実行する場合は `pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm test`、`pnpm validate:plugin` を使います。整形は `pnpm format` です。
 
 テストは Vitest と fast-check、lint と format は Biome を使います。依存パッケージ（MCP TypeScript SDK、Claude Agent SDK、SQLite ドライバ、zod）は未追加です。着手時点の最新版を確認し、各パッケージに追加して固定してください。
