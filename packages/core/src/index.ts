@@ -30,3 +30,12 @@ export type NodeStatus =
  * - info: 回収可能化の通知
  */
 export type Priority = "blocking" | "failed" | "completed" | "progress" | "info";
+
+/** 受信箱の優先度を高い順に並べたもの（FR_012）。 */
+export const PRIORITIES_DESC: readonly Priority[] = [
+  "blocking",
+  "failed",
+  "completed",
+  "progress",
+  "info",
+];

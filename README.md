@@ -25,11 +25,13 @@
 
 ## セットアップ
 
+Node 20 以上と pnpm 10.28.0（`packageManager` で固定）が必要です。
+
 ```bash
-pnpm install
-pnpm -r build
-pnpm -r test
+pnpm install --frozen-lockfile
+pnpm check   # lint、typecheck、build、test、plugin 検証をまとめて実行（CI と同じ）
 ```
 
-依存パッケージ（MCP TypeScript SDK、Claude Agent SDK、SQLite ドライバ、zod、テストランナー）は未追加。
-着手時点の最新版を確認し、各パッケージに追加して固定すること。
+個別に実行する場合は `pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm test`、`pnpm validate:plugin` を使います。整形は `pnpm format` です。
+
+テストは Vitest と fast-check、lint と format は Biome を使います。依存パッケージ（MCP TypeScript SDK、Claude Agent SDK、SQLite ドライバ、zod）は未追加です。着手時点の最新版を確認し、各パッケージに追加して固定してください。
