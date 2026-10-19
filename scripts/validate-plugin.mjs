@@ -15,6 +15,11 @@ try {
   process.exit(1);
 }
 
+if (json === null || typeof json !== "object" || Array.isArray(json)) {
+  console.error("NG: plugin.json のトップレベルは JSON オブジェクトにしてください");
+  process.exit(1);
+}
+
 const missing = required.filter((k) => typeof json[k] !== "string" || json[k].trim() === "");
 if (missing.length > 0) {
   console.error(`NG: plugin.json に必須項目がありません、または空です: ${missing.join(", ")}`);
@@ -24,7 +29,11 @@ const errors = [];
 if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(json.name)) {
   errors.push(`name は kebab-case にしてください: ${json.name}`);
 }
-if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(json.version)) {
+if (
+  !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(
+    json.version,
+  )
+) {
   errors.push(`version は semver にしてください: ${json.version}`);
 }
 for (const dir of ["agents", "hooks", "skills"]) {
