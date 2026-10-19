@@ -1,7 +1,7 @@
 # プロジェクト原則
 
 **バージョン**: 1.0.0
-**最終更新日**: 2026-10-18
+**最終更新日**: 2026-10-19
 **ステータス**: 有効
 
 ## 目的
@@ -166,7 +166,7 @@
 | 標準          | 要件                         | ツール                    | 適用方法                     |
 |:------------|:---------------------------|:-----------------------|:-------------------------|
 | **型安全性**    | strict、noUncheckedIndexedAccess、exactOptionalPropertyTypes を維持 | TypeScript（`tsconfig.base.json`） | `pnpm typecheck`、CI |
-| **Linting** | エラー・警告ゼロ                   | 別 PR で導入               | `pnpm lint`、CI（導入後）     |
+| **Linting** | エラー・警告ゼロ                   | Biome                  | `pnpm lint`、CI           |
 
 ### ドキュメント
 
@@ -223,7 +223,7 @@ cli     mcp     daemon
 | **言語**      | TypeScript（ESM、Node.js 20 以上）  | 型なしの JavaScript   | 型安全性、一貫性         |
 | **パッケージ管理** | pnpm（ワークスペース）                | npm / yarn の併用    | ロックファイルの一貫性      |
 | **MCP**     | MCP TypeScript SDK、zod         | 独自プロトコルの実装        | Library-First: 既存ライブラリがある領域は自作しない。自作する場合は理由を設計に記す |
-| **テスト**     | Vitest、fast-check（導入は別 PR）    | 複数のテストランナーの併用     | 構成の単純さ           |
+| **テスト**     | Vitest、fast-check    | 複数のテストランナーの併用     | 構成の単純さ           |
 | **提供形態**    | Claude Code plugin（private marketplace） | -                 | PRD DC_001       |
 
 **例外プロセス**: ADR に理由を記録したうえで変更する。依存を追加する際は、着手時点の最新版を確認して固定する
@@ -259,7 +259,7 @@ plugin/       # 役割定義 skill、hooks、MCP 設定、起動コマンド
 ### Pre-Commit
 
 - [ ] `pnpm typecheck` が通る
-- [ ] `pnpm lint` が通る（導入後）
+- [ ] `pnpm lint` が通る
 - [ ] `pnpm test` が通る
 - [ ] シークレットが含まれていない
 
