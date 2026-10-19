@@ -28,7 +28,7 @@ CLI 環境の前提は成立した。ただし項目 6 は条件付き（`CLAUDE
 |:--|:--|
 | FR_033 | 満たせる。`query()` による headless 起動が可能。 |
 | FR_009 | 満たせる。idle のセッションへも、実行中のセッションへも追記できる。実行中の追記はツール完了後に届く（即時には届かない）。 |
-| FR_010 | 穏当な停止は `interrupt()` で実現見込みだが、実行中ツールを待たず打ち切るため、FR_010 の定義（実行中操作の完了後に保存して止める）とは異なる。即時停止は `abort()` でプロセスが終了する。フォアグラウンド Bash の子プロセスは停止後に残らなかった（バックグラウンド起動は未検証）。SIGTERM / SIGKILL は未検証。設計制約: `interrupt()` は streaming input 限定のため、子は常に AsyncIterable 入力で起動する（`-p` 単発起動では穏当な停止ができない）。 |
+| FR_010 | `interrupt()` は FR_010 の穏当な停止の定義（実行中操作の完了後に保存して止める）とは異なる（実行中ツールを待たず打ち切る）。設計の選択肢（未検証）: 実行中の追記はツール完了後に届くため、停止指示をメッセージとして送る方式なら定義に近い穏当な停止にできる可能性がある。即時停止は `abort()` でプロセスが終了する。フォアグラウンド Bash の子プロセスは停止後に残らなかった（バックグラウンド起動は未検証）。SIGTERM / SIGKILL は未検証。設計制約: `interrupt()` は streaming input 限定のため、子は常に AsyncIterable 入力で起動する（`-p` 単発起動では穏当な停止ができない）。 |
 | FR_026〜FR_029 | 停止後に作業ツリー配下でプロセスが動いていないことが、回収可能の判定（FR_026）と事前確認付きの回収（FR_029）の前提になる。検証したフォアグラウンド Bash では停止後にプロセスが残らなかったが、バックグラウンド起動や `setsid` / `nohup` されたプロセスは、停止後も cwd を保持して作業ツリーを書き換えうる（未検証）。その場合 FR_010 の「停止」とは言えず、回収の安全性の前提も崩れる。対処案: 停止後に作業ツリーを cwd またはオープンファイルとして保持するプロセスの生存確認（`lsof +D` / `/proc/*/cwd`）を回収可能の判定に含める、プロセスグループ単位での終了、バックグラウンド起動を hooks（PreToolUse）で拒否する。PRD 変更の要否は設計で判断する（FR_026 の判定条件に「配下プロセスの不在」を加える案）。 |
 | FR_035 | 条件付き。`--resume <id> --fork-session` で履歴を覗ける。子の起動時に `CLAUDE_CODE_SESSION_ID` を env から除外すること。fork はファイルシステムを共有するため、覗き見側が書き換えると子の作業を妨げる。覗き見は読み取り専用（`permissionMode` / `allowedTools` の制限）で開く。 |
 | IR_001 | 満たせる。HTTP MCP をプログラムから注入できる。 |
@@ -36,7 +36,7 @@ CLI 環境の前提は成立した。ただし項目 6 は条件付き（`CLAUDE
 | NFR_005 | ヘッダでノードごとのトークンを渡せる。ただし「ローカルからの接続のみ」と「ノード停止時の失効」はヘッダ注入では満たせず、MCP サーバ側の実装課題（bind 先を 127.0.0.1 にする、トークンの失効、トークンが子のログや init メッセージに出ないか）。 |
 | NFR_011 | `CLAUDE_CODE_SESSION_ID` を除外しないと、フック入力の `session_id` が親と混ざる。除外すれば、子ごとに別の `session_id` がフックに渡る。 |
 | FR_006 | 満たせる。`options.cwd` に worktree を指定できる。 |
-| NFR_001 | 3 つの子を別 worktree で同時起動し、セッション ID・フックの `session_id` が混ざらないことを確認した。 |
+| NFR_001 | 短時間のタスクを持つ 3 つの子を別 worktree・別 cwd で同時起動し、セッション ID・フックの `session_id` が混ざらないことを確認した。同一 cwd の共有、4 つ以上、長時間実行、`~/.claude/projects` の競合は未確認。 |
 
 PRD・憲法の変更は、現時点では不要と見込む。ただし FR_026〜FR_029 への影響（バックグラウンド起動されたプロセスの扱い）を調べるまで断定しない。見直し候補は FR_026 の回収可能の判定条件（配下プロセスの不在）と FR_010 の停止の定義（穏当な停止の意味）。
 
@@ -78,6 +78,8 @@ PRD・憲法の変更は、現時点では不要と見込む。ただし FR_026�
 作業用ディレクトリで `npm i @anthropic-ai/claude-agent-sdk` を実行し、次の要点で再現する。認証は実行環境の既存認証を使い、認証情報はコードに含めない。
 
 ```ts
+// 要点のみ（型・import は省略、全文の実行確認済みコードではない）。
+// `permissionMode: 'bypassPermissions'` は使い捨ての検証環境専用で、製品の子の起動設定ではない。
 // 親由来の env を除外（セッション ID の混入防止）
 const env = { ...process.env };
 delete env.CLAUDE_CODE_SESSION_ID;
@@ -108,7 +110,7 @@ const q = query({ prompt: input(), options: {
 | 実行中の追記 | Bash `sleep 20` 中に 6 秒後に push | ツール完了後に応答。result は 1 回 |
 | `interrupt()` | Bash `echo work > partial.txt; sleep 25; touch finished.txt` の 10 秒後 | `partial.txt` あり、`finished.txt` なし、result は `error_during_execution` |
 | `abort()` | Bash 実行中に呼ぶ | `Claude Code process aborted by user` が throw、`finished.txt` なし、停止 3 秒後に `sleep` は存在せず、`orphan.txt` も書かれない |
-| 子プロセスの残存 | `(sleep N; echo > orphan.txt)` の実行中に `interrupt()` / `abort()`、`ps -eo pid,ppid,pgid,cmd` で確認 | いずれも残らない |
+| 子プロセスの残存 | `(sleep N; echo > orphan.txt)` の実行中に `interrupt()` / `abort()`、`ps -eo pid,ppid,pgid,cmd` で確認 | いずれも残らない（注意: プロセス名での検索 `pgrep -f` などは検索コマンド自身のシェルも数えるため誤判定する。PID / PGID と親子関係で追跡し、バックグラウンド起動の検証でも同じ方法を使う） |
 | 同時起動 | 3 つの worktree で並列 | セッション ID 3 種、フックの `session_id` も混ざらない |
 | fork | `claude -p --resume <id> --fork-session` | 新しいセッション ID が発行され、履歴を引き継ぐ |
 | env の継承 | `CLAUDE_CODE_SESSION_ID` を残したまま起動 | 子のセッション ID が親と同一 |
