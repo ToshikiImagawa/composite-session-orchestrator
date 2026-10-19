@@ -18,6 +18,10 @@ CLI 環境の前提（FR_009, FR_010, FR_033, IR_001, IR_002）を確認する�
 
 調査日: 2026-10-19。検証環境: cloud 環境（Linux）、`@anthropic-ai/claude-agent-sdk` 0.3.303、Claude Code CLI 2.1.303、Node 22。**Desktop 環境は対象外**（PRD 6 章の Desktop 側の前提は別途検証）。再検証時は SDK / CLI のバージョン差を確認すること。検証スクリプトはリポジトリ外で実施し、コミットしていない。
 
+### 訂正履歴
+
+- 初版で「`abort()` 後に `sleep` の孤児が残る」と記載したが、`pgrep` が自分自身のシェルを数えた計測誤りだった。`ps -eo pid,ppid,pgid,cmd` で停止の 3 秒後と、`sleep` の満了後（`orphan.txt` の有無）に確認し直し、残らないと訂正した。
+
 ### 総括
 
 CLI 環境の前提は成立した。ただし項目 6 は条件付き（`CLAUDE_CODE_SESSION_ID` の除外が必要）、項目 3 は SIGTERM / SIGKILL とバックグラウンド起動プロセスの扱いが未検証、項目 2 は実行中ツールの完了後に届く（即時には届かない）。
@@ -65,6 +69,10 @@ PRD・憲法の変更は、現時点では不要と見込む。ただし FR_026�
 - 作業ディレクトリ: `options.cwd`
 - セッション識別と覗き見: init / result の `session_id`、`claude -p --resume <id> --fork-session`
 - 環境変数: `options.env` は `process.env` を置き換える。`{...process.env}` から `CLAUDE_CODE_SESSION_ID` などを除いて渡す
+
+### 注記
+
+- `CLAUDE_CODE_SESSION_ID` などの環境変数名は、検証した cloud 環境（Claude Code Remote）に固有の可能性が高い。ローカルや Desktop 環境では別の変数が継承される可能性があるため、子の起動時は継承された `CLAUDE_CODE_*` を一覧して確認すること。
 
 ### 未確認事項
 
