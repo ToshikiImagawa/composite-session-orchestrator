@@ -12,6 +12,7 @@ import {
   INBOX_KINDS,
   type InboxItem,
   type InboxKind,
+  isSafeId,
   type NodeDeps,
   ok,
   type Result,
@@ -97,15 +98,15 @@ const isNonNegInt = (x: unknown): x is number => Number.isInteger(x) && (x as nu
 /** daemon から受け取った項目の形を検査する（境界での実行時検査。値の細かい検証は zod の導入時に拡張する）。 */
 function itemProblem(x: unknown): string | undefined {
   if (!isRecord(x)) return "項目がオブジェクトでない";
-  if (typeof x.id !== "string" || typeof x.nodeId !== "string") return "id・nodeId が文字列でない";
+  if (!isSafeId(x.id) || !isSafeId(x.nodeId)) return "id・nodeId が識別子の形式でない";
   if (!isNonNegInt(x.seq)) return `seq が不正: ${String(x.id)}`;
   if (typeof x.at !== "string") return `at が文字列でない: ${x.id}`;
   if (!(INBOX_KINDS as readonly unknown[]).includes(x.kind)) return `kind が不正: ${x.id}`;
-  if (!Array.isArray(x.dependsOn) || !x.dependsOn.every((d) => typeof d === "string")) {
-    return `dependsOn が文字列の配列でない: ${x.id}`;
+  if (!Array.isArray(x.dependsOn) || !x.dependsOn.every(isSafeId)) {
+    return `dependsOn が識別子の配列でない: ${x.id}`;
   }
   if (x.summary !== undefined && typeof x.summary !== "string") return `summary が不正: ${x.id}`;
-  if (x.ref !== undefined && typeof x.ref !== "string") return `ref が不正: ${x.id}`;
+  if (x.ref !== undefined && !isSafeId(x.ref)) return `ref が識別子の形式でない: ${x.id}`;
   return undefined;
 }
 

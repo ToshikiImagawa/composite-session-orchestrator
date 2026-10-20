@@ -146,6 +146,25 @@ describe("入口の検査（invalid_argument, NFR_010）", () => {
     bad(renderInbox([bad1 as never]));
   });
 
+  it.each([
+    [{ id: "a b" }],
+    [{ id: "../x" }],
+    [{ id: "" }],
+    [{ nodeId: "n/1" }],
+    [{ nodeId: "*" }],
+    [{ ref: "dec 1" }],
+    [{ dependsOn: ["ok", "a;b"] }],
+  ])("識別子が isSafeId に合わない項目 %j は拒否する", (override) => {
+    bad(renderInbox([{ ...item({ id: "a" }), ...override }]));
+  });
+
+  it("isSafeId に合う識別子（. _ : - を含む）は受け付ける", () => {
+    const r = renderInbox([
+      item({ id: "inbox-1.a_b:c", nodeId: "node-1", ref: "dec:1", dependsOn: ["n.0"] }),
+    ]);
+    expect(r.ok).toBe(true);
+  });
+
   it("items が配列でなければ拒否する", () => {
     bad(renderInbox(undefined as never));
     bad(renderInbox({} as never));

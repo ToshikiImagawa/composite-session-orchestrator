@@ -3,9 +3,11 @@ import {
   DEFAULT_PURGE_TOMBSTONE,
   err,
   failure,
+  isSafeId,
   ok,
   type Result,
 } from "@cso/core";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { type DaemonClient, formatFailure, runCommand } from "../src/index.js";
 
@@ -272,5 +274,38 @@ describe("formatFailure", () => {
   it("code・原因・次の操作を含む", () => {
     const text = formatFailure(failure("some_code", "原因です", "操作 A", "操作 B"));
     for (const s of ["some_code", "原因です", "操作 A", "操作 B"]) expect(text).toContain(s);
+  });
+});
+
+describe("ノード ID の規則は core の isSafeId と一致する（ずれ防止）", () => {
+  it("任意の文字列で、reclaim が受け付けるのは isSafeId が真のときだけ", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(fc.string(), fc.stringMatching(/^[A-Za-z0-9._:\-/*? ]{0,12}$/)),
+        async (id) => {
+          const { client, sent } = happy();
+          const r = await runCommand(["reclaim", id], deps(client));
+          // 先頭が "-" のものはオプション扱いで、どちらにしても窓口は呼ばれない
+          if (isSafeId(id)) {
+            expect(r.exitCode).toBe(0);
+            expect(sent).toHaveLength(1);
+          } else {
+            expect(r.exitCode).toBe(2);
+            expect(sent).toEqual([]);
+          }
+        },
+      ),
+    );
+  });
+
+  it("--request-id の値にも同じ規則を使う", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string(), async (rid) => {
+        const { client, sent } = happy();
+        const r = await runCommand(["reclaim", "n1", "--request-id", rid], deps(client));
+        expect(r.exitCode === 0).toBe(isSafeId(rid));
+        expect(sent.length === 1).toBe(isSafeId(rid));
+      }),
+    );
   });
 });
