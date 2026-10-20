@@ -12,6 +12,7 @@ import {
   type NodeState,
   reclaimInvariantViolations,
   type TreeNode,
+  type TreeViolation,
   validateTree,
 } from "../src/index.js";
 
@@ -131,6 +132,16 @@ describe("addChild", () => {
   it("重複 ID・親なし（2 つ目の根）は拒否する", () => {
     expect(addChild(sample, n("w1", "implement", "mid")).ok).toBe(false);
     expect(addChild(sample, n("r2", "integrator", null)).ok).toBe(false);
+  });
+
+  it("追加前から壊れている木でも、新たな違反を生まない追加は受け付け、生む追加は拒否する", () => {
+    const broken = [n("r", "integrator", null), n("x", "integrator", "ghost")]; // 親が存在しない
+    expect(addChild(broken, n("w", "implement", "r")).ok).toBe(true);
+    const r = addChild(broken, n("y", "implement", "nope"));
+    expect(r).toEqual({
+      ok: false,
+      violation: { kind: "missingParent", nodeId: "y", parentId: "nope" },
+    });
   });
 
   it("空の木には統合ノードの根だけ追加できる", () => {
@@ -260,11 +271,104 @@ describe("性質（fast-check）", () => {
     );
   });
 
-  it("同じ入力なら同じ出力（決定的）", () => {
+  it("兄弟順を含む入力順を入れ替えても、妥当性・子孫の集合・集計は変わらない", () => {
+    const shuffled = treeArb.chain((t) =>
+      fc.tuple(
+        fc.constant(t),
+        fc.shuffledSubarray(t, { minLength: t.length, maxLength: t.length }),
+      ),
+    );
     fc.assert(
-      fc.property(treeArb, (tree) => {
-        expect(descendantsOf(tree, "n0")).toEqual(descendantsOf([...tree], "n0"));
+      fc.property(shuffled, ([tree, perm]) => {
+        expect(validateTree(perm)).toEqual([]);
+        for (const node of tree) {
+          const a = descendantsOf(tree, node.id)
+            .map((x) => x.id)
+            .sort();
+          const b = descendantsOf(perm, node.id)
+            .map((x) => x.id)
+            .sort();
+          expect(b).toEqual(a);
+        }
+        const states = (id: string): NodeState =>
+          NODE_STATES[id.length % NODE_STATES.length] as NodeState;
+        expect(countByState(perm, "n0", states)).toEqual(countByState(tree, "n0", states));
       }),
+    );
+  });
+
+  // 独立した単純なオラクル。壊れうる任意の配列に対して validateTree と同じ違反の多重集合を返す。
+  const oracle = (nodes: readonly TreeNode[]): string[] => {
+    const out: string[] = [];
+    const first = (id: string): TreeNode | undefined => nodes.find((x) => x.id === id);
+    nodes.forEach((x, i) => {
+      if (nodes.findIndex((y) => y.id === x.id) !== i) out.push(`duplicateId:${x.id}`);
+    });
+    const roots = nodes.filter((x) => x.parentId === null);
+    if (nodes.length > 0 && roots.length === 0) out.push("noRoot");
+    if (roots.length > 1) out.push(`multipleRoots:${roots.map((x) => x.id).join(",")}`);
+    for (const r of roots) if (r.role !== "integrator") out.push(`rootNotIntegrator:${r.id}`);
+    for (const x of nodes) {
+      if (x.parentId === null) continue;
+      const parent = first(x.parentId);
+      if (parent === undefined) out.push(`missingParent:${x.id}:${x.parentId}`);
+      else if (parent.role !== "integrator") out.push(`parentNotIntegrator:${x.id}:${x.parentId}`);
+      let cur: TreeNode | undefined = x;
+      for (let step = 0; step <= nodes.length && cur?.parentId != null; step++) {
+        if (cur.parentId === x.id) {
+          out.push(`cycle:${x.id}`);
+          break;
+        }
+        cur = first(cur.parentId);
+      }
+    }
+    return out.sort();
+  };
+  const show = (v: TreeViolation): string => {
+    switch (v.kind) {
+      case "noRoot":
+        return "noRoot";
+      case "multipleRoots":
+        return `multipleRoots:${v.nodeIds.join(",")}`;
+      case "duplicateId":
+      case "rootNotIntegrator":
+      case "cycle":
+        return `${v.kind}:${v.nodeId}`;
+      case "missingParent":
+      case "parentNotIntegrator":
+        return `${v.kind}:${v.nodeId}:${v.parentId}`;
+    }
+  };
+
+  const anyNode = fc.record({
+    id: fc.constantFrom("a", "b", "c", "d"),
+    role: fc.constantFrom<NodeRole>("integrator", "implement", "review", "investigate", "merge"),
+    parentId: fc.option(fc.constantFrom("a", "b", "c", "d", "z"), { nil: null }),
+  });
+
+  it("任意の（壊れうる）配列で、validateTree は独立したオラクルと同じ違反を返す", () => {
+    fc.assert(
+      fc.property(fc.array(anyNode, { maxLength: 8 }), (nodes) => {
+        expect(validateTree(nodes).map(show).sort()).toEqual(oracle(nodes));
+      }),
+      { numRuns: 1000 },
+    );
+  });
+
+  it("addChild: 新たな違反がなければ追加され、あれば木を変えない（オラクルと一致）", () => {
+    fc.assert(
+      fc.property(fc.array(anyNode, { maxLength: 6 }), anyNode, (nodes, node) => {
+        const before = oracle(nodes);
+        const after = oracle([...nodes, node]);
+        const left = [...before];
+        const fresh = after.filter((k) => {
+          const i = left.indexOf(k);
+          if (i >= 0) left.splice(i, 1);
+          return i < 0;
+        });
+        expect(addChild(nodes, node).ok).toBe(fresh.length === 0);
+      }),
+      { numRuns: 1000 },
     );
   });
 });

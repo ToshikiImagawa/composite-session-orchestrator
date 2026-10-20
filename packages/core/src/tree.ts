@@ -76,12 +76,25 @@ export function childrenOf(nodes: readonly TreeNode[], id: string): TreeNode[] {
   return nodes.filter((x) => x.parentId === id);
 }
 
-/** 自身を含まない子孫を、入力順の深さ優先（先行順）で返す。 */
+/** 親の ID から子（入力順）への索引。 */
+function childIndex(nodes: readonly TreeNode[]): Map<string, TreeNode[]> {
+  const index = new Map<string, TreeNode[]>();
+  for (const node of nodes) {
+    if (node.parentId === null) continue;
+    const list = index.get(node.parentId);
+    if (list === undefined) index.set(node.parentId, [node]);
+    else list.push(node);
+  }
+  return index;
+}
+
+/** 自身を含まない子孫を、入力順の深さ優先（先行順）で返す。索引を一度作るので O(n)。 */
 export function descendantsOf(nodes: readonly TreeNode[], id: string): TreeNode[] {
+  const index = childIndex(nodes);
   const out: TreeNode[] = [];
   const visited = new Set<string>([id]);
   const walk = (cur: string): void => {
-    for (const child of childrenOf(nodes, cur)) {
+    for (const child of index.get(cur) ?? []) {
       if (visited.has(child.id)) continue;
       visited.add(child.id);
       out.push(child);
@@ -117,11 +130,26 @@ export type AddChildResult =
   | { readonly ok: true; readonly nodes: readonly TreeNode[] }
   | { readonly ok: false; readonly violation: TreeViolation };
 
-/** ノードを追加する。追加後の木が不変条件を破るなら、木を変えず最初の違反を返す。 */
+const violationKey = (v: TreeViolation): string => JSON.stringify(v);
+
+/**
+ * ノードを追加する。追加によって新たに生じた違反（追加前の木にはなかった違反）があれば、
+ * 木を変えずその最初の違反を返す。追加前から壊れている木でも、新たな違反を生まない追加は受け付ける。
+ */
 export function addChild(nodes: readonly TreeNode[], node: TreeNode): AddChildResult {
   const next = [...nodes, node];
-  const violation = validateTree(next)[0];
-  return violation === undefined ? { ok: true, nodes: next } : { ok: false, violation };
+  const known = new Map<string, number>();
+  for (const v of validateTree(nodes)) {
+    const k = violationKey(v);
+    known.set(k, (known.get(k) ?? 0) + 1);
+  }
+  for (const v of validateTree(next)) {
+    const k = violationKey(v);
+    const left = known.get(k) ?? 0;
+    if (left > 0) known.set(k, left - 1);
+    else return { ok: false, violation: v };
+  }
+  return { ok: true, nodes: next };
 }
 
 // index.ts との循環 import を避けるため、状態の一覧は型で網羅を保証して持つ。
