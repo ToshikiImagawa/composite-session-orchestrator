@@ -6,6 +6,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -106,6 +107,67 @@ describe("FileTokenRepository（ハッシュ・ロール・nodeId・発行日時
   });
 });
 
+describe("保存先の安全性（ディレクトリ・ファイルの検査）", () => {
+  it("保存先のディレクトリが、グループ・他者から書き込めるなら失敗する（読み込みも書き込みも）", () => {
+    const dir = tmp();
+    const sub = join(dir, "open");
+    mkdirSync(sub, { mode: 0o700 });
+    chmodSync(sub, 0o775);
+    expect(() => new FileTokenRepository(join(sub, "tokens.json")).load()).toThrow(/ディレクトリ/);
+    expect(() => new FileTokenRepository(join(sub, "tokens.json")).put(rec("a"))).toThrow(
+      /ディレクトリ/,
+    );
+    chmodSync(sub, 0o755); // 読めるだけなら許す
+    expect(() => new FileTokenRepository(join(sub, "tokens.json")).load()).not.toThrow();
+  });
+
+  it("ディレクトリがシンボリックリンクなら失敗する", () => {
+    const dir = tmp();
+    const real = join(dir, "real");
+    mkdirSync(real, { mode: 0o700 });
+    symlinkSync(real, join(dir, "link"));
+    expect(() => new FileTokenRepository(join(dir, "link", "tokens.json")).load()).toThrow(
+      /ディレクトリ/,
+    );
+  });
+
+  it("トークンのファイルは、通常のファイルだけ（シンボリックリンク・ディレクトリは失敗）。所有者がこのプロセスと違えば失敗", () => {
+    const dir = tmp();
+    const real = join(dir, "real.json");
+    new FileTokenRepository(real).put(rec("a"));
+    symlinkSync(real, join(dir, "tokens.json"));
+    expect(() => new FileTokenRepository(join(dir, "tokens.json")).load()).toThrow(
+      /通常のファイル/,
+    );
+    mkdirSync(join(dir, "asdir.json"), { mode: 0o700 });
+    expect(() => new FileTokenRepository(join(dir, "asdir.json")).load()).toThrow(/通常のファイル/);
+    const uid = process.getuid?.() ?? 0;
+    expect(() => new FileTokenRepository(real, { getUid: () => uid + 1 }).load()).toThrow(/所有者/);
+    expect(() => new FileTokenRepository(real, { getUid: () => uid }).load()).not.toThrow();
+  });
+
+  it("ハッシュや nodeId が重複しているファイルは、不正として失敗する", () => {
+    const dir = tmp();
+    const path = join(dir, "tokens.json");
+    for (const tokens of [
+      [rec("a"), { ...rec("b"), tokenHash: rec("a").tokenHash }],
+      [rec("a"), { ...rec("a"), tokenHash: rec("b").tokenHash }],
+    ]) {
+      writeFileSync(path, JSON.stringify({ version: 1, tokens }), { mode: 0o600 });
+      expect(() => new FileTokenRepository(path).load()).toThrow(/重複/);
+    }
+  });
+
+  it("起動時（load）に、前回の書き込みの途中で残った一時ファイル（.tokens-*.tmp）を掃除する。他のファイルは消さない", () => {
+    const dir = tmp();
+    const path = join(dir, "tokens.json");
+    writeFileSync(join(dir, ".tokens-123-456.tmp"), "x", { mode: 0o600 });
+    writeFileSync(join(dir, "other.txt"), "keep", { mode: 0o600 });
+    new FileTokenRepository(path).load();
+    expect(readdirSync(dir).sort()).toEqual(["other.txt"]);
+  });
+});
+
 describe("永続化つきの認証情報（再起動後も有効）", () => {
   it("発行したトークンは、ストアを作り直しても認証できる。失効は永続する。再発行で古いトークンは無効", () => {
     const path = join(tmp(), "tokens.json");
@@ -181,5 +243,31 @@ describe("loadOrCreateHumanToken（人間のトークンは 0600 のファイル
     expect(() => loadOrCreateHumanToken(path)).toThrow();
     mkdirSync(join(dir, "d"));
     expect(() => loadOrCreateHumanToken(join(dir, "d"))).toThrow();
+  });
+
+  it("形（TOKEN_SHAPE）を検査する: 空白・制御文字・長すぎる値は失敗する", () => {
+    const dir = tmp();
+    const path = join(dir, "human-token");
+    for (const bad of [
+      `${"x".repeat(20)} ${"y".repeat(20)}`,
+      `${"x".repeat(40)}\u0000`,
+      "x".repeat(600),
+      `${"é".repeat(40)}`,
+    ]) {
+      writeFileSync(path, `${bad}\n`, { mode: 0o600 });
+      expect(() => loadOrCreateHumanToken(path), JSON.stringify(bad)).toThrow();
+    }
+  });
+
+  it("置き場所のディレクトリの権限（グループ・他者が書ける）とシンボリックリンクのファイルは失敗する", () => {
+    const dir = tmp();
+    const open = join(dir, "open");
+    mkdirSync(open, { mode: 0o700 });
+    chmodSync(open, 0o777);
+    expect(() => loadOrCreateHumanToken(join(open, "human-token"))).toThrow(/ディレクトリ/);
+    const real = join(dir, "real");
+    writeFileSync(real, `${"x".repeat(43)}\n`, { mode: 0o600 });
+    symlinkSync(real, join(dir, "link-token"));
+    expect(() => loadOrCreateHumanToken(join(dir, "link-token"))).toThrow(/通常のファイル/);
   });
 });

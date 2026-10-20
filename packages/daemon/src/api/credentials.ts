@@ -23,7 +23,7 @@ export interface CredentialStore {
   revokeNode(nodeId: string): void;
 }
 
-const TOKEN_SHAPE = /^[A-Za-z0-9._~+/=-]{16,512}$/;
+export const TOKEN_SHAPE = /^[A-Za-z0-9._~+/=-]{16,512}$/;
 const MIN_HUMAN_TOKEN = 32;
 
 /** `Authorization: Bearer <token>` からトークンを取り出す。形が違えば `undefined`。 */

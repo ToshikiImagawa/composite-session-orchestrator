@@ -1,51 +1,78 @@
-import { isSafeId } from "@cso/core";
+import { ID_PATTERN, isSafeId } from "@cso/core";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { BIND_CODE_ALPHABET, createBindCodes, normalizeBindCode } from "../../src/api/bind.js";
+import {
+  BIND_CODE_ALPHABET,
+  BIND_CODE_SHAPE,
+  createBindCodes,
+  createThrottle,
+  formatBindCodeForDisplay,
+  normalizeBindCode,
+} from "../../src/api/bind.js";
 
 const rig = (over: Parameters<typeof createBindCodes>[0] = {}) => {
   let now = 1_000_000;
   const codes = createBindCodes({ clock: () => now, ...over });
   return { codes, advance: (ms: number) => (now += ms) };
 };
-const wrong = (i: number) =>
-  `WRNG-${String(i)
-    .padStart(4, "A")
-    .replace(/[^A-Z]/g, "B")}-AAAA-BBBB`;
+const wrong = (i: number) => `${String(i).padStart(4, "0")}ABCDEFGHJKMNPQRSTVWXYZ`.slice(0, 26);
 
-describe("bind コードの形式（Desktop で人が見て入力しやすい）", () => {
-  it("紛らわしい文字（0 O 1 I L）を除いた英数字 16 文字を、4 文字ずつ「-」で区切る。isSafeId を満たす", () => {
-    const { codes } = rig();
-    expect(BIND_CODE_ALPHABET).toHaveLength(31);
-    for (const bad of ["0", "O", "1", "I", "L"]) expect(BIND_CODE_ALPHABET).not.toContain(bad);
-    for (let i = 0; i < 50; i++) {
+describe("bind コードの形式（英数字だけ・128 ビット以上・isSafeId の部分集合）", () => {
+  it("Crockford base32（0-9 と A-Z から I L O U を除く 32 種）の 26 文字（130 ビット）。発行したコードはすべて isSafeId を満たす", () => {
+    expect(BIND_CODE_ALPHABET).toBe("0123456789ABCDEFGHJKMNPQRSTVWXYZ");
+    const { codes } = rig({ maxOutstanding: 5000 });
+    for (let i = 0; i < 300; i++) {
       const c = codes.issue(`n${i}`);
-      expect(c).toMatch(/^[A-HJ-KM-NP-Z2-9]{4}(-[A-HJ-KM-NP-Z2-9]{4}){3}$/);
+      expect(c, c).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+      expect(BIND_CODE_SHAPE.test(c)).toBe(true);
       expect(isSafeId(c), c).toBe(true);
     }
   });
 
-  it("小文字・区切りなしで入力しても同じコードとして使える（正規化）", () => {
-    expect(normalizeBindCode("abcd-efgh-jkmn-pqrs")).toBe("ABCDEFGHJKMNPQRS");
-    expect(normalizeBindCode("ABCD EFGH JKMN PQRS")).toBe("ABCDEFGHJKMNPQRS");
-    expect(normalizeBindCode("ABCDEFGHJKMNPQRS")).toBe("ABCDEFGHJKMNPQRS");
-    const { codes } = rig();
-    const c = codes.issue("a");
-    expect(codes.redeem("a", c.toLowerCase().replaceAll("-", ""))).toEqual({
-      ok: true,
-      nodeId: "a",
-    });
+  it("性質: BIND_CODE_SHAPE に合う文字列は、必ず ID_PATTERN にも合う（部分集合）", () => {
+    fc.assert(
+      fc.property(fc.stringMatching(/^[0-9A-Za-z\-_. :]{0,40}$/), (s) => {
+        if (BIND_CODE_SHAPE.test(s)) expect(ID_PATTERN.test(s)).toBe(true);
+      }),
+    );
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom(...BIND_CODE_ALPHABET), { minLength: 26, maxLength: 26 }),
+        (cs) => {
+          const s = cs.join("");
+          expect(BIND_CODE_SHAPE.test(s)).toBe(true);
+          expect(isSafeId(s)).toBe(true);
+        },
+      ),
+    );
   });
 
-  it("コードは一様に選ぶ（偏りのない文字の出現）", () => {
+  it("入力の正規化: 大文字小文字・区切り・空白を問わず、紛らわしい文字は Crockford の規則（I L → 1、O → 0）", () => {
+    expect(normalizeBindCode("abcde-fghjk mnpqr\tstvwx-yz0123")).toBe("ABCDEFGHJKMNPQRSTVWXYZ0123");
+    expect(normalizeBindCode("OIl0")).toBe("0110");
+    const { codes } = rig();
+    const c = codes.issue("a");
+    const typed = formatBindCodeForDisplay(c).toLowerCase().replaceAll("-", " ");
+    expect(codes.redeem("a", typed)).toEqual({ ok: true, nodeId: "a" });
+  });
+
+  it("表示用の整形: 5 文字ずつ「-」で区切る（5-5-5-5-6）。正規化すると元に戻る", () => {
+    const { codes } = rig();
+    const c = codes.issue("a");
+    const shown = formatBindCodeForDisplay(c);
+    expect(shown).toMatch(/^[0-9A-Z]{5}(-[0-9A-Z]{5}){3}-[0-9A-Z]{6}$/);
+    expect(normalizeBindCode(shown)).toBe(c);
+  });
+
+  it("コードは一様に選ぶ（32 種がすべて現れ、偏りがない）", () => {
     const { codes } = rig({ maxOutstanding: 5000 });
     const counts = new Map<string, number>();
     for (let i = 0; i < 400; i++) {
-      for (const ch of codes.issue(`n${i}`).replaceAll("-", ""))
-        counts.set(ch, (counts.get(ch) ?? 0) + 1);
+      for (const ch of codes.issue(`n${i}`)) counts.set(ch, (counts.get(ch) ?? 0) + 1);
     }
-    expect(counts.size).toBe(31);
-    const total = 400 * 16;
-    for (const n of counts.values()) expect(n / total).toBeGreaterThan(0.015); // 期待は約 0.032
+    expect(counts.size).toBe(32);
+    const total = 400 * 26;
+    for (const n of counts.values()) expect(n / total).toBeGreaterThan(0.02); // 期待は 1/32 ≒ 0.031
   });
 });
 
@@ -61,6 +88,35 @@ describe("bind コード（一度きり・短い有効期限・ノードに結�
     const { codes } = rig();
     const c = codes.issue("a");
     expect(codes.redeem("b", c)).toEqual({ ok: false, reason: "invalid" });
+    expect(codes.redeem("a", c)).toEqual({ ok: true, nodeId: "a" });
+  });
+
+  it("ノードの状態が許さないときは、コードを消費しない（accept が偽なら rejected。許すようになれば使える）", () => {
+    const { codes } = rig();
+    const c = codes.issue("a");
+    let allowed = false;
+    const accept = () => allowed;
+    expect(codes.redeem("a", c, accept)).toEqual({ ok: false, reason: "rejected" });
+    expect(codes.redeem("a", c, accept)).toEqual({ ok: false, reason: "rejected" });
+    allowed = true;
+    expect(codes.redeem("a", c, accept)).toEqual({ ok: true, nodeId: "a" });
+    expect(codes.redeem("a", c, accept)).toEqual({ ok: false, reason: "invalid" });
+  });
+
+  it("accept が例外を投げたら rejected（フェイルクローズ。消費しない）。間違ったコードでは accept を呼ばない", () => {
+    const { codes } = rig();
+    const c = codes.issue("a");
+    expect(
+      codes.redeem("a", c, () => {
+        throw new Error("x");
+      }),
+    ).toEqual({ ok: false, reason: "rejected" });
+    let called = 0;
+    codes.redeem("a", wrong(1), () => {
+      called += 1;
+      return true;
+    });
+    expect(called).toBe(0);
     expect(codes.redeem("a", c)).toEqual({ ok: true, nodeId: "a" });
   });
 
@@ -95,11 +151,10 @@ describe("bind コード（一度きり・短い有効期限・ノードに結�
     expect(codes.redeem("a", c)).toEqual({ ok: false, reason: "invalid" });
     const c2 = codes.issue("b");
     expect(JSON.stringify(codes)).not.toContain(c2);
-    expect(JSON.stringify(codes)).not.toContain(normalizeBindCode(c2));
   });
 
   it("不正なノード ID・未発行・不正な形のコードは使えない", () => {
-    const { codes } = rig({ maxFailures: 1000, maxGlobalFailures: 1000 });
+    const { codes } = rig({ maxFailures: 1000 });
     expect(() => codes.issue("")).toThrow();
     expect(() => codes.issue("../x")).toThrow();
     for (const bad of ["", "x", "unknown-code-unknown-code", null, undefined, 5, {}]) {
@@ -108,14 +163,8 @@ describe("bind コード（一度きり・短い有効期限・ノードに結�
         reason: "invalid",
       });
     }
-    expect(codes.redeem("../x" as never, "ABCD-EFGH-JKMN-PQRS")).toEqual({
-      ok: false,
-      reason: "invalid",
-    });
-    expect(codes.redeem(5 as never, "ABCD-EFGH-JKMN-PQRS")).toEqual({
-      ok: false,
-      reason: "invalid",
-    });
+    expect(codes.redeem("../x" as never, wrong(1))).toEqual({ ok: false, reason: "invalid" });
+    expect(codes.redeem(5 as never, wrong(1))).toEqual({ ok: false, reason: "invalid" });
   });
 
   it("未使用のコードの数に上限がある（超えたら、最も古いものから捨てる）", () => {
@@ -126,8 +175,8 @@ describe("bind コード（一度きり・短い有効期限・ノードに結�
   });
 });
 
-describe("失敗の回数制限（ノード単位と全体の両方で数える）", () => {
-  it("ノード単位: 窓の中で、そのノードの失敗が上限（既定 5 回）に達すると、そのノードをロックする。他のノードは使える", () => {
+describe("ノードごとの失敗の回数制限", () => {
+  it("窓の中で、そのノードの失敗が上限（既定 5 回）に達すると、そのノードをロックする。他のノードは使える", () => {
     const r = rig();
     const good = r.codes.issue("a");
     const other = r.codes.issue("b");
@@ -141,16 +190,14 @@ describe("失敗の回数制限（ノード単位と全体の両方で数える�
     expect(r.codes.redeem("a", good)).toEqual({ ok: true, nodeId: "a" });
   });
 
-  it("全体: ノードを変えて試しても、全体の失敗が上限（既定 20 回）に達すると、全員をロックする", () => {
+  it("全体のロックはない（ノードを変えて試しても、全員は止まらない）", () => {
     const r = rig();
     const good = r.codes.issue("zz");
-    for (let i = 0; i < 20; i++) r.codes.redeem(`n${i}`, wrong(i));
-    expect(r.codes.redeem("zz", good)).toMatchObject({ ok: false, reason: "locked" });
-    r.advance(60_000);
+    for (let i = 0; i < 100; i++) r.codes.redeem(`n${i}`, wrong(i));
     expect(r.codes.redeem("zz", good)).toEqual({ ok: true, nodeId: "zz" });
   });
 
-  it("古い失敗は窓（既定 1 分）を過ぎたら数えない。ロック中の試行は失敗に数えず、ロックを延ばさない", () => {
+  it("古い失敗は窓（既定 1 分）を過ぎたら数えない。ロック中の試行は数えず、ロックを延ばさない", () => {
     const r = rig();
     const good = r.codes.issue("a");
     for (let i = 0; i < 4; i++) r.codes.redeem("a", wrong(i));
@@ -167,8 +214,39 @@ describe("失敗の回数制限（ノード単位と全体の両方で数える�
   });
 
   it("失敗を覚えるノードの数に上限がある（メモリを使い切らせない）", () => {
-    const r = rig({ maxTrackedNodes: 10, maxGlobalFailures: 100000 });
+    const r = rig({ maxTrackedNodes: 10 });
     for (let i = 0; i < 1000; i++) r.codes.redeem(`n${i}`, wrong(i));
     expect(r.codes.trackedNodes()).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("短いスロットル（全体で 1 秒あたり N 回の失敗）", () => {
+  const rigT = (perSecond = 3) => {
+    let now = 5_000;
+    const t = createThrottle({ clock: () => now, perSecond });
+    return { t, advance: (ms: number) => (now += ms) };
+  };
+
+  it("1 秒の中で失敗が N 回に達したら、その秒の残りは止める（retryAfterMs つき）。次の秒には解ける", () => {
+    const { t, advance } = rigT(3);
+    expect(t.blocked()).toBeUndefined();
+    t.fail();
+    t.fail();
+    expect(t.blocked()).toBeUndefined();
+    t.fail();
+    const b = t.blocked();
+    expect(b).toBeGreaterThan(0);
+    expect(b).toBeLessThanOrEqual(1000);
+    advance(1000);
+    expect(t.blocked()).toBeUndefined();
+  });
+
+  it("止めている間の試行は数えない（延び続けない）。失敗の記録は上限を超えてもメモリを増やさない", () => {
+    const { t, advance } = rigT(2);
+    t.fail();
+    t.fail();
+    for (let i = 0; i < 10000; i++) t.fail();
+    advance(1000);
+    expect(t.blocked()).toBeUndefined();
   });
 });

@@ -1,7 +1,7 @@
 import { request as httpRequest } from "node:http";
 import { type EventBody, foldEvents, type OrchEvent, type OrchState, ok } from "@cso/core";
 import { afterEach, describe, expect, it } from "vitest";
-import { createBindCodes } from "../../src/api/bind.js";
+import { createBindCodes, createThrottle, formatBindCodeForDisplay } from "../../src/api/bind.js";
 import { createCredentialStore } from "../../src/api/credentials.js";
 import {
   type ApiLogger,
@@ -452,7 +452,12 @@ describe("判定の順序・主体の検査・チャンク転送・結果の写�
     expect(res.status).toBe(500);
     expect(JSON.stringify(res.json)).not.toContain("secret-internal-detail");
     expect(logs).toHaveLength(1);
-    expect(logs[0]).toMatchObject({ kind: "error", requestId: "q1", operation: "tree.list" });
+    expect(logs[0]).toMatchObject({
+      event: "internalError",
+      requestId: "q1",
+      operation: "tree.list",
+    });
+    expect(typeof logs[0]?.at).toBe("string");
     expect(String(logs[0]?.error)).toContain("secret-internal-detail");
   });
 
@@ -477,9 +482,10 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
   const rigBind = async (
     over: {
       now?: () => number;
-      state?: OrchState;
+      state?: OrchState | (() => OrchState);
       logger?: ApiLogger;
       bindOptions?: Parameters<typeof createBindCodes>[0];
+      throttle?: ReturnType<typeof createThrottle>;
     } = {},
   ) => {
     const credentials = createCredentialStore({ humanToken: HUMAN });
@@ -488,7 +494,9 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
       credentials,
       bind,
       ...(over.logger ? { logger: over.logger } : {}),
-      getState: () => over.state ?? state(),
+      ...(over.throttle ? { bindThrottle: over.throttle } : {}),
+      clock: () => "2026-10-20T00:00:00.000Z",
+      getState: () => (typeof over.state === "function" ? over.state() : (over.state ?? state())),
       handlers: { "report.progress": () => ok({ accepted: true }) },
     });
     const { url } = await server.listen(0);
@@ -540,7 +548,7 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     expect((await r.call({ nodeId: "a", bindCode: code })).status).toBe(200);
     for (const [nodeId, c] of [
       ["a", code],
-      ["a", "WXYZ-2345-6789-ABCD"],
+      ["a", "WXYZ2345ABCDEFGHJKMNPQRSTV"],
     ] as const) {
       const res = await r.call({ nodeId, bindCode: c });
       expect(res.status).toBe(401);
@@ -552,23 +560,62 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     expect((await r.call({ nodeId: "a", bindCode: other })).status).toBe(401);
   });
 
-  it("ノード単位・全体の両方で、失敗が続いたら 429（Retry-After つき）", async () => {
+  it("ノード単位のロックで 429（Retry-After つき）。他のノードは使える", async () => {
     const r = await rigBind();
-    for (let i = 0; i < 5; i++)
-      await r.call({
-        nodeId: "a",
-        bindCode: `WRNG-AAAA-BBBB-${String(i).repeat(4).replace(/\d/g, "C")}`,
-      });
+    for (let i = 0; i < 5; i++) await r.call({ nodeId: "a", bindCode: `${String(i).repeat(26)}` });
     const locked = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
     expect(locked.status).toBe(429);
     expect(locked.json.error.code).toBe("tooManyRequests");
     expect(Number(locked.headers.get("retry-after"))).toBeGreaterThan(0);
-    const okOther = await r.call({ nodeId: "b", bindCode: r.bind.issue("b") });
-    expect(okOther.status).toBe(401); // b は state() で pending の子ではなく存在しない。ロックではなく通常の失敗
-    const g = await rigBind();
-    for (let i = 0; i < 20; i++) await g.call({ nodeId: `n${i}`, bindCode: "WRNG-AAAA-BBBB-CCCC" });
-    const all = await g.call({ nodeId: "a", bindCode: g.bind.issue("a") });
-    expect(all.status).toBe(429);
+    const other = await r.call({ nodeId: "a2", bindCode: r.bind.issue("a2") });
+    expect(other.status).toBe(401); // a2 は木にいない。ロックではなく通常の失敗
+  });
+
+  it("全体は、ロックではなく短いスロットル（1 秒あたり N 回の失敗）。不正な本文・型違いも数える。次の秒には解ける", async () => {
+    let now = 5_000;
+    const throttle = createThrottle({ clock: () => now, perSecond: 3 });
+    const r = await rigBind({ throttle });
+    expect((await r.call("{not json")).status).toBe(400); // 不正な本文
+    expect((await r.call({ nodeId: "a", bindCode: 5 })).status).toBe(400); // 型違い
+    expect((await r.call({ nodeId: "n1", bindCode: "0".repeat(26) })).status).toBe(401);
+    const blocked = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
+    expect(blocked.status).toBe(429);
+    expect(blocked.json.error.code).toBe("tooManyRequests");
+    expect(blocked.headers.get("retry-after")).toBe("1");
+    now += 1000;
+    const ok1 = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
+    expect(ok1.status).toBe(200);
+  });
+
+  it("ノードの状態が許さないときは、コードを消費しない。許すようになれば同じコードで紐付けられる", async () => {
+    let allowed = false;
+    const stopped = foldEvents([
+      ev({
+        type: "node.created",
+        payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+      }),
+      ev({ type: "node.stateChanged", payload: { nodeId: "root", event: { type: "start" } } }),
+      ev({
+        type: "node.created",
+        payload: { nodeId: "a", role: "implement", parentId: "root", dependsOn: [] },
+      }),
+      ev({ type: "node.stateChanged", payload: { nodeId: "a", event: { type: "start" } } }),
+      ev({
+        type: "node.stateChanged",
+        payload: { nodeId: "a", event: { type: "stop", mode: "immediate" } },
+      }),
+      ev({
+        type: "node.stateChanged",
+        payload: { nodeId: "a", event: { type: "confirmStopped" } },
+      }),
+    ]);
+    if (!stopped.ok) throw new Error(stopped.error.code);
+    const running = state();
+    const r = await rigBind({ state: () => (allowed ? running : stopped.value) });
+    const code = r.bind.issue("a");
+    expect((await r.call({ nodeId: "a", bindCode: code })).status).toBe(401);
+    allowed = true;
+    expect((await r.call({ nodeId: "a", bindCode: code })).status).toBe(200);
   });
 
   it("ロール・状態が合わないノードのコードは使えない（統合ノード・木にないノード）", async () => {
@@ -577,31 +624,55 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     expect((await r.call({ nodeId: "ghost", bindCode: r.bind.issue("ghost") })).status).toBe(401);
   });
 
-  it("紐付けの成功・失敗を logger に記録する（コードの値は書かない。トークンも書かない）", async () => {
+  it("紐付けの成功・失敗・ロック・スロットルを logger に記録する（コード・ハッシュ・先頭の文字・トークンは書かない）", async () => {
     const logs: Record<string, unknown>[] = [];
-    const r = await rigBind({ logger: (e) => logs.push(e as never) });
+    const now = 5_000;
+    const r = await rigBind({
+      logger: (e) => logs.push(e as unknown as Record<string, unknown>),
+      throttle: createThrottle({ clock: () => now, perSecond: 100 }),
+    });
     const code = r.bind.issue("a");
-    const ok1 = await r.call({ nodeId: "a", bindCode: code });
-    await r.call({ nodeId: "a", bindCode: "WXYZ-2345-6789-ABCD" });
+    const ok1 = await r.call({ nodeId: "a", bindCode: formatBindCodeForDisplay(code) });
+    await r.call({ nodeId: "a", bindCode: "ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZZ" });
+    await r.call("{not json");
     for (let i = 0; i < 5; i++)
-      await r.call({ nodeId: "a", bindCode: `WRNG-AAAA-BBBB-CCC${i === 0 ? "D" : "E"}` });
+      await r.call({ nodeId: "a", bindCode: `${String(i + 1).repeat(26)}` });
     await r.call({ nodeId: "a", bindCode: code });
-    const outcomes = logs.filter((l) => l.kind === "bind").map((l) => `${l.outcome}:${l.nodeId}`);
-    expect(outcomes[0]).toBe("success:a");
-    expect(outcomes[1]).toBe("invalid:a");
-    expect(outcomes).toContain("locked:a");
+    const events = logs.map((l) => l.event);
+    expect(events[0]).toBe("bindSucceeded");
+    expect(logs[0]).toMatchObject({ nodeId: "a", at: "2026-10-20T00:00:00.000Z" });
+    expect(logs[1]).toMatchObject({ event: "bindFailed", reason: "invalid" });
+    expect(logs[2]).toMatchObject({ event: "bindFailed", reason: "malformed" });
+    expect(events).toContain("bindLocked");
+    // 失敗の記録に nodeId は含めない（申告された値は信用できない）
+    for (const l of logs.filter((x) => x.event !== "bindSucceeded"))
+      expect(l).not.toHaveProperty("nodeId");
     const text = JSON.stringify(logs);
-    expect(text).not.toContain(code);
-    expect(text).not.toContain("WXYZ-2345-6789-ABCD");
-    expect(text).not.toContain((ok1.json.value as { token: string }).token);
+    for (const secret of [
+      code,
+      code.slice(0, 5),
+      "ZZZZZ",
+      (ok1.json.value as { token: string }).token,
+    ]) {
+      expect(text).not.toContain(secret);
+    }
+    const t = await rigBind({
+      logger: (e) => logs.push(e as unknown as Record<string, unknown>),
+      throttle: createThrottle({ clock: () => now, perSecond: 1 }),
+    });
+    await t.call("{bad");
+    await t.call("{bad");
+    expect(logs.at(-1)).toMatchObject({ event: "bindThrottled", reason: "global" });
   });
 
   it("形の検査: 余計なキー・不正なコード・JSON でない・大きすぎる本文・GET・Content-Type", async () => {
     const r = await rigBind();
     expect((await r.call({ nodeId: "a", bindCode: "x", extra: 1 })).status).toBe(400);
     expect((await r.call({ nodeId: "a", bindCode: 5 })).status).toBe(400);
-    expect((await r.call({ bindCode: "ABCD-EFGH-JKMN-PQRS" })).status).toBe(400);
-    expect((await r.call({ nodeId: "../x", bindCode: "ABCD-EFGH-JKMN-PQRS" })).status).toBe(400);
+    expect((await r.call({ bindCode: "ABCDEFGHJKMNPQRSTVWXYZ0123" })).status).toBe(400);
+    expect((await r.call({ nodeId: "../x", bindCode: "ABCDEFGHJKMNPQRSTVWXYZ0123" })).status).toBe(
+      400,
+    );
     expect((await r.call({})).status).toBe(400);
     expect((await r.call("{not json")).status).toBe(400);
     expect((await r.call({ nodeId: "a", bindCode: "A".repeat(5000) })).status).toBe(413);
@@ -622,7 +693,7 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
       const res = await fetch(`${url}/v1/bind`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ nodeId: "a", bindCode: "ABCD-EFGH-JKMN-PQRS" }),
+        body: JSON.stringify({ nodeId: "a", bindCode: "ABCDEFGHJKMNPQRSTVWXYZ0123" }),
       });
       expect(res.status).toBe(404);
       const raw = await new Promise<number>((resolve, reject) => {

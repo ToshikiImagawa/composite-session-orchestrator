@@ -31,7 +31,7 @@ import {
   type Result,
 } from "@cso/core";
 import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
-import type { BindCodes } from "./bind.js";
+import { type BindCodes, createThrottle, type Throttle } from "./bind.js";
 import { type CredentialStore, parseBearer } from "./credentials.js";
 import { pickResult } from "./results.js";
 import { parseEnvelope, validateParams } from "./validate.js";
@@ -55,21 +55,28 @@ export type Handlers = {
 };
 
 /**
- * 記録するイベント。`error`: 500 の原因（応答には出さない）。`bind`: bind の入口の結果（成功・失敗・ロール・状態が合わない）。
- * コードの値・トークンは書かない。logger が例外を投げても、応答は変えない。
+ * 記録するイベント（`at` は ISO 8601 UTC）。`internalError`: 500 の原因（応答には出さない）。bind の入口の結果:
+ * `bindSucceeded`（成功。`nodeId` を持つのはこれだけ）、`bindFailed`（`reason`: invalid＝コードが無効・
+ * rejected＝ノードの状態が許さない・malformed＝本文の形が不正）、`bindLocked`（ノードごとのロール中。`reason: "node"`）、
+ * `bindThrottled`（全体のスロットル。`reason: "global"`）。コードの値・ハッシュ・先頭の文字・トークンは書かない
+ * （失敗では、申告された nodeId も書かない）。logger が例外を投げても、応答は変えない。
  */
 export type ApiLogEvent =
   | {
-      readonly kind: "error";
+      readonly event: "internalError";
       readonly requestId: string;
       readonly operation: DaemonOperation;
       readonly error: unknown;
+      readonly at: string;
     }
+  | { readonly event: "bindSucceeded"; readonly nodeId: string; readonly at: string }
   | {
-      readonly kind: "bind";
-      readonly outcome: "success" | "invalid" | "locked" | "rejected";
-      readonly nodeId: string;
-    };
+      readonly event: "bindFailed";
+      readonly reason: "invalid" | "rejected" | "malformed";
+      readonly at: string;
+    }
+  | { readonly event: "bindLocked"; readonly reason: "node"; readonly at: string }
+  | { readonly event: "bindThrottled"; readonly reason: "global"; readonly at: string };
 
 export type ApiLogger = (event: ApiLogEvent) => void;
 
@@ -84,6 +91,10 @@ export interface ApiDeps {
   readonly logger?: ApiLogger;
   /** bind 専用の入口（`POST /v1/bind`）の bind コード。省略すると、この入口はない（404）。 */
   readonly bind?: BindCodes;
+  /** bind の入口の、全体のスロットル（1 秒あたりの失敗）。省略すると 1 秒に 10 回。 */
+  readonly bindThrottle?: Throttle;
+  /** 記録の時刻（ISO 8601 UTC）。既定は現在時刻。 */
+  readonly clock?: () => string;
 }
 
 export interface ApiServer {
@@ -286,6 +297,9 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     send(res, 200, { ok: true, value });
   }
 
+  const now = (): string => (deps.clock ?? (() => new Date().toISOString()))();
+  const throttle: Throttle = deps.bindThrottle ?? createThrottle({});
+
   function log(event: ApiLogEvent): void {
     try {
       deps.logger?.(event);
@@ -304,6 +318,30 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     res: ServerResponse,
     bind: BindCodes,
   ): Promise<void> {
+    // 失敗は、どれも全体のスロットルで数える（不正な本文・型違いも）。
+    const denied = (
+      error: Failure,
+      reason: "invalid" | "rejected" | "malformed",
+      extra: Record<string, string> = {},
+    ): void => {
+      throttle.fail();
+      log({ event: "bindFailed", reason, at: now() });
+      reject(res, error, extra);
+    };
+    const wait = throttle.blocked();
+    if (wait !== undefined) {
+      log({ event: "bindThrottled", reason: "global", at: now() });
+      req.resume();
+      return reject(
+        res,
+        failure(
+          "tooManyRequests",
+          "失敗が続いたため、しばらく受け付けない",
+          "しばらく待って、もう一度試す",
+        ),
+        { "retry-after": String(Math.max(1, Math.ceil(wait / 1000))) },
+      );
+    }
     if (req.method !== "POST") {
       return reject(res, failure("methodNotAllowed", "POST だけを受け付ける", "POST で呼び出す"), {
         allow: "POST",
@@ -311,21 +349,21 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     }
     if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {
       req.resume();
-      return reject(
-        res,
+      return denied(
         failure("unsupportedMediaType", "Content-Type が application/json でない", "JSON で送る"),
+        "malformed",
       );
     }
     const raw = await readBody(req, BIND_MAX_BODY);
     if (raw === undefined) {
       res.once("finish", () => req.destroy());
-      return reject(
-        res,
+      return denied(
         failure(
           "payloadTooLarge",
           `本文が上限（${BIND_MAX_BODY} バイト）を超えた`,
           "本文を小さくする",
         ),
+        "malformed",
         { connection: "close" },
       );
     }
@@ -333,7 +371,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     try {
       body = JSON.parse(raw.toString("utf8"));
     } catch {
-      return reject(res, failure("invalidRequest", "本文が JSON でない", "JSON で送る"));
+      return denied(failure("invalidRequest", "本文が JSON でない", "JSON で送る"), "malformed");
     }
     const b = body as { nodeId?: unknown; bindCode?: unknown } | null;
     if (
@@ -344,41 +382,41 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       !isSafeId(b?.nodeId) ||
       !isBoundedText(b?.bindCode, 64)
     ) {
-      return reject(
-        res,
+      return denied(
         failure(
           "invalidRequest",
           "本文は { nodeId, bindCode } の形で送る",
           "nodeId と bindCode を確認する",
         ),
+        "malformed",
       );
     }
     const nodeId = b?.nodeId as string;
-    const redeemed = bind.redeem(nodeId, b?.bindCode);
-    if (!redeemed.ok && redeemed.reason === "locked") {
-      log({ kind: "bind", outcome: "locked", nodeId });
-      return reject(
-        res,
-        failure(
-          "tooManyRequests",
-          "失敗が続いたため、しばらく受け付けない",
-          "しばらく待って、もう一度試す",
-        ),
-        { "retry-after": String(Math.max(1, Math.ceil(redeemed.retryAfterMs / 1000))) },
-      );
-    }
-    const unauthorized = (): void =>
-      reject(res, failure("unauthenticated", "bind コードが無効", "bind コードを再発行する"), {
+    // 結び付いたノードが、子ロールで、トークンを持てる状態か（統合ノード・木にない・停止後などは不可）を先に確かめ、
+    // 許されたときだけコードを消費する。
+    const redeemed = bind.redeem(
+      nodeId,
+      b?.bindCode,
+      (id) => checkPrincipal({ role: "child", nodeId: id }, deps.getState()).ok,
+    );
+    const unauthorized = (reason: "invalid" | "rejected"): void =>
+      denied(failure("unauthenticated", "bind コードが無効", "bind コードを再発行する"), reason, {
         "www-authenticate": "Bearer",
       });
     if (!redeemed.ok) {
-      log({ kind: "bind", outcome: "invalid", nodeId });
-      return unauthorized();
-    }
-    // 結び付いたノードが、子ロールで、トークンを持てる状態か（統合ノード・木にない・停止後などは不可）。
-    if (!checkPrincipal({ role: "child", nodeId: redeemed.nodeId }, deps.getState()).ok) {
-      log({ kind: "bind", outcome: "rejected", nodeId });
-      return unauthorized();
+      if (redeemed.reason === "locked") {
+        log({ event: "bindLocked", reason: "node", at: now() });
+        return reject(
+          res,
+          failure(
+            "tooManyRequests",
+            "失敗が続いたため、しばらく受け付けない",
+            "しばらく待って、もう一度試す",
+          ),
+          { "retry-after": String(Math.max(1, Math.ceil(redeemed.retryAfterMs / 1000))) },
+        );
+      }
+      return unauthorized(redeemed.reason);
     }
     let token: string;
     try {
@@ -386,7 +424,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     } catch (error) {
       return internalError(res, "bind", "node.bind", error);
     }
-    log({ kind: "bind", outcome: "success", nodeId });
+    log({ event: "bindSucceeded", nodeId: redeemed.nodeId, at: now() });
     send(res, 200, { ok: true, value: { nodeId: redeemed.nodeId, token } });
   }
 
@@ -396,7 +434,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     operation: DaemonOperation,
     error: unknown,
   ): void {
-    log({ kind: "error", requestId, operation, error });
+    log({ event: "internalError", requestId, operation, error, at: now() });
     reject(
       res,
       failure("internalError", "内部エラー", "もう一度試す", "改善しなければ管理者に知らせる"),
