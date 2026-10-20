@@ -22,11 +22,13 @@ import {
   type Failure,
   failure,
   findRunningProcesses,
+  LIMITS,
   MAX_GRACE_MS,
   ok,
   type Result,
   type Scope,
   type StopOutcome,
+  sanitizeText,
 } from "@cso/core";
 import type {
   AgentLauncher,
@@ -301,6 +303,28 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     return ok(undefined);
   }
 
+  /** 予期しない終了を記録する: 終了、失敗の報告、受信箱の failure の項目（報告を `ref` で指す）。 */
+  private recordExit(nodeId: string, rawReason: unknown): void {
+    const reason = sanitizeText(rawReason, LIMITS.reason);
+    this.record({ type: "node.exited", payload: { nodeId, reason } });
+    const reportId = `report-${this.deps.newRequestId()}`;
+    const failed = this.record({
+      type: "report.added",
+      payload: { reportId, nodeId, kind: "failure", text: reason },
+    });
+    if (failed) return; // 参照先がないと項目を足せない
+    this.record({
+      type: "inbox.added",
+      payload: {
+        id: `inbox-${this.deps.newRequestId()}`,
+        kind: "failure",
+        nodeId,
+        summary: sanitizeText(`子が予期せず終了した: ${reason}`, LIMITS.summary),
+        ref: reportId,
+      },
+    });
+  }
+
   /** 稼働中の子が、停止の要求なしに終了したら、通知して管理から外す。 */
   private watchFinished(nodeId: string, entry: NodeEntry): void {
     let finished: Promise<void>;
@@ -317,8 +341,8 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
       .then((reason) => {
         if (this.nodes.get(nodeId) !== entry || entry.stopping) return;
         this.nodes.delete(nodeId);
-        // 記録に失敗しても、通知と掃除は行う。
-        this.record({ type: "node.exited", payload: { nodeId, reason } });
+        // 記録に失敗しても、通知と掃除は行う。理由は子の例外などの外部の値なので、記録できる形にする。
+        this.recordExit(nodeId, reason);
         try {
           this.deps.onUnexpectedExit?.(nodeId, reason);
         } catch {
@@ -415,7 +439,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
       if (decision.unknownTool !== undefined) {
         this.record({
           type: "node.toolDenied",
-          payload: { nodeId, tool: decision.unknownTool },
+          payload: { nodeId, tool: sanitizeText(decision.unknownTool, LIMITS.tool) },
         });
       }
       if (decision.violation !== undefined) {

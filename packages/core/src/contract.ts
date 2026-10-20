@@ -197,12 +197,31 @@ export const DAEMON_OPERATIONS: readonly RoleOperation<ContractRole>[] = CONTRAC
   (r) => ROLE_OPERATIONS[r],
 );
 
+/**
+ * 統合ノードの操作のうち、ノード（または、それを持つ判断・報告）を指すもの。呼び出した統合ノード（`caller`）の
+ * 部分木（`isInSubtree`）に限る（spec 4.1）。`decision.get`・`report.get` は、記録の `nodeId` で判定する。
+ * 適用は窓口（T13 以降）。ここでは判定の対象の操作を固定する。
+ */
+export const SUBTREE_SCOPED_OPERATIONS = [
+  "node.send",
+  "node.stop",
+  "node.split",
+  "node.review",
+  "node.reclaimPreview",
+  "node.reclaim",
+  "node.capabilities",
+  "decision.get",
+  "report.get",
+] as const satisfies readonly RoleOperation<"integrator">[];
+
 /** 窓口への要求の封筒。`requestId` で冪等にする（NFR_003）。ロールが持たない操作は型で表せない。 */
 export type DaemonRequest<R extends ContractRole = ContractRole> = {
   [Role in R]: {
     [Op in RoleOperation<Role>]: {
       readonly requestId: string;
       readonly role: Role;
+      /** 呼び出したノード。クライアントは指定せず、daemon が認証（ノード専用の資格情報）で決めて付ける。 */
+      readonly caller?: { readonly nodeId: string };
       readonly operation: Op;
       readonly params: OperationMap[Op]["params"];
     };

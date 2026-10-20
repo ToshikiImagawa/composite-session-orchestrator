@@ -5,6 +5,7 @@ import {
   foldEvents,
   INBOX_SUMMARY_MAX,
   initialState,
+  LIMITS,
   type NodeEvent,
   type OrchEvent,
   type OrchState,
@@ -158,11 +159,15 @@ describe("記録専用イベント node.toolDenied・node.exited（T10c。状態
 
 describe("受信箱の中身（summary・ref）", () => {
   it("inbox.added は任意の summary（短い要約）・ref（参照 ID）を持ち、InboxItem に載る", () => {
+    const d = ev({
+      type: "decision.requested",
+      payload: { decisionId: "d1", nodeId: "a", question: "DB はどれにする？" },
+    });
     const e = ev({
       type: "inbox.added",
       payload: { id: "i1", kind: "decision", nodeId: "a", summary: "DB はどれにする？", ref: "d1" },
     });
-    const s = must(foldEvents([...base(), e]));
+    const s = must(foldEvents([...base(), d, e]));
     expect(s.inbox[0]).toMatchObject({ id: "i1", summary: "DB はどれにする？", ref: "d1" });
   });
 
@@ -243,7 +248,7 @@ describe("報告の保存（report.added）", () => {
     } as never);
 
   it("報告の種類は progress・done・outOfScope", () => {
-    expect(REPORT_KINDS).toEqual(["progress", "done", "outOfScope"]);
+    expect(REPORT_KINDS).toEqual(["progress", "done", "outOfScope", "failure"]);
   });
 
   it("報告を保存し、状態は変えない。done は受け入れ基準ごとの根拠を持てる", () => {
@@ -278,5 +283,195 @@ describe("報告の保存（report.added）", () => {
     ]) {
       expect(code(foldEvents([...base(), added(bad)])), JSON.stringify(bad)).toBe("invalidPayload");
     }
+  });
+});
+
+describe("子が入れる文字列・配列の上限（コードポイントで数える）", () => {
+  const repeat = (n: number, ch = "あ") => ch.repeat(n);
+  const addReport = (over: Record<string, unknown>) =>
+    ev({
+      type: "report.added",
+      payload: { reportId: `r${counter}`, nodeId: "a", kind: "progress", text: "x", ...over },
+    } as never);
+  const request = (over: Record<string, unknown>) =>
+    ev({
+      type: "decision.requested",
+      payload: { decisionId: `d${counter}`, nodeId: "a", ...over },
+    } as never);
+  const exited = (reason: string) => ev({ type: "node.exited", payload: { nodeId: "a", reason } });
+  const denied = (tool: string) => ev({ type: "node.toolDenied", payload: { nodeId: "a", tool } });
+  const ok = (e: OrchEvent) => code(foldEvents([...base(), e]));
+
+  it("上限は core の定数にまとまっている", () => {
+    expect(LIMITS).toEqual({
+      reportText: 64 * 1024,
+      question: 8 * 1024,
+      optionCount: 20,
+      optionLength: 500,
+      evidenceCount: 50,
+      evidenceLength: 4 * 1024,
+      reason: 1024,
+      tool: 1024,
+      summary: INBOX_SUMMARY_MAX,
+    });
+  });
+
+  it("ちょうど上限までは受け入れ、超えたら invalidPayload", () => {
+    expect(ok(addReport({ text: repeat(LIMITS.reportText) }))).toBeNull();
+    expect(ok(addReport({ text: repeat(LIMITS.reportText + 1) }))).toBe("invalidPayload");
+    expect(ok(request({ question: repeat(LIMITS.question) }))).toBeNull();
+    expect(ok(request({ question: repeat(LIMITS.question + 1) }))).toBe("invalidPayload");
+    expect(ok(exited(repeat(LIMITS.reason)))).toBeNull();
+    expect(ok(exited(repeat(LIMITS.reason + 1)))).toBe("invalidPayload");
+    expect(ok(denied(repeat(LIMITS.tool)))).toBeNull();
+    expect(ok(denied(repeat(LIMITS.tool + 1)))).toBe("invalidPayload");
+  });
+
+  it("選択肢は 20 件・各 500 文字まで", () => {
+    const opts = (n: number) => Array.from({ length: n }, (_, i) => `案${i}`);
+    expect(ok(request({ question: "q", options: opts(LIMITS.optionCount) }))).toBeNull();
+    expect(ok(request({ question: "q", options: opts(LIMITS.optionCount + 1) }))).toBe(
+      "invalidPayload",
+    );
+    expect(ok(request({ question: "q", options: [repeat(LIMITS.optionLength)] }))).toBeNull();
+    expect(ok(request({ question: "q", options: [repeat(LIMITS.optionLength + 1)] }))).toBe(
+      "invalidPayload",
+    );
+  });
+
+  it("根拠は 50 件・各項目 4KB まで", () => {
+    const ev1 = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ criterion: `c${i}`, evidence: "e" }));
+    expect(ok(addReport({ kind: "done", evidence: ev1(LIMITS.evidenceCount) }))).toBeNull();
+    expect(ok(addReport({ kind: "done", evidence: ev1(LIMITS.evidenceCount + 1) }))).toBe(
+      "invalidPayload",
+    );
+    const long = repeat(LIMITS.evidenceLength + 1);
+    expect(ok(addReport({ kind: "done", evidence: [{ criterion: "c", evidence: long }] }))).toBe(
+      "invalidPayload",
+    );
+    expect(ok(addReport({ kind: "done", evidence: [{ criterion: long, evidence: "e" }] }))).toBe(
+      "invalidPayload",
+    );
+  });
+
+  it("長さはコードポイントで数える（サロゲートペアを 2 と数えない）。summary も同じ", () => {
+    expect(ok(exited("😀".repeat(LIMITS.reason)))).toBeNull();
+    expect(ok(exited("😀".repeat(LIMITS.reason + 1)))).toBe("invalidPayload");
+    const sum = (summary: string) =>
+      ev({
+        type: "inbox.added",
+        payload: { id: `i${counter}`, kind: "info", nodeId: "a", summary },
+      });
+    expect(ok(sum("😀".repeat(INBOX_SUMMARY_MAX)))).toBeNull();
+    expect(ok(sum("😀".repeat(INBOX_SUMMARY_MAX + 1)))).toBe("invalidPayload");
+  });
+
+  it("タブ・改行以外の制御文字・DEL・書式制御（Cf。U+202E など）を拒否する", () => {
+    const bad = ["a\u0000b", "a\u001bb", "a\rb", "a\u007fb", "a‮b", "a​b", "a\u0085b"];
+    for (const s of bad) {
+      const label = JSON.stringify(s);
+      expect(ok(addReport({ text: s })), `text ${label}`).toBe("invalidPayload");
+      expect(ok(request({ question: s })), `question ${label}`).toBe("invalidPayload");
+      expect(ok(request({ question: "q", options: [s, "b"] })), `options ${label}`).toBe(
+        "invalidPayload",
+      );
+      expect(ok(exited(s)), `reason ${label}`).toBe("invalidPayload");
+      expect(ok(denied(s)), `tool ${label}`).toBe("invalidPayload");
+      expect(
+        ok(
+          ev({
+            type: "inbox.added",
+            payload: { id: `i${counter}`, kind: "info", nodeId: "a", summary: s },
+          }),
+        ),
+        `summary ${label}`,
+      ).toBe("invalidPayload");
+      expect(
+        ok(addReport({ kind: "done", evidence: [{ criterion: s, evidence: "e" }] })),
+        `evidence ${label}`,
+      ).toBe("invalidPayload");
+    }
+    expect(ok(addReport({ text: "行1\n\t行2" }))).toBeNull();
+  });
+});
+
+describe("選択肢の検査", () => {
+  const request = (over: Record<string, unknown>) =>
+    ev({
+      type: "decision.requested",
+      payload: { decisionId: `d${counter}`, nodeId: "a", ...over },
+    } as never);
+  it("options を指定するなら question が必須。options は空・重複を拒否する", () => {
+    const r = (over: Record<string, unknown>) => code(foldEvents([...base(), request(over)]));
+    expect(r({ options: ["A", "B"] })).toBe("invalidPayload");
+    expect(r({ question: "q", options: [] })).toBe("invalidPayload");
+    expect(r({ question: "q", options: ["A", "A"] })).toBe("invalidPayload");
+    expect(r({ question: "q", options: ["A", "B"] })).toBeNull();
+    expect(r({ question: "q" })).toBeNull();
+  });
+});
+
+describe("inbox.added の ref の検査（unknownRef）", () => {
+  const added = (over: Record<string, unknown>) =>
+    ev({ type: "inbox.added", payload: { id: `i${counter}`, nodeId: "a", ...over } } as never);
+  const dec = (nodeId = "a") =>
+    ev({ type: "decision.requested", payload: { decisionId: "d1", nodeId, question: "q" } });
+  const rep = (kind = "progress", nodeId = "a") =>
+    ev({ type: "report.added", payload: { reportId: "r1", nodeId, kind, text: "t" } } as never);
+
+  it("decision・answer は記録済みの decisionId、それ以外の報告系は記録済みの reportId を指す", () => {
+    const d = dec();
+    const r = rep();
+    const b = base();
+    const run = (...e: OrchEvent[]) => code(foldEvents([...b, d, r, ...e]));
+    expect(run(added({ kind: "decision", ref: "d1" }))).toBeNull();
+    expect(run(added({ kind: "answer", ref: "d1" }))).toBeNull();
+    for (const kind of ["done", "progress", "failure", "info"]) {
+      expect(run(added({ kind, ref: "r1" })), kind).toBeNull();
+    }
+  });
+
+  it("未記録・種類の食い違い・別ノードのものは unknownRef", () => {
+    const b = base();
+    const d = dec();
+    const r = rep();
+    const other = created(5, "b", "implement", "root");
+    const run = (...e: OrchEvent[]) => code(foldEvents([...b, other, d, r, ...e]));
+    expect(run(added({ kind: "decision", ref: "nope" }))).toBe("unknownRef");
+    expect(run(added({ kind: "progress", ref: "nope" }))).toBe("unknownRef");
+    expect(run(added({ kind: "decision", ref: "r1" }))).toBe("unknownRef"); // 種類の食い違い
+    expect(run(added({ kind: "progress", ref: "d1" }))).toBe("unknownRef");
+    expect(run(added({ kind: "progress", ref: "r1", nodeId: "b" }))).toBe("unknownRef"); // 別ノード
+    expect(run(added({ kind: "decision", ref: "d1", nodeId: "b" }))).toBe("unknownRef");
+    // 参照先のない種類（violation・stopIncomplete）は ref を持てない
+    expect(run(added({ kind: "violation", ref: "r1" }))).toBe("unknownRef");
+    expect(run(added({ kind: "stopIncomplete", ref: "r1" }))).toBe("unknownRef");
+  });
+
+  it("ref なしは従来どおり", () => {
+    expect(code(foldEvents([...base(), added({ kind: "violation" })]))).toBeNull();
+  });
+});
+
+describe("node.exited・node.toolDenied を記録できるノードの状態", () => {
+  const exited = (nodeId: string) => ev({ type: "node.exited", payload: { nodeId, reason: "x" } });
+  const denied = (nodeId: string) =>
+    ev({ type: "node.toolDenied", payload: { nodeId, tool: "T" } });
+
+  it("running・waiting・stopping・stopIncomplete のノードに限る（pending・停止済み・完了後は invalidTransition）", () => {
+    const pending = [...base().slice(0, 3)]; // a は pending
+    expect(code(foldEvents([...pending, exited("a")]))).toBe("invalidTransition");
+    expect(code(foldEvents([...pending, denied("a")]))).toBe("invalidTransition");
+    expect(code(foldEvents([...base(), exited("a")]))).toBeNull();
+    expect(code(foldEvents([...base(), denied("a")]))).toBeNull();
+    const waiting = [...base(), changed(10, "a", { type: "requestDecision" })];
+    expect(code(foldEvents([...waiting, exited("a")]))).toBeNull();
+    const stopping = [...base(), changed(10, "a", { type: "stop", mode: "immediate" })];
+    expect(code(foldEvents([...stopping, denied("a")]))).toBeNull();
+    const stopped = [...stopping, changed(11, "a", { type: "confirmStopped" })];
+    expect(code(foldEvents([...stopped, exited("a")]))).toBe("invalidTransition");
+    const done = [...base(), changed(10, "a", { type: "reportDone" })];
+    expect(code(foldEvents([...done, denied("a")]))).toBe("invalidTransition");
   });
 });

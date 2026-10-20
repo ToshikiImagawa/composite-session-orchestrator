@@ -18,6 +18,7 @@ import {
   type Result,
   ROLE_OPERATIONS,
   type RoleOperation,
+  SUBTREE_SCOPED_OPERATIONS,
 } from "../src/index.js";
 
 describe("Result（NFR_010）", () => {
@@ -93,6 +94,37 @@ describe("操作の契約（NFR_004, DC_003）", () => {
       elapsedDays: 111,
     };
     expect(preview.nodeIds).toHaveLength(2);
+  });
+
+  it("統合ノードの操作のうち、ノード・判断・報告を指すものは自分の部分木に限る（適用は窓口。T13 以降）", () => {
+    expect([...SUBTREE_SCOPED_OPERATIONS].sort()).toEqual(
+      [
+        "decision.get",
+        "node.capabilities",
+        "node.reclaim",
+        "node.reclaimPreview",
+        "node.review",
+        "node.send",
+        "node.split",
+        "node.stop",
+        "report.get",
+      ].sort(),
+    );
+    for (const op of SUBTREE_SCOPED_OPERATIONS) {
+      expect(ROLE_OPERATIONS.integrator as readonly string[], op).toContain(op);
+    }
+  });
+
+  it("要求の caller（daemon が認証で決めるノード）は任意で、クライアントは必須にされない", () => {
+    const integ = (r: DaemonRequest<"integrator">) => r;
+    const b = { requestId: "r9", role: "integrator", operation: "node.stop" } as const;
+    integ({ ...b, params: { nodeId: "n1", mode: "graceful" } });
+    const withCaller = integ({
+      ...b,
+      caller: { nodeId: "m1" },
+      params: { nodeId: "n1", mode: "graceful" },
+    });
+    expect(withCaller.caller?.nodeId).toBe("m1");
   });
 
   it("墓標の既定は「残す」（監査 NFR_011 と誤削除の追跡のため安全側。保持ポリシーの設定で変えられる）", () => {

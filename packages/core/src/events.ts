@@ -20,8 +20,9 @@
 
 import { type Failure, failure, ok, type Result } from "./contract.js";
 import { type InboxItem, isValidInboxTime } from "./inbox.js";
-import { INBOX_KINDS, INBOX_SUMMARY_MAX, type InboxKind } from "./inbox-kinds.js";
+import { INBOX_KINDS, type InboxKind } from "./inbox-kinds.js";
 import type { NodeRole, NodeState } from "./index.js";
+import { isBoundedText, LIMITS } from "./limits.js";
 import type { ScopeViolationReason } from "./scope.js";
 import {
   COMPLETED_STATES,
@@ -67,7 +68,7 @@ export type EventBody =
         readonly id: string;
         readonly kind: InboxKind;
         readonly nodeId: string;
-        /** 短い要約（`INBOX_SUMMARY_MAX` 文字以下）。 */
+        /** 短い要約（`LIMITS.summary` 文字以下）。 */
         readonly summary?: string;
         /** 参照 ID（`decisionId`・`reportId` など）。 */
         readonly ref?: string;
@@ -122,7 +123,7 @@ export type EventBody =
       readonly payload: { readonly decisionId: string; readonly answer: string };
     };
 
-export const REPORT_KINDS = ["progress", "done", "outOfScope"] as const;
+export const REPORT_KINDS = ["progress", "done", "outOfScope", "failure"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
 const isReportKind = (x: unknown): x is ReportKind =>
   typeof x === "string" && (REPORT_KINDS as readonly string[]).includes(x);
@@ -299,6 +300,7 @@ export type FoldFailureCode =
   | "unknownStopRequest"
   | "observationAlreadyRecorded"
   | "duplicateReport"
+  | "unknownRef"
   | "invalidState";
 
 /** どのイベント（`seq`）で拒否したかを持つ失敗。壊れたイベントで `seq` が分からないときは 0。 */
@@ -416,12 +418,40 @@ interface Draft {
   toolDenials: ToolDenialRecord[];
   exits: ExitRecord[];
   reports: ReportRecord[];
-  reportIds: Set<string>;
+  reportIdx: Map<string, ReportRecord>;
   lastSeq: number;
   requests: Map<string, string>;
   /** 直前の `step` で、イベントの一部が無視されたこと（`ApplyOutcome.ignored` に渡す）。 */
   note: "graceMsIgnored" | undefined;
 }
+
+/** 受信箱の項目の `ref` が指す記録の種類。参照先のない種類（violation・stopIncomplete）は `ref` を持てない。 */
+const REF_TARGET: Readonly<Record<InboxKind, "decision" | "report" | undefined>> = {
+  decision: "decision",
+  answer: "decision",
+  violation: undefined,
+  failure: "report",
+  stopIncomplete: undefined,
+  done: "report",
+  progress: "report",
+  info: "report",
+};
+
+/** `node.toolDenied`・`node.exited` を記録できるノードの状態（子のプロセスがありうる間）。 */
+const RECORDABLE_STATES: ReadonlySet<NodeState> = new Set([
+  "running",
+  "waiting",
+  "stopping",
+  "stopIncomplete",
+]);
+
+const notRecordable = (seq: number, node: NodeRecord, what: string): Result<boolean, FoldFailure> =>
+  reject(
+    seq,
+    "invalidTransition",
+    `状態 ${node.state} のノードに ${what} は記録できない（running・waiting・stopping・stopIncomplete のとき）`,
+    "ノードの状態を確認する",
+  );
 
 /** 配列の項目を検査する。`undefined`（古いスナップショットに無い項目）は空として受け入れる。壊れていれば `undefined`。 */
 function arrayOf<T>(x: unknown, guard: (v: unknown) => boolean): T[] | undefined {
@@ -527,7 +557,7 @@ function toDraft(state: OrchState): Draft | undefined {
     toolDenials: [...toolDenials],
     exits: [...exits],
     reports: [...reports],
-    reportIds: new Set(reports.map((r) => r.reportId)),
+    reportIdx: new Map(reports.map((r) => [r.reportId, r])),
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
     note: undefined,
@@ -902,11 +932,8 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (!isId(id) || !isId(nodeId) || !INBOX_KINDS.includes(kind as InboxKind)) {
         return invalid(seq, "inbox.added の payload");
       }
-      if (
-        summary !== undefined &&
-        (typeof summary !== "string" || summary.length > INBOX_SUMMARY_MAX)
-      ) {
-        return invalid(seq, `inbox.added の summary（${INBOX_SUMMARY_MAX} 文字以下の文字列）`);
+      if (summary !== undefined && !isBoundedText(summary, LIMITS.summary)) {
+        return invalid(seq, `inbox.added の summary（${LIMITS.summary} 文字以下、制御文字なし）`);
       }
       if (ref !== undefined && !isId(ref)) return invalid(seq, "inbox.added の ref");
       if (!isValidInboxTime(raw.at)) return invalid(seq, "inbox.added の at（ISO 8601 UTC）");
@@ -914,6 +941,25 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (node === undefined) return unknownNode(seq, nodeId);
       if (d.inboxIds.has(id)) {
         return reject(seq, "duplicateInboxId", `受信箱の項目 ${id} は既にある`, "別の ID を使う");
+      }
+      if (ref !== undefined) {
+        // 参照先は、記録済みで、項目の種類に合い、同じノードのものに限る。
+        const target = REF_TARGET[kind as InboxKind];
+        const owner =
+          target === "decision"
+            ? d.decisions[d.decisionIdx.get(ref as string) ?? -1]?.nodeId
+            : target === "report"
+              ? d.reportIdx.get(ref as string)?.nodeId
+              : undefined;
+        if (owner !== nodeId) {
+          return reject(
+            seq,
+            "unknownRef",
+            `ref ${String(ref)} は、種類 ${String(kind)} の項目が指せる、ノード ${nodeId} の記録ではない`,
+            "判断要求・報告を先に記録する",
+            "種類に合う ID（decision・answer は decisionId、報告系は reportId）を指定する",
+          );
+        }
       }
       d.inboxIds.add(id);
       d.inbox.push(
@@ -933,24 +979,34 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
 
     case "node.toolDenied": {
       const { nodeId, tool } = p;
-      if (!isId(nodeId) || !isId(tool)) return invalid(seq, "node.toolDenied の payload");
-      if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
+      if (!isId(nodeId) || !isBoundedText(tool, LIMITS.tool) || tool === "")
+        return invalid(seq, "node.toolDenied の payload");
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (!RECORDABLE_STATES.has(node.state)) return notRecordable(seq, node, "node.toolDenied");
       d.toolDenials.push(freezeRecord({ seq, at: raw.at, nodeId, tool, actor }));
       return commit();
     }
 
     case "node.exited": {
       const { nodeId, reason } = p;
-      if (!isId(nodeId) || typeof reason !== "string")
+      if (!isId(nodeId) || !isBoundedText(reason, LIMITS.reason))
         return invalid(seq, "node.exited の payload");
-      if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (!RECORDABLE_STATES.has(node.state)) return notRecordable(seq, node, "node.exited");
       d.exits.push(freezeRecord({ seq, at: raw.at, nodeId, reason, actor }));
       return commit();
     }
 
     case "report.added": {
       const { reportId, nodeId, kind, text, evidence } = p;
-      if (!isId(reportId) || !isId(nodeId) || !isReportKind(kind) || typeof text !== "string") {
+      if (
+        !isId(reportId) ||
+        !isId(nodeId) ||
+        !isReportKind(kind) ||
+        !isBoundedText(text, LIMITS.reportText)
+      ) {
         return invalid(seq, "report.added の payload");
       }
       let evidenceList: ReportEvidence[] | undefined;
@@ -959,13 +1015,17 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
         if (
           kind !== "done" ||
           !Array.isArray(evidence) ||
+          evidence.length > LIMITS.evidenceCount ||
           !evidence.every(
-            (x) => isRec(x) && typeof x.criterion === "string" && typeof x.evidence === "string",
+            (x) =>
+              isRec(x) &&
+              isBoundedText(x.criterion, LIMITS.evidenceLength) &&
+              isBoundedText(x.evidence, LIMITS.evidenceLength),
           )
         ) {
           return invalid(
             seq,
-            "report.added の evidence（完了報告の { criterion, evidence } の配列）",
+            `report.added の evidence（完了報告の { criterion, evidence } の ${LIMITS.evidenceCount} 件以下の配列）`,
           );
         }
         evidenceList = evidence.map((x: Rec) => ({
@@ -974,34 +1034,45 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
         }));
       }
       if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
-      if (d.reportIds.has(reportId)) {
+      if (d.reportIdx.has(reportId)) {
         return reject(seq, "duplicateReport", `報告 ${reportId} は既にある`, "別の ID を使う");
       }
-      d.reportIds.add(reportId);
-      d.reports.push(
-        freezeRecord({
-          seq,
-          at: raw.at,
-          reportId,
-          nodeId,
-          kind,
-          text,
-          ...(evidenceList === undefined ? {} : { evidence: Object.freeze(evidenceList) }),
-          actor,
-        }),
-      );
+      const record = freezeRecord({
+        seq,
+        at: raw.at,
+        reportId,
+        nodeId,
+        kind,
+        text,
+        ...(evidenceList === undefined ? {} : { evidence: Object.freeze(evidenceList) }),
+        actor,
+      });
+      d.reportIdx.set(reportId, record);
+      d.reports.push(record);
       return commit();
     }
 
     case "decision.requested": {
       const { decisionId, nodeId, question, options } = p;
       if (!isId(decisionId) || !isId(nodeId)) return invalid(seq, "decision.requested の payload");
-      if (
-        (question !== undefined && typeof question !== "string") ||
-        (options !== undefined &&
-          !(Array.isArray(options) && options.every((o) => typeof o === "string")))
-      ) {
-        return invalid(seq, "decision.requested の question・options");
+      if (question !== undefined && !isBoundedText(question, LIMITS.question)) {
+        return invalid(seq, `decision.requested の question（${LIMITS.question} 文字以下）`);
+      }
+      if (options !== undefined) {
+        // 選択肢を示すなら問いが要る。空・重複は不可。
+        if (
+          question === undefined ||
+          !Array.isArray(options) ||
+          options.length < 1 ||
+          options.length > LIMITS.optionCount ||
+          !options.every((o) => isBoundedText(o, LIMITS.optionLength) && o !== "") ||
+          new Set(options).size !== options.length
+        ) {
+          return invalid(
+            seq,
+            `decision.requested の options（question が必須。重複なし、1〜${LIMITS.optionCount} 件、各 ${LIMITS.optionLength} 文字以下）`,
+          );
+        }
       }
       if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
       if (d.decisionIdx.has(decisionId)) {
