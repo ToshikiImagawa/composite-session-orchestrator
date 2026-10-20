@@ -72,7 +72,14 @@ export type EventBody =
   | {
       /** 停止の観測の記録（猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか）。状態は変えない。 */
       readonly type: "node.stopObserved";
-      readonly payload: { readonly nodeId: string; readonly outcome: StopOutcome };
+      readonly payload: {
+        readonly nodeId: string;
+        readonly outcome: StopOutcome;
+        /** 対応する停止の試行（`stop`・`retryStop` の `node.stateChanged`）のイベントの `seq`。 */
+        readonly stopSeq: number;
+        /** そのとき有効だった猶予（ミリ秒）。穏当な停止のとき。 */
+        readonly graceMs?: number;
+      };
     }
   | {
       readonly type: "decision.requested";

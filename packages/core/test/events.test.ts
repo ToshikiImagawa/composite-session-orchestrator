@@ -1050,6 +1050,18 @@ describe("停止の記録（node.stopObserved）と猶予時間（graceMs）", (
     );
   });
 
+  it("EventBody の型が、停止の観測の payload（stopSeq・graceMs）を表せる", () => {
+    const typed: EventBody = {
+      type: "node.stopObserved",
+      payload: { nodeId: "a", outcome: "aborted", stopSeq: 1, graceMs: 1000 },
+    };
+    const minimal: EventBody = {
+      type: "node.stopObserved",
+      payload: { nodeId: "a", outcome: "aborted", stopSeq: 1 },
+    };
+    expect([typed.type, minimal.type]).toEqual(["node.stopObserved", "node.stopObserved"]);
+  });
+
   it("isStopOutcome は型ガード", () => {
     expect(STOP_OUTCOMES.every(isStopOutcome)).toBe(true);
     for (const x of ["x", "", null, undefined, 1, {}, ["withinGrace"]])
