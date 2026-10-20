@@ -1,10 +1,12 @@
 /**
- * daemon 窓口の契約型と Result 型（NFR_001, NFR_003, NFR_004, NFR_010）。I/O を持たない型と純粋関数のみ。
+ * daemon 窓口の契約型と Result 型（NFR_003, NFR_004, NFR_010）。I/O を持たない型と純粋関数のみ。
  * `mcp`・`cli` は daemon に依存せず、この契約を通して 127.0.0.1 の窓口を呼ぶ（design 3 章）。
  *
  * 仮置きの範囲: 操作名は spec 4.1 の操作一覧に対応する仮の名前で、引数・結果の型は最小限
  * （識別子と主要な項目のみ）。各操作の実装タスクで確定する。境界での値の検証（zod など）は将来課題。
  */
+
+import type { NodeState } from "./index.js";
 
 /** 失敗。原因と次に取るべき操作を必ず持つ（NFR_010）。 */
 export interface Failure {
@@ -66,8 +68,9 @@ export interface OperationMap {
   "node.send": { params: { nodeId: string; text: string }; result: { delivered: boolean } };
   "node.stop": {
     params: { nodeId: string; mode: "graceful" | "immediate" };
-    result: { state: string };
+    result: { state: NodeState };
   };
+  // TODO(T11): items は #8 マージ後に InboxItem へ差し替える。
   "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly unknown[] } };
   "tree.list": { params: Record<string, never>; result: { table: string } };
   "decision.present": {
@@ -79,16 +82,19 @@ export interface OperationMap {
     result: { newNodeId: string };
   };
   "scope.decide": {
-    params: { requestId: string; decision: "approve" | "reject" | "split" };
-    result: { state: string };
+    params: { extensionId: string; decision: "approve" | "reject" | "split" };
+    result: { state: NodeState };
   };
   "node.review": {
     params: { nodeId: string; verdict: "accept" | "reject" };
-    result: { state: string };
+    result: { state: NodeState };
   };
   "node.reclaimPreview": { params: { nodeId: string }; result: { reclaimable: boolean } };
   "node.reclaim": { params: { nodeId: string }; result: { reclaimed: readonly string[] } };
-  "node.capabilities": { params: { nodeId: string }; result: { operations: readonly string[] } };
+  "node.capabilities": {
+    params: { nodeId: string };
+    result: { operations: readonly DaemonOperation[] };
+  };
   // 子（報告は親へのみ）
   "report.progress": { params: { text: string }; result: { accepted: true } };
   "report.decision": {
@@ -100,11 +106,11 @@ export interface OperationMap {
     params: { evidence: readonly { criterion: string; evidence: string }[] };
     result: { accepted: true };
   };
-  "scope.extend": { params: { target: string; reason: string }; result: { requestId: string } };
+  "scope.extend": { params: { target: string; reason: string }; result: { extensionId: string } };
   "node.bind": { params: { bindCode: string }; result: { nodeId: string } };
   // 人間（画面・コマンド）
   "decision.answer": {
-    params: { decisionId: string; choice?: string; text?: string };
+    params: { decisionId: string } & ({ choice: string } | { text: string });
     result: { accepted: true };
   };
   "node.reclaimInstruct": { params: { nodeId: string }; result: { accepted: true } };
@@ -143,7 +149,7 @@ export const ROLE_OPERATIONS = {
 export type RoleOperation<R extends ContractRole> = (typeof ROLE_OPERATIONS)[R][number];
 
 /** 操作の一覧（重複なし）。 */
-export const DAEMON_OPERATIONS: readonly DaemonOperation[] = CONTRACT_ROLES.flatMap(
+export const DAEMON_OPERATIONS: readonly RoleOperation<ContractRole>[] = CONTRACT_ROLES.flatMap(
   (r) => ROLE_OPERATIONS[r],
 );
 

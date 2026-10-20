@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   CONTRACT_ROLES,
+  type ContractRole,
   DAEMON_OPERATIONS,
+  type DaemonOperation,
   type DaemonRequest,
   err,
   type Failure,
@@ -13,6 +15,7 @@ import {
   ok,
   type Result,
   ROLE_OPERATIONS,
+  type RoleOperation,
 } from "../src/index.js";
 
 describe("Result（NFR_010）", () => {
@@ -80,5 +83,11 @@ describe("操作の契約（NFR_004, DC_003）", () => {
     expect(good.params).toEqual({ nodeId: "n1", mode: "graceful" });
     // @ts-expect-error mode は graceful / immediate のみ
     integ({ ...b, params: { nodeId: "n1", mode: "now" } });
+  });
+
+  it("すべての操作がいずれかのロールに属する（型）", () => {
+    type Unassigned = Exclude<DaemonOperation, RoleOperation<ContractRole>>;
+    expectTypeOf<Unassigned>().toEqualTypeOf<never>();
+    expect(new Set(DAEMON_OPERATIONS).size).toBeGreaterThan(0);
   });
 });
