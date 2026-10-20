@@ -21,13 +21,25 @@ importers:
         specifier: 5.0.5
         version: 5.0.5(vite@8.3.4)
 
-  packages/cli: {}
+  packages/cli:
+    dependencies:
+      '@cso/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/core: {}
 
-  packages/daemon: {}
+  packages/daemon:
+    dependencies:
+      '@cso/core':
+        specifier: workspace:*
+        version: link:../core
 
-  packages/mcp: {}
+  packages/mcp:
+    dependencies:
+      '@cso/core':
+        specifier: workspace:*
+        version: link:../core
 
 packages:
 

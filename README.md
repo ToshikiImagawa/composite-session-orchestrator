@@ -36,4 +36,6 @@ pnpm check   # lint、typecheck、build、test、plugin 検証をまとめて実
 
 個別に実行する場合は `pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm test`、`pnpm validate:plugin` を使います。整形は `pnpm format` です。
 
+パッケージ単体の `typecheck`・`test`（例: `pnpm --filter @cso/daemon test`）は、`@cso/core` を core のソースに別名解決するため、先にビルドしなくても動きます。本番の解決（core の `dist`）は、`pnpm check` の中の `scripts/check-core-resolution.mjs` が確かめます（`pnpm build` の後に実行）。
+
 テストは Vitest と fast-check、lint と format は Biome を使います。依存パッケージ（MCP TypeScript SDK、Claude Agent SDK、SQLite ドライバ、zod）は未追加です。着手時点の最新版を確認し、各パッケージに追加して固定してください。
