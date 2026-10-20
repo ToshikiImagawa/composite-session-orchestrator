@@ -10,8 +10,8 @@
  * 415 JSON でない、422 操作の失敗、500 内部エラー、501 未実装）。内部の例外の詳細は返さず、`logger` に記録する。
  * 成功の結果は、`OperationMap` の `result` のキーだけに写して返す（`pickResult`）。
  *
- * もう 1 つの入口 `POST /v1/bind`（`bind` を渡したときだけ）は、トークンを持たない子のための専用の経路で、bind コードだけで
- * 子ロールのノードトークンを返す（失敗が続いたら 429）。
+ * もう 1 つの入口 `POST /v1/bind`（`bind` を渡したときだけ）は、トークンを持たない子のための専用の経路で、`nodeId` と bind コードだけで
+ * 子ロールのノードトークンを返す（そのノードの既存のトークンは無効になる）（失敗が続いたら 429）。
  *
  * 操作の実体は `handlers` に差し込む（このファイルは入口と権限の判定だけを持つ）。ハンドラには、認証から決めた
  * ロールと caller と、検証済みの引数を渡す。caller の部分木に限った結果（受信箱・一覧）にするのはハンドラの責務。
@@ -24,6 +24,8 @@ import {
   type DaemonOperation,
   type Failure,
   failure,
+  isBoundedText,
+  isSafeId,
   type OperationMap,
   type OrchState,
   type Result,
@@ -52,12 +54,24 @@ export type Handlers = {
     | Promise<Result<OperationMap[Op]["result"], Failure>>;
 };
 
-/** 500 の原因の記録（応答には出さない）。logger が例外を投げても、応答は変えない。 */
-export type ApiLogger = (event: {
-  readonly requestId: string;
-  readonly operation: DaemonOperation;
-  readonly error: unknown;
-}) => void;
+/**
+ * 記録するイベント。`error`: 500 の原因（応答には出さない）。`bind`: bind の入口の結果（成功・失敗・ロール・状態が合わない）。
+ * コードの値・トークンは書かない。logger が例外を投げても、応答は変えない。
+ */
+export type ApiLogEvent =
+  | {
+      readonly kind: "error";
+      readonly requestId: string;
+      readonly operation: DaemonOperation;
+      readonly error: unknown;
+    }
+  | {
+      readonly kind: "bind";
+      readonly outcome: "success" | "invalid" | "locked" | "rejected";
+      readonly nodeId: string;
+    };
+
+export type ApiLogger = (event: ApiLogEvent) => void;
 
 export interface ApiDeps {
   readonly credentials: CredentialStore;
@@ -66,7 +80,7 @@ export interface ApiDeps {
   readonly handlers: Handlers;
   /** 本文の上限（バイト）。既定 1 MiB。 */
   readonly maxBodyBytes?: number;
-  /** 500 の原因を記録する。省略すると記録しない。 */
+  /** 500 の原因と、bind の結果を記録する。省略すると記録しない。 */
   readonly logger?: ApiLogger;
   /** bind 専用の入口（`POST /v1/bind`）の bind コード。省略すると、この入口はない（404）。 */
   readonly bind?: BindCodes;
@@ -80,7 +94,7 @@ export interface ApiServer {
 
 const HOST = "127.0.0.1";
 const DEFAULT_MAX_BODY = 1024 * 1024;
-/** bind の本文は { bindCode } だけなので小さく。 */
+/** bind の本文は { nodeId, bindCode } だけなので小さく。 */
 const BIND_MAX_BODY = 1024;
 
 const STATUS: Readonly<Record<string, number>> = {
@@ -272,9 +286,17 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     send(res, 200, { ok: true, value });
   }
 
+  function log(event: ApiLogEvent): void {
+    try {
+      deps.logger?.(event);
+    } catch {
+      // 記録の失敗で、応答を変えない。
+    }
+  }
+
   /**
-   * bind 専用の入口。トークンを持たない子が、bind コード（一度きり・短い有効期限・ノードに結ぶ）だけで、
-   * 子ロールのノードトークンを受け取る。失敗は、未知・使用済み・期限切れ・ノードの状態の違いを区別せず 401 とし、
+   * bind 専用の入口。トークンを持たない子が、`nodeId` と bind コード（一度きり・短い有効期限・ノードに結ぶ）だけで、
+   * 子ロールのノードトークンを受け取る（そのノードの既存のトークンは無効になる）。失敗は、未知・使用済み・期限切れ・ノードの状態の違いを区別せず 401 とし、
    * 失敗が続いたら 429。トークンはこの応答でだけ返す（記録しない）。
    */
   async function handleBind(
@@ -313,21 +335,28 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     } catch {
       return reject(res, failure("invalidRequest", "本文が JSON でない", "JSON で送る"));
     }
-    const code = (body as { bindCode?: unknown } | null)?.bindCode;
+    const b = body as { nodeId?: unknown; bindCode?: unknown } | null;
     if (
       typeof body !== "object" ||
       body === null ||
       Array.isArray(body) ||
-      Object.keys(body).some((k) => k !== "bindCode") ||
-      typeof code !== "string"
+      Object.keys(body).some((k) => k !== "nodeId" && k !== "bindCode") ||
+      !isSafeId(b?.nodeId) ||
+      !isBoundedText(b?.bindCode, 64)
     ) {
       return reject(
         res,
-        failure("invalidRequest", "本文は { bindCode } の形で送る", "bindCode を確認する"),
+        failure(
+          "invalidRequest",
+          "本文は { nodeId, bindCode } の形で送る",
+          "nodeId と bindCode を確認する",
+        ),
       );
     }
-    const redeemed = bind.redeem(code);
+    const nodeId = b?.nodeId as string;
+    const redeemed = bind.redeem(nodeId, b?.bindCode);
     if (!redeemed.ok && redeemed.reason === "locked") {
+      log({ kind: "bind", outcome: "locked", nodeId });
       return reject(
         res,
         failure(
@@ -342,9 +371,13 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       reject(res, failure("unauthenticated", "bind コードが無効", "bind コードを再発行する"), {
         "www-authenticate": "Bearer",
       });
-    if (!redeemed.ok) return unauthorized();
+    if (!redeemed.ok) {
+      log({ kind: "bind", outcome: "invalid", nodeId });
+      return unauthorized();
+    }
     // 結び付いたノードが、子ロールで、トークンを持てる状態か（統合ノード・木にない・停止後などは不可）。
     if (!checkPrincipal({ role: "child", nodeId: redeemed.nodeId }, deps.getState()).ok) {
+      log({ kind: "bind", outcome: "rejected", nodeId });
       return unauthorized();
     }
     let token: string;
@@ -353,6 +386,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     } catch (error) {
       return internalError(res, "bind", "node.bind", error);
     }
+    log({ kind: "bind", outcome: "success", nodeId });
     send(res, 200, { ok: true, value: { nodeId: redeemed.nodeId, token } });
   }
 
@@ -362,11 +396,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     operation: DaemonOperation,
     error: unknown,
   ): void {
-    try {
-      deps.logger?.({ requestId, operation, error });
-    } catch {
-      // 記録の失敗で、応答を変えない。
-    }
+    log({ kind: "error", requestId, operation, error });
     reject(
       res,
       failure("internalError", "内部エラー", "もう一度試す", "改善しなければ管理者に知らせる"),

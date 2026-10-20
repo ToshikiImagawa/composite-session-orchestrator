@@ -22,6 +22,7 @@ import {
   type Failure,
   failure,
   findRunningProcesses,
+  ID_MAX_LENGTH,
   LIMITS,
   MAX_GRACE_MS,
   ok,
@@ -303,11 +304,17 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     return ok(undefined);
   }
 
+  /** 識別子（`isSafeId`）を満たす ID を作る。`newRequestId` が安全でない文字を返しても、記録できる形にする。 */
+  private safeId(prefix: string): string {
+    const raw = this.deps.newRequestId().replace(/[^A-Za-z0-9._:-]/g, "-");
+    return `${prefix}-${raw}`.slice(0, ID_MAX_LENGTH);
+  }
+
   /** 予期しない終了を記録する: 終了、失敗の報告、受信箱の failure の項目（報告を `ref` で指す）。 */
   private recordExit(nodeId: string, rawReason: unknown): void {
     const reason = sanitizeText(rawReason, LIMITS.reason);
     this.record({ type: "node.exited", payload: { nodeId, reason } });
-    const reportId = `report-${this.deps.newRequestId()}`;
+    const reportId = this.safeId("report");
     const failed = this.record({
       type: "report.added",
       payload: { reportId, nodeId, kind: "failure", text: reason },
@@ -316,7 +323,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     this.record({
       type: "inbox.added",
       payload: {
-        id: `inbox-${this.deps.newRequestId()}`,
+        id: this.safeId("inbox"),
         kind: "failure",
         nodeId,
         summary: sanitizeText(`子が予期せず終了した: ${reason}`, LIMITS.summary),
