@@ -10,6 +10,9 @@
  * 415 JSON でない、422 操作の失敗、500 内部エラー、501 未実装）。内部の例外の詳細は返さず、`logger` に記録する。
  * 成功の結果は、`OperationMap` の `result` のキーだけに写して返す（`pickResult`）。
  *
+ * もう 1 つの入口 `POST /v1/bind`（`bind` を渡したときだけ）は、トークンを持たない子のための専用の経路で、bind コードだけで
+ * 子ロールのノードトークンを返す（失敗が続いたら 429）。
+ *
  * 操作の実体は `handlers` に差し込む（このファイルは入口と権限の判定だけを持つ）。ハンドラには、認証から決めた
  * ロールと caller と、検証済みの引数を渡す。caller の部分木に限った結果（受信箱・一覧）にするのはハンドラの責務。
  */
@@ -26,6 +29,7 @@ import {
   type Result,
 } from "@cso/core";
 import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
+import type { BindCodes } from "./bind.js";
 import { type CredentialStore, parseBearer } from "./credentials.js";
 import { pickResult } from "./results.js";
 import { parseEnvelope, validateParams } from "./validate.js";
@@ -64,6 +68,8 @@ export interface ApiDeps {
   readonly maxBodyBytes?: number;
   /** 500 の原因を記録する。省略すると記録しない。 */
   readonly logger?: ApiLogger;
+  /** bind 専用の入口（`POST /v1/bind`）の bind コード。省略すると、この入口はない（404）。 */
+  readonly bind?: BindCodes;
 }
 
 export interface ApiServer {
@@ -74,6 +80,8 @@ export interface ApiServer {
 
 const HOST = "127.0.0.1";
 const DEFAULT_MAX_BODY = 1024 * 1024;
+/** bind の本文は { bindCode } だけなので小さく。 */
+const BIND_MAX_BODY = 1024;
 
 const STATUS: Readonly<Record<string, number>> = {
   unauthenticated: 401,
@@ -87,6 +95,7 @@ const STATUS: Readonly<Record<string, number>> = {
   methodNotAllowed: 405,
   notImplemented: 501,
   internalError: 500,
+  tooManyRequests: 429,
 };
 
 function send(
@@ -165,6 +174,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       );
     }
     const path = (req.url ?? "").split("?")[0];
+    if (path === "/v1/bind" && deps.bind !== undefined) return handleBind(req, res, deps.bind);
     if (path !== "/v1/request") {
       return reject(res, failure("notFound", "このパスはない", "POST /v1/request を使う"));
     }
@@ -260,6 +270,90 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       );
     }
     send(res, 200, { ok: true, value });
+  }
+
+  /**
+   * bind 専用の入口。トークンを持たない子が、bind コード（一度きり・短い有効期限・ノードに結ぶ）だけで、
+   * 子ロールのノードトークンを受け取る。失敗は、未知・使用済み・期限切れ・ノードの状態の違いを区別せず 401 とし、
+   * 失敗が続いたら 429。トークンはこの応答でだけ返す（記録しない）。
+   */
+  async function handleBind(
+    req: IncomingMessage,
+    res: ServerResponse,
+    bind: BindCodes,
+  ): Promise<void> {
+    if (req.method !== "POST") {
+      return reject(res, failure("methodNotAllowed", "POST だけを受け付ける", "POST で呼び出す"), {
+        allow: "POST",
+      });
+    }
+    if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {
+      req.resume();
+      return reject(
+        res,
+        failure("unsupportedMediaType", "Content-Type が application/json でない", "JSON で送る"),
+      );
+    }
+    const raw = await readBody(req, BIND_MAX_BODY);
+    if (raw === undefined) {
+      res.once("finish", () => req.destroy());
+      return reject(
+        res,
+        failure(
+          "payloadTooLarge",
+          `本文が上限（${BIND_MAX_BODY} バイト）を超えた`,
+          "本文を小さくする",
+        ),
+        { connection: "close" },
+      );
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(raw.toString("utf8"));
+    } catch {
+      return reject(res, failure("invalidRequest", "本文が JSON でない", "JSON で送る"));
+    }
+    const code = (body as { bindCode?: unknown } | null)?.bindCode;
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      Array.isArray(body) ||
+      Object.keys(body).some((k) => k !== "bindCode") ||
+      typeof code !== "string"
+    ) {
+      return reject(
+        res,
+        failure("invalidRequest", "本文は { bindCode } の形で送る", "bindCode を確認する"),
+      );
+    }
+    const redeemed = bind.redeem(code);
+    if (!redeemed.ok && redeemed.reason === "locked") {
+      return reject(
+        res,
+        failure(
+          "tooManyRequests",
+          "失敗が続いたため、しばらく受け付けない",
+          "しばらく待って、もう一度試す",
+        ),
+        { "retry-after": String(Math.max(1, Math.ceil(redeemed.retryAfterMs / 1000))) },
+      );
+    }
+    const unauthorized = (): void =>
+      reject(res, failure("unauthenticated", "bind コードが無効", "bind コードを再発行する"), {
+        "www-authenticate": "Bearer",
+      });
+    if (!redeemed.ok) return unauthorized();
+    // 結び付いたノードが、子ロールで、トークンを持てる状態か（統合ノード・木にない・停止後などは不可）。
+    if (!checkPrincipal({ role: "child", nodeId: redeemed.nodeId }, deps.getState()).ok) {
+      return unauthorized();
+    }
+    let token: string;
+    try {
+      token = deps.credentials.issueNodeToken(redeemed.nodeId, "child");
+    } catch (error) {
+      return internalError(res, "bind", "node.bind", error);
+    }
+    send(res, 200, { ok: true, value: { nodeId: redeemed.nodeId, token } });
   }
 
   function internalError(

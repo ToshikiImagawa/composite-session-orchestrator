@@ -1,6 +1,7 @@
 import { request as httpRequest } from "node:http";
 import { type EventBody, foldEvents, type OrchEvent, type OrchState, ok } from "@cso/core";
 import { afterEach, describe, expect, it } from "vitest";
+import { createBindCodes } from "../../src/api/bind.js";
 import { createCredentialStore } from "../../src/api/credentials.js";
 import {
   type ApiLogger,
@@ -469,5 +470,119 @@ describe("判定の順序・主体の検査・チャンク転送・結果の写�
       },
     );
     expect((await post(r, treeList, bearer(r.tokens.m1))).status).toBe(500);
+  });
+});
+
+describe("bind 専用の入口（POST /v1/bind。Bearer なしで、bindCode だけ）", () => {
+  const rigBind = async (over: { now?: () => number; state?: OrchState } = {}) => {
+    const credentials = createCredentialStore({ humanToken: HUMAN });
+    const bind = createBindCodes({ clock: over.now ?? Date.now });
+    const server = createApiServer({
+      credentials,
+      bind,
+      getState: () => over.state ?? state(),
+      handlers: { "report.progress": () => ok({ accepted: true }) },
+    });
+    const { url } = await server.listen(0);
+    rig = { server, url, port: 0, tokens: { human: HUMAN, m1: "", root: "", a: "" }, calls: [] };
+    const call = (body: unknown, headers: Record<string, string> = {}) =>
+      post(rig as Rig, body, headers, "/v1/bind");
+    return { credentials, bind, url, call };
+  };
+
+  it("有効なコードで、子ロールのノードトークンを受け取る。そのトークンで窓口を呼べる", async () => {
+    const r = await rigBind();
+    const code = r.bind.issue("a");
+    const res = await r.call({ bindCode: code });
+    expect(res.status).toBe(200);
+    expect(res.json.ok).toBe(true);
+    const value = res.json.value as { nodeId: string; token: string };
+    expect(value.nodeId).toBe("a");
+    expect(value.token.length).toBeGreaterThanOrEqual(43);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(r.credentials.authenticate(value.token)).toEqual({ role: "child", nodeId: "a" });
+    const used = await fetch(`${r.url}/v1/request`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${value.token}` },
+      body: JSON.stringify({ requestId: "p", operation: "report.progress", params: { text: "x" } }),
+    });
+    expect(used.status).toBe(200);
+  });
+
+  it("コードは一度だけ。未知・使用済み・期限切れは、区別せず 401（unauthenticated）", async () => {
+    let now = 1_000_000;
+    const r = await rigBind({ now: () => now });
+    const code = r.bind.issue("a");
+    expect((await r.call({ bindCode: code })).status).toBe(200);
+    for (const c of [code, "unknown-code-unknown-code-xx"]) {
+      const res = await r.call({ bindCode: c });
+      expect(res.status).toBe(401);
+      expect(res.json.error.code).toBe("unauthenticated");
+    }
+    const old = r.bind.issue("a");
+    now += 10 * 60_000;
+    expect((await r.call({ bindCode: old })).status).toBe(401);
+  });
+
+  it("失敗が続いたら 429（Retry-After つき）。ロール・状態が合わないノードのコードも使えない", async () => {
+    const r = await rigBind();
+    for (let i = 0; i < 5; i++) await r.call({ bindCode: `wrong-code-wrong-code-${i}xx` });
+    const locked = await r.call({ bindCode: r.bind.issue("a") });
+    expect(locked.status).toBe(429);
+    expect(locked.json.error.code).toBe("tooManyRequests");
+    expect(Number(locked.headers.get("retry-after"))).toBeGreaterThan(0);
+    const r2 = await rigBind();
+    expect((await r2.call({ bindCode: r2.bind.issue("m1") })).status).toBe(401); // 統合ノードは bind できない
+    expect((await r2.call({ bindCode: r2.bind.issue("ghost") })).status).toBe(401); // 木にないノード
+  });
+
+  it("形の検査: 余計なキー・不正なコード・JSON でない・大きすぎる本文・GET・Content-Type", async () => {
+    const r = await rigBind();
+    expect((await r.call({ bindCode: "x", extra: 1 })).status).toBe(400);
+    expect((await r.call({ bindCode: 5 })).status).toBe(400);
+    expect((await r.call({})).status).toBe(400);
+    expect((await r.call("{not json")).status).toBe(400);
+    expect((await r.call({ bindCode: "a".repeat(5000) })).status).toBe(413);
+    expect((await fetch(`${r.url}/v1/bind`)).status).toBe(405);
+    const text = await fetch(`${r.url}/v1/bind`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "{}",
+    });
+    expect(text.status).toBe(415);
+  });
+
+  it("bind を設定していなければ、入口はない（404）。Host の検査は同じ", async () => {
+    const credentials = createCredentialStore({ humanToken: HUMAN });
+    const server = createApiServer({ credentials, getState: state, handlers: {} });
+    const { url, port } = await server.listen(0);
+    try {
+      const res = await fetch(`${url}/v1/bind`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bindCode: "abcdefabcdefabcdef" }),
+      });
+      expect(res.status).toBe(404);
+      const raw = await new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            path: "/v1/bind",
+            method: "POST",
+            headers: { host: "evil.example.com", "content-type": "application/json" },
+          },
+          (r2) => {
+            r2.resume();
+            resolve(r2.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end("{}");
+      });
+      expect(raw).toBe(403);
+    } finally {
+      await server.close();
+    }
   });
 });

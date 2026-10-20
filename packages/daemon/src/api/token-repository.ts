@@ -1,0 +1,160 @@
+/**
+ * ノードのトークンの永続化（daemon の再起動後も有効にする）。保存するのはハッシュ・ロール・nodeId・発行日時だけで、
+ * トークンそのものは保存しない。ファイルは 0600、置き場所のディレクトリは 0700。
+ *
+ * - 書き込みは、同じディレクトリの一時ファイル（0600）に書いて `rename` する（原子的。途中で止まっても壊れない）。
+ * - 読み込みで、権限が緩い（グループ・他者が読める）・壊れた JSON・不正な形のファイルは、黙って捨てずに失敗させる
+ *   （フェイルクローズ。全トークンが無効になることを、起動の失敗として人が知れるようにする）。
+ * - daemon は単一プロセス。複数のプロセスが同じファイルを書く使い方は想定しない。
+ */
+
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import { isSafeId } from "@cso/core";
+
+export interface TokenRecord {
+  /** トークンの SHA-256（16 進 64 文字）。 */
+  readonly tokenHash: string;
+  readonly role: "integrator" | "child";
+  readonly nodeId: string;
+  /** ISO 8601（UTC）。 */
+  readonly issuedAt: string;
+}
+
+export interface TokenRepository {
+  load(): TokenRecord[];
+  /** 同じノードの記録は置き換える。失敗したら例外（呼び出し側はトークンを発行しない）。 */
+  put(record: TokenRecord): void;
+  remove(nodeId: string): void;
+}
+
+const FILE_VERSION = 1;
+const HASH = /^[0-9a-f]{64}$/;
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+
+export function isTokenRecord(x: unknown): x is TokenRecord {
+  if (typeof x !== "object" || x === null) return false;
+  const r = x as Record<string, unknown>;
+  return (
+    typeof r.tokenHash === "string" &&
+    HASH.test(r.tokenHash) &&
+    (r.role === "integrator" || r.role === "child") &&
+    isSafeId(r.nodeId) &&
+    typeof r.issuedAt === "string" &&
+    ISO.test(r.issuedAt) &&
+    !Number.isNaN(Date.parse(r.issuedAt))
+  );
+}
+
+/** グループ・他者に権限があるか。 */
+export const isLoosePermission = (mode: number): boolean => (mode & 0o077) !== 0;
+
+export class FileTokenRepository implements TokenRepository {
+  private records: Map<string, TokenRecord> | undefined;
+
+  constructor(private readonly path: string) {}
+
+  load(): TokenRecord[] {
+    let mode: number;
+    try {
+      mode = statSync(this.path).mode;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        this.records = new Map();
+        return [];
+      }
+      throw e;
+    }
+    if (isLoosePermission(mode)) {
+      throw new Error(
+        `トークンのファイル ${this.path} の権限が緩い（0600 にする）: ${(mode & 0o777).toString(8)}`,
+      );
+    }
+    const parsed: unknown = JSON.parse(readFileSync(this.path, "utf8"));
+    const p = parsed as { version?: unknown; tokens?: unknown };
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      p.version !== FILE_VERSION ||
+      !Array.isArray(p.tokens) ||
+      !p.tokens.every(isTokenRecord)
+    ) {
+      throw new Error(`トークンのファイル ${this.path} の形が不正`);
+    }
+    this.records = new Map(p.tokens.map((t) => [t.nodeId, t]));
+    return [...this.records.values()];
+  }
+
+  put(record: TokenRecord): void {
+    const records = this.ensure();
+    const next = new Map(records);
+    next.set(record.nodeId, record);
+    this.write(next);
+    this.records = next;
+  }
+
+  remove(nodeId: string): void {
+    const records = this.ensure();
+    if (!records.has(nodeId)) return;
+    const next = new Map(records);
+    next.delete(nodeId);
+    this.write(next);
+    this.records = next;
+  }
+
+  private ensure(): Map<string, TokenRecord> {
+    if (this.records === undefined) this.load();
+    return this.records as Map<string, TokenRecord>;
+  }
+
+  private write(records: ReadonlyMap<string, TokenRecord>): void {
+    const dir = dirname(this.path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const tmp = join(dir, `.tokens-${process.pid}-${Date.now()}.tmp`);
+    const body = `${JSON.stringify({ version: FILE_VERSION, tokens: [...records.values()] }, null, 2)}\n`;
+    const fd = openSync(tmp, "wx", 0o600);
+    try {
+      writeSync(fd, body);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, this.path);
+  }
+}
+
+/** テスト・永続化しない構成用。`failNext` で保存の失敗を再現できる。 */
+export class MemoryTokenRepository implements TokenRepository {
+  private readonly records = new Map<string, TokenRecord>();
+  failNext = false;
+
+  load(): TokenRecord[] {
+    return [...this.records.values()];
+  }
+  put(record: TokenRecord): void {
+    this.check();
+    this.records.set(record.nodeId, record);
+  }
+  remove(nodeId: string): void {
+    this.check();
+    this.records.delete(nodeId);
+  }
+  private check(): void {
+    if (this.failNext) {
+      this.failNext = false;
+      throw new Error("保存に失敗した");
+    }
+  }
+}
