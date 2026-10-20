@@ -22,6 +22,7 @@ export const NODE_STATES = [
 ] as const;
 export type NodeState = (typeof NODE_STATES)[number];
 
+export * from "./contract.js";
 export * from "./inbox.js";
 export * from "./inbox-kinds.js";
 export * from "./scope.js";
