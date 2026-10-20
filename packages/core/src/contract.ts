@@ -6,6 +6,7 @@
  * （識別子と主要な項目のみ）。各操作の実装タスクで確定する。境界での値の検証（zod など）は将来課題。
  */
 
+import type { InboxItem } from "./inbox.js";
 import type { NodeState } from "./index.js";
 
 /** 失敗。原因と次に取るべき操作を必ず持つ（NFR_010）。 */
@@ -70,8 +71,7 @@ export interface OperationMap {
     params: { nodeId: string; mode: "graceful" | "immediate" };
     result: { state: NodeState };
   };
-  // TODO(T11): items は #8 マージ後に InboxItem へ差し替える。
-  "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly unknown[] } };
+  "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly InboxItem[] } };
   "tree.list": { params: Record<string, never>; result: { table: string } };
   "decision.present": {
     params: { question: string; options: readonly string[]; pauseNodeIds?: readonly string[] };
