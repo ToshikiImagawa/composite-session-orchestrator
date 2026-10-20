@@ -1,4 +1,4 @@
-import { isBoundedText, LIMITS, type Scope } from "@cso/core";
+import { isBoundedText, isSafeId, LIMITS, type Scope } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { type SdkAdapterDeps, SdkRuntimeAdapter } from "../../src/sdk/sdk-adapter.js";
 import { FakeLauncher, FakeSink, FakeTimers, probeSequence, settle } from "./fakes.js";
@@ -783,6 +783,23 @@ describe("予期しない終了（finished の監視）", () => {
     expect(body?.type).toBe("node.toolDenied");
     const tool = body?.type === "node.toolDenied" ? body.payload.tool : "";
     expect(isBoundedText(tool, LIMITS.tool)).toBe(true);
+  });
+
+  it("生成する報告・受信箱の ID は、newRequestId が安全でない文字を返しても isSafeId を満たす", async () => {
+    let n = 0;
+    const r = rig({ newRequestId: () => `req ${++n}/x\u202e${"y".repeat(300)}` });
+    await startNode(r);
+    r.launcher.sessions[0]?.finish(new Error("x"));
+    await settle();
+    const ids: string[] = [];
+    for (const rec of r.sink.records) {
+      if (rec.body.type === "report.added") ids.push(rec.body.payload.reportId);
+      if (rec.body.type === "inbox.added")
+        ids.push(rec.body.payload.id, rec.body.payload.ref ?? "");
+    }
+    expect(ids).toHaveLength(3);
+    for (const id of ids) expect(isSafeId(id), id).toBe(true);
+    expect(ids[0]).toBe(ids[2]); // inbox の ref は、報告の ID
   });
 
   it("node.exited の記録に失敗しても、通知と掃除は行う", async () => {

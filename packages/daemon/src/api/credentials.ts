@@ -8,6 +8,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { TokenRepository } from "./token-repository.js";
 
 export type Principal =
   | { readonly role: "human" }
@@ -22,7 +23,7 @@ export interface CredentialStore {
   revokeNode(nodeId: string): void;
 }
 
-const TOKEN_SHAPE = /^[A-Za-z0-9._~+/=-]{16,512}$/;
+export const TOKEN_SHAPE = /^[A-Za-z0-9._~+/=-]{16,512}$/;
 const MIN_HUMAN_TOKEN = 32;
 
 /** `Authorization: Bearer <token>` からトークンを取り出す。形が違えば `undefined`。 */
@@ -42,6 +43,10 @@ export function createCredentialStore(options: {
   readonly humanToken: string;
   /** テスト用。既定は `crypto.randomBytes`。 */
   readonly randomBytes?: (size: number) => Buffer;
+  /** ノードのトークンの保存先。省略するとメモリ上だけ（再起動で無効になる）。 */
+  readonly repository?: TokenRepository;
+  /** 発行日時（ISO 8601 UTC）。既定は現在時刻。 */
+  readonly clock?: () => string;
 }): CredentialStore {
   if (typeof options.humanToken !== "string" || options.humanToken.length < MIN_HUMAN_TOKEN) {
     throw new RangeError(`人間のトークンは ${MIN_HUMAN_TOKEN} 文字以上が必要`);
@@ -52,6 +57,13 @@ export function createCredentialStore(options: {
   const byHash = new Map<string, Principal>();
   /** nodeId → 現在のトークンのハッシュ。 */
   const byNode = new Map<string, string>();
+  const repository = options.repository;
+  const clock = options.clock ?? (() => new Date().toISOString());
+  // 保存済みのトークンを復元する（壊れたファイルなどは例外。黙って捨てない）。
+  for (const r of repository?.load() ?? []) {
+    byHash.set(r.tokenHash, { role: r.role, nodeId: r.nodeId });
+    byNode.set(r.nodeId, r.tokenHash);
+  }
 
   return {
     authenticate(token) {
@@ -64,9 +76,11 @@ export function createCredentialStore(options: {
       if (typeof nodeId !== "string" || nodeId === "") throw new RangeError("nodeId が不正");
       if (role !== "integrator" && role !== "child") throw new RangeError("ロールが不正");
       const old = byNode.get(nodeId);
-      if (old !== undefined) byHash.delete(old);
       const token = random(32).toString("base64url");
       const h = sha256(token).toString("hex");
+      // 保存に成功してから有効にする（失敗したら例外で、トークンは発行されず、古いトークンも残る）。
+      repository?.put({ tokenHash: h, role, nodeId, issuedAt: clock() });
+      if (old !== undefined) byHash.delete(old);
       byHash.set(h, { role, nodeId });
       byNode.set(nodeId, h);
       return token;
@@ -74,6 +88,8 @@ export function createCredentialStore(options: {
     revokeNode(nodeId) {
       const h = byNode.get(nodeId);
       if (h === undefined) return;
+      // 保存先から消せなかったら例外（メモリ上も残す。失効できていないことを、呼び出し側が知れる）。
+      repository?.remove(nodeId);
       byHash.delete(h);
       byNode.delete(nodeId);
     },
