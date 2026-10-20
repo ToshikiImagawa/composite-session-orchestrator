@@ -24,7 +24,7 @@ depends-on: ["design-initial-spec-design"]
 | ID | タスク | 手動確認依存 | 依存 | 状態 | 対応要求 |
 |:--|:--|:--|:--|:--|:--|
 | T01 | core: `NodeStatus`/`Priority` を spec の `NodeState`/`InboxKind` に整合（名称統一、`stopping`/`stopIncomplete` 追加、`InboxKind`→`Priority` 対応） | なし | - | 完了（本 PR） | FR_012, FR_026, FR_010 |
-| T02 | core: 木の構造と親子の不変条件（純粋関数、fast-check） | なし | T01 | 未 | FR_001, FR_002, FR_028, NFR_007 |
+| T02 | core: 木の構造と親子の不変条件（純粋関数、fast-check） | なし | T01 | 完了（本 PR） | FR_001, FR_002, FR_028, NFR_007 |
 | T03 | core: 状態遷移。**前提: 未解決事項「停止要求を受け付ける元状態」の確定** | なし（元状態の方針は要決定） | T01 | 未 | FR_010, FR_018, FR_024 |
 | T04 | core: 受信箱の整列（優先度・依存関係・時刻、決定的） | なし | T01 | 未 | FR_012, FR_013, NFR_007 |
 | T05 | core: 回収可能判定（条件 1〜6、プロセス一覧を入力にとる純粋関数） | なし | T03 | 未 | FR_026, FR_027, FR_028, NFR_007 |
