@@ -36,7 +36,7 @@ depends-on: ["design-initial-spec-design"]
 | T10b | daemon: Agent SDK `query()` による `AgentLauncher` の実バインディング（依存 `@anthropic-ai/claude-agent-sdk` のバージョン・ライセンス・Node 22/24 を確認、手動検証）。実機確認で固定する項目: (1) フックが許可するツール名（LS・TodoWrite・ToolSearch・BashOutput など）、(2) 子の環境変数の除去規則（識別子系のみ除去し `*_TOKEN*`・`*_TOKEN_FILE`・`*_URL` は残す、の調整）、(3) 子の予期しない終了（`AgentSession.finished()`）の扱い（T10c で `node.exited` を記録し `onUnexpectedExit` で通知する。状態遷移への反映は daemon の窓口で決める） | 一部あり（実 SDK での起動・停止の手動確認） | T10 | 未 | FR_005, FR_009, FR_010, IR_002 |
 | T10c | core/daemon: 記録専用イベントの追加（`node.toolDenied`・`node.exited`・`report.added`、受信箱の `summary`・`ref`、`decision.get`・`report.get`、`node.purgePreview`・墓標の選択を含む）。`node.toolDenied{nodeId, tool}`（未知のツールの拒否。範囲違反ではなく受信箱に載せない）と `node.exited{nodeId, reason}`（子の予期しない終了。T10 は `onUnexpectedExit` で通知のみ）を core に足し、アダプタから記録する。T10b とは別の小タスクで、T10b より先に実施できる | なし | T10 | 完了（本 PR） | NFR_011, FR_009, FR_011, FR_012, FR_031 |
 | T11 | mcp: ロール別ツール定義と公開一覧のテスト固定（NFR_004）。FR_012 の「次に取るべき操作の候補」を受信箱の応答へ添える部分もここで扱う | なし | T08 | 未 | FR_004, NFR_004, NFR_009 |
-| T12 | cli: 人間用コマンド（purge、回収の指示） | なし | T08 | 完了（本 PR）。実行ファイルと HTTP クライアントは daemon の窓口の実装後 | FR_029, FR_031, NFR_006 |
+| T12 | cli: 人間用コマンド（purge、回収の指示） | なし | T08 | 完了（本 PR）。purge の事前確認・墓標の選択・再実行（requestId）を含む。実行ファイルと HTTP クライアント、人間の認証の結線は daemon の窓口の実装後 | FR_029, FR_031, NFR_006 |
 | T23 | daemon: HTML 画面、SSE による反映 | なし（能力表の表示値のみ確定待ちだが、画面の骨格は先行可能のためこちらに配置） | T09 | 未 | FR_021, IR_003, NFR_008 |
 | T24 | core/daemon: 中間統合ノードの配下の要約報告（上位の受信箱へ優先度付きで送る） | なし | T04, T07 | 未 | FR_013 |
 
