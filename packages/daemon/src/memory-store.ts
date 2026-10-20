@@ -18,6 +18,7 @@ export function createMemoryStore(): { open(): EventStore } {
         readAll: sorted,
         readAfter: (seq) => sorted().filter((r) => r.seq > seq),
         lastSeq: () => data.rows.reduce((m, r) => Math.max(m, r.seq), 0),
+        findBySeq: (seq) => data.rows.find((r) => r.seq === seq),
         findByRequestId: (id) => data.rows.find((r) => r.requestId === id),
         append(row) {
           if (data.rows.some((r) => r.seq === row.seq)) throw new Error(`UNIQUE: seq ${row.seq}`);

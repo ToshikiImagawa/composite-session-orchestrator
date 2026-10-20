@@ -34,6 +34,8 @@ pnpm check   # lint、typecheck、build、test、plugin 検証をまとめて実
 
 `pnpm validate:plugin` は `plugin/.claude-plugin/plugin.json` の JSON 構文、必須項目（name、version、description）、name の kebab-case、version の semver、`plugin/{agents,hooks,skills}` の存在を確認します。
 
+`pnpm install` に「Ignored build scripts: better-sqlite3」という警告が出ますが、無害です。better-sqlite3 13 系はビルド済みのバイナリを同梱しており、ビルドスクリプトを実行しなくても動きます（許可すると、不要なコンパイルが走りうるため許可していません）。
+
 個別に実行する場合は `pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm test`、`pnpm validate:plugin` を使います。整形は `pnpm format` です。
 
 パッケージ単体の `typecheck`・`test`（例: `pnpm --filter @cso/daemon test`）は、`@cso/core` を core のソースに別名解決するため、先にビルドしなくても動きます。本番の解決（core の `dist`）は、`pnpm check` の中の `scripts/check-core-resolution.mjs` が確かめます（`pnpm build` の後に実行）。

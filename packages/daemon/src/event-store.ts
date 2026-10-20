@@ -2,6 +2,9 @@
  * イベントログの永続化の境界。ドライバー（SQLite など）をこのインターフェースの裏に隠し、
  * 差し替え可能にする（例: better-sqlite3 → node:sqlite）。状態の導出は持たない（core の foldEvents が唯一）。
  * 同期 API とする（daemon は単一プロセスで、追記は 1 トランザクションの seq 採番）。
+ *
+ * ライフサイクル: ストアを開いた側が閉じる責任を持つ（`EventLog` は閉じない）。実装は、同じ保存先を二重に開けない
+ * ようにしてよい（SQLite 実装は排他ロックで拒否する）。
  */
 
 /** 保存する 1 行。`actor`・`payload` は JSON 文字列のまま持ち、読み出しの検証は EventLog が行う。 */
@@ -19,6 +22,10 @@ export interface StoredSnapshot {
   readonly lastSeq: number;
   /** 状態の JSON 文字列。 */
   readonly state: string;
+  /** core の状態のスキーマの版。異なる版のスナップショットは使わない。 */
+  readonly stateVersion: number;
+  /** `lastSeq` のイベントの行のハッシュ。ログと食い違うスナップショットを見つけるため。 */
+  readonly lastEventHash: string;
 }
 
 export interface EventStore {
@@ -29,6 +36,7 @@ export interface EventStore {
   /** 保存済みの最大の `seq`。空なら 0。 */
   lastSeq(): number;
   findByRequestId(requestId: string): StoredEvent | undefined;
+  findBySeq(seq: number): StoredEvent | undefined;
   /** 行を追記する。`seq`・`requestId` の重複は例外（一意制約）。 */
   append(row: StoredEvent): void;
   /** `fn` を 1 つのトランザクションで実行する。例外ならロールバックして再送出する。 */

@@ -7,7 +7,15 @@
  * - 同じ `requestId` の再試行は、行を増やさず最初のイベントを返す（冪等）。
  * - 復元は、スナップショット（キャッシュ）から再開する。壊れていれば捨ててログ全体から再構築する。
  * - 壊れた行は例外でなく失敗（`corruptRow`）として返す。
+ * - 時計が例外・不正な形式（ISO 8601 UTC でない）なら `invalidClock` で失敗する（何も書かない）。
+ *
+ * ライフサイクル: ストアを開いた側が閉じる責任を持つ（`EventLog` はストアを閉じない）。
+ * スナップショットは、状態のスキーマの版と、末尾のイベントのハッシュが合うときだけ使う。`verifySnapshot` を指定すると、
+ * さらにログ全体の畳み込みと突き合わせ、食い違えば捨てる（起動時の追加の検査。既定は無効）。
  */
+
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   type Actor,
@@ -17,6 +25,7 @@ import {
   failure,
   foldEvents,
   initialState,
+  isValidInboxTime,
   type OrchEvent,
   type OrchState,
   ok,
@@ -42,6 +51,18 @@ export interface EventLogOptions {
   readonly clock: () => string;
   /** このイベント数ごとにスナップショットを保存する。0 以下で保存しない。既定 1000。 */
   readonly snapshotEvery?: number;
+  /** 起動時に、スナップショットから復元した状態を、ログ全体の畳み込みと突き合わせる。既定は無効。 */
+  readonly verifySnapshot?: boolean;
+}
+
+/** スナップショットに保存する core の状態のスキーマの版。`OrchState` の形を変えたら上げる。 */
+export const STATE_VERSION = 1;
+
+/** イベントの行のハッシュ（SHA-256、16 進）。スナップショットがログと食い違っていないかを確かめる。 */
+export function eventHash(row: StoredEvent): string {
+  return createHash("sha256")
+    .update(JSON.stringify([row.seq, row.at, row.requestId, row.actor, row.type, row.payload]))
+    .digest("hex");
 }
 
 type Rec = Record<string, unknown>;
@@ -132,22 +153,38 @@ function parseRows(rows: readonly StoredEvent[]): Result<OrchEvent[], Failure> {
   return ok(out);
 }
 
-function restore(store: EventStore): Result<OrchState, Failure> {
-  const snap = store.loadSnapshot();
-  if (snap !== undefined && Number.isInteger(snap.lastSeq) && snap.lastSeq <= store.lastSeq()) {
-    const base = parseSnapshotState(snap.state, snap.lastSeq);
-    if (base !== undefined) {
-      const rows = parseRows(store.readAfter(snap.lastSeq));
-      if (rows.ok) {
-        const folded = foldEvents(rows.value, base);
-        if (folded.ok) return folded;
-      }
-      // スナップショットとの組み合わせで失敗したら、キャッシュを疑ってログ全体から再構築する。
-    }
-  }
+function foldAll(store: EventStore): Result<OrchState, Failure> {
   const all = parseRows(store.readAll());
   if (!all.ok) return all;
   return foldEvents(all.value, initialState());
+}
+
+/** スナップショットから復元する。使えない（版・ハッシュ・形が合わない、畳み込みに失敗する）ときは `undefined`。 */
+function restoreFromSnapshot(store: EventStore): OrchState | undefined {
+  const snap = store.loadSnapshot();
+  if (snap === undefined || snap.stateVersion !== STATE_VERSION || !Number.isInteger(snap.lastSeq))
+    return undefined;
+  if (snap.lastSeq > store.lastSeq()) return undefined;
+  const last = store.findBySeq(snap.lastSeq);
+  if (last === undefined || eventHash(last) !== snap.lastEventHash) return undefined;
+  const base = parseSnapshotState(snap.state, snap.lastSeq);
+  if (base === undefined) return undefined;
+  const rows = parseRows(store.readAfter(snap.lastSeq));
+  if (!rows.ok) return undefined;
+  const folded = foldEvents(rows.value, base);
+  return folded.ok ? folded.value : undefined;
+}
+
+function restore(store: EventStore, verify: boolean): Result<OrchState, Failure> {
+  const fromSnapshot = restoreFromSnapshot(store);
+  if (fromSnapshot !== undefined) {
+    if (!verify) return ok(fromSnapshot);
+    const full = foldAll(store);
+    // 突き合わせで食い違えば、スナップショットを捨てて、ログ全体の結果を使う。
+    if (full.ok && isDeepStrictEqual(full.value, fromSnapshot)) return ok(fromSnapshot);
+    return full;
+  }
+  return foldAll(store);
 }
 
 export class EventLog {
@@ -162,7 +199,7 @@ export class EventLog {
   static open(store: EventStore, options: EventLogOptions): Result<EventLog, Failure> {
     let restored: Result<OrchState, Failure>;
     try {
-      restored = restore(store);
+      restored = restore(store, options.verifySnapshot === true);
     } catch (e) {
       return {
         ok: false,
@@ -201,12 +238,27 @@ export class EventLog {
         ),
       };
     }
+    let at: string;
+    try {
+      at = this.clock();
+    } catch (e) {
+      return {
+        ok: false,
+        error: failure("invalidClock", `時計の取得に失敗: ${String(e)}`, "時計の設定を確認する"),
+      };
+    }
+    if (typeof at !== "string" || !isValidInboxTime(at)) {
+      return {
+        ok: false,
+        error: failure("invalidClock", "時計の値が ISO 8601（UTC）でない", "時計の設定を確認する"),
+      };
+    }
     let next: OrchState | undefined;
     try {
       const result = this.store.transaction((): Result<AppendOutcome, Failure> => {
         const event = {
           seq: this.current.lastSeq + 1,
-          at: this.clock(),
+          at,
           requestId: request.requestId,
           actor: request.actor,
           ...request.body,
@@ -228,9 +280,15 @@ export class EventLog {
           }
           return ok({ event: first.value, applied: false, state: this.current });
         }
-        this.store.append(toRow(event));
+        const row = toRow(event);
+        this.store.append(row);
         if (this.snapshotEvery > 0 && event.seq % this.snapshotEvery === 0) {
-          this.store.saveSnapshot({ lastSeq: event.seq, state: JSON.stringify(r.value.state) });
+          this.store.saveSnapshot({
+            lastSeq: event.seq,
+            state: JSON.stringify(r.value.state),
+            stateVersion: STATE_VERSION,
+            lastEventHash: eventHash(row),
+          });
         }
         next = r.value.state;
         return ok({ event, applied: true, state: r.value.state });

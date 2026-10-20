@@ -2,7 +2,7 @@ import { type EventBody, foldEvents, type NodeEvent, type OrchEvent, stateOf } f
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { EventStore, StoredEvent } from "../src/event-store.js";
-import { EventLog } from "../src/eventlog.js";
+import { EventLog, eventHash, STATE_VERSION } from "../src/eventlog.js";
 import { createMemoryStore } from "../src/memory-store.js";
 
 const SYS = { system: true } as const;
@@ -129,6 +129,28 @@ describe("追記", () => {
   });
 });
 
+describe("時計（clock）", () => {
+  it("clock が例外・不正な形式の値を返したら invalidClock で失敗し、何も書かず、seq も消費しない", () => {
+    const store = createMemoryStore().open();
+    let mode: "ok" | "throw" | "bad" = "throw";
+    const log = EventLog.open(store, {
+      clock: () => {
+        if (mode === "throw") throw new Error("clock broke");
+        return mode === "bad" ? "yesterday" : AT;
+      },
+    });
+    if (!log.ok) throw new Error("open");
+    const r1 = append(log.value, "r1", created("root", "integrator", null));
+    expect(r1.ok ? null : r1.error.code).toBe("invalidClock");
+    mode = "bad";
+    const r2 = append(log.value, "r1", created("root", "integrator", null));
+    expect(r2.ok ? null : r2.error.code).toBe("invalidClock");
+    expect(store.readAll()).toHaveLength(0);
+    mode = "ok";
+    expect(must(append(log.value, "r1", created("root", "integrator", null))).event.seq).toBe(1);
+  });
+});
+
 describe("復元（NFR_002）", () => {
   it("開き直すと、ログから同じ状態を導出する（foldEvents と一致）", () => {
     const shared = createMemoryStore();
@@ -206,18 +228,37 @@ describe("スナップショット（キャッシュ。ログから再構築で�
     const shared = createMemoryStore();
     const log = openLog(shared.open(), 3);
     many(log, 8); // seq 10
-    const snap = shared.open().loadSnapshot();
-    expect(snap?.lastSeq).toBe(9);
+    const saved = shared.open().loadSnapshot();
+    expect(saved?.lastSeq).toBe(9);
+    expect(saved?.stateVersion).toBe(STATE_VERSION);
+    expect(saved?.lastEventHash).toBe(eventHash(shared.open().findBySeq(9) as never));
     const restored = openLog(shared.open(), 3);
     expect(restored.state()).toEqual(log.state());
   });
+
+  /** 正しい版とハッシュを持つスナップショットを保存する（状態の中身だけを差し替えられる）。 */
+  const saveSnap = (
+    shared: ReturnType<typeof createMemoryStore>,
+    lastSeq: number,
+    state: string,
+    over: Partial<{ stateVersion: number; lastEventHash: string }> = {},
+  ): void => {
+    const s = shared.open();
+    const last = s.findBySeq(lastSeq);
+    s.saveSnapshot({
+      lastSeq,
+      state,
+      stateVersion: over.stateVersion ?? STATE_VERSION,
+      lastEventHash: over.lastEventHash ?? (last === undefined ? "none" : eventHash(last)),
+    });
+  };
 
   it("壊れたスナップショットは捨てて、ログ全体から再構築する", () => {
     const shared = createMemoryStore();
     const log = openLog(shared.open(), 3);
     many(log, 8);
     for (const state of ["{not json", "null", '{"nodes":1}', "42"]) {
-      shared.open().saveSnapshot({ lastSeq: 9, state });
+      saveSnap(shared, 9, state);
       expect(openLog(shared.open(), 3).state(), state).toEqual(log.state());
     }
   });
@@ -226,8 +267,50 @@ describe("スナップショット（キャッシュ。ログから再構築で�
     const shared = createMemoryStore();
     const log = openLog(shared.open(), 1000);
     many(log, 3);
-    shared.open().saveSnapshot({ lastSeq: 999, state: JSON.stringify(log.state()) });
+    saveSnap(shared, 999, JSON.stringify(log.state()));
     expect(openLog(shared.open()).state()).toEqual(log.state());
+  });
+
+  it("状態のスキーマの版が違うスナップショットは捨てる", () => {
+    const shared = createMemoryStore();
+    const log = openLog(shared.open(), 3);
+    many(log, 8);
+    const stale = JSON.stringify({ ...log.state(), nodes: [] });
+    saveSnap(shared, 9, stale, { stateVersion: STATE_VERSION + 1 });
+    expect(openLog(shared.open(), 3).state()).toEqual(log.state());
+  });
+
+  it("末尾のイベントのハッシュが合わないスナップショット（ログと食い違う）は捨てる", () => {
+    const shared = createMemoryStore();
+    const log = openLog(shared.open(), 3);
+    many(log, 8);
+    const stale = JSON.stringify({ ...log.state(), nodes: [] });
+    saveSnap(shared, 9, stale, { lastEventHash: "0".repeat(64) });
+    expect(openLog(shared.open(), 3).state()).toEqual(log.state());
+  });
+
+  it("版とハッシュが合っていて中身だけ違うスナップショットは、既定では受け入れ、verifySnapshot で全ログと比べて捨てる", () => {
+    const shared = createMemoryStore();
+    const log = openLog(shared.open(), 3);
+    many(log, 8);
+    const tampered = { ...log.state(), lastSeq: 9, nodes: log.state().nodes.slice(0, 2) };
+    saveSnap(shared, 9, JSON.stringify(tampered));
+    expect(openLog(shared.open(), 3).state().nodes).toHaveLength(tampered.nodes.length); // 既定: 信用する（スナップショットの requests にある残りのイベントは重複として無視される）
+    const verified = EventLog.open(shared.open(), {
+      clock,
+      snapshotEvery: 3,
+      verifySnapshot: true,
+    });
+    expect(verified.ok && verified.value.state()).toEqual(log.state());
+  });
+
+  it("eventHash は行の内容で決まり（決定的）、内容が変われば変わる", () => {
+    const r = { seq: 1, at: "a", requestId: "r", actor: "{}", type: "t", payload: "{}" };
+    expect(eventHash(r)).toBe(eventHash({ ...r }));
+    expect(eventHash(r)).toMatch(/^[0-9a-f]{64}$/);
+    for (const k of ["seq", "at", "requestId", "actor", "type", "payload"] as const) {
+      expect(eventHash({ ...r, [k]: k === "seq" ? 2 : "x" })).not.toBe(eventHash(r));
+    }
   });
 
   it("スナップショットが最新のログより古くても、残りを畳み込んで一致する", () => {

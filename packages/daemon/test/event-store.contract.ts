@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest";
-import type { EventStore, StoredEvent } from "../src/event-store.js";
+import type { EventStore, StoredEvent, StoredSnapshot } from "../src/event-store.js";
 
 export interface StoreHarness {
   readonly store: EventStore;
-  /** 同じ保存先を開き直す（再起動の模擬）。 */
+  /** 同じ保存先を開き直す（再起動の模擬）。以前に開いたストアは閉じる（daemon は単一プロセスで、排他のため）。 */
   reopen(): EventStore;
   cleanup(): void;
 }
+
+export const snap = (lastSeq: number, over: Partial<StoredSnapshot> = {}): StoredSnapshot => ({
+  lastSeq,
+  state: "{}",
+  stateVersion: 1,
+  lastEventHash: `hash-${lastSeq}`,
+  ...over,
+});
 
 export const row = (seq: number, over: Partial<StoredEvent> = {}): StoredEvent => ({
   seq,
@@ -18,7 +26,10 @@ export const row = (seq: number, over: Partial<StoredEvent> = {}): StoredEvent =
   ...over,
 });
 
-/** EventStore の実装が満たす契約。メモリ実装と SQLite 実装の両方に同じ試験を課す。 */
+/**
+ * EventStore の実装が満たす契約。メモリ実装と SQLite 実装の両方に同じ試験を課す。
+ * 注意: メモリ実装は値の型を検査しない（SQLite は STRICT テーブルで検査する）。契約は、文字列・整数の正しい入力に対するもの。
+ */
 export function describeEventStore(name: string, make: () => StoreHarness): void {
   describe(`EventStore の契約: ${name}`, () => {
     const withStore = (fn: (h: StoreHarness) => void): void => {
@@ -36,6 +47,7 @@ export function describeEventStore(name: string, make: () => StoreHarness): void
         expect(store.readAfter(0)).toEqual([]);
         expect(store.lastSeq()).toBe(0);
         expect(store.findByRequestId("x")).toBeUndefined();
+        expect(store.findBySeq(1)).toBeUndefined();
         expect(store.loadSnapshot()).toBeUndefined();
       });
     });
@@ -58,6 +70,8 @@ export function describeEventStore(name: string, make: () => StoreHarness): void
         store.append(r);
         expect(store.readAll()).toEqual([r]);
         expect(store.findByRequestId("req-1")).toEqual(r);
+        expect(store.findBySeq(1)).toEqual(r);
+        expect(store.findBySeq(2)).toBeUndefined();
       });
     });
 
@@ -77,7 +91,7 @@ export function describeEventStore(name: string, make: () => StoreHarness): void
         expect(() =>
           store.transaction(() => {
             store.append(row(2));
-            store.saveSnapshot({ lastSeq: 2, state: "{}" });
+            store.saveSnapshot(snap(2));
             throw new Error("boom");
           }),
         ).toThrow("boom");
@@ -91,9 +105,14 @@ export function describeEventStore(name: string, make: () => StoreHarness): void
 
     it("スナップショットは最新の 1 件だけを持つ", () => {
       withStore(({ store }) => {
-        store.saveSnapshot({ lastSeq: 3, state: '{"a":1}' });
-        store.saveSnapshot({ lastSeq: 6, state: '{"a":2}' });
-        expect(store.loadSnapshot()).toEqual({ lastSeq: 6, state: '{"a":2}' });
+        store.saveSnapshot(snap(3, { state: '{"a":1}' }));
+        store.saveSnapshot(snap(6, { state: '{"a":2}', stateVersion: 2, lastEventHash: "abc" }));
+        expect(store.loadSnapshot()).toEqual({
+          lastSeq: 6,
+          state: '{"a":2}',
+          stateVersion: 2,
+          lastEventHash: "abc",
+        });
       });
     });
 
@@ -101,10 +120,10 @@ export function describeEventStore(name: string, make: () => StoreHarness): void
       withStore((h) => {
         h.store.append(row(1));
         h.store.append(row(2));
-        h.store.saveSnapshot({ lastSeq: 2, state: "{}" });
+        h.store.saveSnapshot(snap(2));
         const again = h.reopen();
         expect(again.readAll().map((r) => r.seq)).toEqual([1, 2]);
-        expect(again.loadSnapshot()).toEqual({ lastSeq: 2, state: "{}" });
+        expect(again.loadSnapshot()).toEqual(snap(2));
         expect(again.findByRequestId("req-2")?.seq).toBe(2);
       });
     });
