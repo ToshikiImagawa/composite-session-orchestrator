@@ -79,8 +79,8 @@ describe("条件 1〜6（spec 5.8）", () => {
     const a = assess(input({ nodes }));
     expect(a.unmet).toEqual(["dependentsIncomplete"]);
     expect(a.blockers).toEqual([
-      { reason: "dependentsIncomplete", nodeId: "x" },
-      { reason: "dependentsIncomplete", nodeId: "z" },
+      { kind: "node", reason: "dependentsIncomplete", nodeId: "x" },
+      { kind: "node", reason: "dependentsIncomplete", nodeId: "z" },
     ]);
   });
 
@@ -109,8 +109,8 @@ describe("条件 1〜6（spec 5.8）", () => {
     const a = assess({ nodes, facts, openDecisionNodeIds: [], processes: [] }, "root");
     expect(a.unmet).toEqual(["descendantsNotReclaimable"]);
     expect(a.blockers).toEqual([
-      { reason: "descendantsNotReclaimable", nodeId: "c" },
-      { reason: "descendantsNotReclaimable", nodeId: "d" },
+      { kind: "node", reason: "descendantsNotReclaimable", nodeId: "c" },
+      { kind: "node", reason: "descendantsNotReclaimable", nodeId: "d" },
     ]);
     const ok = assess(
       {
@@ -135,8 +135,8 @@ describe("条件 1〜6（spec 5.8）", () => {
     const a = assess(input({ processes }));
     expect(a.unmet).toEqual(["processesRunning"]);
     expect(a.blockers).toEqual([
-      { reason: "processesRunning", pid: 10 },
-      { reason: "processesRunning", pid: 20 },
+      { kind: "process", reason: "processesRunning", pid: 10 },
+      { kind: "process", reason: "processesRunning", pid: 20 },
     ]);
   });
 
@@ -176,16 +176,16 @@ describe("条件 1〜6（spec 5.8）", () => {
 });
 
 describe("状態の前提と破棄判断（T03 と整合）", () => {
-  it("回収可能にできるのは verified と、破棄判断済みの stopped だけ", () => {
+  it("判定の対象は verified・stopped・reclaimable（回収の実行直前の再判定を含む）だけ", () => {
     for (const s of NODE_STATES) {
       const a = assess(
         input({ nodes: [root(), node("a", s)], facts: { a: goodFacts({ discarded: true }) } }),
       );
-      expect(a.reclaimable, s).toBe(s === "verified" || s === "stopped");
+      expect(a.reclaimable, s).toBe(s === "verified" || s === "stopped" || s === "reclaimable");
     }
   });
 
-  it("verified 以外・stopped 以外は stateNotEligible だけを返す（stopping / stopIncomplete / done を含む）", () => {
+  it("判定の対象でない状態は stateNotEligible だけを返す（stopping / stopIncomplete / done / archived を含む）", () => {
     for (const s of [
       "pending",
       "running",
@@ -193,7 +193,6 @@ describe("状態の前提と破棄判断（T03 と整合）", () => {
       "done",
       "stopping",
       "stopIncomplete",
-      "reclaimable",
       "archived",
     ] as const) {
       const a = assess(
@@ -206,7 +205,7 @@ describe("状態の前提と破棄判断（T03 と整合）", () => {
     }
   });
 
-  it("停止したノードは、破棄の判断がなければ discardRequired。判断済みなら条件 1 を免除する", () => {
+  it("停止したノードは、破棄の判断がなければ discardRequired。判断済みなら条件 1・2 を免除する", () => {
     const stopped = (over: Partial<ReclaimNodeFacts>) =>
       assess(
         input({
@@ -216,8 +215,10 @@ describe("状態の前提と破棄判断（T03 と整合）", () => {
       );
     expect(stopped({ discarded: false }).unmet).toEqual(["discardRequired"]);
     expect(stopped({ discarded: true }).reclaimable).toBe(true);
-    // 条件 2 以降は免除されない（安全側）
-    expect(stopped({ discarded: true, clean: false }).unmet).toEqual(["dirty"]);
+    // 破棄の判断を経た停止は、未保存の変更も捨てることを含めて判断済み（条件 2 も免除）
+    expect(stopped({ discarded: true, clean: false }).reclaimable).toBe(true);
+    // 条件 3 以降は免除されない
+    expect(stopped({ discarded: true, openDecision: true } as never).reclaimable).toBe(true);
   });
 
   it("verified のノードの discarded は条件 1 を免除しない", () => {
@@ -230,7 +231,7 @@ describe("状態の前提と破棄判断（T03 と整合）", () => {
 describe("入力が欠ける・不正なときは安全側（フェイルクローズ）", () => {
   it("事実がないノードは回収不可（factsMissing）。事実に依らない条件は評価する", () => {
     const a = assess(input({ facts: {}, openDecisionNodeIds: ["a"] }));
-    expect(a.unmet).toEqual(["openDecision", "factsMissing"]);
+    expect(a.unmet).toEqual(["factsMissing", "openDecision"]);
   });
 
   it("作業ツリーのパスが絶対パスでない・根・空は factsMissing", () => {
@@ -275,6 +276,120 @@ describe("入力が欠ける・不正なときは安全側（フェイルクロ�
     );
     for (const u of tree.unmet) seen.add(u);
     expect([...seen].sort()).toEqual([...UNMET_REASONS].sort());
+  });
+});
+
+describe("フェイルクローズと回収の実行直前の再判定", () => {
+  it("事実は === true のときだけ満たしたとみなす（truthy な値は満たさない）", () => {
+    const a = assess(
+      input({
+        facts: { a: { merged: "yes", clean: 1, discarded: true, worktreePath: WT } as never },
+      }),
+    );
+    expect(a.unmet).toEqual(["notMerged", "dirty"]);
+  });
+
+  it("hasOpenFiles は === false のときだけ開いていないとみなす（unknown・未定義・null は動作中）", () => {
+    for (const v of ["unknown", undefined, null, 0, "no"]) {
+      const a = assess(
+        input({ processes: [{ pid: 3, cwd: "/elsewhere", hasOpenFiles: v as never }] }),
+      );
+      expect(a.unmet, String(v)).toEqual(["processesRunning"]);
+    }
+    expect(
+      assess(input({ processes: [{ pid: 3, cwd: "/elsewhere", hasOpenFiles: false }] }))
+        .reclaimable,
+    ).toBe(true);
+  });
+
+  it("reclaimable の再判定: 統合済みで条件を満たせば回収可能。未保存の変更・動作中のプロセスがあれば不可", () => {
+    const nodes = [root(), node("a", "reclaimable")];
+    expect(assess(input({ nodes })).reclaimable).toBe(true);
+    expect(assess(input({ nodes, facts: { a: goodFacts({ clean: false }) } })).unmet).toEqual([
+      "dirty",
+    ]);
+    expect(
+      assess(input({ nodes, processes: [{ pid: 1, cwd: WT, hasOpenFiles: false }] })).unmet,
+    ).toEqual(["processesRunning"]);
+  });
+
+  it("reclaimable の再判定: 統合済みでなければ破棄の経路とみなし、discarded を要する", () => {
+    const nodes = [root(), node("a", "reclaimable")];
+    const f = (over: Partial<ReclaimNodeFacts>) =>
+      assess(input({ nodes, facts: { a: goodFacts({ merged: false, ...over }) } }));
+    expect(f({ discarded: false }).unmet).toEqual(["notMerged"]);
+    expect(f({ discarded: true, clean: false }).reclaimable).toBe(true);
+  });
+
+  it("archived は判定の対象外（stateNotEligible）", () => {
+    expect(assess(input({ nodes: [root(), node("a", "archived")] })).unmet).toEqual([
+      "stateNotEligible",
+    ]);
+  });
+
+  it("facts は自前のプロパティだけを見る（ノード ID が constructor / __proto__ でも例外にならず factsMissing）", () => {
+    for (const id of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      const nodes = [root(), node(id, "verified")];
+      const r = assessReclaim(input({ nodes, facts: {} }), id);
+      expect(r.ok && r.value.unmet, id).toEqual(["factsMissing"]);
+    }
+  });
+
+  it("worktreeRoot を渡すと、作業ツリーのパスがその配下でなければ factsMissing", () => {
+    expect(assess(input({ worktreeRoot: "/wt" })).reclaimable).toBe(true);
+    expect(assess(input({ worktreeRoot: "/other" })).unmet).toEqual(["factsMissing"]);
+    expect(assess(input({ worktreeRoot: "relative" })).unmet).toEqual(["factsMissing"]);
+  });
+
+  it("壊れた入力では例外を出さず、Failure（invalidInput）を返す", () => {
+    for (const bad of [
+      null,
+      undefined,
+      1,
+      "x",
+      [],
+      {},
+      { nodes: 1 },
+      { nodes: [null], facts: {}, openDecisionNodeIds: [], processes: [] },
+      { nodes: [], facts: {}, openDecisionNodeIds: "a", processes: [] },
+    ]) {
+      const r = assessReclaim(bad as never, "a");
+      expect(r.ok, JSON.stringify(bad)).toBe(false);
+      if (!r.ok) expect(["invalidInput", "unknownNode"]).toContain(r.error.code);
+    }
+  });
+
+  it("任意の値を入力にしても、例外を出さず結果を返す（全域関数）", () => {
+    fc.assert(
+      fc.property(fc.anything(), fc.anything(), (inp, id) => {
+        expect(typeof assessReclaim(inp as never, id as never).ok).toBe("boolean");
+      }),
+    );
+  });
+
+  it("入力の一部を壊しても例外を出さず、回収可能にはならない", () => {
+    const junk = fc.oneof(
+      fc.constant(null),
+      fc.constant(undefined),
+      fc.integer(),
+      fc.string(),
+      fc.array(fc.anything()),
+      fc.object(),
+    );
+    fc.assert(
+      fc.property(
+        junk,
+        fc.constantFrom("facts", "processes", "openDecisionNodeIds", "nodes", "worktreeRoot"),
+        (v, key) => {
+          const r = assessReclaim({ ...input(), [key]: v } as never, "a");
+          expect(typeof r.ok).toBe("boolean");
+          // 配列は妥当な値になりうる（空の一覧など）ので、配列以外の壊れた値だけを検査する
+          if (r.ok && key !== "worktreeRoot" && !Array.isArray(v)) {
+            expect(r.value.reclaimable, key).toBe(false);
+          }
+        },
+      ),
+    );
   });
 });
 
