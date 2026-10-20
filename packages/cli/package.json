@@ -12,5 +12,8 @@
   },
   "dependencies": {
     "@cso/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

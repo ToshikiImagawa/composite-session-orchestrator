@@ -25,7 +25,7 @@
 
 ## セットアップ
 
-Node 20 以上と pnpm 10.28.0（`packageManager` で固定）が必要です。
+Node 22 以上と pnpm 10.28.0（`packageManager` で固定）が必要です。
 
 ```bash
 pnpm install --frozen-lockfile
