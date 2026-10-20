@@ -197,6 +197,9 @@ interface Capabilities {
 | 停止の進行と復帰 | 停止要求の再送／別イベント | `stopTimeout`（`stopping`→`stopIncomplete`）、`retryStop`（`stopIncomplete`→`stopping`。効果は即時停止）、`confirmStopped`（`stopping`・`stopIncomplete`→`stopped`、プロセス不在を確認）を停止要求とは別のイベントにする。`stopping`（穏当な停止の猶予中）に即時停止の要求が来たら、即時停止へ切り替える（状態は `stopping` のまま）。`running`・`waiting` から `stopped` へ至る経路は必ず `confirmStopped` を通る | 停止要求の冪等性を保ち、進行の事実（時間切れ、確認）と指示を分けるため。猶予切れの後の再試行は、猶予なしで止めるのが目的のため |
 | 差し戻しと再開 | 自動／指示による | `done`→`running`（差し戻し）と `stopped` からの再開は、人間または統合ノードの指示による。再開は `stopped`→`pending` に戻し、依存先が完了済み（`dependenciesDone`）なら続けて `start` して `running` へ進める（依存待ちを飛ばさない） | spec 5.7（差し戻しは親の判定）、5.3（子を再開可能にする）、5.2（依存先の完了まで起動しない） |
 | 停止した子の回収 | 常に可／破棄判断を要する | `stopped`→`reclaimable` は破棄の判断を経た場合のみ（`markReclaimable` の `discarded`）。`verified`→`reclaimable` は回収可能判定（T05）の結果による | spec 5.8（停止したノードは破棄判断を経た場合に限り回収可能） |
+| イベントの種別と状態の導出 | 種別を文字列のまま持つ／型付きの判別共用体 | 型付きの判別共用体で 6 種: `node.created`（`pending` で作成。木の不変条件を検査）、`node.stateChanged`（payload は T03 の `NodeEvent`。遷移は T03 の表で決める）、`scope.violation`（記録のみ。状態は変えない）、`inbox.added`（`seq`・`at` は envelope から取る）、`decision.requested`、`decision.answered`（先に確定した回答を採用し、後続は却下として記録。FR_019）。未知の種別は拒否する（無視しない）。状態は `seq` の昇順の畳み込み（`foldEvents`）でのみ導出し、入力順に依存しない。`seq` の重複、木・遷移・回収の不変条件に反するイベントは、`seq` つきの失敗で全体を拒否する。daemon は追記の前に `applyEvent` で検査する | 復元（NFR_002）と記録（NFR_011）を同じ列から導くため。将来のイベント追加で黙って無視されないようにするため |
+| `requestId` の冪等性 | 内容を問わず無視／内容の違いは拒否 | 同じ `requestId` で同一内容（actor・type・payload。キー順は無視）は無視して成功。内容が違えば `requestIdConflict` で拒否 | 再試行は重複せず（NFR_003）、別の要求が同じ識別子を取り違えたときは気づけるようにするため |
+| 依存先の「完了」の解釈（FR_008） | `done`（完了報告済み）／`verified`（受理済み） | `verified`。`start` は `dependsOn` の全ノードが `verified` のときだけ許可し、`done` では許可しない。`restart` の `dependenciesDone` は payload を信用せず、畳み込みが状態から判定する | 未検証の成果の上に後続を始めると、差し戻しのときに後続が無駄になるため（spec 5.7） |
 
 ## 9.2. 未解決の課題
 
