@@ -26,4 +26,5 @@ export * from "./contract.js";
 export * from "./inbox.js";
 export * from "./inbox-kinds.js";
 export * from "./scope.js";
+export * from "./transition.js";
 export * from "./tree.js";
