@@ -303,3 +303,6 @@ export function evaluateScope(scope: Scope, cwd: string, op: ScopeOperation): Sc
   if (issue !== undefined) return deny("invalidScope", `${issue.field}: ${issue.problem}`);
   return op.kind === "write" ? checkWrite(scope, cwd, op.path) : checkCommand(scope, op.command);
 }
+
+/** 場所の判定（`normalize` と `isUnder`）を、他の判定（回収可能など）が同じ規則で使うための公開。 */
+export { isUnder as isPathUnder, normalize as normalizePath };
