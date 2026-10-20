@@ -9,8 +9,8 @@ import {
   type NodeEvent,
   type OrchEvent,
   type OrchState,
-  stateOf,
   type StopOutcome,
+  stateOf,
 } from "../src/index.js";
 
 const SYS = { system: true } as const;
