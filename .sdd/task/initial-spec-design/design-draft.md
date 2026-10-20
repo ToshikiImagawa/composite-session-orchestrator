@@ -205,6 +205,13 @@ interface Capabilities {
 | 依存先の「完了」の解釈（FR_008） | `done`（完了報告済み）／`verified` 以降（受理済み） | `verified` 以降（`verified`・`reclaimable`・`archived`。共通定数 `COMPLETED_STATES`）。`start` は `dependsOn` の全ノードがこのいずれかのときだけ許可し、`done` では許可しない。`restart` の `dependenciesDone` は payload を信用せず、畳み込みが状態から判定する。回収可能判定（T05）の条件 3 でも同じ定数を使う | 未検証の成果の上に後続を始めると、差し戻しのときに後続が無駄になるため（spec 5.7）。依存先が先に回収されても、後続が起動できなくならないようにするため |
 | 回収可能判定の入力と理由 | 状態から直接判定／事実を引数で受ける | 事実（統合済みか、きれいか、破棄判断済みか、作業ツリーのパス）、プロセス一覧、未回答の判断を持つノードを引数で受ける純粋関数 `assessReclaim`。戻り値は `{reclaimable, unmet, blockers}`。`unmet` は列挙型（`stateNotEligible`・`discardRequired`・`factsMissing`・`notMerged`・`dirty`・`dependentsIncomplete`・`openDecision`・`descendantsNotReclaimable`・`processesRunning`・`processesUnknown`）、`blockers` は原因のノード・pid（統合ノードでは回収可能以降でない配下を名指し）。T07 の `OrchState` からの変換は `daemon` の責務 | 時刻・識別子・プロセス一覧は引数で受ける（NFR_007）。回収不可の理由を短く示し、原因を名指しするため（spec 5.8） |
 | 回収判定の安全側の既定 | 欠けた入力は許可／拒否 | フェイルクローズ。事実は `=== true` のときだけ満たしたとみなし、プロセスの `hasOpenFiles` は `=== false` のときだけ開いていないとみなす（`"unknown"` は動作中）。判定の対象にできる状態は `verified`、`stopped`、`reclaimable`（回収の実行直前の再判定のため。条件 1・`discardRequired` は `merged`・`discarded` の事実で判定し、統合済みでない `reclaimable` は破棄の経路とみなす）。事実が欠ける・作業ツリーのパスが不正（`worktreeRoot` の配下でない場合を含む）なら `factsMissing`、プロセス一覧が取得できなければ `processesUnknown` で回収不可。入力の形が壊れていれば例外を出さず `invalidInput` の失敗を返す。条件 3 の「未完了」は依存元が `COMPLETED_STATES`（`verified`・`reclaimable`・`archived`）以外で、木の外からの依存は daemon が実行時に再判定して拾う。条件 6 は、cwd が作業ツリー配下（`scope.ts` と同じ畳み込み・ディレクトリ境界）または作業ツリー配下のファイルを開いている（または不明）プロセスがあること、cwd が不明（絶対パスでない）なプロセスも動作中として扱う。**破棄の判断を経た停止（`stopped` で `discarded`）は、条件 1 と条件 2（未保存の変更）を免除する（ユーザー決定）**。判断を求めるときは、未保存の変更の一覧を人間に提示する（提示の実装は T12・T23）。パスは daemon のアダプタが realpath にして渡し、`discarded` の情報源は daemon が一つのイベントから導く | 失うものがある場合は拒否する安全な手段だけを使う方針（spec 5.8、NFR_006）。破棄の判断は成果を捨てることを含むため |
+| `sdk` アダプタの実 SDK 結線（ユーザー決定 Q1） | T10 に含める／別 PR | 別 PR（新タスク「SDK 実バインディング」）。T10 は `AgentLauncher` 抽象とフェイクでの検証まで | 新規依存（`@anthropic-ai/claude-agent-sdk`）のバージョン・ライセンス・Node 22/24 の確認と手動検証を本体の変更から分ける |
+| 停止の確認間隔と上限（ユーザー決定 Q3） | 間隔・上限の値／自動再試行の有無 | 1 秒間隔で最大 30 秒（どちらも設定値）で作業ツリー配下のプロセスを確認し、上限で `stopTimeout`（→ `stopIncomplete`、残存 pid を blockers に記録）。自動再試行はせず、`retryStop` の指示でのみ再試行 | 残存プロセスの握り潰しを避け、再開の判断を人間または統合ノードに残す（FR_010） |
+| 子の環境変数の除去 | 全継承／名前規則で除去 | 名前が `/^claude.*session/i` に合う識別子系の変数を除去（`CLAUDE_CODE_SESSION_ID` など）。認証・接続に要る `*_TOKEN*`・`*_TOKEN_FILE`・`*_URL` は残す（最終的な規則は T10b の実機検証で調整）。除去した名前だけを返し、値は記録しない | 親のセッションを子が継承する混線を防ぐ（Spike 02） |
+| フックの対応づけ | 全許可／ツール別に判定 | 読み取り系と読み取りのみで無害なツール（LS・TodoWrite・ToolSearch・BashOutput。ユーザー決定。ツール名は T10b の実機確認で固定）は許可。Write/Edit/MultiEdit/NotebookEdit は、書き込み先を「最も深い既存の祖先の実パス＋残り」にして（scope の場所も実パス化。解決に失敗したら拒否）`evaluateScope` の書き込み判定、Bash は `command` を判定（`run_in_background` と `dangerouslyDisableSandbox: true` は拒否）。`mcp__node__*` は許可、WebFetch・WebSearch・Task・Agent・未知のツールは拒否（範囲違反ではなく unknownTool。`scope.violation` にせず受信箱に載せない）。範囲違反の拒否時は `scope.violation` を記録（記録に失敗しても拒否は維持）。範囲は `updateScope` で更新できる（FR_015） | フェイルクローズ（FR_014、FR_015） |
+| 停止の手段の堅牢化 | 例外・時間切れを想定しない／想定する | `interrupt`・`abort`・`close`・`send` の例外を捕らえ、`interrupt` 失敗・時間切れ（既定 10 秒）は `abort`、`abort` 失敗は検証へ進む。観測は行った手段で記録し、記録の失敗は警告にして続行。確認の時間は実時間で数え、検証中の即時停止の要求は `abort` して outcome を合わせる。`stop()` は常に `Result`。停止中への指示は `stopping` で拒否 | 子が戻らない・例外を投げる状況でも、停止の確認（B-001）を止めないため |
+| 停止の観測の結びつけ | stopSeq なし／あり | `node.stopObserved` に `stopSeq` と `graceMs`（穏当のみ）を付けて記録。猶予内に停止／中断／打ち切りを区別 | 猶予時間の見直し材料（9.2） |
+| プロセス確認の限界 | 全プロセスを確認／読めるものだけ | `lsof` で cwd が作業ツリー配下か開いているファイルがあるプロセスを確認。他ユーザーのプロセスで cwd が読めないものは無視する。cwd 一覧が取れなければ失敗（`hasOpenFiles` は不明を許容）。realpath はアダプタが行う | 権限差のある環境での偽陽性を避けつつ失敗側に倒す |
 
 ## 9.2. 未解決の課題
 
@@ -223,6 +230,11 @@ interface Capabilities {
 | バックグラウンド起動（`&`、`nohup`、`setsid` など）の拒否の方針 | 中 | `core` の範囲判定（T06）は既定で拒否として実装済み。ADR で確定する |
 | 場所の比較の大文字小文字・Unicode 正規化 | 高 | `core`（T06）は大文字小文字を畳み込み、NFC 正規化して比較する（区別する FS では過剰拒否で安全側）。シンボリックリンクの実パス解決と、判定に渡すパスの正規化は `daemon` のアダプタの責務。ADR で確定する |
 | コマンド判定の方針（ADR 候補） | 中 | (1) `2>&1` など一部のリダイレクトも一律拒否している。許す範囲を ADR で決める。(2) 判定不能（`unparsable`）の細分化は将来課題。(3) 再解釈・実行コマンドの固定リストの見直し。(4) スクリプト経由の書き込みは構造上判定できない（spec 5.5） |
+| 未知のツールの拒否の記録（監査）。T10 は拒否のみで記録しない | 中 | core に記録専用イベント `node.toolDenied{nodeId, tool}` を足し、アダプタから記録する（T10c） |
+| 子の予期しない終了の記録。T10 は `onUnexpectedExit` で通知のみ | 中 | core に記録専用イベント `node.exited{nodeId, reason}` を足す（T10c） |
+| 入れ子の作業ツリー（作業ツリーの配下に別の作業ツリーがある場合）の範囲判定とプロセス確認 | 中 | 未検証。親の作業ツリーの確認（`lsof +D`・cwd）に子のプロセスが含まれうる。T10b の実機検証で扱いを決める |
+| daemon の再起動後の孤児（再起動前に起動した子のプロセス） | 中 | 未解決。アダプタは稼働中のノードをメモリで持つため、再起動後は子を管理できない。復元時にプロセスの確認（`lsof`）で孤児を検出し、人間に提示する設計を T10b 以降で行う |
+| `@types/node` と `engines` の対応 | 低 | `engines` は Node 22 以上、`@types/node` は 22 系（下限に合わせる）。Node 24 は CI で動作を確認する |
 | 状態の保持に使う SQLite ドライバ | 低 | 着手時点の最新版を確認して決める |
 | 受信箱の整列の計算量 | 低 | 現状は O(n³)（1000 件で約 541ms を実測）。Kahn 法と優先度付きキューで O(n log n) にできる。件数が増えてから見直す |
 
