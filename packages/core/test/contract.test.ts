@@ -5,6 +5,7 @@ import {
   DAEMON_OPERATIONS,
   type DaemonOperation,
   type DaemonRequest,
+  DEFAULT_PURGE_TOMBSTONE,
   err,
   type Failure,
   failure,
@@ -92,6 +93,10 @@ describe("操作の契約（NFR_004, DC_003）", () => {
       elapsedDays: 111,
     };
     expect(preview.nodeIds).toHaveLength(2);
+  });
+
+  it("墓標の既定は「残す」（監査 NFR_011 と誤削除の追跡のため安全側。保持ポリシーの設定で変えられる）", () => {
+    expect(DEFAULT_PURGE_TOMBSTONE).toBe(true);
   });
 
   it("child ロールは spawn / purge を型で表せない", () => {

@@ -62,6 +62,12 @@ export const mapResult = <T, U, E extends Failure>(
 export const CONTRACT_ROLES = ["integrator", "child", "human"] as const;
 export type ContractRole = (typeof CONTRACT_ROLES)[number];
 
+/**
+ * 最終削除で墓標を残すかの既定（FR_031）。残す側を既定とする（監査 NFR_011 と誤削除の追跡のため安全側）。
+ * daemon の保持ポリシーの設定で変えられる。`node.purge` の `tombstone` を省略したときにこの値を使う。
+ */
+export const DEFAULT_PURGE_TOMBSTONE = true;
+
 /** 操作の引数と結果（spec 4.1。仮置き、最小限）。 */
 export interface OperationMap {
   // 統合
@@ -140,7 +146,7 @@ export interface OperationMap {
   "node.reclaimInstruct": { params: { nodeId: string }; result: { accepted: true } };
   /**
    * 最終削除（FR_031）。最上位の木単位。`tombstone`: 削除後に 1 行の墓標（タイトル、結果、最終コミット、日付）を残すか。
-   * 省略時は保持ポリシーの既定に従う（daemon の設定。この契約では決めない）。
+   * 省略時は保持ポリシーの既定に従う（`DEFAULT_PURGE_TOMBSTONE` = 残す。daemon の設定で変えられる）。
    */
   "node.purge": {
     params: { nodeId: string; tombstone?: boolean };
