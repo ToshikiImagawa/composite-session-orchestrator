@@ -9,6 +9,7 @@ const SCOPE: Scope = {
   allowedCommands: ["ls", "pnpm test"],
 };
 const WT = "/wt/a";
+const STOP_SEQ = 17;
 
 interface Rig {
   adapter: SdkRuntimeAdapter;
@@ -268,7 +269,7 @@ describe("stop: 穏当な停止（2 段階）", () => {
   it("猶予内に result が来たら、停止指示のメッセージを送り、打ち切らず、停止を確認して記録する", async () => {
     const r = rig();
     await startNode(r);
-    const p = r.adapter.stop("a", { mode: "graceful" });
+    const p = r.adapter.stop("a", { mode: "graceful", stopSeq: STOP_SEQ });
     await settle();
     const s = r.launcher.sessions[0];
     expect(s?.sent).toHaveLength(1);
@@ -287,7 +288,7 @@ describe("stop: 穏当な停止（2 段階）", () => {
   it("猶予（既定 60 秒）を超えたら interrupt で打ち切り、interrupted を記録する", async () => {
     const r = rig();
     await startNode(r);
-    const p = r.adapter.stop("a", { mode: "graceful" });
+    const p = r.adapter.stop("a", { mode: "graceful", stopSeq: STOP_SEQ });
     await settle();
     await r.timers.advance(59_999);
     expect(r.launcher.sessions[0]?.calls).not.toContain("interrupt");
@@ -304,7 +305,7 @@ describe("stop: 穏当な停止（2 段階）", () => {
   it("猶予は停止要求ごとに上書きできる", async () => {
     const r = rig();
     await startNode(r);
-    const p = r.adapter.stop("a", { mode: "graceful", graceMs: 5000 });
+    const p = r.adapter.stop("a", { mode: "graceful", graceMs: 5000, stopSeq: STOP_SEQ });
     await settle();
     await r.timers.advance(5000);
     const res = await p;
@@ -314,7 +315,7 @@ describe("stop: 穏当な停止（2 段階）", () => {
   it("result が先に来たら、猶予のタイマーは取り消される", async () => {
     const r = rig();
     await startNode(r);
-    const p = r.adapter.stop("a", { mode: "graceful" });
+    const p = r.adapter.stop("a", { mode: "graceful", stopSeq: STOP_SEQ });
     await settle();
     r.launcher.sessions[0]?.emitResult();
     await p;
@@ -326,7 +327,7 @@ describe("stop: 即時停止", () => {
   it("猶予なしで abort し、停止指示は送らない", async () => {
     const r = rig();
     await startNode(r);
-    const res = await r.adapter.stop("a", { mode: "immediate" });
+    const res = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     const s = r.launcher.sessions[0];
     expect(s?.calls).toContain("abort");
     expect(s?.sent).toHaveLength(0);
@@ -337,9 +338,9 @@ describe("stop: 即時停止", () => {
   it("穏当な停止の猶予中に即時停止が来たら、すぐ abort に切り替える", async () => {
     const r = rig();
     await startNode(r);
-    const graceful = r.adapter.stop("a", { mode: "graceful" });
+    const graceful = r.adapter.stop("a", { mode: "graceful", stopSeq: STOP_SEQ });
     await settle();
-    const immediate = r.adapter.stop("a", { mode: "immediate" });
+    const immediate = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     await settle();
     const g = await graceful;
     const i = await immediate;
@@ -353,8 +354,8 @@ describe("stop: 即時停止", () => {
   it("穏当な停止の最中の穏当な停止の再送は、同じ停止を共有する（二重に送らない）", async () => {
     const r = rig();
     await startNode(r);
-    const a = r.adapter.stop("a", { mode: "graceful" });
-    const b = r.adapter.stop("a", { mode: "graceful" });
+    const a = r.adapter.stop("a", { mode: "graceful", stopSeq: STOP_SEQ });
+    const b = r.adapter.stop("a", { mode: "graceful", stopSeq: STOP_SEQ });
     await settle();
     r.launcher.sessions[0]?.emitResult();
     expect((await a).ok && (await b).ok).toBe(true);
@@ -368,7 +369,7 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
   it("プロセスが残っている間は確認を繰り返し、いなくなったら停止と記録する", async () => {
     const r = rig({}, [[proc(7)], [proc(7)], []]);
     await startNode(r);
-    const p = r.adapter.stop("a", { mode: "immediate" });
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     await settle();
     await r.timers.advance(1000);
     await r.timers.advance(1000);
@@ -381,7 +382,7 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
   it("所定の時間（既定 30 秒）を超えても残っていれば、stopTimeout を記録して停止未完了（pid を名指し）を返す", async () => {
     const r = rig({}, [[proc(7), proc(9)]]);
     await startNode(r);
-    const p = r.adapter.stop("a", { mode: "immediate" });
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     await settle();
     await r.timers.advance(30_000);
     const res = await p;
@@ -392,7 +393,7 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
   it("プロセス一覧が取得できない（null）間は停止と確認できない。時間切れで停止未完了になる", async () => {
     const r = rig({}, [null]);
     await startNode(r);
-    const p = r.adapter.stop("a", { mode: "immediate" });
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     await settle();
     await r.timers.advance(30_000);
     const res = await p;
@@ -403,7 +404,7 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
   it("確認の時間と間隔は設定できる", async () => {
     const r = rig({ verifyTimeoutMs: 3000, verifyIntervalMs: 500 }, [[proc(1)]]);
     await startNode(r);
-    const p = r.adapter.stop("a", { mode: "immediate" });
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     await settle();
     await r.timers.advance(3000);
     const res = await p;
@@ -414,12 +415,12 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
   it("停止未完了のあとの再試行（即時停止）で、いなくなれば停止を確認して記録する", async () => {
     const r = rig({ verifyTimeoutMs: 2000 }, [[proc(7)], [proc(7)], [proc(7)], []]);
     await startNode(r);
-    const first = r.adapter.stop("a", { mode: "immediate" });
+    const first = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     await settle();
     await r.timers.advance(2000);
     const incomplete = await first;
     expect(incomplete.ok && incomplete.value.state).toBe("stopIncomplete");
-    const retry = await r.adapter.stop("a", { mode: "immediate" });
+    const retry = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     expect(retry.ok && retry.value).toMatchObject({ state: "stopped" });
     expect(r.launcher.sessions[0]?.calls.filter((c) => c === "abort")).toHaveLength(2);
   });
@@ -427,10 +428,10 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
   it("停止を確認できたノードは管理から外れ、以後の操作は失敗する", async () => {
     const r = rig();
     await startNode(r);
-    await r.adapter.stop("a", { mode: "immediate" });
+    await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     const s = await r.adapter.send("a", "x");
     expect(s.ok ? null : s.error.code).toBe("unknownNode");
-    const again = await r.adapter.stop("a", { mode: "immediate" });
+    const again = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     expect(again.ok ? null : again.error.code).toBe("unknownNode");
   });
 });
@@ -438,26 +439,84 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
 describe("stop: 失敗", () => {
   it("未知のノード・不正な要求は失敗", async () => {
     const r = rig();
-    const a = await r.adapter.stop("zzz", { mode: "graceful" });
+    const a = await r.adapter.stop("zzz", { mode: "graceful", stopSeq: STOP_SEQ });
     expect(a.ok ? null : a.error.code).toBe("unknownNode");
     await startNode(r);
     for (const bad of [
       null,
       {},
-      { mode: "soon" },
-      { mode: "graceful", graceMs: 0 },
-      { mode: "graceful", graceMs: Number.NaN },
+      { mode: "soon", stopSeq: 1 },
+      { mode: "graceful", stopSeq: 1, graceMs: 0 },
+      { mode: "graceful", stopSeq: 1, graceMs: Number.NaN },
+      { mode: "graceful", stopSeq: 1, graceMs: 1.5 },
+      { mode: "graceful", stopSeq: 1, graceMs: 3_600_001 },
+      { mode: "immediate", stopSeq: 1, graceMs: 1000 },
+      { mode: "graceful" },
+      { mode: "graceful", stopSeq: 0 },
+      { mode: "graceful", stopSeq: 1.5 },
+      { mode: "graceful", stopSeq: "1" },
     ]) {
       const res = await r.adapter.stop("a", bad as never);
-      expect(res.ok, JSON.stringify(bad)).toBe(false);
+      expect(res.ok ? null : res.error.code, JSON.stringify(bad)).toBe("invalidRequest");
     }
+  });
+
+  it("観測には、停止要求の seq（stopSeq）と、そのとき有効だった猶予（graceMs）を載せる", async () => {
+    // 穏当: 要求の graceMs
+    const a = rig();
+    await startNode(a);
+    const pa = a.adapter.stop("a", { mode: "graceful", graceMs: 5000, stopSeq: 21 });
+    await settle();
+    a.launcher.sessions[0]?.emitResult();
+    await pa;
+    expect(a.sink.records[0]?.body).toEqual({
+      type: "node.stopObserved",
+      payload: { nodeId: "a", outcome: "withinGrace", stopSeq: 21, graceMs: 5000 },
+    });
+    // 穏当で graceMs 省略: 既定値（60 秒）
+    const b = rig();
+    await startNode(b);
+    const pb = b.adapter.stop("a", { mode: "graceful", stopSeq: 22 });
+    await settle();
+    await b.timers.advance(60_000);
+    await pb;
+    expect(b.sink.records[0]?.body).toEqual({
+      type: "node.stopObserved",
+      payload: { nodeId: "a", outcome: "interrupted", stopSeq: 22, graceMs: 60_000 },
+    });
+    // 即時: graceMs なし
+    const c = rig();
+    await startNode(c);
+    await c.adapter.stop("a", { mode: "immediate", stopSeq: 23 });
+    expect(c.sink.records[0]?.body).toEqual({
+      type: "node.stopObserved",
+      payload: { nodeId: "a", outcome: "aborted", stopSeq: 23 },
+    });
+    // 穏当の猶予中に即時へ切り替え: 穏当の停止要求に結び付き、そのときの猶予を載せる
+    const d = rig();
+    await startNode(d);
+    const gd = d.adapter.stop("a", { mode: "graceful", graceMs: 9000, stopSeq: 24 });
+    await settle();
+    void d.adapter.stop("a", { mode: "immediate", stopSeq: 25 });
+    await gd;
+    expect(d.sink.records[0]?.body).toEqual({
+      type: "node.stopObserved",
+      payload: { nodeId: "a", outcome: "aborted", stopSeq: 24, graceMs: 9000 },
+    });
+  });
+
+  it("既定の猶予の設定が不正（整数でない・上限超過）なら、穏当な停止は invalidRequest", async () => {
+    const r = rig({ defaultGraceMs: 0.5 });
+    await startNode(r);
+    const res = await r.adapter.stop("a", { mode: "graceful", stopSeq: 1 });
+    expect(res.ok ? null : res.error.code).toBe("invalidRequest");
   });
 
   it("記録に失敗したら recordFailed を返す（停止の状態を記録できなかった）", async () => {
     const r = rig();
     await startNode(r);
     r.sink.failNext = 1;
-    const res = await r.adapter.stop("a", { mode: "immediate" });
+    const res = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     expect(res.ok ? null : res.error.code).toBe("recordFailed");
   });
 });

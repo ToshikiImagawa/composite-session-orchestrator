@@ -19,6 +19,7 @@ import {
   type Failure,
   failure,
   findRunningProcesses,
+  MAX_GRACE_MS,
   ok,
   type Result,
   type StopOutcome,
@@ -84,8 +85,8 @@ interface NodeEntry {
 
 type Rec = Record<string, unknown>;
 const isRec = (x: unknown): x is Rec => typeof x === "object" && x !== null && !Array.isArray(x);
-const isPositive = (x: unknown): x is number =>
-  typeof x === "number" && Number.isFinite(x) && x > 0;
+const isGraceMs = (x: unknown): x is number =>
+  typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= MAX_GRACE_MS;
 
 const fail = (
   code: string,
@@ -236,15 +237,23 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
         "ノードの状態を確認する",
       );
     }
+    const grace =
+      isRec(request) && request.mode === "graceful"
+        ? (request.graceMs ?? this.deps.defaultGraceMs ?? 60_000)
+        : undefined;
     if (
       !isRec(request) ||
       (request.mode !== "graceful" && request.mode !== "immediate") ||
-      (request.graceMs !== undefined && !isPositive(request.graceMs))
+      !Number.isInteger(request.stopSeq) ||
+      (request.stopSeq as number) < 1 ||
+      (request.graceMs !== undefined &&
+        (request.mode !== "graceful" || !isGraceMs(request.graceMs))) ||
+      (request.mode === "graceful" && !isGraceMs(grace))
     ) {
       return fail(
         "invalidRequest",
         "停止の要求の形が不正",
-        "mode（graceful か immediate）と graceMs（正の数）を確認する",
+        "mode（graceful か immediate）、stopSeq（正の整数）、graceMs（1 以上 3,600,000 以下の整数。穏当な停止のみ）を確認する",
       );
     }
     const running = entry.flow;
@@ -257,11 +266,16 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     const escalated = new Promise<void>((r) => {
       escalate = r;
     });
-    const promise = this.runStop(nodeId, entry, request.mode, request.graceMs, escalated).finally(
-      () => {
-        entry.flow = undefined;
-      },
-    );
+    const promise = this.runStop(
+      nodeId,
+      entry,
+      request.mode,
+      grace,
+      request.stopSeq,
+      escalated,
+    ).finally(() => {
+      entry.flow = undefined;
+    });
     entry.flow = { mode: request.mode, promise, escalate };
     return promise;
   }
@@ -311,6 +325,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     entry: NodeEntry,
     mode: "graceful" | "immediate",
     graceMs: number | undefined,
+    stopSeq: number,
     escalated: Promise<void>,
   ): Promise<Result<StopValue, Failure>> {
     const d = this.deps;
@@ -323,7 +338,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     } else {
       const result = session.nextResult();
       session.send(STOP_MESSAGE);
-      const timer = d.timers.after(graceMs ?? d.defaultGraceMs ?? 60_000);
+      const timer = d.timers.after(graceMs as number);
       const winner = await Promise.race([
         result.then(() => "result" as const),
         timer.promise.then(() => "timeout" as const),
@@ -343,7 +358,16 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
       }
     }
 
-    const recorded = this.record({ type: "node.stopObserved", payload: { nodeId, outcome } });
+    // 観測は停止要求の seq と、そのとき有効だった猶予（穏当な停止のみ）に結び付ける。
+    const recorded = this.record({
+      type: "node.stopObserved",
+      payload: {
+        nodeId,
+        outcome,
+        stopSeq,
+        ...(mode === "graceful" && graceMs !== undefined ? { graceMs } : {}),
+      },
+    });
     if (recorded)
       return fail(
         "recordFailed",

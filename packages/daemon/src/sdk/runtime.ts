@@ -39,8 +39,10 @@ export interface DeliveryValue {
 
 export interface StopRequest {
   readonly mode: "graceful" | "immediate";
-  /** 穏当な停止の猶予（ミリ秒）。省略時は既定値。停止要求ごとに上書きできる。 */
+  /** 穏当な停止の猶予（1 以上 3,600,000 以下の整数ミリ秒）。省略時は既定値。停止要求ごとに上書きできる。即時停止では指定できない。 */
   readonly graceMs?: number;
+  /** 対応する停止要求（`stop`・`retryStop` の `node.stateChanged`）のイベントの `seq`。観測の記録に結び付ける。 */
+  readonly stopSeq: number;
 }
 
 export interface StopValue {
