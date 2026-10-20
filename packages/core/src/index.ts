@@ -59,3 +59,4 @@ export const INBOX_KIND_PRIORITY: Readonly<Record<InboxKind, Priority>> = {
   progress: "progress",
   info: "info",
 };
+export * from "./inbox.js";
