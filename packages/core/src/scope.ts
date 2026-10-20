@@ -4,8 +4,9 @@
  *
  * - 読み込みは制限しない。
  * - 書き込みは、禁止場所に入らず、かつ許可場所の配下であること（禁止が優先）。
- * - コマンドは、許可コマンドに一致し、リダイレクトの書き込み先が書き込みの条件を満たすこと。
- * - 判定できないもの（コマンド置換など）とバックグラウンド起動（既定）は拒否する。
+ * - コマンドは、全部分が許可コマンドに一致すること。
+ * - 判定できないもの（コマンド置換、サブシェル、リダイレクト `<` `>`）とバックグラウンド起動（既定。ADR 未決）は拒否する。
+ * - パスは正規化済みの入力を前提とする。シンボリックリンクの実パス解決は daemon のアダプタの責務で、ここでは行わない。
  */
 
 /** spec 4.2 の Scope。 */
@@ -72,38 +73,31 @@ function checkWrite(scope: Scope, cwd: string, rawPath: string): ScopeDecision {
 
 interface Segment {
   words: string[];
-  redirects: string[];
 }
 
 type Parsed =
   | { readonly ok: true; readonly segments: Segment[]; readonly background: boolean }
   | { readonly ok: false };
 
-/** 最小限のシェル字句解析。引用符、区切り、リダイレクト、置換、`&` を扱う。 */
+/** 最小限のシェル字句解析。引用符、区切り、置換・サブシェル・リダイレクト（拒否）、`&` を扱う。 */
 function parseCommand(input: string): Parsed {
   const segments: Segment[] = [];
-  let seg: Segment = { words: [], redirects: [] };
+  let seg: Segment = { words: [] };
   let word = "";
   let inWord = false;
   let quote: "'" | '"' | null = null;
-  let redirectPending = false;
   let background = false;
 
   const endWord = (): void => {
     if (!inWord) return;
-    if (redirectPending) {
-      seg.redirects.push(word);
-      redirectPending = false;
-    } else {
-      seg.words.push(word);
-    }
+    seg.words.push(word);
     word = "";
     inWord = false;
   };
   const endSegment = (): void => {
     endWord();
     segments.push(seg);
-    seg = { words: [], redirects: [] };
+    seg = { words: [] };
   };
 
   for (let i = 0; i < input.length; i++) {
@@ -127,16 +121,8 @@ function parseCommand(input: string): Parsed {
     } else if (c === "\\" && next !== "") {
       word += input.charAt(++i);
       inWord = true;
-    } else if ((c === "<" || c === ">") && next === "(") {
+    } else if (c === "<" || c === ">" || c === "(" || c === ")") {
       return { ok: false };
-    } else if (c === ">" || (c === "&" && next === ">")) {
-      if (c === "&") i++; // `&>`
-      if (/^\d+$/.test(word)) {
-        word = "";
-        inWord = false; // `2>` のファイル記述子
-      } else endWord();
-      if (input.charAt(i + 1) === ">") i++; // `>>`
-      redirectPending = true;
     } else if (c === "&") {
       if (next === "&") i++;
       else background = true;
@@ -165,7 +151,7 @@ function checkCommand(scope: Scope, cwd: string, command: string): ScopeDecision
   if (!parsed.ok) return deny("unparsable", command);
   if (parsed.background) return deny("backgroundExecution", command);
 
-  const nonEmpty = parsed.segments.filter((s) => s.words.length > 0 || s.redirects.length > 0);
+  const nonEmpty = parsed.segments.filter((s) => s.words.length > 0);
   if (nonEmpty.length === 0) return deny("commandNotAllowed", command);
 
   for (const seg of nonEmpty) {
@@ -178,11 +164,6 @@ function checkCommand(scope: Scope, cwd: string, command: string): ScopeDecision
       return want[0] !== "" && want.every((w, i) => seg.words[i] === w);
     });
     if (!allowed) return deny("commandNotAllowed", seg.words.join(" "));
-    for (const target of seg.redirects) {
-      if (target === "/dev/null" || target.startsWith("&")) continue;
-      const d = checkWrite(scope, cwd, target);
-      if (!d.allowed) return d;
-    }
   }
   return ALLOW;
 }

@@ -92,11 +92,13 @@ describe("コマンド（場所とコマンドの両方）", () => {
     expect(reasonOf(cmd("setsid ls"))).toBe("backgroundExecution");
   });
 
-  it("リダイレクトの書き込み先も場所を検査する", () => {
-    expect(cmd("ls > src/out.txt").allowed).toBe(true);
-    expect(reasonOf(cmd("ls > /etc/x"))).toBe("outsideWritable");
-    expect(reasonOf(cmd("ls >> src/secret/x"))).toBe("forbiddenLocation");
-    expect(reasonOf(cmd("ls >src/../x"))).toBe("outsideWritable");
+  it("リダイレクト・サブシェルは判定できないものとして拒否", () => {
+    expect(reasonOf(cmd("ls > src/out.txt"))).toBe("unparsable");
+    expect(reasonOf(cmd("ls >> src/out.txt"))).toBe("unparsable");
+    expect(reasonOf(cmd("ls 2> /dev/null"))).toBe("unparsable");
+    expect(reasonOf(cmd("ls < src/in"))).toBe("unparsable");
+    expect(reasonOf(cmd("(ls)"))).toBe("unparsable");
+    expect(cmd("ls 'a > b'").allowed).toBe(true);
   });
 
   it("空のコマンド・許可コマンドが空の範囲は拒否", () => {

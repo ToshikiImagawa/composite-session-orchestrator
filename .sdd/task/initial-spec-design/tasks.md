@@ -50,4 +50,5 @@ depends-on: ["design-initial-spec-design"]
 - `stopping`→`stopIncomplete` の所定の時間、再試行方式、復帰操作、停止要求を受け付ける元状態（T03, T05 の前提）
 - `mcp`/`cli`→daemon の契約の型を置く場所（`core` に置く案で着手し ADR に残す）
 - 木あたりの同時実行数と費用の上限
+- バックグラウンド起動（`&`、`nohup`、`setsid` など）の扱い（T06 は既定で拒否として実装。ADR で確定する）
 - 停止後に残るプロセス・`lsof` の OS 差の検証（T10 の前提）
