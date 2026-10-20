@@ -35,11 +35,10 @@ export const INBOX_KINDS = [
 ] as const;
 export type InboxKind = (typeof INBOX_KINDS)[number];
 
-/** 受信箱の優先度。高い順に並ぶ（FR_012）。 */
 export const PRIORITIES = ["blocking", "failed", "completed", "progress", "info"] as const;
 
 /**
- * 受信箱の優先度。高い順に blocking > failed > completed > progress > info（FR_012）。
+ * 受信箱の優先度。PRIORITIES は高い順に並ぶ: blocking > failed > completed > progress > info（FR_012）。
  *
  * 項目の種類（InboxKind）との対応は INBOX_KIND_PRIORITY を参照:
  * - blocking: decision, answer

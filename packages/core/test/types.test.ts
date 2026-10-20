@@ -58,11 +58,20 @@ describe("InboxKind と Priority の対応（spec 4.2, FR_012）", () => {
     expect(INBOX_KIND_PRIORITY[kind]).toBe(priority);
   });
 
-  it("全ての種類が定義済みの優先度に対応する（性質ベース）", () => {
+  it("優先度の帯は spec の順序（要判断 ＞ 失敗 ＞ 完了 ＞ 進捗 ＞ 情報）を守る（性質ベース）", () => {
+    // spec 4.2 の種類の並びは優先度の高い順。帯の順位が単調非減少であること。
+    const rank = (k: InboxKind): number => PRIORITIES.indexOf(INBOX_KIND_PRIORITY[k]);
     fc.assert(
-      fc.property(fc.constantFrom(...INBOX_KINDS), (kind: InboxKind) => {
-        expect(PRIORITIES).toContain(INBOX_KIND_PRIORITY[kind]);
-      }),
+      fc.property(
+        fc.integer({ min: 0, max: INBOX_KINDS.length - 1 }),
+        fc.integer({ min: 0, max: INBOX_KINDS.length - 1 }),
+        (i, j) => {
+          const [lo, hi] = i <= j ? [i, j] : [j, i];
+          expect(rank(INBOX_KINDS[lo] as InboxKind)).toBeLessThanOrEqual(
+            rank(INBOX_KINDS[hi] as InboxKind),
+          );
+        },
+      ),
     );
   });
 
