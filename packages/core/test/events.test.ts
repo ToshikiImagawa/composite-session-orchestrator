@@ -51,6 +51,7 @@ const must = (r: ReturnType<typeof foldEvents>): OrchState => {
 /** root(integrator) ─ a(implement) / b(implement, a に依存) */
 const base = (): OrchEvent[] => [
   ev(created("root", "integrator", null)),
+  ev(changed("root", { type: "start" })),
   ev(created("a", "implement", "root")),
   ev(created("b", "implement", "root", ["a"])),
 ];
@@ -63,7 +64,7 @@ describe("畳み込み（状態はイベント列からのみ導出）", () => {
   it("node.created で pending のノードができ、木の不変条件を守る", () => {
     const s = must(foldEvents(base()));
     expect(s.nodes.map((n) => [n.id, n.state])).toEqual([
-      ["root", "pending"],
+      ["root", "running"],
       ["a", "pending"],
       ["b", "pending"],
     ]);
@@ -72,6 +73,7 @@ describe("畳み込み（状態はイベント列からのみ導出）", () => {
   it("木の不変条件に反する node.created は seq つきで拒否される", () => {
     const bad = foldEvents([
       ev(created("root", "integrator", null)),
+      ev(changed("root", { type: "start" })),
       ev(created("w", "implement", "root")),
       ev(created("x", "review", "w")),
     ]);
@@ -86,11 +88,13 @@ describe("畳み込み（状態はイベント列からのみ導出）", () => {
   it("未知の依存先・自己依存は拒否される", () => {
     const r1 = foldEvents([
       ev(created("root", "integrator", null)),
+      ev(changed("root", { type: "start" })),
       ev(created("a", "implement", "root", ["ghost"])),
     ]);
     expect(r1.ok ? null : r1.error.code).toBe("unknownDependency");
     const r2 = foldEvents([
       ev(created("root", "integrator", null)),
+      ev(changed("root", { type: "start" })),
       ev(created("a", "implement", "root", ["a"])),
     ]);
     expect(r2.ok ? null : r2.error.code).toBe("unknownDependency");
@@ -160,11 +164,16 @@ describe("畳み込み（状態はイベント列からのみ導出）", () => {
     ];
     const tree: OrchEvent[] = [
       ev(created("root", "integrator", null)),
+      ev(changed("root", { type: "start" })),
       ev(created("a", "implement", "root")),
+    ];
+    const finishRoot = (): OrchEvent[] => [
+      ev(changed("root", { type: "reportDone" })),
+      ev(changed("root", { type: "accept" })),
     ];
     const bad = foldEvents([
       ...tree,
-      ...toVerified("root"),
+      ...finishRoot(),
       ...toVerified("a"),
       ev(changed("root", { type: "markReclaimable", discarded: false })),
     ]);
@@ -172,7 +181,7 @@ describe("畳み込み（状態はイベント列からのみ導出）", () => {
     const good = must(
       foldEvents([
         ...tree,
-        ...toVerified("root"),
+        ...finishRoot(),
         ...toVerified("a"),
         ev(changed("a", { type: "markReclaimable", discarded: false })),
         ev(changed("root", { type: "markReclaimable", discarded: false })),
@@ -202,7 +211,7 @@ describe("scope.violation / inbox / 判断", () => {
     const b = base();
     const e = ev({
       type: "inbox.added",
-      payload: { id: "i1", kind: "progress", nodeId: "a", dependsOn: [] },
+      payload: { id: "i1", kind: "progress", nodeId: "a" },
     });
     const s = must(foldEvents([...b, e]));
     expect(s.inbox).toEqual([
@@ -211,7 +220,7 @@ describe("scope.violation / inbox / 判断", () => {
     const dup = foldEvents([
       ...b,
       e,
-      ev({ type: "inbox.added", payload: { id: "i1", kind: "info", nodeId: "a", dependsOn: [] } }),
+      ev({ type: "inbox.added", payload: { id: "i1", kind: "info", nodeId: "a" } }),
     ]);
     expect(dup.ok ? null : dup.error.code).toBe("duplicateInboxId");
   });
@@ -221,13 +230,13 @@ describe("scope.violation / inbox / 判断", () => {
       ...base(),
       ev({
         type: "inbox.added",
-        payload: { id: "i", kind: "bogus" as never, nodeId: "a", dependsOn: [] },
+        payload: { id: "i", kind: "bogus" as never, nodeId: "a" },
       }),
     ]);
     expect(r.ok ? null : r.error.code).toBe("invalidPayload");
     const r2 = foldEvents([
       ...base(),
-      ev({ type: "inbox.added", payload: { id: "i", kind: "info", nodeId: "zzz", dependsOn: [] } }),
+      ev({ type: "inbox.added", payload: { id: "i", kind: "info", nodeId: "zzz" } }),
     ]);
     expect(r2.ok ? null : r2.error.code).toBe("unknownNode");
   });
@@ -312,12 +321,12 @@ describe("requestId の冪等性（NFR_003）", () => {
     const b = base();
     const e1 = ev({
       type: "inbox.added",
-      payload: { id: "i", kind: "info", nodeId: "a", dependsOn: [] },
+      payload: { id: "i", kind: "info", nodeId: "a" },
     });
     const e2 = {
       ...e1,
       seq: e1.seq + 100,
-      payload: { dependsOn: [], nodeId: "a", kind: "info", id: "i" },
+      payload: { nodeId: "a", kind: "info", id: "i" },
     } as OrchEvent;
     expect(must(foldEvents([...b, e1, e2]))).toEqual(must(foldEvents([...b, e1])));
   });
@@ -371,11 +380,12 @@ function buildLog(steps: readonly Pick3[]): OrchEvent[] {
     } as OrchEvent;
     const r = applyEvent(state, e);
     if (r.ok) {
-      state = r.value;
+      state = r.value.state;
       log.push(e);
     }
   };
   tryAdd(created("n0", "integrator", null));
+  tryAdd(changed("n0", { type: "start" }));
   steps.forEach(([k, a, b], i) => {
     const ids = state.nodes.map((x) => x.id);
     const pick = (x: number): string => ids[x % ids.length] as string;
@@ -409,7 +419,6 @@ function buildLog(steps: readonly Pick3[]): OrchEvent[] {
             id: `i${i}`,
             kind: INBOX_KINDS[b % INBOX_KINDS.length] as never,
             nodeId: pick(a),
-            dependsOn: [],
           },
         });
         break;
@@ -446,7 +455,10 @@ describe("性質（fast-check）", () => {
         for (const e of log) {
           const r = applyEvent(s, e);
           expect(r.ok).toBe(true);
-          if (r.ok) s = r.value;
+          if (r.ok) {
+            expect(r.value.applied).toBe(true);
+            s = r.value.state;
+          }
         }
         expect(must(foldEvents(log))).toEqual(s);
       }),
@@ -499,11 +511,12 @@ describe("性質（fast-check）", () => {
           expect([
             "invalidTransition",
             "dependenciesNotVerified",
+            "parentNotActive",
             "reclaimInvariant",
             "discardRequired",
             "alreadyFinished",
           ]).toContain(r.error.code);
-        else expect(r.value.nodes.length).toBe(s.nodes.length);
+        else expect(r.value.state.nodes.length).toBe(s.nodes.length);
       }),
     );
   });
@@ -515,6 +528,292 @@ describe("性質（fast-check）", () => {
         const ids = new Set(s.nodes.map((n) => n.id));
         expect(ids.size).toBe(s.nodes.length);
         for (const n of s.nodes) if (n.parentId !== null) expect(ids.has(n.parentId)).toBe(true);
+      }),
+    );
+  });
+});
+
+describe("親の状態・依存の制約", () => {
+  const tree = (): OrchEvent[] => [
+    ev(created("root", "integrator", null)),
+    ev(changed("root", { type: "start" })),
+  ];
+
+  it("子を作れるのは、親が running か waiting のときだけ", () => {
+    const pendingParent = foldEvents([
+      ...tree(),
+      ev(created("m", "integrator", "root")), // pending のまま
+      ev(created("c", "implement", "m")),
+    ]);
+    expect(pendingParent.ok ? null : pendingParent.error.code).toBe("parentNotActive");
+
+    const waiting = must(
+      foldEvents([
+        ...tree(),
+        ev(changed("root", { type: "requestDecision" })),
+        ev(created("c", "implement", "root")),
+      ]),
+    );
+    expect(stateOf(waiting, "c")).toBe("pending");
+
+    for (const [steps, label] of [
+      [[{ type: "reportDone" }], "done"],
+      [[{ type: "reportDone" }, { type: "accept" }], "verified"],
+      [[{ type: "stop", mode: "immediate" }], "stopping"],
+      [[{ type: "stop", mode: "immediate" }, { type: "confirmStopped" }], "stopped"],
+    ] as const) {
+      const r = foldEvents([
+        ...tree(),
+        ...steps.map((e) => ev(changed("root", e as NodeEvent))),
+        ev(created("c", "implement", "root")),
+      ]);
+      expect(r.ok ? null : r.error.code, label).toBe("parentNotActive");
+    }
+  });
+
+  it("依存先に、自分の親・祖先は指定できない（相互待ちの防止）", () => {
+    const withMid = [
+      ...tree(),
+      ev(created("m", "integrator", "root")),
+      ev(changed("m", { type: "start" })),
+      ev(created("sib", "implement", "root")),
+    ];
+    for (const dep of ["m", "root"]) {
+      const r = foldEvents([...withMid, ev(created("c", "implement", "m", [dep]))]);
+      expect(r.ok ? null : r.error.code, dep).toBe("dependsOnAncestor");
+    }
+    const ok1 = must(foldEvents([...withMid, ev(created("c", "implement", "m", ["sib"]))]));
+    expect(stateOf(ok1, "c")).toBe("pending");
+  });
+
+  it("依存先の完了は verified 以降（verified・reclaimable・archived）。done では起動できない", () => {
+    const b = base();
+    const toArchived: OrchEvent[] = [
+      ev(changed("a", { type: "start" })),
+      ev(changed("a", { type: "reportDone" })),
+      ev(changed("a", { type: "accept" })),
+      ev(changed("a", { type: "markReclaimable", discarded: false })),
+      ev(changed("a", { type: "archive" })),
+    ];
+    const s = must(foldEvents([...b, ...toArchived, ev(changed("b", { type: "start" }))]));
+    expect(stateOf(s, "a")).toBe("archived");
+    expect(stateOf(s, "b")).toBe("running");
+  });
+});
+
+describe("applyEvent の結果と不変性", () => {
+  it("新しいイベントは applied: true、重複は applied: false で状態は同一", () => {
+    const s = must(foldEvents(base()));
+    const e = ev({
+      type: "scope.violation",
+      payload: { nodeId: "a", reason: "outsideWritable", subject: "/x" },
+    });
+    const r1 = applyEvent(s, e);
+    expect(r1.ok && r1.value.applied).toBe(true);
+    if (!r1.ok) throw new Error("unexpected");
+    const dup = applyEvent(r1.value.state, { ...e, seq: e.seq + 1000 } as OrchEvent);
+    expect(dup.ok && dup.value.applied).toBe(false);
+    expect(dup.ok && dup.value.state).toBe(r1.value.state);
+  });
+
+  it("導出した状態は凍結されている（入力の状態も変更されない）", () => {
+    const s = must(foldEvents(base()));
+    expect(Object.isFrozen(s)).toBe(true);
+    expect(Object.isFrozen(s.nodes)).toBe(true);
+    expect(Object.isFrozen(s.nodes[0])).toBe(true);
+    const before = JSON.stringify(s);
+    applyEvent(s, ev(created("z", "implement", "root")));
+    expect(JSON.stringify(s)).toBe(before);
+  });
+
+  it("inbox.added の依存先はノードの記録から導き、payload の値は使わない", () => {
+    const b = base();
+    const e = ev({
+      type: "inbox.added",
+      payload: { id: "i", kind: "info", nodeId: "b", dependsOn: ["root"] } as never,
+    });
+    const s = must(foldEvents([...b, e]));
+    expect(s.inbox[0]?.dependsOn).toEqual(["a"]);
+  });
+
+  it("inbox.added の at は ISO 8601 UTC でなければ拒否される", () => {
+    const b = base();
+    const e = {
+      ...ev({ type: "inbox.added", payload: { id: "i", kind: "info", nodeId: "a" } }),
+      at: "yesterday",
+    } as OrchEvent;
+    const r = foldEvents([...b, e]);
+    expect(r.ok ? null : r.error.code).toBe("invalidPayload");
+  });
+
+  it("スナップショットからの再開: 接頭辞の状態に残りを畳み込むと、全体の畳み込みと一致する", () => {
+    fc.assert(
+      fc.property(logArb, fc.nat(), (log, cut) => {
+        const k = cut % (log.length + 1);
+        const snapshot = must(foldEvents(log.slice(0, k)));
+        expect(must(foldEvents(log.slice(k), snapshot))).toEqual(must(foldEvents(log)));
+      }),
+    );
+  });
+
+  it("大きなログでも現実的な時間で畳み込める（3000 ノード）", () => {
+    const log: OrchEvent[] = [
+      {
+        seq: 1,
+        at: "2026-10-20T00:00:00Z",
+        requestId: "r1",
+        actor: SYS,
+        ...created("root", "integrator", null),
+      },
+      {
+        seq: 2,
+        at: "2026-10-20T00:00:00Z",
+        requestId: "r2",
+        actor: SYS,
+        ...changed("root", { type: "start" }),
+      },
+    ];
+    for (let i = 0; i < 3000; i++) {
+      log.push({
+        seq: i + 3,
+        at: "2026-10-20T00:00:00Z",
+        requestId: `c${i}`,
+        actor: SYS,
+        ...created(`n${i}`, "implement", "root"),
+      });
+    }
+    const t0 = Date.now();
+    const s = must(foldEvents(log));
+    expect(s.nodes).toHaveLength(3001);
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+});
+
+describe("壊れたイベントでも例外を出さない（全域関数）", () => {
+  it("任意の値をイベントとして渡しても、foldEvents・applyEvent は例外を出さず、失敗か成功を返す", () => {
+    fc.assert(
+      fc.property(fc.array(fc.anything(), { maxLength: 6 }), (junk) => {
+        const r = foldEvents(junk as never);
+        expect(typeof r.ok).toBe("boolean");
+        for (const j of junk) {
+          const a = applyEvent(initialState(), j as never);
+          expect(typeof a.ok).toBe("boolean");
+        }
+      }),
+    );
+  });
+
+  it("妥当なイベントの一部の項目を壊しても、例外を出さず、失敗する", () => {
+    const junkValue = fc.oneof(
+      fc.constant(null),
+      fc.constant(undefined),
+      fc.integer(),
+      fc.string(),
+      fc.array(fc.anything()),
+      fc.object(),
+    );
+    const mutate = (e: OrchEvent, key: string, v: unknown): OrchEvent => {
+      const copy: Record<string, unknown> = { ...e };
+      if (key.startsWith("payload."))
+        copy.payload = { ...(e.payload as object), [key.slice(8)]: v };
+      else copy[key] = v;
+      return copy as unknown as OrchEvent;
+    };
+    fc.assert(
+      fc.property(
+        logArb,
+        fc.nat(),
+        junkValue,
+        fc.constantFrom(
+          "seq",
+          "at",
+          "requestId",
+          "actor",
+          "type",
+          "payload",
+          "payload.nodeId",
+          "payload.event",
+          "payload.kind",
+          "payload.role",
+          "payload.dependsOn",
+          "payload.answer",
+          "payload.decisionId",
+        ),
+        (log, pick, v, key) => {
+          fc.pre(log.length > 0);
+          const target = pick % log.length;
+          const broken = log.map((e, i) => (i === target ? mutate(e, key, v) : e));
+          const r = foldEvents(broken);
+          expect(typeof r.ok).toBe("boolean");
+        },
+      ),
+    );
+  });
+
+  it("イベントが null や配列でも失敗を返す", () => {
+    for (const j of [null, undefined, 1, "x", [], {}, { seq: 1 }, { seq: 1, requestId: "r" }]) {
+      const r = foldEvents([j as never]);
+      expect(r.ok, JSON.stringify(j)).toBe(false);
+    }
+  });
+
+  it("payload の値を型ガードで検証する（role・mode・discarded・answer・reason）", () => {
+    const b = base();
+    const bad: EventBody[] = [
+      {
+        type: "node.created",
+        payload: { nodeId: "x", role: "boss" as never, parentId: "root", dependsOn: [] },
+      },
+      {
+        type: "node.stateChanged",
+        payload: { nodeId: "a", event: { type: "stop", mode: "soon" } as never },
+      },
+      {
+        type: "node.stateChanged",
+        payload: { nodeId: "a", event: { type: "markReclaimable", discarded: "yes" } as never },
+      },
+      { type: "node.stateChanged", payload: { nodeId: "a", event: { type: "teleport" } as never } },
+      { type: "decision.answered", payload: { decisionId: "d", answer: 5 as never } },
+      {
+        type: "scope.violation",
+        payload: { nodeId: "a", reason: "whatever" as never, subject: "s" },
+      },
+    ];
+    for (const body of bad) {
+      const r = foldEvents([...b, ev(body)]);
+      expect(r.ok ? null : r.error.code, JSON.stringify(body)).toBe("invalidPayload");
+    }
+  });
+});
+
+describe("requestId・seq の性質（fast-check）", () => {
+  it("同じ requestId で内容が違うイベントは、必ず requestIdConflict", () => {
+    fc.assert(
+      fc.property(logArb, fc.nat(), (log, pick) => {
+        fc.pre(log.length > 0);
+        const first = log[pick % log.length] as OrchEvent;
+        const clash = {
+          seq: 1_000_000,
+          at: first.at,
+          requestId: first.requestId,
+          actor: first.actor,
+          type: "scope.violation",
+          payload: { nodeId: "n0", reason: "outsideWritable", subject: `clash-${first.requestId}` },
+        } as OrchEvent;
+        const r = foldEvents([...log, clash]);
+        expect(r.ok ? null : r.error.code).toBe("requestIdConflict");
+      }),
+    );
+  });
+
+  it("seq が重複すれば、入力順にかかわらず必ず duplicateSeq", () => {
+    fc.assert(
+      fc.property(logArb, fc.nat(), fc.boolean(), (log, pick, front) => {
+        fc.pre(log.length > 0);
+        const first = log[pick % log.length] as OrchEvent;
+        const twin = { ...first, requestId: `twin-${first.requestId}` } as OrchEvent;
+        const r = foldEvents(front ? [twin, ...log] : [...log, twin]);
+        expect(r.ok ? null : r.error.code).toBe("duplicateSeq");
       }),
     );
   });
