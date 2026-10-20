@@ -9,6 +9,16 @@
 import { type Failure, failure, ok, type Result } from "./contract.js";
 import type { NodeState } from "./index.js";
 
+/**
+ * 「完了」とみなす状態（FR_008）。依存先がこれらのいずれかなら、依存元は起動できる（T07）。
+ * 回収可能判定（T05）の条件 3 でも、依存元が完了しているかの判定に使う。
+ */
+export const COMPLETED_STATES: ReadonlySet<NodeState> = new Set([
+  "verified",
+  "reclaimable",
+  "archived",
+]);
+
 export type StopMode = "graceful" | "immediate";
 
 export type NodeEvent =
