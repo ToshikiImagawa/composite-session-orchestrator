@@ -25,7 +25,7 @@
 
 ## セットアップ
 
-Node 20 以上と pnpm 10.28.0（`packageManager` で固定）が必要です。
+Node 22 以上と pnpm 10.28.0（`packageManager` で固定）が必要です。
 
 ```bash
 pnpm install --frozen-lockfile
@@ -33,6 +33,8 @@ pnpm check   # lint、typecheck、build、test、plugin 検証をまとめて実
 ```
 
 `pnpm validate:plugin` は `plugin/.claude-plugin/plugin.json` の JSON 構文、必須項目（name、version、description）、name の kebab-case、version の semver、`plugin/{agents,hooks,skills}` の存在を確認します。
+
+`pnpm install` に「Ignored build scripts: better-sqlite3」という警告が出ますが、無害です。better-sqlite3 13 系はビルド済みのバイナリを同梱しており、ビルドスクリプトを実行しなくても動きます（許可すると、不要なコンパイルが走りうるため許可していません）。
 
 個別に実行する場合は `pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm test`、`pnpm validate:plugin` を使います。整形は `pnpm format` です。
 
