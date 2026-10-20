@@ -1,13 +1,21 @@
 import {
   type EventBody,
   foldEvents,
+  INTEGRATOR_OPERATION_CLASS,
+  type NodeEvent,
   type OrchEvent,
   type OrchState,
   ROLE_OPERATIONS,
+  SUBTREE_RULES,
   SUBTREE_SCOPED_OPERATIONS,
 } from "@cso/core";
 import { describe, expect, it } from "vitest";
-import { authorize } from "../../src/api/authorize.js";
+import {
+  authorize,
+  authorizeRole,
+  authorizeScope,
+  checkPrincipal,
+} from "../../src/api/authorize.js";
 import type { Principal } from "../../src/api/credentials.js";
 
 let n = 0;
@@ -79,30 +87,78 @@ describe("ロールごとの操作（ROLE_OPERATIONS）", () => {
   });
 });
 
-describe("読める範囲（自分の部分木のみ）", () => {
-  it("統合ノードは、自分の部分木のノードを指す操作だけ許可する", () => {
-    for (const op of SUBTREE_SCOPED_OPERATIONS) {
-      if (op === "decision.get" || op === "report.get") continue;
-      const p = (nodeId: string) =>
-        op === "node.stop"
-          ? { nodeId, mode: "graceful" }
-          : op === "node.send"
-            ? { nodeId, text: "x" }
-            : op === "node.split"
-              ? { nodeId, brief: "b", keep: "stop" }
-              : op === "node.review"
-                ? { nodeId, verdict: "accept" }
-                : { nodeId };
-      expect(run(m1, op, p("a")).ok, `${op} 子孫`).toBe(true);
-      expect(run(m1, op, p("m1")).ok, `${op} 自分`).toBe(true);
-      expect(code(run(m1, op, p("b"))), `${op} 兄弟の部分木`).toBe("forbidden");
-      expect(code(run(m1, op, p("root"))), `${op} 祖先`).toBe("forbidden");
-      expect(code(run(m1, op, p("zzz"))), `${op} 未知`).toBe("forbidden");
-      expect(run(root, op, p("b")).ok, `${op} 根は全体`).toBe(true);
+describe("読める範囲（部分木の規則）", () => {
+  const nodeParams = (op: string, nodeId: string) =>
+    op === "node.stop"
+      ? { nodeId, mode: "graceful" }
+      : op === "node.send"
+        ? { nodeId, text: "x" }
+        : op === "node.split"
+          ? { nodeId, brief: "b", keep: "stop" }
+          : op === "node.review"
+            ? { nodeId, verdict: "accept" }
+            : { nodeId };
+
+  it("strictDescendant: 自分の子孫だけ。自分自身・祖先・兄弟の部分木・未知は forbidden（自分の停止は親か人間だけ）", () => {
+    for (const op of [
+      "node.send",
+      "node.stop",
+      "node.split",
+      "node.reclaimPreview",
+      "node.reclaim",
+      "node.capabilities",
+    ]) {
+      expect(run(m1, op, nodeParams(op, "a")).ok, `${op} 子孫`).toBe(true);
+      expect(code(run(m1, op, nodeParams(op, "m1"))), `${op} 自分`).toBe("forbidden");
+      expect(code(run(m1, op, nodeParams(op, "b"))), `${op} 兄弟の部分木`).toBe("forbidden");
+      expect(code(run(m1, op, nodeParams(op, "root"))), `${op} 祖先`).toBe("forbidden");
+      expect(code(run(m1, op, nodeParams(op, "zzz"))), `${op} 未知`).toBe("forbidden");
+      expect(run(root, op, nodeParams(op, "b")).ok, `${op} 根は全体の子孫`).toBe(true);
+      expect(code(run(root, op, nodeParams(op, "root"))), `${op} 根の自分`).toBe("forbidden");
     }
   });
 
-  it("decision.get・report.get は、記録のノードで判定する。範囲外と未知は区別しない（notFound）", () => {
+  it("directChild: node.review（完了の判定）は直接の親だけ", () => {
+    expect(run(m1, "node.review", nodeParams("node.review", "a")).ok).toBe(true);
+    expect(code(run(root, "node.review", nodeParams("node.review", "a")))).toBe("forbidden"); // 孫
+    expect(run(root, "node.review", nodeParams("node.review", "m1")).ok).toBe(true);
+    expect(code(run(m1, "node.review", nodeParams("node.review", "m1")))).toBe("forbidden");
+    expect(code(run(m1, "node.review", nodeParams("node.review", "b")))).toBe("forbidden");
+  });
+
+  it("node.spawn の parentId は、自分か自分の子孫（selfOrDescendant）", () => {
+    const spawn = (parentId: string) => ({ brief: "b", parentId });
+    expect(run(m1, "node.spawn", spawn("m1")).ok).toBe(true);
+    expect(run(m1, "node.spawn", spawn("a")).ok).toBe(true);
+    expect(code(run(m1, "node.spawn", spawn("m2")))).toBe("forbidden");
+    expect(code(run(m1, "node.spawn", spawn("root")))).toBe("forbidden");
+    expect(code(run(m1, "node.spawn", spawn("zzz")))).toBe("forbidden");
+  });
+
+  it("decision.present の pauseNodeIds は、すべて厳密な子孫（1 つでも外れれば forbidden）", () => {
+    const present = (pauseNodeIds?: string[]) => ({
+      question: "q",
+      options: ["A"],
+      ...(pauseNodeIds === undefined ? {} : { pauseNodeIds }),
+    });
+    expect(run(m1, "decision.present", present()).ok).toBe(true);
+    expect(run(m1, "decision.present", present([])).ok).toBe(true);
+    expect(run(m1, "decision.present", present(["a"])).ok).toBe(true);
+    expect(code(run(m1, "decision.present", present(["a", "b"])))).toBe("forbidden");
+    expect(code(run(m1, "decision.present", present(["m1"])))).toBe("forbidden");
+    expect(code(run(m1, "decision.present", present(["zzz"])))).toBe("forbidden");
+  });
+
+  it("scope.decide は、発生元の記録ができるまで統合ロールからの呼び出しを拒否する（フェイルクローズ）", () => {
+    expect(code(run(m1, "scope.decide", { extensionId: "e", decision: "approve" }))).toBe(
+      "forbidden",
+    );
+    expect(code(run(root, "scope.decide", { extensionId: "e", decision: "approve" }))).toBe(
+      "forbidden",
+    );
+  });
+
+  it("decision.get・report.get は、記録のノード（自分か子孫）で判定する。範囲外と未知は区別しない（notFound）", () => {
     expect(run(m1, "decision.get", { decisionId: "da" }).ok).toBe(true);
     expect(run(m1, "report.get", { reportId: "ra" }).ok).toBe(true);
     expect(code(run(m1, "decision.get", { decisionId: "db" }))).toBe("notFound");
@@ -119,6 +175,56 @@ describe("読める範囲（自分の部分木のみ）", () => {
     expect(code(run({ role: "child", nodeId: "ghost" }, "report.progress", { text: "x" }))).toBe(
       "forbidden",
     );
+  });
+});
+
+describe("主体の検査（checkPrincipal: トークンのロールとノードの状態）", () => {
+  const withState = (extra: EventBody[] = []): OrchState => {
+    const r = foldEvents([
+      created("root", "integrator", null),
+      start("root"),
+      created("m1", "integrator", "root"),
+      start("m1"),
+      created("a", "implement", "m1"),
+      start("a"),
+      ...extra.map(ev),
+    ]);
+    if (!r.ok) throw new Error(r.error.code);
+    return r.value;
+  };
+  const stateOf = (nodeId: string, ...events: NodeEvent[]) =>
+    withState(events.map((event) => ({ type: "node.stateChanged", payload: { nodeId, event } })));
+
+  it("人間は常に有効。ノードのトークンは、ノードが木にあり、ロールが NodeRecord.role と合うときだけ有効", () => {
+    expect(checkPrincipal(human, withState()).ok).toBe(true);
+    expect(checkPrincipal(m1, withState()).ok).toBe(true);
+    expect(checkPrincipal(childA, withState()).ok).toBe(true);
+    expect(code(checkPrincipal({ role: "integrator", nodeId: "ghost" }, withState()))).toBe(
+      "unauthenticated",
+    );
+    // 子のトークンで統合ノードを名乗る・逆
+    expect(code(checkPrincipal({ role: "child", nodeId: "m1" }, withState()))).toBe(
+      "unauthenticated",
+    );
+    expect(code(checkPrincipal({ role: "integrator", nodeId: "a" }, withState()))).toBe(
+      "unauthenticated",
+    );
+  });
+
+  it("停止後（stopIncomplete・stopped）・回収可能・アーカイブのノードのトークンは無効。停止要求中（stopping）は有効", () => {
+    const stopping = stateOf("a", { type: "stop", mode: "graceful" });
+    expect(checkPrincipal(childA, stopping).ok).toBe(true);
+    const incomplete = stateOf("a", { type: "stop", mode: "immediate" }, { type: "stopTimeout" });
+    expect(code(checkPrincipal(childA, incomplete))).toBe("unauthenticated");
+    const stopped = stateOf("a", { type: "stop", mode: "immediate" }, { type: "confirmStopped" });
+    expect(code(checkPrincipal(childA, stopped))).toBe("unauthenticated");
+    const reclaimable = stateOf(
+      "a",
+      { type: "stop", mode: "immediate" },
+      { type: "confirmStopped" },
+      { type: "markReclaimable", discarded: true },
+    );
+    expect(code(checkPrincipal(childA, reclaimable))).toBe("unauthenticated");
   });
 });
 
@@ -141,12 +247,30 @@ describe("申告の検査（ロール・caller は認証で決める）", () => 
   });
 });
 
+describe("判定の順序（ロール → 引数の検証 → 部分木）", () => {
+  it("authorizeRole は引数を見ない。ロールのない操作は、引数が不正でも forbidden", () => {
+    expect(code(authorizeRole(childA, "node.stop", {}))).toBe("forbidden");
+    expect(authorizeRole(m1, "node.stop", {}).ok).toBe(true);
+  });
+  it("authorizeScope は検証済みの引数で、部分木だけを判定する", () => {
+    expect(code(authorizeScope(m1, "node.stop", { nodeId: "b", mode: "graceful" }, S))).toBe(
+      "forbidden",
+    );
+    expect(authorizeScope(m1, "node.stop", { nodeId: "a", mode: "graceful" }, S).ok).toBe(true);
+  });
+});
+
 describe("操作表との整合", () => {
-  it("統合ノードの操作は、部分木の対象を持つものを除き、引数なしの判定だけで通る", () => {
-    const scoped = new Set<string>(SUBTREE_SCOPED_OPERATIONS);
+  it("統合ノードの操作は、分類（INTEGRATOR_OPERATION_CLASS）のとおりに判定される", () => {
     for (const op of ROLE_OPERATIONS.integrator) {
-      if (scoped.has(op)) continue;
-      expect(authorize(m1, op, {} as never, S, {}).ok, op).toBe(true);
+      const cls = INTEGRATOR_OPERATION_CLASS[op];
+      const r = authorize(m1, op, {} as never, S, {});
+      // decision.present は pauseNodeIds が任意（省略なら対象なし）
+      if (cls === "callerFiltered" || op === "decision.present") expect(r.ok, op).toBe(true);
+      else expect(r.ok, op).toBe(false);
     }
+  });
+  it("SUBTREE_SCOPED_OPERATIONS は SUBTREE_RULES のキー", () => {
+    expect([...SUBTREE_SCOPED_OPERATIONS].sort()).toEqual(Object.keys(SUBTREE_RULES).sort());
   });
 });

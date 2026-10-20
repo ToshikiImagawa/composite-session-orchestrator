@@ -9,6 +9,7 @@ import {
   err,
   type Failure,
   failure,
+  INTEGRATOR_OPERATION_CLASS,
   isErr,
   isFailure,
   isOk,
@@ -18,6 +19,7 @@ import {
   type Result,
   ROLE_OPERATIONS,
   type RoleOperation,
+  SUBTREE_RULES,
   SUBTREE_SCOPED_OPERATIONS,
 } from "../src/index.js";
 
@@ -96,22 +98,36 @@ describe("操作の契約（NFR_004, DC_003）", () => {
     expect(preview.nodeIds).toHaveLength(2);
   });
 
-  it("統合ノードの操作のうち、ノード・判断・報告を指すものは自分の部分木に限る（適用は窓口。T13 以降）", () => {
-    expect([...SUBTREE_SCOPED_OPERATIONS].sort()).toEqual(
-      [
-        "decision.get",
-        "node.capabilities",
-        "node.reclaim",
-        "node.reclaimPreview",
-        "node.review",
-        "node.send",
-        "node.split",
-        "node.stop",
-        "report.get",
-      ].sort(),
+  it("統合ノードの操作を、部分木の規則・呼び出し側で絞る・拒否の 3 つに分類する（表は型で網羅される）", () => {
+    for (const op of ROLE_OPERATIONS.integrator) {
+      expect(["subtree", "callerFiltered", "denied"], op).toContain(INTEGRATOR_OPERATION_CLASS[op]);
+    }
+    expect(Object.keys(INTEGRATOR_OPERATION_CLASS).sort()).toEqual(
+      [...ROLE_OPERATIONS.integrator].sort(),
     );
+    expect(INTEGRATOR_OPERATION_CLASS["inbox.fetch"]).toBe("callerFiltered");
+    expect(INTEGRATOR_OPERATION_CLASS["tree.list"]).toBe("callerFiltered");
+    // 発生元の記録がまだないので、記録ができるまでは統合ロールからの呼び出しを拒否する
+    expect(INTEGRATOR_OPERATION_CLASS["scope.decide"]).toBe("denied");
+  });
+
+  it("部分木の規則の表: 操作ごとに strictDescendant・directChild・selfOrDescendant を決める", () => {
+    expect(SUBTREE_RULES).toEqual({
+      "node.spawn": "selfOrDescendant", // parentId。自分の子を作れる
+      "node.send": "strictDescendant",
+      "node.stop": "strictDescendant", // 自分の停止は、親か人間だけができる
+      "node.split": "strictDescendant",
+      "node.review": "directChild", // 完了の判定は親だけ
+      "node.reclaimPreview": "strictDescendant",
+      "node.reclaim": "strictDescendant",
+      "node.capabilities": "strictDescendant",
+      "decision.present": "strictDescendant", // pauseNodeIds のすべて
+      "decision.get": "selfOrDescendant", // 記録のノード
+      "report.get": "selfOrDescendant",
+    });
+    expect([...SUBTREE_SCOPED_OPERATIONS].sort()).toEqual(Object.keys(SUBTREE_RULES).sort());
     for (const op of SUBTREE_SCOPED_OPERATIONS) {
-      expect(ROLE_OPERATIONS.integrator as readonly string[], op).toContain(op);
+      expect(INTEGRATOR_OPERATION_CLASS[op], op).toBe("subtree");
     }
   });
 

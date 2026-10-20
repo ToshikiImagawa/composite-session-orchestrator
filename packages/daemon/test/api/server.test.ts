@@ -2,7 +2,12 @@ import { request as httpRequest } from "node:http";
 import { type EventBody, foldEvents, type OrchEvent, type OrchState, ok } from "@cso/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCredentialStore } from "../../src/api/credentials.js";
-import { type ApiServer, createApiServer, type Handlers } from "../../src/api/server.js";
+import {
+  type ApiLogger,
+  type ApiServer,
+  createApiServer,
+  type Handlers,
+} from "../../src/api/server.js";
 
 let n = 0;
 const ev = (body: EventBody): OrchEvent =>
@@ -52,10 +57,14 @@ afterEach(async () => {
   rig = undefined;
 });
 
-const start = async (handlers?: Handlers, over: { maxBodyBytes?: number } = {}): Promise<Rig> => {
+const start = async (
+  handlers?: Handlers,
+  over: { maxBodyBytes?: number; logger?: ApiLogger; state?: OrchState } = {},
+): Promise<Rig> => {
   const credentials = createCredentialStore({ humanToken: HUMAN });
   const calls: unknown[] = [];
-  const s = state();
+  const s = over.state ?? state();
+  const { state: _ignored, ...rest } = over;
   const server = createApiServer({
     credentials,
     getState: () => s,
@@ -73,7 +82,7 @@ const start = async (handlers?: Handlers, over: { maxBodyBytes?: number } = {}):
         return ok({ purged: [req.params.nodeId] });
       },
     },
-    ...over,
+    ...rest,
   });
   const { port, url } = await server.listen(0);
   rig = {
@@ -317,5 +326,148 @@ describe("窓口の HTTP サーバー（127.0.0.1）", () => {
     } finally {
       await server.close();
     }
+  });
+});
+
+describe("判定の順序・主体の検査・チャンク転送・結果の写し・ログ", () => {
+  it("ロールの判定は引数の検証より先（ロールのない操作は、引数が不正でも 403。400 で形を教えない）", async () => {
+    const r = await start();
+    const res = await post(
+      r,
+      { requestId: "o1", operation: "node.stop", params: { bogus: 1 } },
+      bearer(r.tokens.a),
+    );
+    expect(res.status).toBe(403);
+    const ok = await post(
+      r,
+      { requestId: "o2", operation: "node.send", params: { bogus: 1 } },
+      bearer(r.tokens.m1),
+    );
+    expect(ok.status).toBe(400); // ロールがある操作は、引数の形を検証する
+  });
+
+  it("停止後・回収済みのノードのトークンは 401（トークンが生きていても使えない）", async () => {
+    const stopped = foldEvents([
+      ev({
+        type: "node.created",
+        payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+      }),
+      ev({ type: "node.stateChanged", payload: { nodeId: "root", event: { type: "start" } } }),
+      ev({
+        type: "node.created",
+        payload: { nodeId: "a", role: "implement", parentId: "root", dependsOn: [] },
+      }),
+      ev({ type: "node.stateChanged", payload: { nodeId: "a", event: { type: "start" } } }),
+      ev({
+        type: "node.stateChanged",
+        payload: { nodeId: "a", event: { type: "stop", mode: "immediate" } },
+      }),
+      ev({
+        type: "node.stateChanged",
+        payload: { nodeId: "a", event: { type: "confirmStopped" } },
+      }),
+    ]);
+    if (!stopped.ok) throw new Error(stopped.error.code);
+    const r = await start(undefined, { state: stopped.value });
+    const res = await post(
+      r,
+      { requestId: "p1", operation: "report.progress", params: { text: "x" } },
+      bearer(r.tokens.a),
+    );
+    expect(res.status).toBe(401);
+    expect(res.json.error.code).toBe("unauthenticated");
+  });
+
+  it("チャンク転送で上限を超えたら 413 を返して接続を破棄する（上限を超えて読み続けない）", async () => {
+    const r = await start(undefined, { maxBodyBytes: 200 });
+    const result = await new Promise<{ status: number; closed: boolean }>((resolve, reject) => {
+      let status = 0;
+      let socketClosed = false;
+      const req = httpRequest({
+        host: "127.0.0.1",
+        port: r.port,
+        path: "/v1/request",
+        method: "POST",
+        agent: false,
+        headers: {
+          "content-type": "application/json",
+          ...bearer(r.tokens.m1),
+          "transfer-encoding": "chunked",
+        },
+      });
+      req.on("socket", (sock) => sock.once("close", () => (socketClosed = true)));
+      req.on("response", (res) => {
+        status = res.statusCode ?? 0;
+        res.resume();
+      });
+      req.on("error", () => undefined);
+      const timer = setInterval(() => {
+        if (!req.destroyed) req.write("x".repeat(100));
+      }, 5);
+      const settle = setInterval(() => {
+        if (socketClosed) {
+          clearInterval(timer);
+          clearInterval(settle);
+          resolve({ status, closed: true });
+        }
+      }, 10);
+      setTimeout(() => {
+        clearInterval(timer);
+        clearInterval(settle);
+        req.destroy();
+        reject(new Error("接続が閉じられなかった"));
+      }, 4000);
+    });
+    expect(result.status).toBe(413);
+    expect(result.closed).toBe(true);
+  });
+
+  it("結果は OperationMap の result のキーだけに写して返す（余計なキーは返さない）。形が違う結果は 500", async () => {
+    const r = await start({
+      "tree.list": () => ({ ok: true, value: { table: "t", secret: "internal" } }) as never,
+      "node.send": () => ({ ok: true, value: "oops" }) as never,
+    });
+    const res = await post(r, treeList, bearer(r.tokens.m1));
+    expect(res.json).toEqual({ ok: true, value: { table: "t" } });
+    const bad = await post(
+      r,
+      { requestId: "x", operation: "node.send", params: { nodeId: "a", text: "x" } },
+      bearer(r.tokens.m1),
+    );
+    expect(bad.status).toBe(500);
+  });
+
+  it("ハンドラの例外は、注入した logger に記録する（応答には詳細を出さない）", async () => {
+    const logs: { requestId: string; operation: string; error: unknown }[] = [];
+    const r = await start(
+      {
+        "tree.list": () => {
+          throw new Error("secret-internal-detail");
+        },
+      },
+      { logger: (e) => logs.push(e) },
+    );
+    const res = await post(r, treeList, bearer(r.tokens.m1));
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(res.json)).not.toContain("secret-internal-detail");
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ requestId: "q1", operation: "tree.list" });
+    expect(String(logs[0]?.error)).toContain("secret-internal-detail");
+  });
+
+  it("logger が例外を投げても、応答は 500 のまま", async () => {
+    const r = await start(
+      {
+        "tree.list": () => {
+          throw new Error("x");
+        },
+      },
+      {
+        logger: () => {
+          throw new Error("logger broke");
+        },
+      },
+    );
+    expect((await post(r, treeList, bearer(r.tokens.m1))).status).toBe(500);
   });
 });

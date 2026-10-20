@@ -33,6 +33,9 @@ export function parseBearer(header: unknown): string | undefined {
   return token !== undefined && TOKEN_SHAPE.test(token) ? token : undefined;
 }
 
+/** 人間のトークンを生成する（`randomBytes(32).base64url` に固定。43 文字）。 */
+export const generateHumanToken = (): string => randomBytes(32).toString("base64url");
+
 const sha256 = (s: string): Buffer => createHash("sha256").update(s, "utf8").digest();
 
 export function createCredentialStore(options: {

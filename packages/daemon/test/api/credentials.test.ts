@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createCredentialStore, parseBearer } from "../../src/api/credentials.js";
+import {
+  createCredentialStore,
+  generateHumanToken,
+  parseBearer,
+} from "../../src/api/credentials.js";
 
 const HUMAN = "h".repeat(40);
 const store = () => createCredentialStore({ humanToken: HUMAN });
@@ -74,5 +78,15 @@ describe("認証情報（人間と、ノード専用のトークンを分ける�
     const t = s.issueNodeToken("m1", "integrator");
     expect(s.authenticate(t)?.role).not.toBe("human");
     expect(s.authenticate(HUMAN)).not.toHaveProperty("nodeId");
+  });
+});
+
+describe("generateHumanToken（人間のトークンの生成。randomBytes(32).base64url に固定）", () => {
+  it("43 文字の base64url で、毎回異なる。ストアの最小長を満たす", () => {
+    const a = generateHumanToken();
+    const b = generateHumanToken();
+    expect(a).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(a).not.toBe(b);
+    expect(createCredentialStore({ humanToken: a }).authenticate(a)).toEqual({ role: "human" });
   });
 });

@@ -3,10 +3,12 @@
  * PRD: NFR_003, NFR_004, DC_003 / design 4.2, 9.1
  *
  * 処理の順（どこで失敗しても拒否する。フェイルクローズ）:
- * Host・Origin → ルート・メソッド → 認証（401。本文を読む前）→ Content-Type → 本文（上限）→ 封筒 → 引数 →
- * 認可（403・404）→ ハンドラ。応答は常に `Result`（成功 `{ok:true,value}`、失敗 `{ok:false,error}`）で、HTTP の状態は
+ * Host・Origin → ルート・メソッド → 認証（401。本文を読む前）→ 主体の検査（トークンのロール・ノードの状態。401）→
+ * Content-Type → 本文（上限。超えたら 413 で接続を破棄）→ 封筒 → ロールの判定（403）→ 引数の検証（400）→
+ * 部分木の判定（403・404）→ ハンドラ。ロールの判定を先にして、ロールのない操作に引数の形を教えない。応答は常に `Result`（成功 `{ok:true,value}`、失敗 `{ok:false,error}`）で、HTTP の状態は
  * 失敗の種類を表す（401 未認証、403 権限なし、404 見つからない・未知の操作、400 不正な要求、413 本文が大きい、
- * 415 JSON でない、422 操作の失敗、500 内部エラー、501 未実装）。内部の例外の詳細は返さない。
+ * 415 JSON でない、422 操作の失敗、500 内部エラー、501 未実装）。内部の例外の詳細は返さず、`logger` に記録する。
+ * 成功の結果は、`OperationMap` の `result` のキーだけに写して返す（`pickResult`）。
  *
  * 操作の実体は `handlers` に差し込む（このファイルは入口と権限の判定だけを持つ）。ハンドラには、認証から決めた
  * ロールと caller と、検証済みの引数を渡す。caller の部分木に限った結果（受信箱・一覧）にするのはハンドラの責務。
@@ -23,8 +25,9 @@ import {
   type OrchState,
   type Result,
 } from "@cso/core";
-import { authorize } from "./authorize.js";
+import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
 import { type CredentialStore, parseBearer } from "./credentials.js";
+import { pickResult } from "./results.js";
 import { parseEnvelope, validateParams } from "./validate.js";
 
 export interface HandlerRequest<Op extends DaemonOperation = DaemonOperation> {
@@ -45,6 +48,13 @@ export type Handlers = {
     | Promise<Result<OperationMap[Op]["result"], Failure>>;
 };
 
+/** 500 の原因の記録（応答には出さない）。logger が例外を投げても、応答は変えない。 */
+export type ApiLogger = (event: {
+  readonly requestId: string;
+  readonly operation: DaemonOperation;
+  readonly error: unknown;
+}) => void;
+
 export interface ApiDeps {
   readonly credentials: CredentialStore;
   /** 認可（部分木の判定）に使う現在の状態。 */
@@ -52,6 +62,8 @@ export interface ApiDeps {
   readonly handlers: Handlers;
   /** 本文の上限（バイト）。既定 1 MiB。 */
   readonly maxBodyBytes?: number;
+  /** 500 の原因を記録する。省略すると記録しない。 */
+  readonly logger?: ApiLogger;
 }
 
 export interface ApiServer {
@@ -97,24 +109,36 @@ function send(
 const reject = (res: ServerResponse, error: Failure, extra: Record<string, string> = {}): void =>
   send(res, STATUS[error.code] ?? 422, { ok: false, error }, extra);
 
-/** 本文を上限つきで読む。超えたら `undefined`。 */
+/** 本文を上限つきで読む。超えたら（宣言の長さでも、チャンク転送の途中でも）読むのをやめて `undefined`。 */
 function readBody(req: IncomingMessage, max: number): Promise<Buffer | undefined> {
   return new Promise((resolve) => {
     const declared = Number(req.headers["content-length"]);
-    if (Number.isFinite(declared) && declared > max) {
-      req.resume();
-      return resolve(undefined);
-    }
+    if (Number.isFinite(declared) && declared > max) return resolve(undefined);
     const chunks: Buffer[] = [];
     let size = 0;
-    let over = false;
-    req.on("data", (c: Buffer) => {
+    const done = (v: Buffer | undefined): void => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      resolve(v);
+    };
+    const onData = (c: Buffer): void => {
       size += c.length;
-      if (size > max) over = true;
-      else if (!over) chunks.push(c);
-    });
-    req.on("end", () => resolve(over ? undefined : Buffer.concat(chunks)));
-    req.on("error", () => resolve(undefined));
+      if (size > max) {
+        done(undefined);
+        return;
+      }
+      chunks.push(c);
+    };
+    const onEnd = (): void => {
+      done(Buffer.concat(chunks));
+    };
+    const onError = (): void => {
+      done(undefined);
+    };
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
   });
 }
 
@@ -163,6 +187,8 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         { "www-authenticate": "Bearer" },
       );
     }
+    const valid = checkPrincipal(principal, deps.getState());
+    if (!valid.ok) return reject(res, valid.error, { "www-authenticate": "Bearer" });
     if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {
       req.resume();
       return reject(
@@ -186,13 +212,16 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const env = parseEnvelope(body);
     if (!env.ok) return reject(res, env.error);
     const { requestId, operation } = env.value;
-    const params = validateParams(operation, env.value.params);
-    if (!params.ok) return reject(res, params.error);
-    const allowed = authorize(principal, operation, params.value, deps.getState(), {
+    // ロールの判定を、引数の検証より先に行う（ロールのない操作に、引数の形を教えない）。
+    const role = authorizeRole(principal, operation, {
       ...(env.value.claimedRole === undefined ? {} : { claimedRole: env.value.claimedRole }),
       ...(env.value.claimedCaller === undefined ? {} : { claimedCaller: env.value.claimedCaller }),
     });
-    if (!allowed.ok) return reject(res, allowed.error);
+    if (!role.ok) return reject(res, role.error);
+    const params = validateParams(operation, env.value.params);
+    if (!params.ok) return reject(res, params.error);
+    const scope = authorizeScope(principal, operation, params.value, deps.getState());
+    if (!scope.ok) return reject(res, scope.error);
 
     const handler = Object.hasOwn(deps.handlers, operation)
       ? (deps.handlers[operation] as ((r: HandlerRequest) => unknown) | undefined)
@@ -213,13 +242,41 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     let result: Result<unknown, Failure>;
     try {
       result = (await handler(request)) as Result<unknown, Failure>;
-    } catch {
-      return reject(
+    } catch (error) {
+      return internalError(res, requestId, operation, error);
+    }
+    if (!result.ok) {
+      // 操作の失敗（権限・入力の検査を通った後の、状態に依る失敗）は 422。コードごとの状態に写さない:
+      // ハンドラの失敗コードは操作ごとに増えるため、ここでは「要求は正しいが、今は実行できない」で統一する。
+      return send(res, 422, { ok: false, error: result.error });
+    }
+    const value = pickResult(operation, result.value);
+    if (value === undefined) {
+      return internalError(
         res,
-        failure("internalError", "内部エラー", "もう一度試す", "改善しなければ管理者に知らせる"),
+        requestId,
+        operation,
+        new Error("ハンドラの結果がオブジェクトでない"),
       );
     }
-    send(res, result.ok ? 200 : 422, result);
+    send(res, 200, { ok: true, value });
+  }
+
+  function internalError(
+    res: ServerResponse,
+    requestId: string,
+    operation: DaemonOperation,
+    error: unknown,
+  ): void {
+    try {
+      deps.logger?.({ requestId, operation, error });
+    } catch {
+      // 記録の失敗で、応答を変えない。
+    }
+    reject(
+      res,
+      failure("internalError", "内部エラー", "もう一度試す", "改善しなければ管理者に知らせる"),
+    );
   }
 
   const server: Server = createServer((req, res) => {
