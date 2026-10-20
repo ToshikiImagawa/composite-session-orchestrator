@@ -28,7 +28,7 @@ export type NodeEvent =
   | { readonly type: "reportDone" } // 完了報告（running→done）
   | { readonly type: "accept" } // 親が受理（done→verified）
   | { readonly type: "reject" } // 親が差し戻し（done→running）。統合ノードまたは人間の指示による
-  | { readonly type: "stop"; readonly mode: StopMode } // 停止要求
+  | { readonly type: "stop"; readonly mode: StopMode; readonly graceMs?: number } // 停止要求。graceMs は猶予時間（記録用。遷移には影響しない）
   | { readonly type: "stopTimeout" } // 停止要求後、所定の時間を超えてもプロセスが残っている
   | { readonly type: "retryStop" } // 停止の再試行（stopIncomplete→stopping。即時停止の指示）
   | { readonly type: "confirmStopped" } // 作業ツリー配下にプロセスがないことを確認した

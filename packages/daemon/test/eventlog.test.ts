@@ -280,6 +280,17 @@ describe("スナップショット（キャッシュ。ログから再構築で�
     expect(openLog(shared.open(), 3).state()).toEqual(log.state());
   });
 
+  it("古い形（状態のスキーマの版 1。停止の試行の記録を持たない）のスナップショットは捨てる", () => {
+    expect(STATE_VERSION).toBe(2);
+    const shared = createMemoryStore();
+    const log = openLog(shared.open(), 3);
+    many(log, 8);
+    const { stopRequests: _a, stopObservations: _b, ...oldShape } = log.state();
+    // 内容は古い形で、ログとは食い違う（ノードが空）。版が 1 のままなら受け入れてしまう。
+    saveSnap(shared, 9, JSON.stringify({ ...oldShape, nodes: [] }), { stateVersion: 1 });
+    expect(openLog(shared.open(), 3).state()).toEqual(log.state());
+  });
+
   it("末尾のイベントのハッシュが合わないスナップショット（ログと食い違う）は捨てる", () => {
     const shared = createMemoryStore();
     const log = openLog(shared.open(), 3);

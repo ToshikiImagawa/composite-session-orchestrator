@@ -55,8 +55,8 @@ export interface EventLogOptions {
   readonly verifySnapshot?: boolean;
 }
 
-/** スナップショットに保存する core の状態のスキーマの版。`OrchState` の形を変えたら上げる。 */
-export const STATE_VERSION = 1;
+/** スナップショットに保存する core の状態のスキーマの版。`OrchState` の形を変えたら上げる（2: 停止の試行・観測の記録を追加）。 */
+export const STATE_VERSION = 2;
 
 /** イベントの行のハッシュ（SHA-256、16 進）。スナップショットがログと食い違っていないかを確かめる。 */
 export function eventHash(row: StoredEvent): string {

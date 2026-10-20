@@ -70,6 +70,18 @@ export type EventBody =
       };
     }
   | {
+      /** 停止の観測の記録（猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか）。状態は変えない。 */
+      readonly type: "node.stopObserved";
+      readonly payload: {
+        readonly nodeId: string;
+        readonly outcome: StopOutcome;
+        /** 対応する停止の試行（`stop`・`retryStop` の `node.stateChanged`）のイベントの `seq`。 */
+        readonly stopSeq: number;
+        /** そのとき有効だった猶予（ミリ秒）。穏当な停止のとき。 */
+        readonly graceMs?: number;
+      };
+    }
+  | {
       readonly type: "decision.requested";
       readonly payload: { readonly decisionId: string; readonly nodeId: string };
     }
@@ -77,6 +89,17 @@ export type EventBody =
       readonly type: "decision.answered";
       readonly payload: { readonly decisionId: string; readonly answer: string };
     };
+
+export const STOP_OUTCOMES = ["withinGrace", "interrupted", "aborted"] as const;
+/** 停止の観測: 猶予内に result が来た／猶予を超えて `interrupt()` に落ちた／`abort()` した。 */
+export type StopOutcome = (typeof STOP_OUTCOMES)[number];
+export const isStopOutcome = (x: unknown): x is StopOutcome =>
+  typeof x === "string" && (STOP_OUTCOMES as readonly string[]).includes(x);
+
+/** 穏当な停止の猶予の上限（ミリ秒、1 時間）。 */
+export const MAX_GRACE_MS = 3_600_000;
+const isGraceMs = (x: unknown): x is number =>
+  typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= MAX_GRACE_MS;
 
 export type OrchEvent = {
   /** daemon が採番する単調増加の番号。 */
@@ -139,12 +162,38 @@ export interface ViolationRecord {
   readonly actor: Actor;
 }
 
+export interface StopObservation {
+  readonly seq: number;
+  readonly at: string;
+  readonly nodeId: string;
+  readonly outcome: StopOutcome;
+  /** 対応する停止要求（`stop`・`retryStop` の `node.stateChanged`）のイベントの `seq`。 */
+  readonly stopSeq: number;
+  /** そのとき有効だった猶予時間（ミリ秒）。 */
+  readonly graceMs?: number;
+  /** 注意: 観測の発行者の信頼性は、窓口のロール別の操作表（NFR_004）が保証する。ここでは検査しない。 */
+  readonly actor: Actor;
+}
+
+/** 停止の試行（観測の対象）: 状態を `stopping` に進めた停止要求と、`retryStop`。 */
+export interface StopRequestRecord {
+  readonly seq: number;
+  readonly nodeId: string;
+  readonly kind: "stop" | "retryStop";
+  readonly mode: "graceful" | "immediate";
+  readonly graceMs?: number;
+}
+
 export interface OrchState {
   /** 作成順。 */
   readonly nodes: readonly NodeRecord[];
   readonly inbox: readonly InboxItem[];
   readonly decisions: readonly DecisionRecord[];
   readonly violations: readonly ViolationRecord[];
+  /** 停止の試行の記録（観測の結び付け先）。 */
+  readonly stopRequests: readonly StopRequestRecord[];
+  /** 停止の観測の記録（猶予内に止まったかの実測。猶予の既定値の見直しに使う）。 */
+  readonly stopObservations: readonly StopObservation[];
   /** 最後に適用したイベントの `seq`。 */
   readonly lastSeq: number;
   /** 適用済みの要求識別子 → 内容の指紋（冪等性の判定用）。 */
@@ -168,7 +217,10 @@ export type FoldFailureCode =
   | "reclaimInvariant"
   | "duplicateInboxId"
   | "duplicateDecision"
-  | "unknownDecision";
+  | "unknownDecision"
+  | "unknownStopRequest"
+  | "observationAlreadyRecorded"
+  | "invalidState";
 
 /** どのイベント（`seq`）で拒否したかを持つ失敗。壊れたイベントで `seq` が分からないときは 0。 */
 export interface FoldFailure extends Failure {
@@ -179,6 +231,11 @@ export interface FoldFailure extends Failure {
 export interface ApplyOutcome {
   readonly state: OrchState;
   readonly applied: boolean;
+  /**
+   * イベントは記録されたが、一部が無視された。`graceMsIgnored`: 停止の進行中に別の `graceMs` の停止要求が来た
+   * （進行中の停止の猶予は変わらない）。
+   */
+  readonly ignored?: "graceMsIgnored";
 }
 
 export type ApplyResult = Result<ApplyOutcome, FoldFailure>;
@@ -189,6 +246,8 @@ export const initialState = (): OrchState => ({
   inbox: [],
   decisions: [],
   violations: [],
+  stopRequests: [],
+  stopObservations: [],
   lastSeq: 0,
   requests: {},
 });
@@ -226,10 +285,14 @@ function parseNodeEvent(x: unknown): NodeEvent | undefined {
     case "confirmStopped":
     case "archive":
       return { type: x.type };
-    case "stop":
-      return x.mode === "graceful" || x.mode === "immediate"
-        ? { type: "stop", mode: x.mode }
+    case "stop": {
+      if (x.mode !== "graceful" && x.mode !== "immediate") return undefined;
+      if (x.graceMs === undefined) return { type: "stop", mode: x.mode };
+      // 猶予は穏当な停止だけの設定。即時停止では指定できない。
+      return x.mode === "graceful" && isGraceMs(x.graceMs)
+        ? { type: "stop", mode: x.mode, graceMs: x.graceMs }
         : undefined;
+    }
     case "restart":
       return typeof x.dependenciesDone === "boolean"
         ? { type: "restart", dependenciesDone: x.dependenciesDone }
@@ -266,29 +329,92 @@ interface Draft {
   decisions: DecisionRecord[];
   decisionIdx: Map<string, number>;
   violations: ViolationRecord[];
+  stopRequests: StopRequestRecord[];
+  stopObservations: StopObservation[];
   lastSeq: number;
   requests: Map<string, string>;
+  /** 直前の `step` で、イベントの一部が無視されたこと（`ApplyOutcome.ignored` に渡す）。 */
+  note: "graceMsIgnored" | undefined;
 }
 
-function toDraft(state: OrchState): Draft {
+/** 配列の項目を検査する。`undefined`（古いスナップショットに無い項目）は空として受け入れる。壊れていれば `undefined`。 */
+function arrayOf<T>(x: unknown, guard: (v: unknown) => boolean): T[] | undefined {
+  if (x === undefined) return [];
+  return Array.isArray(x) && x.every(guard) ? (x as T[]) : undefined;
+}
+
+const nodeShape = (n: unknown): boolean =>
+  isRec(n) &&
+  typeof n.id === "string" &&
+  typeof n.role === "string" &&
+  typeof n.state === "string" &&
+  (n.parentId === null || typeof n.parentId === "string") &&
+  Array.isArray(n.dependsOn);
+const inboxShape = (i: unknown): boolean =>
+  isRec(i) && typeof i.id === "string" && typeof i.nodeId === "string";
+const decisionShape = (d: unknown): boolean =>
+  isRec(d) && typeof d.decisionId === "string" && Array.isArray(d.rejected);
+const violationShape = (v: unknown): boolean => isRec(v) && typeof v.nodeId === "string";
+const stopRequestShape = (r: unknown): boolean =>
+  isRec(r) &&
+  Number.isInteger(r.seq) &&
+  isId(r.nodeId) &&
+  (r.kind === "stop" || r.kind === "retryStop") &&
+  (r.mode === "graceful" || r.mode === "immediate") &&
+  (r.graceMs === undefined || isGraceMs(r.graceMs));
+const observationShape = (o: unknown): boolean =>
+  isRec(o) &&
+  Number.isInteger(o.seq) &&
+  typeof o.at === "string" &&
+  isId(o.nodeId) &&
+  isStopOutcome(o.outcome) &&
+  Number.isInteger(o.stopSeq) &&
+  (o.graceMs === undefined || isGraceMs(o.graceMs)) &&
+  parseActor(o.actor) !== undefined;
+
+/** 状態から下書きを作る。状態が壊れていれば（スナップショットの破損など）`undefined`。例外は出さない。 */
+function toDraft(state: OrchState): Draft | undefined {
+  if (!isRec(state) || !Number.isInteger(state.lastSeq) || !isRec(state.requests)) return undefined;
+  if (!Object.values(state.requests).every((v) => typeof v === "string")) return undefined;
+  const nodes =
+    Array.isArray(state.nodes) && state.nodes.every(nodeShape) ? state.nodes : undefined;
+  const inbox =
+    Array.isArray(state.inbox) && state.inbox.every(inboxShape) ? state.inbox : undefined;
+  const decisions =
+    Array.isArray(state.decisions) && state.decisions.every(decisionShape)
+      ? state.decisions
+      : undefined;
+  const violations =
+    Array.isArray(state.violations) && state.violations.every(violationShape)
+      ? state.violations
+      : undefined;
+  // 古いスナップショットには無い項目なので、欠けていても受け入れる。
+  const stopRequests = arrayOf<StopRequestRecord>(state.stopRequests, stopRequestShape);
+  const stopObservations = arrayOf<StopObservation>(state.stopObservations, observationShape);
+  if (!nodes || !inbox || !decisions || !violations || !stopRequests || !stopObservations)
+    return undefined;
+
   const d: Draft = {
-    nodes: [...state.nodes],
+    nodes: [...nodes],
     nodeIdx: new Map(),
     children: new Map(),
-    inbox: [...state.inbox],
-    inboxIds: new Set(state.inbox.map((i) => i.id)),
-    decisions: [...state.decisions],
+    inbox: [...inbox],
+    inboxIds: new Set(inbox.map((i) => i.id)),
+    decisions: [...decisions],
     decisionIdx: new Map(),
-    violations: [...state.violations],
+    violations: [...violations],
+    stopRequests: [...stopRequests],
+    stopObservations: [...stopObservations],
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
+    note: undefined,
   };
-  state.nodes.forEach((n, i) => {
+  nodes.forEach((n, i) => {
     d.nodeIdx.set(n.id, i);
     if (n.parentId !== null)
       d.children.set(n.parentId, [...(d.children.get(n.parentId) ?? []), n.id]);
   });
-  state.decisions.forEach((x, i) => {
+  decisions.forEach((x, i) => {
     d.decisionIdx.set(x.decisionId, i);
   });
   return d;
@@ -302,6 +428,8 @@ function toState(d: Draft): OrchState {
     inbox: Object.freeze(d.inbox),
     decisions: Object.freeze(d.decisions),
     violations: Object.freeze(d.violations),
+    stopRequests: Object.freeze(d.stopRequests),
+    stopObservations: Object.freeze(d.stopObservations),
     lastSeq: d.lastSeq,
     requests: Object.freeze(Object.fromEntries(d.requests)),
   });
@@ -357,6 +485,7 @@ const dependenciesCompleted = (d: Draft, node: NodeRecord): boolean =>
 
 /** 1 件を下書きに適用する。成功なら `true`（適用）か `false`（重複で無視）。失敗のとき下書きは変わらない。 */
 function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
+  d.note = undefined;
   if (!isRec(raw)) return invalid(0, "イベント");
   const seq = Number.isInteger(raw.seq) ? (raw.seq as number) : 0;
   if (!isId(raw.requestId)) {
@@ -498,6 +627,12 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (event === undefined) return invalid(seq, "node.stateChanged の event");
       const node = nodeAt(d, nodeId);
       if (node === undefined) return unknownNode(seq, nodeId);
+      if (event.type === "stop" && event.graceMs !== undefined && node.state === "waiting") {
+        return invalid(
+          seq,
+          "停止要求の graceMs（判断待ちのノードは猶予なしの即時停止のため指定できない）",
+        );
+      }
       const depsOk = dependenciesCompleted(d, node);
       // restart の dependenciesDone は payload を信用せず、状態から判定する。
       const effective: NodeEvent =
@@ -534,6 +669,25 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
         }
       }
       d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({ ...node, state: next });
+      if (event.type === "stop" && t.value.changed && t.value.effect !== "cancelStart") {
+        d.stopRequests.push(
+          freezeRecord({
+            seq,
+            nodeId,
+            kind: "stop" as const,
+            mode: event.mode,
+            ...(event.graceMs === undefined ? {} : { graceMs: event.graceMs }),
+          }),
+        );
+      } else if (event.type === "retryStop" && t.value.changed) {
+        d.stopRequests.push(
+          freezeRecord({ seq, nodeId, kind: "retryStop" as const, mode: "immediate" as const }),
+        );
+      } else if (event.type === "stop" && !t.value.changed && event.graceMs !== undefined) {
+        // 進行中の停止に、別の猶予の停止要求が来た。進行中の猶予は変えない。
+        const latest = [...d.stopRequests].reverse().find((r) => r.nodeId === nodeId);
+        if (latest?.graceMs !== event.graceMs) d.note = "graceMsIgnored";
+      }
       return commit();
     }
 
@@ -555,6 +709,62 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           nodeId,
           reason: reason as ScopeViolationReason,
           subject,
+          actor,
+        }),
+      );
+      return commit();
+    }
+
+    case "node.stopObserved": {
+      const { nodeId, outcome, stopSeq, graceMs } = p;
+      if (
+        !isId(nodeId) ||
+        !isStopOutcome(outcome) ||
+        !Number.isInteger(stopSeq) ||
+        (stopSeq as number) < 1 ||
+        (graceMs !== undefined && !isGraceMs(graceMs))
+      ) {
+        return invalid(seq, "node.stopObserved の payload");
+      }
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (
+        node.state !== "stopping" &&
+        node.state !== "stopIncomplete" &&
+        node.state !== "stopped"
+      ) {
+        return reject(
+          seq,
+          "invalidTransition",
+          `状態 ${node.state} のノードに停止の観測は記録できない（stopping・stopIncomplete・stopped のとき）`,
+          "停止要求を先に出す",
+        );
+      }
+      const request = d.stopRequests.find((r) => r.seq === stopSeq);
+      if (request === undefined || request.nodeId !== nodeId) {
+        return reject(
+          seq,
+          "unknownStopRequest",
+          `seq ${String(stopSeq)} は ${nodeId} の停止要求ではない`,
+          "停止要求（stop・retryStop）のイベントの seq を指定する",
+        );
+      }
+      if (d.stopObservations.some((o) => o.stopSeq === stopSeq)) {
+        return reject(
+          seq,
+          "observationAlreadyRecorded",
+          `停止要求 ${String(stopSeq)} の観測は記録済み（1 件だけ）`,
+          "別の停止要求（retryStop など）に対して観測する",
+        );
+      }
+      d.stopObservations.push(
+        freezeRecord({
+          seq,
+          at: raw.at,
+          nodeId,
+          outcome,
+          stopSeq: stopSeq as number,
+          ...(graceMs === undefined ? {} : { graceMs: graceMs as number }),
           actor,
         }),
       );
@@ -643,10 +853,29 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
  */
 export function applyEvent(state: OrchState, e: OrchEvent): ApplyResult {
   const draft = toDraft(state);
+  if (draft === undefined) return invalidState(seqOf(e));
   const r = step(draft, e);
   if (!r.ok) return r;
-  return ok({ state: r.value ? toState(draft) : state, applied: r.value });
+  return ok({
+    state: r.value ? toState(draft) : state,
+    applied: r.value,
+    ...(r.value && draft.note !== undefined ? { ignored: draft.note } : {}),
+  });
 }
+
+const seqOf = (e: unknown): number => (isRec(e) && Number.isInteger(e.seq) ? (e.seq as number) : 0);
+
+const invalidState = (seq: number): Result<never, FoldFailure> => ({
+  ok: false,
+  error: {
+    ...failure(
+      "invalidState",
+      "状態が壊れている（スナップショットの破損など）",
+      "スナップショットを捨てて、ログ全体から再構築する",
+    ),
+    seq,
+  },
+});
 
 /**
  * イベント列を `seq` の昇順に畳み込んで状態を得る。入力順に依存しない。
@@ -673,6 +902,7 @@ export function foldEvents(
     }
   }
   const draft = toDraft(base);
+  if (draft === undefined) return invalidState(0);
   for (const e of sorted) {
     const r = step(draft, e);
     if (!r.ok) return r;
