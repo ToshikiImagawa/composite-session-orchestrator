@@ -112,16 +112,15 @@ describe("createLsofProbe（作業ツリー配下で動作中のプロセスの�
     expect(await probe(WT)).toEqual([]);
   });
 
-  it("+D の実行に失敗したら、開いているファイルは unknown（動作中として扱われる）。cwd の一覧は使う", async () => {
-    const probe = createLsofProbe(
-      fakeExec({ stdout: CWD_OUT }, { code: 2, stdout: "", error: "boom" }),
-    );
-    const list = (await probe(WT)) ?? [];
-    expect(list.map((p) => [p.pid, p.hasOpenFiles])).toEqual([
-      [100, "unknown"],
-      [101, "unknown"],
-      [104, "unknown"],
-    ]);
+  it("+D の失敗・時間切れは「プロセスなし」にせず null（取得できない。processesUnknown に倒す）", async () => {
+    for (const bad of [
+      { code: 2, stdout: "", error: "boom" },
+      { code: null, stdout: "", error: "timeout" },
+      { code: 2, stdout: "" },
+    ]) {
+      const probe = createLsofProbe(fakeExec({ stdout: CWD_OUT }, bad));
+      expect(await probe(WT), JSON.stringify(bad)).toBeNull();
+    }
   });
 
   it("cwd の一覧の取得に失敗したら null（確認できない。安全側で回収不可）", async () => {

@@ -32,6 +32,7 @@ const rig = (
     launcher,
     probe,
     realpath: async (p) => (p === "/link/a" ? WT : p),
+    resolvePath: async (p) => p,
     sink,
     timers,
     newRequestId: () => `rq-${++n}`,
@@ -39,6 +40,12 @@ const rig = (
     ...over,
   });
   return { adapter, launcher, sink, timers, probeCalls: calls };
+};
+
+const sessionOf = (r: Rig) => {
+  const s = r.launcher.sessions[0];
+  if (s === undefined) throw new Error("no session");
+  return s;
 };
 
 const startNode = async (r: Rig, nodeId = "a") => {
@@ -240,7 +247,8 @@ describe("フック（PreToolUse）", () => {
         })
       ).allow,
     ).toBe(false);
-    expect(r.sink.types).toEqual(["scope.violation", "scope.violation"]);
+    // 未知のツールは範囲違反ではないので、scope.violation（受信箱に載る）にしない。
+    expect(r.sink.types).toEqual(["scope.violation"]);
   });
 
   it("記録に失敗しても、拒否は変えない（フェイルクローズ）", async () => {
@@ -512,11 +520,257 @@ describe("stop: 失敗", () => {
     expect(res.ok ? null : res.error.code).toBe("invalidRequest");
   });
 
-  it("記録に失敗したら recordFailed を返す（停止の状態を記録できなかった）", async () => {
+  it("観測の記録に失敗しても警告として続行し、検証と confirmStopped を行う", async () => {
     const r = rig();
     await startNode(r);
     r.sink.failNext = 1;
     const res = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    expect(res.ok && res.value.state).toBe("stopped");
+    expect(res.ok && res.value.warnings?.[0]).toContain("観測");
+    expect(r.sink.types).toEqual(["node.stateChanged:confirmStopped"]);
+  });
+
+  it("停止の確認の記録に失敗したら recordFailed を返す", async () => {
+    const r = rig();
+    await startNode(r);
+    r.sink.failNext = 2;
+    const res = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
     expect(res.ok ? null : res.error.code).toBe("recordFailed");
+  });
+});
+
+describe("stop: 堅牢化（例外・戻らない・result が来ない）", () => {
+  const session = (r: Rig) =>
+    r.launcher.sessions[0] as NonNullable<(typeof r.launcher.sessions)[0]>;
+
+  it("interrupt が例外なら abort に切り替え、aborted を記録する（行った手段で記録）", async () => {
+    const r = rig();
+    await startNode(r);
+    session(r).throwOn.add("interrupt");
+    const p = r.adapter.stop("a", { mode: "graceful", graceMs: 1000, stopSeq: STOP_SEQ });
+    await settle();
+    await r.timers.advance(1000);
+    const res = await p;
+    expect(session(r).calls).toEqual(expect.arrayContaining(["interrupt", "abort"]));
+    expect(res.ok && res.value).toMatchObject({ state: "stopped", outcome: "aborted" });
+  });
+
+  it("interrupt が戻らなければ、時間制限（既定 10 秒。timers と競合）で abort に切り替える", async () => {
+    const r = rig();
+    await startNode(r);
+    session(r).interruptMode = "hang";
+    const p = r.adapter.stop("a", { mode: "graceful", graceMs: 1000, stopSeq: STOP_SEQ });
+    await settle();
+    await r.timers.advance(1000);
+    expect(session(r).calls).not.toContain("abort");
+    await r.timers.advance(9_999);
+    expect(session(r).calls).not.toContain("abort");
+    await r.timers.advance(1);
+    const res = await p;
+    expect(session(r).calls).toContain("abort");
+    expect(res.ok && res.value.outcome).toBe("aborted");
+    expect(r.timers.pendingCount).toBe(0);
+  });
+
+  it("interrupt の時間制限は設定でき、interrupt 中の即時停止の要求でもすぐ abort する", async () => {
+    const r = rig({ interruptTimeoutMs: 500 });
+    await startNode(r);
+    session(r).interruptMode = "hang";
+    const p = r.adapter.stop("a", { mode: "graceful", graceMs: 1000, stopSeq: STOP_SEQ });
+    await settle();
+    await r.timers.advance(1500);
+    expect((await p).ok).toBe(true);
+    const r2 = rig();
+    await startNode(r2);
+    sessionOf(r2).interruptMode = "hang";
+    const p2 = r2.adapter.stop("a", { mode: "graceful", graceMs: 1000, stopSeq: STOP_SEQ });
+    await settle();
+    await r2.timers.advance(1000);
+    void r2.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    await settle();
+    expect(r2.launcher.sessions[0]?.calls).toContain("abort");
+    expect((await p2).ok).toBe(true);
+  });
+
+  it("interrupt は戻るが result が来なくても、止まらずに検証へ進む", async () => {
+    const r = rig();
+    await startNode(r);
+    session(r).interruptMode = "noResult";
+    const p = await Promise.race([
+      (async () => {
+        const q = r.adapter.stop("a", { mode: "graceful", graceMs: 1000, stopSeq: STOP_SEQ });
+        await settle();
+        await r.timers.advance(1000);
+        return q;
+      })(),
+    ]);
+    expect(p.ok && p.value).toMatchObject({ state: "stopped", outcome: "interrupted" });
+  });
+
+  it("abort が例外でも reject せず、検証へ進む（stop は常に Result）", async () => {
+    const r = rig();
+    await startNode(r);
+    session(r).throwOn.add("abort");
+    const res = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    expect(res.ok && res.value.state).toBe("stopped");
+    expect(res.ok && res.value.warnings?.some((w) => w.includes("abort"))).toBe(true);
+  });
+
+  it("send・close・nextResult が例外でも、停止は続行する", async () => {
+    for (const op of ["send", "close", "nextResult"] as const) {
+      const r = rig();
+      await startNode(r);
+      session(r).throwOn.add(op);
+      const p = r.adapter.stop("a", { mode: "graceful", graceMs: 1000, stopSeq: STOP_SEQ });
+      await settle();
+      session(r).emitResult();
+      await r.timers.advance(1000);
+      const res = await p;
+      expect(res.ok, op).toBe(true);
+    }
+  });
+
+  it("記録口が例外を投げても reject しない", async () => {
+    const sink = {
+      record: () => {
+        throw new Error("sink exploded");
+      },
+    };
+    const r = rig({ sink });
+    await startNode(r);
+    const res = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    expect(res.ok ? null : res.error.code).toBe("recordFailed");
+  });
+
+  it("プローブが戻らなくても、全体の時間（実時間）で打ち切って停止未完了にする", async () => {
+    const hang = rig({ verifyTimeoutMs: 5000, probe: () => new Promise(() => undefined) });
+    await startNode(hang);
+    const p = hang.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    await settle();
+    await hang.timers.advance(5000);
+    const res = await p;
+    expect(res.ok && res.value.state).toBe("stopIncomplete");
+    expect(hang.timers.pendingCount).toBe(0);
+  });
+
+  it("プローブ自体に時間がかかる場合も、実時間で数える（間隔の回数では数えない）", async () => {
+    const timersRef: { t?: FakeTimers } = {};
+    let calls = 0;
+    const r = rig({
+      verifyTimeoutMs: 5000,
+      verifyIntervalMs: 1000,
+      probe: async () => {
+        calls += 1;
+        await timersRef.t?.sleep(2000);
+        return [{ pid: 7, cwd: WT, hasOpenFiles: false as const }];
+      },
+    });
+    timersRef.t = r.timers;
+    await startNode(r);
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    await settle();
+    await r.timers.advance(5000);
+    const res = await p;
+    expect(res.ok && res.value.state).toBe("stopIncomplete");
+    expect(calls).toBeLessThanOrEqual(3);
+  });
+});
+
+describe("検証フェーズ中の即時停止", () => {
+  it("abort を呼び、返す outcome を aborted にする", async () => {
+    const r = rig({}, [[{ pid: 7, cwd: WT, hasOpenFiles: false }], []]);
+    await startNode(r);
+    const g = r.adapter.stop("a", { mode: "graceful", graceMs: 1000, stopSeq: STOP_SEQ });
+    await settle();
+    r.launcher.sessions[0]?.emitResult(); // 猶予内に result。次は検証（pid 7 が残る）
+    await settle();
+    const callsBefore = r.launcher.sessions[0]?.calls.filter((c) => c === "abort").length;
+    expect(callsBefore).toBe(0);
+    void r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    await settle();
+    expect(r.launcher.sessions[0]?.calls).toContain("abort");
+    await r.timers.advance(1000);
+    const res = await g;
+    expect(res.ok && res.value.outcome).toBe("aborted");
+    expect(r.sink.types.filter((t) => t.startsWith("node.stopObserved"))).toEqual([
+      "node.stopObserved:withinGrace",
+    ]);
+  });
+});
+
+describe("停止中のノードへの send", () => {
+  it("停止中は stopping として拒否する。例外を投げる send は sendFailed", async () => {
+    const r = rig({}, [[{ pid: 7, cwd: WT, hasOpenFiles: false }]]);
+    await startNode(r);
+    void r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    await settle();
+    const res = await r.adapter.send("a", "続けて");
+    expect(res.ok ? null : res.error.code).toBe("stopping");
+
+    const r2 = rig();
+    await startNode(r2);
+    r2.launcher.sessions[0]?.throwOn.add("send");
+    const res2 = await r2.adapter.send("a", "x");
+    expect(res2.ok ? null : res2.error.code).toBe("sendFailed");
+  });
+});
+
+describe("予期しない終了（finished の監視）", () => {
+  it("稼働中に子が終了したら、onUnexpectedExit で通知し、管理から外す", async () => {
+    const seen: [string, string][] = [];
+    const r = rig({ onUnexpectedExit: (nodeId, reason) => void seen.push([nodeId, reason]) });
+    await startNode(r);
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.[0]).toBe("a");
+    expect(seen[0]?.[1]).toContain("crashed");
+    const s = await r.adapter.send("a", "x");
+    expect(s.ok ? null : s.error.code).toBe("unknownNode");
+  });
+
+  it("停止の最中の終了は、予期しない終了にしない", async () => {
+    const seen: string[] = [];
+    const r = rig({ onUnexpectedExit: (n) => void seen.push(n) });
+    await startNode(r);
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    r.launcher.sessions[0]?.finish();
+    await p;
+    expect(seen).toEqual([]);
+  });
+});
+
+describe("範囲の更新（FR_015）", () => {
+  it("updateScope の後のフック判定は、新しい範囲を使う", async () => {
+    const r = rig();
+    await startNode(r);
+    const hook = sessionOf(r).options.hooks.preToolUse;
+    const call = () => hook({ toolName: "Write", toolInput: { file_path: "docs/a.md" }, cwd: WT });
+    expect((await call()).allow).toBe(false);
+    const u = r.adapter.updateScope("a", { ...SCOPE, writableLocations: ["src", "docs"] });
+    expect(u.ok).toBe(true);
+    expect((await call()).allow).toBe(true);
+    const bad = r.adapter.updateScope("zzz", SCOPE);
+    expect(bad.ok ? null : bad.error.code).toBe("unknownNode");
+  });
+});
+
+describe("フック: リンクの解決", () => {
+  it("書き込み先の解決に失敗したら拒否し、解決した実パスで判定する", async () => {
+    const r = rig({
+      resolvePath: async (p) => {
+        if (p.includes("boom")) throw new Error("EACCES");
+        return p.replace("/wt/a/src/link", "/etc");
+      },
+    });
+    await startNode(r);
+    const hook = sessionOf(r).options.hooks.preToolUse;
+    expect(
+      (await hook({ toolName: "Write", toolInput: { file_path: "src/link/x" }, cwd: WT })).allow,
+    ).toBe(false);
+    expect(
+      (await hook({ toolName: "Write", toolInput: { file_path: "src/boom" }, cwd: WT })).allow,
+    ).toBe(false);
+    expect(r.sink.types).toEqual(["scope.violation", "scope.violation"]);
   });
 });

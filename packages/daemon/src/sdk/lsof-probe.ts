@@ -6,8 +6,8 @@
  *   を使う。macOS と Linux の両方で使える。cwd が作業ツリー配下、または配下のファイルを開いているプロセスだけを返す。
  * - cwd を読めなかったプロセス（`(readlink: Permission denied)`。他のユーザーのプロセス）は対象にしない。
  *   この限界は、daemon が子を起動するユーザーと同じユーザーで動くことを前提とする。
- * - cwd の一覧が取れなければ `null`（確認できない。安全側で回収不可）。`+D` が失敗したときは、開いているファイルを
- *   `"unknown"`（動作中として扱われる）にする。
+ * - cwd の一覧が取れなければ `null`（確認できない。安全側で回収不可）。`+D` が失敗・時間切れのときも `null`
+ *   （「プロセスなし」にしない。停止の確認では未確認、回収判定では processesUnknown になる）。
  * - 外部のプロセスは `Exec` に抽象化し、テストはフェイクで行う。引数は配列で渡し、シェルを介さない。
  * - 作業ツリーのパスは、呼び出し側が realpath にして渡す（lsof は実パスを返す）。
  */
@@ -60,7 +60,6 @@ export function parseLsofFields(output: string): LsofProcess[] {
         cur = undefined;
       }
     } else if (cur === undefined) {
-      continue;
     } else if (tag === "c") {
       cur.command = value;
     } else if (tag === "f") {
@@ -105,7 +104,7 @@ export function createLsofProbe(
       exec("lsof", ["-nP", "-d", "cwd", "-F", "pcn"], { timeoutMs }),
       exec("lsof", ["-nP", "-F", "pcfn", "+D", worktreePath], { timeoutMs }),
     ]);
-    if (!okExit(cwdRes)) return null;
+    if (!okExit(cwdRes) || !okExit(openRes)) return null;
 
     const cwds = new Map<number, string>();
     for (const p of parseLsofFields(cwdRes.stdout)) {
@@ -113,13 +112,10 @@ export function createLsofProbe(
       if (cwd !== undefined) cwds.set(p.pid, cwd);
     }
 
-    const openKnown = okExit(openRes);
     const openPids = new Set<number>();
-    if (openKnown) {
-      for (const p of parseLsofFields(openRes.stdout)) {
-        // cwd の行は cwd の一覧で扱うので、開いているファイルには数えない。
-        if (p.files.some((f) => f.fd !== "cwd" && under(f.name, worktreePath))) openPids.add(p.pid);
-      }
+    for (const p of parseLsofFields(openRes.stdout)) {
+      // cwd の行は cwd の一覧で扱うので、開いているファイルには数えない。
+      if (p.files.some((f) => f.fd !== "cwd" && under(f.name, worktreePath))) openPids.add(p.pid);
     }
 
     const pids = new Set<number>(openPids);
@@ -130,7 +126,7 @@ export function createLsofProbe(
         (pid): ProcessInfo => ({
           pid,
           cwd: cwds.get(pid) ?? "",
-          hasOpenFiles: openKnown ? openPids.has(pid) : "unknown",
+          hasOpenFiles: openPids.has(pid),
         }),
       );
   };

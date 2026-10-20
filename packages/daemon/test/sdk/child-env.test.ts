@@ -12,19 +12,13 @@ describe("childEnv（親の環境変数から、セッション識別子に関�
   it("名前に SESSION を含む CLAUDE_* を除く（大文字小文字を問わない）", () => {
     const r = childEnv({
       CLAUDE_CODE_REMOTE_SESSION_ID: "x",
-      CLAUDE_SESSION_TOKEN: "y",
       claude_code_session_dir: "z",
       CLAUDE_CODE_SESSIONS: "w",
       HOME: "/home/u",
     });
     expect(Object.keys(r.env)).toEqual(["HOME"]);
     expect([...r.removed].sort()).toEqual(
-      [
-        "CLAUDE_CODE_REMOTE_SESSION_ID",
-        "CLAUDE_CODE_SESSIONS",
-        "CLAUDE_SESSION_TOKEN",
-        "claude_code_session_dir",
-      ].sort(),
+      ["CLAUDE_CODE_REMOTE_SESSION_ID", "CLAUDE_CODE_SESSIONS", "claude_code_session_dir"].sort(),
     );
   });
 
@@ -38,6 +32,19 @@ describe("childEnv（親の環境変数から、セッション識別子に関�
     };
     expect(childEnv(keep).env).toEqual(keep);
     expect(childEnv(keep).removed).toEqual([]);
+  });
+
+  it("識別子系だけを除き、*_TOKEN* / *_TOKEN_FILE / *_URL は SESSION を含んでも残す（認証・接続に要る。規則は T10b の実機検証で調整）", () => {
+    const keep = {
+      CLAUDE_CODE_SESSION_ACCESS_TOKEN: "a",
+      CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR: "1",
+      CLAUDE_SESSION_INGRESS_TOKEN_FILE: "/f",
+      CLAUDE_CODE_SESSION_URL: "https://x",
+      claude_session_token: "t",
+    };
+    const r = childEnv({ ...keep, CLAUDE_CODE_SESSION_ID: "p" });
+    expect(r.env).toEqual(keep);
+    expect(r.removed).toEqual(["CLAUDE_CODE_SESSION_ID"]);
   });
 
   it("SESSION を含んでも CLAUDE で始まらない変数は残す", () => {
@@ -75,7 +82,7 @@ describe("childEnv（親の環境変数から、セッション識別子に関�
       fc.property(fc.dictionary(key, fc.string()), (env) => {
         const r = childEnv(env);
         for (const [k, v] of Object.entries(r.env)) {
-          expect(/^claude.*session/i.test(k), k).toBe(false);
+          expect(/^claude.*session/i.test(k) && !/token|_url$/i.test(k), k).toBe(false);
           expect(env[k]).toBe(v);
         }
         for (const k of Object.keys(env)) expect(k in r.env || r.removed.includes(k), k).toBe(true);

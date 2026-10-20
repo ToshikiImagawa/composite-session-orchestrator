@@ -9,7 +9,11 @@ export const settle = async (n = 30): Promise<void> => {
 
 /** 手動で進める時計。`advance` で期限の来たタイマーを発火する。 */
 export class FakeTimers implements Timers {
-  now = 0;
+  t = 0;
+
+  now(): number {
+    return this.t;
+  }
   private readonly pending: { at: number; fire: () => void; id: number }[] = [];
   private nextId = 1;
 
@@ -19,7 +23,7 @@ export class FakeTimers implements Timers {
     const promise = new Promise<void>((r) => {
       fire = r;
     });
-    this.pending.push({ at: this.now + ms, fire, id });
+    this.pending.push({ at: this.t + ms, fire, id });
     return {
       promise,
       cancel: () => {
@@ -39,17 +43,17 @@ export class FakeTimers implements Timers {
 
   /** 時間を進め、期限の来たタイマーを順に発火する（発火のたびに非同期の続きを実行させる）。 */
   async advance(ms: number): Promise<void> {
-    const target = this.now + ms;
+    const target = this.t + ms;
     for (;;) {
       this.pending.sort((a, b) => a.at - b.at);
       const next = this.pending[0];
       if (next === undefined || next.at > target) break;
       this.pending.shift();
-      this.now = next.at;
+      this.t = next.at;
       next.fire();
       await settle();
     }
-    this.now = target;
+    this.t = target;
     await settle();
   }
 }
@@ -61,6 +65,13 @@ export class FakeSession implements AgentSession {
   private readyReject!: (e: Error) => void;
   private readonly readyPromise: Promise<{ sessionId: string }>;
   private resultWaiters: (() => void)[] = [];
+  /** 呼ばれたら例外を投げる操作。 */
+  readonly throwOn = new Set<"send" | "abort" | "close" | "nextResult" | "interrupt">();
+  /** interrupt の挙動: 既定は result を発生させて戻る。`hang` は戻らない。`noResult` は戻るが result が来ない。 */
+  interruptMode: "ok" | "hang" | "noResult" = "ok";
+  private finishedResolve!: () => void;
+  private finishedReject!: (e: Error) => void;
+  private readonly finishedPromise: Promise<void>;
 
   constructor(public readonly options: LaunchOptions) {
     this.readyPromise = new Promise((res, rej) => {
@@ -68,6 +79,11 @@ export class FakeSession implements AgentSession {
       this.readyReject = rej;
     });
     this.readyPromise.catch(() => undefined);
+    this.finishedPromise = new Promise((res, rej) => {
+      this.finishedResolve = res;
+      this.finishedReject = rej;
+    });
+    this.finishedPromise.catch(() => undefined);
   }
 
   ready(): Promise<{ sessionId: string }> {
@@ -75,23 +91,29 @@ export class FakeSession implements AgentSession {
   }
   send(text: string): void {
     this.calls.push("send");
+    if (this.throwOn.has("send")) throw new Error("send failed");
     this.sent.push(text);
   }
   nextResult(): Promise<void> {
+    if (this.throwOn.has("nextResult")) throw new Error("nextResult failed");
     return new Promise((r) => this.resultWaiters.push(r));
   }
   async interrupt(): Promise<void> {
     this.calls.push("interrupt");
-    this.emitResult(); // interrupt の後には error_during_execution の result が来る
+    if (this.throwOn.has("interrupt")) throw new Error("interrupt failed");
+    if (this.interruptMode === "hang") return new Promise<void>(() => undefined);
+    if (this.interruptMode === "ok") this.emitResult(); // interrupt の後には error_during_execution の result が来る
   }
   abort(): void {
     this.calls.push("abort");
+    if (this.throwOn.has("abort")) throw new Error("abort failed");
   }
   close(): void {
     this.calls.push("close");
+    if (this.throwOn.has("close")) throw new Error("close failed");
   }
   finished(): Promise<void> {
-    return Promise.resolve();
+    return this.finishedPromise;
   }
 
   // --- テストからの操作 ---
@@ -100,6 +122,11 @@ export class FakeSession implements AgentSession {
   }
   failToStart(message = "boom"): void {
     this.readyReject(new Error(message));
+  }
+  /** 子が（予期せず）終了した。 */
+  finish(error?: Error): void {
+    if (error) this.finishedReject(error);
+    else this.finishedResolve();
   }
   emitResult(): void {
     const w = this.resultWaiters;

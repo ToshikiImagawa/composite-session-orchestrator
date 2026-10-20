@@ -6,6 +6,7 @@
 export interface HookInput {
   readonly toolName: string;
   readonly toolInput: unknown;
+  /** SDK が渡す cwd。判定には使わない（基準は、起動時に実パスにした作業ツリー。子が cwd を変えても基準は動かさない）。 */
   readonly cwd: string;
 }
 
@@ -33,7 +34,14 @@ export interface LaunchOptions {
   readonly initialPrompt: string;
 }
 
-/** 起動した子の 1 セッション。 */
+/**
+ * 起動した子の 1 セッション。
+ *
+ * Spike 02 の制約: `interrupt()` はストリーミング入力のときだけ使える（単発の起動では使えない）。`abort()` は、
+ * 待っている `for await` を例外で終わらせる。`finished()` や `nextResult()` が reject する場合がある。
+ * どの操作も例外を投げうる（呼び出し側は try/catch で受け、手段を切り替える）。`interrupt()` は戻らないことがあり、
+ * 戻っても後続の result が来る保証はない（呼び出し側が時間で制限する）。
+ */
 export interface AgentSession {
   /** init を受けたら解決する。起動に失敗したら reject する。 */
   ready(): Promise<{ readonly sessionId: string }>;

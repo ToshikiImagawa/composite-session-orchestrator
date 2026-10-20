@@ -52,6 +52,8 @@ export interface StopValue {
   readonly outcome: StopOutcome;
   /** 残っているプロセスの pid（`stopIncomplete` のときの手がかり）。 */
   readonly blockers: readonly number[];
+  /** 続行した問題（手段の例外、観測の記録の失敗など）。なければ省略する。 */
+  readonly warnings?: readonly string[];
 }
 
 export interface RuntimeAdapter {
@@ -60,10 +62,14 @@ export interface RuntimeAdapter {
   start(request: StartRequest): Promise<Result<StartValue, Failure>>;
   send(nodeId: string, text: string): Promise<Result<DeliveryValue, Failure>>;
   stop(nodeId: string, request: StopRequest): Promise<Result<StopValue, Failure>>;
+  /** 作業範囲の更新（範囲の拡張。FR_015）。以後のフック判定から新しい範囲を使う。 */
+  updateScope(nodeId: string, scope: Scope): Result<undefined, Failure>;
 }
 
 /** タイマー（テストでは手動で進める）。 */
 export interface Timers {
+  /** 現在時刻（ミリ秒）。停止確認の経過時間を実時間で数えるために使う。 */
+  now(): number;
   after(ms: number): { readonly promise: Promise<void>; cancel(): void };
   sleep(ms: number): Promise<void>;
 }
