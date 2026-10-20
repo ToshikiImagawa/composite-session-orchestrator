@@ -255,3 +255,22 @@ describe("性質（fast-check）", () => {
     );
   });
 });
+
+describe("graceMs つきの停止要求", () => {
+  it("graceMs の有無で遷移は変わらない", () => {
+    for (const mode of ["graceful", "immediate"] as const) {
+      for (const from of [
+        "running",
+        "waiting",
+        "pending",
+        "stopping",
+        "stopIncomplete",
+        "done",
+      ] as const) {
+        const plain = transition(from, { type: "stop", mode });
+        const timed = transition(from, { type: "stop", mode, graceMs: 5000 });
+        expect(timed, `${from}/${mode}`).toEqual(plain);
+      }
+    }
+  });
+});

@@ -70,6 +70,11 @@ export type EventBody =
       };
     }
   | {
+      /** 停止の観測の記録（猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか）。状態は変えない。 */
+      readonly type: "node.stopObserved";
+      readonly payload: { readonly nodeId: string; readonly outcome: StopOutcome };
+    }
+  | {
       readonly type: "decision.requested";
       readonly payload: { readonly decisionId: string; readonly nodeId: string };
     }
@@ -77,6 +82,10 @@ export type EventBody =
       readonly type: "decision.answered";
       readonly payload: { readonly decisionId: string; readonly answer: string };
     };
+
+export const STOP_OUTCOMES = ["withinGrace", "interrupted", "aborted"] as const;
+/** 停止の観測: 猶予内に result が来た／猶予を超えて `interrupt()` に落ちた／`abort()` した。 */
+export type StopOutcome = (typeof STOP_OUTCOMES)[number];
 
 export type OrchEvent = {
   /** daemon が採番する単調増加の番号。 */
@@ -139,12 +148,22 @@ export interface ViolationRecord {
   readonly actor: Actor;
 }
 
+export interface StopObservation {
+  readonly seq: number;
+  readonly at: string;
+  readonly nodeId: string;
+  readonly outcome: StopOutcome;
+  readonly actor: Actor;
+}
+
 export interface OrchState {
   /** 作成順。 */
   readonly nodes: readonly NodeRecord[];
   readonly inbox: readonly InboxItem[];
   readonly decisions: readonly DecisionRecord[];
   readonly violations: readonly ViolationRecord[];
+  /** 停止の観測の記録（猶予内に止まったかの実測。猶予の既定値の見直しに使う）。 */
+  readonly stopObservations: readonly StopObservation[];
   /** 最後に適用したイベントの `seq`。 */
   readonly lastSeq: number;
   /** 適用済みの要求識別子 → 内容の指紋（冪等性の判定用）。 */
@@ -189,6 +208,7 @@ export const initialState = (): OrchState => ({
   inbox: [],
   decisions: [],
   violations: [],
+  stopObservations: [],
   lastSeq: 0,
   requests: {},
 });
@@ -226,10 +246,13 @@ function parseNodeEvent(x: unknown): NodeEvent | undefined {
     case "confirmStopped":
     case "archive":
       return { type: x.type };
-    case "stop":
-      return x.mode === "graceful" || x.mode === "immediate"
-        ? { type: "stop", mode: x.mode }
+    case "stop": {
+      if (x.mode !== "graceful" && x.mode !== "immediate") return undefined;
+      if (x.graceMs === undefined) return { type: "stop", mode: x.mode };
+      return typeof x.graceMs === "number" && Number.isFinite(x.graceMs) && x.graceMs > 0
+        ? { type: "stop", mode: x.mode, graceMs: x.graceMs }
         : undefined;
+    }
     case "restart":
       return typeof x.dependenciesDone === "boolean"
         ? { type: "restart", dependenciesDone: x.dependenciesDone }
@@ -266,6 +289,7 @@ interface Draft {
   decisions: DecisionRecord[];
   decisionIdx: Map<string, number>;
   violations: ViolationRecord[];
+  stopObservations: StopObservation[];
   lastSeq: number;
   requests: Map<string, string>;
 }
@@ -280,6 +304,8 @@ function toDraft(state: OrchState): Draft {
     decisions: [...state.decisions],
     decisionIdx: new Map(),
     violations: [...state.violations],
+    // 古いスナップショットの状態には無い項目なので、欠けていても受け入れる。
+    stopObservations: [...(state.stopObservations ?? [])],
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
   };
@@ -302,6 +328,7 @@ function toState(d: Draft): OrchState {
     inbox: Object.freeze(d.inbox),
     decisions: Object.freeze(d.decisions),
     violations: Object.freeze(d.violations),
+    stopObservations: Object.freeze(d.stopObservations),
     lastSeq: d.lastSeq,
     requests: Object.freeze(Object.fromEntries(d.requests)),
   });
@@ -557,6 +584,31 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           subject,
           actor,
         }),
+      );
+      return commit();
+    }
+
+    case "node.stopObserved": {
+      const { nodeId, outcome } = p;
+      if (!isId(nodeId) || !STOP_OUTCOMES.includes(outcome as StopOutcome)) {
+        return invalid(seq, "node.stopObserved の payload");
+      }
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (
+        node.state !== "stopping" &&
+        node.state !== "stopIncomplete" &&
+        node.state !== "stopped"
+      ) {
+        return reject(
+          seq,
+          "invalidTransition",
+          `状態 ${node.state} のノードに停止の観測は記録できない（stopping・stopIncomplete・stopped のとき）`,
+          "停止要求を先に出す",
+        );
+      }
+      d.stopObservations.push(
+        freezeRecord({ seq, at: raw.at, nodeId, outcome: outcome as StopOutcome, actor }),
       );
       return commit();
     }
