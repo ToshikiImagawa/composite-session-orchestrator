@@ -60,4 +60,5 @@ export const INBOX_KIND_PRIORITY: Readonly<Record<InboxKind, Priority>> = {
   info: "info",
 };
 export * from "./scope.js";
+export * from "./transition.js";
 export * from "./tree.js";

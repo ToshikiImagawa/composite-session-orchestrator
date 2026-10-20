@@ -25,7 +25,7 @@ depends-on: ["design-initial-spec-design"]
 |:--|:--|:--|:--|:--|:--|
 | T01 | core: `NodeStatus`/`Priority` を spec の `NodeState`/`InboxKind` に整合（名称統一、`stopping`/`stopIncomplete` 追加、`InboxKind`→`Priority` 対応） | なし | - | 完了（本 PR） | FR_012, FR_026, FR_010 |
 | T02 | core: 木の構造と親子の不変条件（純粋関数、fast-check） | なし | T01 | 完了（本 PR） | FR_001, FR_002, FR_028, NFR_007 |
-| T03 | core: 状態遷移。**前提: 未解決事項「停止要求を受け付ける元状態」の確定** | なし（元状態の方針は要決定） | T01 | 未 | FR_010, FR_018, FR_024 |
+| T03 | core: 状態遷移（停止要求を受け付ける元状態は design 9.1 で確定） | なし | T01 | 完了（本 PR） | FR_010, FR_018, FR_024 |
 | T04 | core: 受信箱の整列（優先度・依存関係・時刻、決定的） | なし | T01 | 未 | FR_012, FR_013, NFR_007 |
 | T05 | core: 回収可能判定（条件 1〜6、プロセス一覧を入力にとる純粋関数） | なし | T03 | 未 | FR_026, FR_027, FR_028, NFR_007 |
 | T06 | core: 範囲違反の判定（作業範囲と操作を入力にする純粋関数） | なし | T01 | 完了（本 PR） | FR_014, FR_015, IR_002 |
@@ -47,7 +47,7 @@ depends-on: ["design-initial-spec-design"]
 
 ## 実装前に決める未解決事項（設計 9.2 より）
 
-- `stopping`→`stopIncomplete` の所定の時間、再試行方式、復帰操作、停止要求を受け付ける元状態（T03, T05 の前提）
+- `stopping`→`stopIncomplete` の所定の時間、再試行方式（自動か手動か）（T05 の前提。遷移自体と停止要求を受け付ける元状態は design 9.1 で確定済み）
 - `mcp`/`cli`→daemon の契約の型を置く場所（`core` に置く案で着手し ADR に残す）
 - 木あたりの同時実行数と費用の上限
 - バックグラウンド起動（`&`、`nohup`、`setsid` など）の扱い（T06 は既定で拒否として実装。ADR で確定する）
