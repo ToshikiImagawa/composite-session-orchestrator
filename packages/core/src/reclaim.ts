@@ -31,6 +31,7 @@
 import { type Failure, failure, ok, type Result } from "./contract.js";
 import type { NodeState } from "./index.js";
 import { isPathUnder, normalizePath } from "./scope.js";
+import { COMPLETED_STATES } from "./transition.js";
 import { descendantsOf, type TreeNode } from "./tree.js";
 
 export interface ProcessInfo {
@@ -96,7 +97,6 @@ export interface ReclaimAssessment {
   readonly blockers: readonly Blocker[];
 }
 
-const COMPLETED: ReadonlySet<NodeState> = new Set(["verified", "reclaimable", "archived"]);
 const RECLAIMED: ReadonlySet<NodeState> = new Set(["reclaimable", "archived"]);
 const ELIGIBLE: ReadonlySet<NodeState> = new Set(["verified", "stopped", "reclaimable"]);
 
@@ -215,7 +215,9 @@ export function assessReclaim(
     if (!facts.clean) unmet.push("dirty"); // 条件 2
   }
 
-  const dependents = nodes.filter((n) => n.dependsOn.includes(nodeId) && !COMPLETED.has(n.state)); // 条件 3
+  const dependents = nodes.filter(
+    (n) => n.dependsOn.includes(nodeId) && !COMPLETED_STATES.has(n.state),
+  ); // 条件 3
   if (dependents.length > 0) {
     unmet.push("dependentsIncomplete");
     for (const d of dependents)

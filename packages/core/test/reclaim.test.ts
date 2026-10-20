@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   assessReclaim,
+  COMPLETED_STATES,
   descendantsOf,
   NODE_STATES,
   type NodeState,
@@ -88,6 +89,13 @@ describe("条件 1〜6（spec 5.8）", () => {
     for (const s of ["verified", "reclaimable", "archived"] as const) {
       const nodes = [root(), node("a", "verified"), node("d", s, { dependsOn: ["a"] })];
       expect(assess(input({ nodes })).reclaimable, s).toBe(true);
+    }
+  });
+
+  it("条件 3: 依存元が妨げるかは、共通定数 COMPLETED_STATES と全状態で一致する", () => {
+    for (const st of NODE_STATES) {
+      const nodes = [root(), node("a", "verified"), node("d", st, { dependsOn: ["a"] })];
+      expect(assess(input({ nodes })).reclaimable, st).toBe(COMPLETED_STATES.has(st));
     }
   });
 
