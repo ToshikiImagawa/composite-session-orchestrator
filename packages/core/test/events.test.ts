@@ -750,6 +750,14 @@ describe("壊れたイベントでも例外を出さない（全域関数）", (
     );
   });
 
+  it("undefined を含む複数のイベントでも失敗を返す（回帰: 並べ替えで例外になった）", () => {
+    const b = base();
+    for (const j of [undefined, null]) {
+      expect(foldEvents([j as never, ...b]).ok).toBe(false);
+      expect(foldEvents([...b, j as never]).ok).toBe(false);
+    }
+  });
+
   it("イベントが null や配列でも失敗を返す", () => {
     for (const j of [null, undefined, 1, "x", [], {}, { seq: 1 }, { seq: 1, requestId: "r" }]) {
       const r = foldEvents([j as never]);

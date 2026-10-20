@@ -657,8 +657,8 @@ export function foldEvents(
   events: readonly OrchEvent[],
   base: OrchState = initialState(),
 ): FoldResult {
-  const bad = events.find((e) => !isRec(e) || !Number.isInteger((e as unknown as Rec).seq));
-  if (bad !== undefined)
+  const bad = events.findIndex((e) => !isRec(e) || !Number.isInteger((e as unknown as Rec).seq));
+  if (bad >= 0)
     return invalid(0, "イベント（seq が整数でない、またはオブジェクトでない）") as FoldResult;
   const sorted = [...events].sort((a, b) => a.seq - b.seq);
   for (let i = 1; i < sorted.length; i++) {
