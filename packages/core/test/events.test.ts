@@ -6,9 +6,11 @@ import {
   foldEvents,
   INBOX_KINDS,
   initialState,
+  isStopOutcome,
   type NodeEvent,
   type OrchEvent,
   type OrchState,
+  STOP_OUTCOMES,
   type StopOutcome,
   stateOf,
 } from "../src/index.js";
@@ -829,90 +831,285 @@ describe("requestId・seq の性質（fast-check）", () => {
 });
 
 describe("停止の記録（node.stopObserved）と猶予時間（graceMs）", () => {
-  const stopping = (): OrchEvent[] => [
-    ...base(),
-    ev(changed("a", { type: "start" })),
-    ev(changed("a", { type: "stop", mode: "graceful", graceMs: 60000 })),
-  ];
-  const observed = (nodeId: string, outcome: StopOutcome | string): EventBody =>
-    ({ type: "node.stopObserved", payload: { nodeId, outcome } }) as EventBody;
+  /** a を running にし、穏当な停止を要求したログ。`stopSeq` は停止要求のイベントの seq。 */
+  const stoppingLog = (graceMs: number | undefined = 60000) => {
+    const b = base();
+    const start = ev(changed("a", { type: "start" }));
+    const stop = ev(
+      changed(
+        "a",
+        graceMs === undefined
+          ? { type: "stop", mode: "graceful" }
+          : { type: "stop", mode: "graceful", graceMs },
+      ),
+    );
+    return { log: [...b, start, stop], stopSeq: stop.seq };
+  };
+  const observed = (
+    nodeId: string,
+    outcome: StopOutcome | string,
+    stopSeq: number,
+    graceMs?: number,
+  ): EventBody =>
+    ({
+      type: "node.stopObserved",
+      payload: { nodeId, outcome, stopSeq, ...(graceMs === undefined ? {} : { graceMs }) },
+    }) as EventBody;
+  const code = (r: ReturnType<typeof foldEvents>): string | null => (r.ok ? null : r.error.code);
 
   it("停止要求の猶予時間（graceMs）は記録でき、遷移は graceMs の有無で変わらない", () => {
-    const s = must(foldEvents(stopping()));
-    expect(stateOf(s, "a")).toBe("stopping");
-    const without = must(
-      foldEvents([
-        ...base(),
-        ev(changed("a", { type: "start" })),
-        ev(changed("a", { type: "stop", mode: "graceful" })),
-      ]),
-    );
-    expect(stateOf(without, "a")).toBe("stopping");
+    const { log } = stoppingLog(60000);
+    expect(stateOf(must(foldEvents(log)), "a")).toBe("stopping");
+    const { log: plain } = stoppingLog(undefined);
+    expect(stateOf(must(foldEvents(plain)), "a")).toBe("stopping");
   });
 
-  it("graceMs が正の有限な数でなければ invalidPayload", () => {
-    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "60" as never, null as never]) {
+  it("graceMs は 1 以上 3,600,000 以下の整数。それ以外は invalidPayload", () => {
+    for (const bad of [
+      0,
+      -1,
+      1.5,
+      3_600_001,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      "60" as never,
+      null as never,
+    ]) {
+      const { log } = stoppingLog(undefined);
       const r = foldEvents([
-        ...base(),
-        ev(changed("a", { type: "start" })),
+        ...log.slice(0, -1),
         ev(changed("a", { type: "stop", mode: "graceful", graceMs: bad })),
       ]);
-      expect(r.ok ? null : r.error.code, String(bad)).toBe("invalidPayload");
+      expect(code(r), String(bad)).toBe("invalidPayload");
+    }
+    for (const good of [1, 60000, 3_600_000]) {
+      const { log } = stoppingLog(good);
+      expect(foldEvents(log).ok, String(good)).toBe(true);
     }
   });
 
-  it("stopObserved は記録のみで、状態を変えない", () => {
-    const log = stopping();
-    const before = must(foldEvents(log));
-    for (const outcome of ["withinGrace", "interrupted", "aborted"] as const) {
-      const s = must(foldEvents([...log, ev(observed("a", outcome))]));
-      expect(s.nodes).toEqual(before.nodes);
-      expect(s.stopObservations.at(-1)).toMatchObject({ nodeId: "a", outcome });
-    }
-  });
-
-  it("stopObserved は seq・at・actor つきで記録され、重複は無視される（冪等）", () => {
-    const log = stopping();
-    const e = ev(observed("a", "withinGrace"), { actor: { nodeId: "a" } });
-    const s = must(foldEvents([...log, e]));
-    expect(s.stopObservations).toEqual([
-      { seq: e.seq, at: e.at, nodeId: "a", outcome: "withinGrace", actor: { nodeId: "a" } },
+  it("即時停止（mode: immediate）と、判断待ち（waiting）への停止要求では graceMs を指定できない", () => {
+    const { log } = stoppingLog(undefined);
+    const immediate = foldEvents([
+      ...log.slice(0, -1),
+      ev(changed("a", { type: "stop", mode: "immediate", graceMs: 1000 })),
     ]);
-    const dup = must(foldEvents([...log, e, { ...e, seq: e.seq + 1000 } as OrchEvent]));
-    expect(dup).toEqual(s);
+    expect(code(immediate)).toBe("invalidPayload");
+    const waiting = foldEvents([
+      ...base(),
+      ev(changed("a", { type: "start" })),
+      ev(changed("a", { type: "requestDecision" })),
+      ev(changed("a", { type: "stop", mode: "graceful", graceMs: 1000 })),
+    ]);
+    expect(code(waiting)).toBe("invalidPayload");
+    const waitingOk = foldEvents([
+      ...base(),
+      ev(changed("a", { type: "start" })),
+      ev(changed("a", { type: "requestDecision" })),
+      ev(changed("a", { type: "stop", mode: "graceful" })),
+    ]);
+    expect(waitingOk.ok).toBe(true);
+  });
+
+  it("stopping 中に別の graceMs の停止要求が来ても、状態は変えず、無視されたことが応答で分かる", () => {
+    const { log } = stoppingLog(60000);
+    const s = must(foldEvents(log));
+    const other = applyEvent(
+      s,
+      ev(changed("a", { type: "stop", mode: "graceful", graceMs: 5000 })),
+    );
+    expect(other.ok && other.value.applied).toBe(true); // イベントとしては記録される
+    expect(other.ok && other.value.ignored).toBe("graceMsIgnored");
+    expect(other.ok && stateOf(other.value.state, "a")).toBe("stopping");
+    expect(other.ok && other.value.state.stopRequests).toEqual(s.stopRequests); // 進行中の停止の猶予は変わらない
+    const same = applyEvent(
+      s,
+      ev(changed("a", { type: "stop", mode: "graceful", graceMs: 60000 })),
+    );
+    expect(same.ok && same.value.ignored).toBeUndefined();
+    const none = applyEvent(s, ev(changed("a", { type: "stop", mode: "graceful" })));
+    expect(none.ok && none.value.ignored).toBeUndefined();
+  });
+
+  it("停止要求は状態に残る（seq・ノード・種別・mode・graceMs）。retryStop も停止の試行として残る", () => {
+    const { log, stopSeq } = stoppingLog(60000);
+    const s = must(foldEvents(log));
+    expect(s.stopRequests).toEqual([
+      { seq: stopSeq, nodeId: "a", kind: "stop", mode: "graceful", graceMs: 60000 },
+    ]);
+    const timeout = ev(changed("a", { type: "stopTimeout" }));
+    const retry = ev(changed("a", { type: "retryStop" }));
+    const s2 = must(foldEvents([...log, timeout, retry]));
+    expect(s2.stopRequests.at(-1)).toEqual({
+      seq: retry.seq,
+      nodeId: "a",
+      kind: "retryStop",
+      mode: "immediate",
+    });
+  });
+
+  it("stopObserved は記録のみで、状態を変えない。停止要求の seq（stopSeq）と、そのときの graceMs を持つ", () => {
+    const { log, stopSeq } = stoppingLog(60000);
+    const before = must(foldEvents(log));
+    const e = ev(observed("a", "interrupted", stopSeq, 60000));
+    const s = must(foldEvents([...log, e]));
+    expect(s.nodes).toEqual(before.nodes);
+    expect(s.stopObservations).toEqual([
+      {
+        seq: e.seq,
+        at: e.at,
+        nodeId: "a",
+        outcome: "interrupted",
+        stopSeq,
+        graceMs: 60000,
+        actor: SYS,
+      },
+    ]);
+  });
+
+  it("同じ停止要求（stopSeq）につき観測は 1 件だけ（2 件目は observationAlreadyRecorded）。冪等な再送は無視される", () => {
+    const { log, stopSeq } = stoppingLog(60000);
+    const first = ev(observed("a", "withinGrace", stopSeq, 60000));
+    const second = ev(observed("a", "aborted", stopSeq));
+    expect(code(foldEvents([...log, first, second]))).toBe("observationAlreadyRecorded");
+    const dup = must(foldEvents([...log, first, { ...first, seq: first.seq + 1000 } as OrchEvent]));
+    expect(dup.stopObservations).toHaveLength(1);
+  });
+
+  it("stopSeq が当該ノードの停止要求でなければ拒否される（存在しない・別のノード・停止要求でないイベント）", () => {
+    const { log } = stoppingLog(60000);
+    expect(code(foldEvents([...log, ev(observed("a", "aborted", 99999))]))).toBe(
+      "unknownStopRequest",
+    );
+    expect(code(foldEvents([...log, ev(observed("a", "aborted", 1))]))).toBe("unknownStopRequest"); // 停止要求でないイベント
+    for (const bad of [0, -1, 1.5, "x" as never, undefined as never]) {
+      expect(code(foldEvents([...log, ev(observed("a", "aborted", bad))])), String(bad)).toBe(
+        "invalidPayload",
+      );
+    }
+    // 別のノードの停止要求の seq
+    const two = [
+      ...base(),
+      ev(changed("a", { type: "start" })),
+      ev(created("c", "implement", "root")),
+      ev(changed("c", { type: "start" })),
+    ];
+    const stopC = ev(changed("c", { type: "stop", mode: "immediate" }));
+    const stopA = ev(changed("a", { type: "stop", mode: "immediate" }));
+    expect(code(foldEvents([...two, stopC, stopA, ev(observed("a", "aborted", stopC.seq))]))).toBe(
+      "unknownStopRequest",
+    );
+    expect(foldEvents([...two, stopC, stopA, ev(observed("a", "aborted", stopA.seq))]).ok).toBe(
+      true,
+    );
+  });
+
+  it("retryStop の後の観測は、retryStop の seq に結び付く", () => {
+    const { log } = stoppingLog(60000);
+    const timeout = ev(changed("a", { type: "stopTimeout" }));
+    const retry = ev(changed("a", { type: "retryStop" }));
+    const obs = ev(observed("a", "aborted", retry.seq));
+    const s = must(foldEvents([...log, timeout, retry, obs]));
+    expect(s.stopObservations.at(-1)?.stopSeq).toBe(retry.seq);
   });
 
   it("停止に関する状態（stopping・stopIncomplete・stopped）のノードにだけ記録できる", () => {
-    const running = foldEvents([
-      ...base(),
-      ev(changed("a", { type: "start" })),
-      ev(observed("a", "aborted")),
-    ]);
-    expect(running.ok ? null : running.error.code).toBe("invalidTransition");
+    const { log, stopSeq } = stoppingLog(60000);
     const stopped = must(
       foldEvents([
-        ...stopping(),
+        ...log,
         ev(changed("a", { type: "confirmStopped" })),
-        ev(observed("a", "withinGrace")),
+        ev(observed("a", "withinGrace", stopSeq, 60000)),
       ]),
     );
     expect(stopped.stopObservations).toHaveLength(1);
+    // 再開して running に戻ったノードには、過去の停止要求の観測を記録できない
+    const resumed = foldEvents([
+      ...log,
+      ev(changed("a", { type: "confirmStopped" })),
+      ev(changed("a", { type: "restart", dependenciesDone: true })),
+      ev(observed("a", "withinGrace", stopSeq, 60000)),
+    ]);
+    expect(code(resumed)).toBe("invalidTransition");
   });
 
-  it("未知のノード・不正な outcome は拒否される。未知の type は引き続き拒否される", () => {
-    const r1 = foldEvents([...stopping(), ev(observed("zzz", "aborted"))]);
-    expect(r1.ok ? null : r1.error.code).toBe("unknownNode");
-    const r2 = foldEvents([...stopping(), ev(observed("a", "gracefully"))]);
-    expect(r2.ok ? null : r2.error.code).toBe("invalidPayload");
-    const r3 = foldEvents([ev({ type: "node.stopObserved2", payload: {} } as never)]);
-    expect(r3.ok ? null : r3.error.code).toBe("unknownEventType");
+  it("未知のノード・不正な outcome・不正な graceMs は拒否される。未知の type は引き続き拒否される", () => {
+    const { log, stopSeq } = stoppingLog(60000);
+    expect(code(foldEvents([...log, ev(observed("zzz", "aborted", stopSeq))]))).toBe("unknownNode");
+    expect(code(foldEvents([...log, ev(observed("a", "gracefully", stopSeq))]))).toBe(
+      "invalidPayload",
+    );
+    expect(code(foldEvents([...log, ev(observed("a", "aborted", stopSeq, 0))]))).toBe(
+      "invalidPayload",
+    );
+    expect(code(foldEvents([...log, ev(observed("a", "aborted", stopSeq, 3_600_001))]))).toBe(
+      "invalidPayload",
+    );
+    expect(code(foldEvents([ev({ type: "node.stopObserved2", payload: {} } as never)]))).toBe(
+      "unknownEventType",
+    );
   });
 
-  it("初期状態は stopObservations が空。持たない古いスナップショットの状態でも畳み込める", () => {
-    expect(initialState().stopObservations).toEqual([]);
-    const { stopObservations: _omit, ...old } = must(foldEvents(base()));
+  it("isStopOutcome は型ガード", () => {
+    expect(STOP_OUTCOMES.every(isStopOutcome)).toBe(true);
+    for (const x of ["x", "", null, undefined, 1, {}, ["withinGrace"]])
+      expect(isStopOutcome(x)).toBe(false);
+  });
+});
+
+describe("状態の壊れた値（スナップショットなど）で例外にならない", () => {
+  const goodState = (): OrchState => must(foldEvents(base()));
+  const corrupt = (patch: Record<string, unknown>): OrchState =>
+    ({ ...goodState(), ...patch }) as unknown as OrchState;
+  const junks: unknown[] = [5, {}, "abc", true, null, [null], [5], [{}], [{ seq: "x" }], [[]]];
+
+  it("stopObservations・stopRequests・他の配列が壊れていれば、applyEvent・foldEvents は例外でなく invalidState の失敗を返す", () => {
+    for (const key of [
+      "stopObservations",
+      "stopRequests",
+      "nodes",
+      "inbox",
+      "decisions",
+      "violations",
+    ]) {
+      for (const junk of junks) {
+        const state = corrupt({ [key]: junk });
+        const next = ev(changed("a", { type: "start" }));
+        const a = applyEvent(state, next);
+        expect(a.ok, `${key}=${JSON.stringify(junk)}`).toBe(false);
+        expect(a.ok ? null : a.error.code).toBe("invalidState");
+        const f = foldEvents([next], state);
+        expect(f.ok ? null : f.error.code, key).toBe("invalidState");
+      }
+    }
+  });
+
+  it("requests が壊れていても invalidState", () => {
+    for (const junk of [5, "x", null, [], [1]]) {
+      const r = applyEvent(corrupt({ requests: junk }), ev(changed("a", { type: "start" })));
+      expect(r.ok ? null : r.error.code, JSON.stringify(junk)).toBe("invalidState");
+    }
+  });
+
+  it("欠けている項目（古いスナップショット）は空として受け入れる", () => {
+    const { stopObservations: _a, stopRequests: _b, ...old } = goodState();
     const r = foldEvents([ev(changed("a", { type: "start" }))], old as unknown as OrchState);
     expect(r.ok).toBe(true);
-    expect(r.ok && r.value.stopObservations).toEqual([]);
+    expect(r.ok && r.value.stopRequests).toEqual([]);
+  });
+
+  it("任意の値を状態にしても、例外を出さない", () => {
+    fc.assert(
+      fc.property(fc.anything(), (state) => {
+        const a = applyEvent(state as never, ev(changed("a", { type: "start" })));
+        expect(typeof a.ok).toBe("boolean");
+        expect(typeof foldEvents([], state as never).ok).toBe("boolean");
+      }),
+    );
+  });
+
+  it("初期状態は stopObservations・stopRequests が空", () => {
+    expect(initialState().stopObservations).toEqual([]);
+    expect(initialState().stopRequests).toEqual([]);
   });
 });
