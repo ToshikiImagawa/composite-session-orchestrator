@@ -4,6 +4,7 @@ import {
   assessReclaim,
   COMPLETED_STATES,
   descendantsOf,
+  findRunningProcesses,
   NODE_STATES,
   type NodeState,
   type ProcessInfo,
@@ -566,5 +567,36 @@ describe("性質（fast-check）", () => {
         if (!base) expect(more).toBe(false);
       }),
     );
+  });
+});
+
+describe("findRunningProcesses（動作中のプロセスの pid）", () => {
+  const wt = "/wt/a";
+  const p = (pid: number, cwd: string, hasOpenFiles: ProcessInfo["hasOpenFiles"]): ProcessInfo => ({
+    pid,
+    cwd,
+    hasOpenFiles,
+  });
+
+  it("cwd が作業ツリー配下、配下のファイルを開いている、または不明なプロセスの pid を昇順で返す", () => {
+    const list = [
+      p(30, "/other", false), // 動作中でない
+      p(20, "/wt/a/sub", false),
+      p(10, "/wt/ab", true),
+      p(40, "/elsewhere", "unknown"),
+      p(50, "", false), // cwd 不明
+    ];
+    expect(findRunningProcesses(wt, list)).toEqual([10, 20, 40, 50]);
+  });
+
+  it("空の一覧は空。assessReclaim の条件 6 と同じ判定", () => {
+    expect(findRunningProcesses(wt, [])).toEqual([]);
+    const procs = [p(5, "/wt/a", false), p(6, "/x", false)];
+    const a = assess(input({ processes: procs }));
+    expect(
+      a.blockers
+        .filter((b) => b.kind === "process")
+        .map((b) => (b.kind === "process" ? b.pid : -1)),
+    ).toEqual(findRunningProcesses(wt, procs));
   });
 });

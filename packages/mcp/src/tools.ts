@@ -16,6 +16,13 @@ import {
 export const MCP_ROLES = ["integrator", "child"] as const;
 export type McpRole = (typeof MCP_ROLES)[number];
 
+/** 実行環境。`node.bind`（紐付けコード）は Desktop の子だけが使う（FR_032）。 */
+export type McpRuntime = "cli" | "desktop";
+
+/** 接続元のロールが MCP で公開するロールか。境界から来た値は、必ずこれで検査する。 */
+export const isMcpRole = (role: unknown): role is McpRole =>
+  typeof role === "string" && (MCP_ROLES as readonly string[]).includes(role);
+
 export interface ToolDefinition {
   /** MCP のツール名。操作名の `.` を `_` に置き換えたもの。 */
   readonly name: string;
@@ -41,6 +48,8 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "node.reclaimPreview": "回収の事前確認。何が回収されるかを示す",
   "node.reclaim": "事前確認で示した対象を回収する。実行時に条件を再判定する",
   "node.capabilities": "ノードごとに可能な操作を参照する",
+  "decision.get": "受信箱の項目（ref）の判断要求の内容を読む。自分の部分木のものだけ",
+  "report.get": "受信箱の項目（ref）の報告の内容を読む。自分の部分木のものだけ",
   "report.progress": "進捗を親へ報告する",
   "report.decision": "判断要求を親へ出す。人間へは親を経由する",
   "report.outOfScope": "作業範囲外の課題を親へ申告する",
@@ -49,30 +58,73 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "node.bind": "紐付けコードで自分をノードの子ロールに結ぶ（Desktop のみ）",
 };
 
-const toolName = (op: DaemonOperation): string => op.replaceAll(".", "_");
+/** 操作名から MCP のツール名への変換（`.` を `_` にする）。ツール名を扱う箇所はすべてこれを使う。 */
+export const toolName = (op: DaemonOperation): string => op.replaceAll(".", "_");
 
-/** ロールに公開するツールの一覧。 */
-export function toolsFor(role: McpRole): readonly ToolDefinition[] {
-  return ROLE_OPERATIONS[role].map((op) => ({
-    name: toolName(op),
-    operation: op,
-    description: DESCRIPTIONS[op],
-  }));
+const DESKTOP_ONLY: readonly DaemonOperation[] = ["node.bind"];
+
+/** ロールに公開するツールの一覧。MCP のロールでなければ何も公開しない。 */
+export function toolsFor(role: McpRole, runtime: McpRuntime = "cli"): readonly ToolDefinition[] {
+  if (!isMcpRole(role)) return [];
+  return ROLE_OPERATIONS[role]
+    .filter((op) => runtime === "desktop" || !DESKTOP_ONLY.includes(op))
+    .map((op) => ({ name: toolName(op), operation: op, description: DESCRIPTIONS[op] }));
+}
+
+/** 編集距離（綴りの近い名前の候補を出すため）。 */
+function distance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(
+        (prev[j] as number) + 1,
+        (cur[j - 1] as number) + 1,
+        (prev[j - 1] as number) + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = cur;
+  }
+  return prev[b.length] as number;
 }
 
 /** ツール名を、そのロールに公開された操作へ解決する。公開されていなければ失敗にする。 */
-export function operationForTool(role: McpRole, name: string): Result<DaemonOperation> {
-  const tool = toolsFor(role).find((t) => t.name === name);
-  if (tool === undefined) {
+export function operationForTool(
+  role: McpRole,
+  name: string,
+  runtime: McpRuntime = "cli",
+): Result<DaemonOperation> {
+  if (!isMcpRole(role)) {
     return {
       ok: false,
       error: failure(
-        "tool_not_exposed",
-        `ツール ${name} は ${role} ロールに公開されていない`,
-        "tools/list で、このロールに公開されたツールを確認する",
-        "必要な操作は親（統合セッション）に依頼する",
+        "role_not_exposed",
+        `ロール ${String(role)} には MCP のツールを公開していない`,
+        `接続のロールを確認する（${MCP_ROLES.join(" / ")} のみ）`,
       ),
     };
   }
-  return ok(tool.operation);
+  const tools = toolsFor(role, runtime);
+  const tool = tools.find((t) => t.name === name);
+  if (tool !== undefined) return ok(tool.operation);
+  const near = tools
+    .map((t) => ({ name: t.name, d: distance(name, t.name) }))
+    .filter((c) => c.d <= 2)
+    .sort((x, y) => x.d - y.d || (x.name < y.name ? -1 : 1))
+    .slice(0, 3)
+    .map((c) => c.name);
+  const base = [
+    "tools/list で、このロールに公開されたツールを確認する",
+    "必要な操作は親（統合セッション）に依頼する",
+  ] as const;
+  const next: [string, ...string[]] =
+    near.length > 0 ? [`もしかして: ${near.join(", ")}`, ...base] : [...base];
+  return {
+    ok: false,
+    error: failure(
+      "tool_not_exposed",
+      `ツール ${name} は ${role} ロールに公開されていない`,
+      ...next,
+    ),
+  };
 }

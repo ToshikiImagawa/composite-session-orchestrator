@@ -32,11 +32,14 @@ depends-on: ["design-initial-spec-design"]
 | T07 | core: イベント型（`OrchEvent`）と畳み込みによる状態導出、`requestId` の冪等性 | なし | T02, T03 | 完了（本 PR） | NFR_002, NFR_003, NFR_011 |
 | T08 | core: daemon 窓口の契約型、Result 型（原因と次の操作） | なし | T01 | 完了（本 PR） | NFR_003, NFR_004, NFR_010 |
 | T09 | daemon: イベントログ（SQLite）と復元。ドライバは着手時点の最新版を確認して決定 | なし | T07 | 完了（本 PR） | NFR_002, NFR_011 |
-| T10 | daemon: `sdk` ランタイムアダプタ（CLI の子の起動・指示・2 段階停止・フック） | なし（Spike 02 で確認済み。プロセス確認の OS 差は実装前に検証） | T05, T06, T08, T09 | 未 | FR_005, FR_009, FR_010, FR_033, IR_002 |
+| T10 | daemon: `sdk` ランタイムアダプタ（CLI の子の起動・指示・2 段階停止・フック） | なし（Spike 02 で確認済み。プロセス確認の OS 差は実装前に検証） | T05, T06, T08, T09 | 完了（本 PR） | FR_005, FR_009, FR_010, FR_033, IR_002 |
+| T10b | daemon: Agent SDK `query()` による `AgentLauncher` の実バインディング（依存 `@anthropic-ai/claude-agent-sdk` のバージョン・ライセンス・Node 22/24 を確認、手動検証）。実機確認で固定する項目: (1) フックが許可するツール名（LS・TodoWrite・ToolSearch・BashOutput など）、(2) 子の環境変数の除去規則（識別子系のみ除去し `*_TOKEN*`・`*_TOKEN_FILE`・`*_URL` は残す、の調整）、(3) 子の予期しない終了（`AgentSession.finished()`）の扱い（T10c で `node.exited` を記録し `onUnexpectedExit` で通知する。状態遷移への反映は daemon の窓口で決める） | 一部あり（実 SDK での起動・停止の手動確認） | T10 | 未 | FR_005, FR_009, FR_010, IR_002 |
+| T10c | core/daemon: 記録専用イベントの追加（`node.toolDenied`・`node.exited`・`report.added`、受信箱の `summary`・`ref`、`decision.get`・`report.get`、`node.purgePreview`・墓標の選択を含む）。`node.toolDenied{nodeId, tool}`（未知のツールの拒否。範囲違反ではなく受信箱に載せない）と `node.exited{nodeId, reason}`（子の予期しない終了。T10 は `onUnexpectedExit` で通知のみ）を core に足し、アダプタから記録する。T10b とは別の小タスクで、T10b より先に実施できる | なし | T10 | 完了（本 PR） | NFR_011, FR_009, FR_011, FR_012, FR_031 |
 | T11 | mcp: ロール別ツール定義と公開一覧のテスト固定（NFR_004）。FR_012 の「次に取るべき操作の候補」を受信箱の応答へ添える部分もここで扱う | なし | T08 | 完了（本 PR） | FR_004, NFR_004, NFR_009, FR_012 |
 | T12 | cli: 人間用コマンド（purge、回収の指示） | なし | T08 | 未 | FR_029, FR_031, NFR_006 |
 | T23 | daemon: HTML 画面、SSE による反映 | なし（能力表の表示値のみ確定待ちだが、画面の骨格は先行可能のためこちらに配置） | T09 | 未 | FR_021, IR_003, NFR_008 |
 | T24 | core/daemon: 中間統合ノードの配下の要約報告（上位の受信箱へ優先度付きで送る） | なし | T04, T07 | 未 | FR_013 |
+| T25 | mcp: MCP 境界の入力検証（zod）。ツール入力と daemon からの応答の形を検査する。依存追加は着手時点の最新版を確認して固定する。**daemon への結線の前提** | なし | T11 | 未 | NFR_010, NFR_004 |
 
 ## 手動確認の結果に依存（仮置きで進め、結果で確定）
 

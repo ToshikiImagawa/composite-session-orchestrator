@@ -6,6 +6,7 @@
  * （識別子と主要な項目のみ）。各操作の実装タスクで確定する。境界での値の検証（zod など）は将来課題。
  */
 
+import type { ReportEvidence, ReportKind } from "./events.js";
 import type { InboxItem } from "./inbox.js";
 import type { NodeState } from "./index.js";
 
@@ -62,6 +63,12 @@ export const mapResult = <T, U, E extends Failure>(
 export const CONTRACT_ROLES = ["integrator", "child", "human"] as const;
 export type ContractRole = (typeof CONTRACT_ROLES)[number];
 
+/**
+ * 最終削除で墓標を残すかの既定（FR_031）。残す側を既定とする（監査 NFR_011 と誤削除の追跡のため安全側）。
+ * daemon の保持ポリシーの設定で変えられる。`node.purge` の `tombstone` を省略したときにこの値を使う。
+ */
+export const DEFAULT_PURGE_TOMBSTONE = true;
+
 /** 操作の引数と結果（spec 4.1。仮置き、最小限）。 */
 export interface OperationMap {
   // 統合
@@ -95,6 +102,29 @@ export interface OperationMap {
     params: { nodeId: string };
     result: { operations: readonly DaemonOperation[] };
   };
+  /** 受信箱の項目（`ref`）の判断要求の内容を読む。 */
+  "decision.get": {
+    params: { decisionId: string };
+    result: {
+      decisionId: string;
+      nodeId: string;
+      status: "open" | "answered";
+      question?: string;
+      options?: readonly string[];
+      answer?: string;
+    };
+  };
+  /** 受信箱の項目（`ref`）の報告の内容を読む。 */
+  "report.get": {
+    params: { reportId: string };
+    result: {
+      reportId: string;
+      nodeId: string;
+      kind: ReportKind;
+      text: string;
+      evidence?: readonly ReportEvidence[];
+    };
+  };
   // 子（報告は親へのみ）
   "report.progress": { params: { text: string }; result: { accepted: true } };
   "report.decision": {
@@ -114,12 +144,24 @@ export interface OperationMap {
     result: { accepted: true };
   };
   "node.reclaimInstruct": { params: { nodeId: string }; result: { accepted: true } };
-  "node.purge": { params: { nodeId: string }; result: { purged: readonly string[] } };
+  /**
+   * 最終削除（FR_031）。最上位の木単位。`tombstone`: 削除後に 1 行の墓標（タイトル、結果、最終コミット、日付）を残すか。
+   * 省略時は保持ポリシーの既定に従う（`DEFAULT_PURGE_TOMBSTONE` = 残す。daemon の設定で変えられる）。
+   */
+  "node.purge": {
+    params: { nodeId: string; tombstone?: boolean };
+    result: { purged: readonly string[] };
+  };
+  /** `node.purge` の事前確認。削除される木（ノード ID）、木全体のアーカイブ日、経過日数を返す。何も変えない。 */
+  "node.purgePreview": {
+    params: { nodeId: string };
+    result: { nodeIds: readonly string[]; archivedAt: string; elapsedDays: number };
+  };
 }
 
 export type DaemonOperation = keyof OperationMap;
 
-/** ロールごとに公開する操作（NFR_004）。`node.purge` は人間のコマンドだけ（DC_003）。 */
+/** ロールごとに公開する操作（NFR_004）。`node.purge`・`node.purgePreview` は人間のコマンドだけ（DC_003）。 */
 export const ROLE_OPERATIONS = {
   integrator: [
     "node.spawn",
@@ -134,6 +176,8 @@ export const ROLE_OPERATIONS = {
     "node.reclaimPreview",
     "node.reclaim",
     "node.capabilities",
+    "decision.get",
+    "report.get",
   ],
   child: [
     "report.progress",
@@ -143,7 +187,7 @@ export const ROLE_OPERATIONS = {
     "scope.extend",
     "node.bind",
   ],
-  human: ["decision.answer", "node.reclaimInstruct", "node.purge"],
+  human: ["decision.answer", "node.reclaimInstruct", "node.purge", "node.purgePreview"],
 } as const satisfies Record<ContractRole, readonly DaemonOperation[]>;
 
 export type RoleOperation<R extends ContractRole> = (typeof ROLE_OPERATIONS)[R][number];
@@ -153,12 +197,31 @@ export const DAEMON_OPERATIONS: readonly RoleOperation<ContractRole>[] = CONTRAC
   (r) => ROLE_OPERATIONS[r],
 );
 
+/**
+ * 統合ノードの操作のうち、ノード（または、それを持つ判断・報告）を指すもの。呼び出した統合ノード（`caller`）の
+ * 部分木（`isInSubtree`）に限る（spec 4.1）。`decision.get`・`report.get` は、記録の `nodeId` で判定する。
+ * 適用は窓口（T13 以降）。ここでは判定の対象の操作を固定する。
+ */
+export const SUBTREE_SCOPED_OPERATIONS = [
+  "node.send",
+  "node.stop",
+  "node.split",
+  "node.review",
+  "node.reclaimPreview",
+  "node.reclaim",
+  "node.capabilities",
+  "decision.get",
+  "report.get",
+] as const satisfies readonly RoleOperation<"integrator">[];
+
 /** 窓口への要求の封筒。`requestId` で冪等にする（NFR_003）。ロールが持たない操作は型で表せない。 */
 export type DaemonRequest<R extends ContractRole = ContractRole> = {
   [Role in R]: {
     [Op in RoleOperation<Role>]: {
       readonly requestId: string;
       readonly role: Role;
+      /** 呼び出したノード。クライアントは指定せず、daemon が認証（ノード専用の資格情報）で決めて付ける。 */
+      readonly caller?: { readonly nodeId: string };
       readonly operation: Op;
       readonly params: OperationMap[Op]["params"];
     };
