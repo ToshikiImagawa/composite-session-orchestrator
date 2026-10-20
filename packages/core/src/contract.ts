@@ -197,22 +197,61 @@ export const DAEMON_OPERATIONS: readonly RoleOperation<ContractRole>[] = CONTRAC
   (r) => ROLE_OPERATIONS[r],
 );
 
+/** 部分木の規則: 対象は、呼び出した統合ノードの、自分自身を含まない子孫／直接の子／自分自身か子孫。 */
+export type SubtreeRule = "strictDescendant" | "directChild" | "selfOrDescendant";
+
+/** 統合ノードの、呼び出し側のノードの部分木では判定しない操作（一覧系は呼び出し側で絞り、`scope.decide` は拒否する）。 */
+type NonSubtreeIntegratorOperation = "inbox.fetch" | "tree.list" | "scope.decide";
+export type SubtreeOperation = Exclude<RoleOperation<"integrator">, NonSubtreeIntegratorOperation>;
+
 /**
- * 統合ノードの操作のうち、ノード（または、それを持つ判断・報告）を指すもの。呼び出した統合ノード（`caller`）の
- * 部分木（`isInSubtree`）に限る（spec 4.1）。`decision.get`・`report.get` は、記録の `nodeId` で判定する。
- * 適用は窓口（T13 以降）。ここでは判定の対象の操作を固定する。
+ * 統合ノードの、ノード・判断・報告を指す操作の、部分木の規則（spec 4.1）。対象は、`caller` の部分木に限る。
+ * - `strictDescendant`: 自分自身を含まない子孫。自分の停止・自分への指示は、親か人間だけができる。
+ * - `directChild`: 完了の判定（受理・差し戻し）は、直接の親だけ。
+ * - `selfOrDescendant`: 自分か子孫。子の生成（`parentId`）と、記録（判断・報告）の読み取り（記録のノード）。
+ * `decision.present` は `pauseNodeIds` のすべてに、`node.spawn` は `parentId` に適用する。
+ * 型で網羅を保証する（統合ノードの操作を足すと、ここか `INTEGRATOR_OPERATION_CLASS` の例外に足すまでコンパイルできない）。
+ * 適用は窓口（daemon の `authorize`）。
  */
-export const SUBTREE_SCOPED_OPERATIONS = [
-  "node.send",
-  "node.stop",
-  "node.split",
-  "node.review",
-  "node.reclaimPreview",
-  "node.reclaim",
-  "node.capabilities",
-  "decision.get",
-  "report.get",
-] as const satisfies readonly RoleOperation<"integrator">[];
+export const SUBTREE_RULES: Readonly<Record<SubtreeOperation, SubtreeRule>> = {
+  "node.spawn": "selfOrDescendant",
+  "node.send": "strictDescendant",
+  "node.stop": "strictDescendant",
+  "node.split": "strictDescendant",
+  "node.review": "directChild",
+  "node.reclaimPreview": "strictDescendant",
+  "node.reclaim": "strictDescendant",
+  "node.capabilities": "strictDescendant",
+  "decision.present": "strictDescendant",
+  "decision.get": "selfOrDescendant",
+  "report.get": "selfOrDescendant",
+};
+
+export const SUBTREE_SCOPED_OPERATIONS = Object.keys(SUBTREE_RULES) as readonly SubtreeOperation[];
+
+/**
+ * 統合ノードの操作の分類（型で網羅）。`subtree`: `SUBTREE_RULES` で判定する。`callerFiltered`: 呼び出し側の部分木に
+ * 絞った結果だけを返す（ハンドラの責務。`visibleState` を使う）。`denied`: 発生元の記録がまだないので、記録ができる
+ * までは統合ロールからの呼び出しを拒否する（`scope.decide`。フェイルクローズ）。
+ */
+export const INTEGRATOR_OPERATION_CLASS: Readonly<
+  Record<RoleOperation<"integrator">, "subtree" | "callerFiltered" | "denied">
+> = {
+  "node.spawn": "subtree",
+  "node.send": "subtree",
+  "node.stop": "subtree",
+  "inbox.fetch": "callerFiltered",
+  "tree.list": "callerFiltered",
+  "decision.present": "subtree",
+  "node.split": "subtree",
+  "scope.decide": "denied",
+  "node.review": "subtree",
+  "node.reclaimPreview": "subtree",
+  "node.reclaim": "subtree",
+  "node.capabilities": "subtree",
+  "decision.get": "subtree",
+  "report.get": "subtree",
+};
 
 /** 窓口への要求の封筒。`requestId` で冪等にする（NFR_003）。ロールが持たない操作は型で表せない。 */
 export type DaemonRequest<R extends ContractRole = ContractRole> = {

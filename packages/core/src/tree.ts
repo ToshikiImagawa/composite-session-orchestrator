@@ -211,3 +211,25 @@ export function isInSubtree(
   if (callerId === targetId) return true;
   return descendantsOf(nodes, callerId).some((n) => n.id === targetId);
 }
+
+/** `targetId` が `callerId` の、自分自身を含まない子孫か。自分自身への操作を許さない規則（停止・指示など）に使う。 */
+export function isStrictDescendant(
+  nodes: readonly TreeNode[],
+  callerId: string,
+  targetId: string,
+): boolean {
+  return callerId !== targetId && isInSubtree(nodes, callerId, targetId);
+}
+
+/** `targetId` が `callerId` の直接の子か（完了の判定は親だけ、など）。不正な入力は偽。 */
+export function isDirectChild(
+  nodes: readonly TreeNode[],
+  callerId: string,
+  targetId: string,
+): boolean {
+  if (!Array.isArray(nodes) || typeof callerId !== "string" || typeof targetId !== "string")
+    return false;
+  if (callerId === "" || targetId === "") return false;
+  if (!nodes.some((n) => n?.id === callerId)) return false;
+  return nodes.some((n) => n?.id === targetId && n.parentId === callerId);
+}
