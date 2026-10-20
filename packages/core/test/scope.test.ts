@@ -126,6 +126,16 @@ describe("書き込み: 回帰（迂回の試み）", () => {
     );
   });
 
+  it("書式制御文字（Cf: ゼロ幅文字など）を含むパスは拒否（HFS+ が無視する文字での迂回対策）", () => {
+    for (const ch of ["\u200b", "\u200c", "\u200d", "\ufeff", "\u2060", "\u00ad"]) {
+      expect(reasonOf(write(`src/secret${ch}/k`)), `U+${ch.codePointAt(0)?.toString(16)}`).toBe(
+        "invalidPath",
+      );
+      expect(reasonOf(write(`sr${ch}c/a`))).toBe("invalidPath");
+    }
+    expect(write("src/日本語/a.ts").allowed).toBe(true); // 通常の非 ASCII は許可
+  });
+
   it("NUL・空のパスは拒否", () => {
     expect(reasonOf(write("src/a\0b"))).toBe("invalidPath");
     expect(reasonOf(write(""))).toBe("invalidPath");
@@ -153,6 +163,14 @@ describe("範囲の設定の検証（フェイルクローズ）", () => {
     );
     expect(validateScope(bad({ writableLocations: ["/tmp"] }), CWD)[0]?.problem).toBe(
       "writableOutsideCwd",
+    );
+  });
+  it("書式制御文字を含む場所のエントリは不正", () => {
+    expect(validateScope(bad({ forbiddenLocations: ["src/sec\u200bret"] }), CWD)[0]?.problem).toBe(
+      "formatChar",
+    );
+    expect(validateScope(bad({ writableLocations: ["sr\ufeffc"] }), CWD)[0]?.problem).toBe(
+      "formatChar",
     );
   });
   it("cwd が絶対パスでなければ不正", () => {

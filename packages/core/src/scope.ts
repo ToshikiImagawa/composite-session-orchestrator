@@ -8,7 +8,9 @@
  * - 判定できないもの（コマンド置換、サブシェル、リダイレクト `<` `>`）とバックグラウンド起動（既定。ADR 未決）は拒否する。
  * - パスは正規化済みの入力を前提とする。シンボリックリンクの実パス解決は daemon のアダプタの責務で、ここでは行わない。
  * - 場所の比較は、大文字小文字の畳み込みと Unicode 正規化（NFC）を行ってから行う。大文字小文字を区別しない
- *   ファイルシステム（macOS、Windows の既定）で `src/SECRET` が禁止場所 `src/secret` をすり抜けるのを防ぐ。
+ *   ファイルシステム（macOS の既定など）で `src/SECRET` が禁止場所 `src/secret` をすり抜けるのを防ぐ。
+ *   Windows（バックスラッシュ区切り、ドライブ文字、予約名）は対象外で、POSIX 形式のパスだけを扱う。
+ *   書式制御文字（Cf、ゼロ幅文字など）を含むパスは、HFS+ が無視して別名と同一視するため拒否する。
  *   区別するファイルシステムでは過剰に拒否するだけで、安全側に倒れる。
  * - 範囲の設定（場所・コマンドの一覧）が不正なときは、書き込みとコマンドをすべて拒否する（フェイルクローズ）。
  *
@@ -36,7 +38,7 @@ export type ScopeViolationReason =
   | "backgroundExecution"
   | "indirectExecution" // 別のコマンドを再解釈・実行するコマンド（固定リスト）
   | "unparsable"
-  | "invalidPath" // 判定対象のパスが不正（空、NUL を含む）
+  | "invalidPath" // 判定対象のパスが不正（空、NUL・書式制御文字を含む）
   | "invalidScope"; // 範囲の設定が不正（validateScope を参照）
 
 export type ScopeDecision =
@@ -78,10 +80,19 @@ const isUnder = (path: string, dir: string): boolean => {
 
 const hasNul = (s: string): boolean => s.includes("\0");
 
+/** 書式制御文字（Cf）。ゼロ幅文字など、一部のファイルシステム（HFS+）が無視するため名前の比較を迂回できる。 */
+const hasFormatChar = (s: string): boolean => /\p{Cf}/u.test(s);
+
 export interface ScopeIssue {
   readonly field: "cwd" | "writableLocations" | "forbiddenLocations" | "allowedCommands";
   readonly value: string;
-  readonly problem: "empty" | "nul" | "notAbsolute" | "writableIsRoot" | "writableOutsideCwd";
+  readonly problem:
+    | "empty"
+    | "nul"
+    | "formatChar"
+    | "notAbsolute"
+    | "writableIsRoot"
+    | "writableOutsideCwd";
 }
 
 /** 範囲の設定を検査する。空の一覧は妥当（何も許可しない）。 */
@@ -93,6 +104,7 @@ export function validateScope(scope: Scope, cwd: string): ScopeIssue[] {
   const location = (field: "writableLocations" | "forbiddenLocations", value: string): void => {
     if (value.trim() === "") issues.push({ field, value, problem: "empty" });
     else if (hasNul(value)) issues.push({ field, value, problem: "nul" });
+    else if (hasFormatChar(value)) issues.push({ field, value, problem: "formatChar" });
     else if (field === "writableLocations") {
       const resolved = normalize(base, value);
       if (resolved === "/") issues.push({ field, value, problem: "writableIsRoot" });
@@ -111,7 +123,9 @@ export function validateScope(scope: Scope, cwd: string): ScopeIssue[] {
 }
 
 function checkWrite(scope: Scope, cwd: string, rawPath: string): ScopeDecision {
-  if (rawPath.trim() === "" || hasNul(rawPath)) return deny("invalidPath", rawPath);
+  if (rawPath.trim() === "" || hasNul(rawPath) || hasFormatChar(rawPath)) {
+    return deny("invalidPath", rawPath);
+  }
   const path = normalize(cwd, rawPath);
   if (scope.forbiddenLocations.some((d) => isUnder(path, normalize(cwd, d)))) {
     return deny("forbiddenLocation", path);
