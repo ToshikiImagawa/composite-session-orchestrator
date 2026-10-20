@@ -32,7 +32,8 @@ depends-on: ["design-initial-spec-design"]
 | T07 | core: イベント型（`OrchEvent`）と畳み込みによる状態導出、`requestId` の冪等性 | なし | T02, T03 | 完了（本 PR） | NFR_002, NFR_003, NFR_011 |
 | T08 | core: daemon 窓口の契約型、Result 型（原因と次の操作） | なし | T01 | 完了（本 PR） | NFR_003, NFR_004, NFR_010 |
 | T09 | daemon: イベントログ（SQLite）と復元。ドライバは着手時点の最新版を確認して決定 | なし | T07 | 完了（本 PR） | NFR_002, NFR_011 |
-| T10 | daemon: `sdk` ランタイムアダプタ（CLI の子の起動・指示・2 段階停止・フック） | なし（Spike 02 で確認済み。プロセス確認の OS 差は実装前に検証） | T05, T06, T08, T09 | 未 | FR_005, FR_009, FR_010, FR_033, IR_002 |
+| T10 | daemon: `sdk` ランタイムアダプタ（CLI の子の起動・指示・2 段階停止・フック） | なし（Spike 02 で確認済み。プロセス確認の OS 差は実装前に検証） | T05, T06, T08, T09 | 完了（本 PR） | FR_005, FR_009, FR_010, FR_033, IR_002 |
+| T10b | daemon: Agent SDK `query()` による `AgentLauncher` の実バインディング（依存 `@anthropic-ai/claude-agent-sdk` のバージョン・ライセンス・Node 22/24 を確認、手動検証） | 一部あり（実 SDK での起動・停止の手動確認） | T10 | 未 | FR_005, FR_009, FR_010, IR_002 |
 | T11 | mcp: ロール別ツール定義と公開一覧のテスト固定（NFR_004）。FR_012 の「次に取るべき操作の候補」を受信箱の応答へ添える部分もここで扱う | なし | T08 | 未 | FR_004, NFR_004, NFR_009 |
 | T12 | cli: 人間用コマンド（purge、回収の指示） | なし | T08 | 未 | FR_029, FR_031, NFR_006 |
 | T23 | daemon: HTML 画面、SSE による反映 | なし（能力表の表示値のみ確定待ちだが、画面の骨格は先行可能のためこちらに配置） | T09 | 未 | FR_021, IR_003, NFR_008 |
