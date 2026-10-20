@@ -194,3 +194,20 @@ export function reclaimInvariantViolations(
   }
   return nodes.filter((x) => bad.has(x.id)).map((x) => x.id);
 }
+
+/**
+ * `targetId` が `callerId` の部分木（自分自身とその子孫）にあるか。統合ノードの読み取り・操作の範囲（spec 4.1）の判定。
+ * どちらかが木にない・不正な入力のときは偽（フェイルクローズ）。例外は出さない。
+ */
+export function isInSubtree(
+  nodes: readonly TreeNode[],
+  callerId: string,
+  targetId: string,
+): boolean {
+  if (!Array.isArray(nodes) || typeof callerId !== "string" || typeof targetId !== "string")
+    return false;
+  if (callerId === "" || targetId === "") return false;
+  if (!nodes.some((n) => n?.id === callerId)) return false;
+  if (callerId === targetId) return true;
+  return descendantsOf(nodes, callerId).some((n) => n.id === targetId);
+}

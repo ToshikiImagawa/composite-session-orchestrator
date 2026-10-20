@@ -5,6 +5,7 @@ import {
   DAEMON_OPERATIONS,
   type DaemonOperation,
   type DaemonRequest,
+  DEFAULT_PURGE_TOMBSTONE,
   err,
   type Failure,
   failure,
@@ -12,10 +13,12 @@ import {
   isFailure,
   isOk,
   mapResult,
+  type OperationMap,
   ok,
   type Result,
   ROLE_OPERATIONS,
   type RoleOperation,
+  SUBTREE_SCOPED_OPERATIONS,
 } from "../src/index.js";
 
 describe("Result（NFR_010）", () => {
@@ -63,6 +66,69 @@ describe("操作の契約（NFR_004, DC_003）", () => {
       (ROLE_OPERATIONS[r] as readonly string[]).includes("node.purge"),
     );
     expect(holders).toEqual(["human"]);
+  });
+
+  it("人間は purge の事前確認（node.purgePreview）を持ち、統合ノードは decision.get・report.get を持つ", () => {
+    expect(ROLE_OPERATIONS.human).toContain("node.purgePreview");
+    expect(ROLE_OPERATIONS.integrator).toEqual(
+      expect.arrayContaining(["decision.get", "report.get"]),
+    );
+    for (const op of ["node.purgePreview", "decision.get", "report.get"]) {
+      const holders = CONTRACT_ROLES.filter((r) =>
+        (ROLE_OPERATIONS[r] as readonly string[]).includes(op),
+      );
+      expect(holders, op).toHaveLength(1);
+    }
+  });
+
+  it("node.purge の墓標の選択は任意（省略は後方互換）、purgePreview は削除される木・アーカイブ日・経過日数を返す", () => {
+    const human = (r: DaemonRequest<"human">) => r;
+    const b = { requestId: "r3", role: "human" } as const;
+    human({ ...b, operation: "node.purge", params: { nodeId: "n" } });
+    human({ ...b, operation: "node.purge", params: { nodeId: "n", tombstone: false } });
+    // @ts-expect-error tombstone は真偽値
+    human({ ...b, operation: "node.purge", params: { nodeId: "n", tombstone: "yes" } });
+    const preview: OperationMap["node.purgePreview"]["result"] = {
+      nodeIds: ["root", "a"],
+      archivedAt: "2026-07-01T00:00:00Z",
+      elapsedDays: 111,
+    };
+    expect(preview.nodeIds).toHaveLength(2);
+  });
+
+  it("統合ノードの操作のうち、ノード・判断・報告を指すものは自分の部分木に限る（適用は窓口。T13 以降）", () => {
+    expect([...SUBTREE_SCOPED_OPERATIONS].sort()).toEqual(
+      [
+        "decision.get",
+        "node.capabilities",
+        "node.reclaim",
+        "node.reclaimPreview",
+        "node.review",
+        "node.send",
+        "node.split",
+        "node.stop",
+        "report.get",
+      ].sort(),
+    );
+    for (const op of SUBTREE_SCOPED_OPERATIONS) {
+      expect(ROLE_OPERATIONS.integrator as readonly string[], op).toContain(op);
+    }
+  });
+
+  it("要求の caller（daemon が認証で決めるノード）は任意で、クライアントは必須にされない", () => {
+    const integ = (r: DaemonRequest<"integrator">) => r;
+    const b = { requestId: "r9", role: "integrator", operation: "node.stop" } as const;
+    integ({ ...b, params: { nodeId: "n1", mode: "graceful" } });
+    const withCaller = integ({
+      ...b,
+      caller: { nodeId: "m1" },
+      params: { nodeId: "n1", mode: "graceful" },
+    });
+    expect(withCaller.caller?.nodeId).toBe("m1");
+  });
+
+  it("墓標の既定は「残す」（監査 NFR_011 と誤削除の追跡のため安全側。保持ポリシーの設定で変えられる）", () => {
+    expect(DEFAULT_PURGE_TOMBSTONE).toBe(true);
   });
 
   it("child ロールは spawn / purge を型で表せない", () => {

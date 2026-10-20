@@ -1,4 +1,4 @@
-import type { Scope } from "@cso/core";
+import { isBoundedText, LIMITS, type Scope } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { type SdkAdapterDeps, SdkRuntimeAdapter } from "../../src/sdk/sdk-adapter.js";
 import { FakeLauncher, FakeSink, FakeTimers, probeSequence, settle } from "./fakes.js";
@@ -247,8 +247,12 @@ describe("フック（PreToolUse）", () => {
         })
       ).allow,
     ).toBe(false);
-    // 未知のツールは範囲違反ではないので、scope.violation（受信箱に載る）にしない。
-    expect(r.sink.types).toEqual(["scope.violation"]);
+    // 未知のツールは範囲違反ではないので、scope.violation（受信箱に載る）にせず、node.toolDenied として記録する。
+    expect(r.sink.types).toEqual(["node.toolDenied", "scope.violation"]);
+    expect(r.sink.records[0]).toMatchObject({
+      actor: { system: true },
+      body: { type: "node.toolDenied", payload: { nodeId: "a", tool: "WebFetch" } },
+    });
   });
 
   it("記録に失敗しても、拒否は変えない（フェイルクローズ）", async () => {
@@ -725,6 +729,24 @@ describe("予期しない終了（finished の監視）", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]?.[0]).toBe("a");
     expect(seen[0]?.[1]).toContain("crashed");
+    // 記録: 予期しない終了、失敗の報告、受信箱の failure の項目（報告を ref で指す）
+    expect(r.sink.types).toEqual(["node.exited", "report.added", "inbox.added"]);
+    expect(r.sink.records[0]).toMatchObject({
+      actor: { system: true },
+      body: { type: "node.exited", payload: { nodeId: "a" } },
+    });
+    const report = r.sink.records[1]?.body;
+    const inbox = r.sink.records[2]?.body;
+    expect(report).toMatchObject({
+      type: "report.added",
+      payload: { nodeId: "a", kind: "failure" },
+    });
+    expect(inbox).toMatchObject({ type: "inbox.added", payload: { nodeId: "a", kind: "failure" } });
+    expect(
+      (inbox?.type === "inbox.added" ? inbox.payload.ref : undefined) ===
+        (report?.type === "report.added" ? report.payload.reportId : null),
+    ).toBe(true);
+    expect(JSON.stringify(r.sink.records[0]?.body)).toContain("crashed");
     const s = await r.adapter.send("a", "x");
     expect(s.ok ? null : s.error.code).toBe("unknownNode");
   });
@@ -737,6 +759,40 @@ describe("予期しない終了（finished の監視）", () => {
     r.launcher.sessions[0]?.finish();
     await p;
     expect(seen).toEqual([]);
+    expect(r.sink.types.some((t) => t === "node.exited")).toBe(false);
+  });
+
+  it("理由に制御文字や長い文字列があっても、記録できる形にして記録する", async () => {
+    const r = rig();
+    await startNode(r);
+    r.launcher.sessions[0]?.finish(new Error(`\u001b[31m${"x".repeat(5000)}`));
+    await settle();
+    const exited = r.sink.records[0]?.body;
+    expect(exited?.type).toBe("node.exited");
+    const reason = exited?.type === "node.exited" ? exited.payload.reason : "";
+    expect(isBoundedText(reason, LIMITS.reason)).toBe(true);
+    expect(r.sink.types).toEqual(["node.exited", "report.added", "inbox.added"]);
+  });
+
+  it("未知のツール名が長い・制御文字を含んでも、記録できる形にして記録する", async () => {
+    const r = rig();
+    await startNode(r);
+    const hook = sessionOf(r).options.hooks.preToolUse;
+    await hook({ toolName: `Evil\u202e${"y".repeat(3000)}`, toolInput: {}, cwd: WT });
+    const body = r.sink.records[0]?.body;
+    expect(body?.type).toBe("node.toolDenied");
+    const tool = body?.type === "node.toolDenied" ? body.payload.tool : "";
+    expect(isBoundedText(tool, LIMITS.tool)).toBe(true);
+  });
+
+  it("node.exited の記録に失敗しても、通知と掃除は行う", async () => {
+    const seen: string[] = [];
+    const r = rig({ onUnexpectedExit: (n) => void seen.push(n) });
+    await startNode(r);
+    r.sink.failNext = 1;
+    r.launcher.sessions[0]?.finish(new Error("x"));
+    await settle();
+    expect(seen).toEqual(["a"]);
   });
 });
 
