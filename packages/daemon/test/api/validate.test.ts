@@ -158,7 +158,14 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
       expect(ok("node.send", { nodeId: "a", text: bad }), JSON.stringify(bad)).toBe(false);
     }
     expect(ok("report.progress", { text: "行1\n\t行2" })).toBe(true);
-    expect(ok("node.send", { nodeId: "a".repeat(257), text: "x" })).toBe(false);
+    expect(ok("node.send", { nodeId: "a".repeat(129), text: "x" })).toBe(false);
+    expect(ok("node.send", { nodeId: "a".repeat(128), text: "x" })).toBe(true);
+    // 識別子の形式（core の isSafeId）: パスの要素・区切り・空白・非 ASCII は拒否
+    for (const id of ["../x", "a/b", "a b", ".hidden", "-x", "あ", "a;b", "a$b"]) {
+      expect(ok("node.send", { nodeId: id, text: "x" }), id).toBe(false);
+      expect(ok("decision.get", { decisionId: id }), id).toBe(false);
+      expect(ok("node.purge", { nodeId: id }), id).toBe(false);
+    }
   });
 
   it("値は新しいオブジェクトに写して返す（入力を変更しない）", () => {

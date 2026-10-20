@@ -10,7 +10,9 @@ import {
   DAEMON_OPERATIONS,
   type DaemonOperation,
   failure,
+  ID_MAX_LENGTH,
   isBoundedText,
+  isSafeId,
   LIMITS,
   type OperationMap,
   type Result,
@@ -32,7 +34,6 @@ export interface Envelope {
 const isRec = (x: unknown): x is Rec => typeof x === "object" && x !== null && !Array.isArray(x);
 const OPERATIONS: ReadonlySet<string> = new Set(DAEMON_OPERATIONS);
 const MAX_REQUEST_ID = 128;
-const MAX_ID = 256;
 
 const bad = (cause: string): Failure =>
   failure("invalidRequest", cause, "要求の形を確認する", "操作の引数の仕様を確認する");
@@ -87,8 +88,8 @@ const fail = (cause: string): never => {
 
 const id = (o: Rec, key: string): string => {
   const v = o[key];
-  if (!isBoundedText(v, MAX_ID) || v === "" || /[\s]/.test(v))
-    fail(`${key} が不正（空でない ${MAX_ID} 文字以下の識別子）`);
+  if (!isSafeId(v))
+    fail(`${key} が不正（英数字で始まり、英数字と . _ : - だけの ${ID_MAX_LENGTH} 文字以下）`);
   return v as string;
 };
 const text = (o: Rec, key: string, max: number): string => {
