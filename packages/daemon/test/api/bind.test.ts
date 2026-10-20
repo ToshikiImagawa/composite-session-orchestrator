@@ -10,7 +10,7 @@ import {
   normalizeBindCode,
 } from "../../src/api/bind.js";
 
-const rig = (over: Parameters<typeof createBindCodes>[0] = {}) => {
+const rig = (over: NonNullable<Parameters<typeof createBindCodes>[0]> = {}) => {
   let now = 1_000_000;
   const codes = createBindCodes({ clock: () => now, ...over });
   return { codes, advance: (ms: number) => (now += ms) };
@@ -154,7 +154,7 @@ describe("bind コード（一度きり・短い有効期限・ノードに結�
   });
 
   it("不正なノード ID・未発行・不正な形のコードは使えない", () => {
-    const { codes } = rig({ maxFailures: 1000 });
+    const { codes } = rig();
     expect(() => codes.issue("")).toThrow();
     expect(() => codes.issue("../x")).toThrow();
     for (const bad of ["", "x", "unknown-code-unknown-code", null, undefined, 5, {}]) {
@@ -175,48 +175,22 @@ describe("bind コード（一度きり・短い有効期限・ノードに結�
   });
 });
 
-describe("ノードごとの失敗の回数制限", () => {
-  it("窓の中で、そのノードの失敗が上限（既定 5 回）に達すると、そのノードをロックする。他のノードは使える", () => {
+describe("失敗はロックしない（記録だけ）", () => {
+  it("同じノードの失敗が続いても、そのノードの正しいコードは使える（nodeId は誰でも申告できるので、妨害に使わせない）", () => {
     const r = rig();
     const good = r.codes.issue("a");
-    const other = r.codes.issue("b");
-    for (let i = 0; i < 5; i++)
+    for (let i = 0; i < 200; i++) {
       expect(r.codes.redeem("a", wrong(i))).toEqual({ ok: false, reason: "invalid" });
-    const locked = r.codes.redeem("a", good);
-    expect(locked).toMatchObject({ ok: false, reason: "locked" });
-    expect(locked.ok ? 0 : (locked as { retryAfterMs: number }).retryAfterMs).toBeGreaterThan(0);
-    expect(r.codes.redeem("b", other)).toEqual({ ok: true, nodeId: "b" });
-    r.advance(60_000);
+    }
     expect(r.codes.redeem("a", good)).toEqual({ ok: true, nodeId: "a" });
   });
 
-  it("全体のロックはない（ノードを変えて試しても、全員は止まらない）", () => {
+  it("失敗の状態をノードごとに持たない（メモリを使い切らせない）。locked という結果もない", () => {
     const r = rig();
-    const good = r.codes.issue("zz");
-    for (let i = 0; i < 100; i++) r.codes.redeem(`n${i}`, wrong(i));
-    expect(r.codes.redeem("zz", good)).toEqual({ ok: true, nodeId: "zz" });
-  });
-
-  it("古い失敗は窓（既定 1 分）を過ぎたら数えない。ロック中の試行は数えず、ロックを延ばさない", () => {
-    const r = rig();
-    const good = r.codes.issue("a");
-    for (let i = 0; i < 4; i++) r.codes.redeem("a", wrong(i));
-    r.advance(60_001);
-    for (let i = 0; i < 4; i++) r.codes.redeem("a", wrong(i + 10));
-    expect(r.codes.redeem("a", good)).toEqual({ ok: true, nodeId: "a" });
-    const r2 = rig({ maxFailures: 2, failureWindowMs: 1000, lockoutMs: 5000 });
-    r2.codes.redeem("a", wrong(1));
-    r2.codes.redeem("a", wrong(2));
-    for (let i = 0; i < 10; i++)
-      expect(r2.codes.redeem("a", wrong(i))).toMatchObject({ reason: "locked" });
-    r2.advance(5000);
-    expect(r2.codes.redeem("a", wrong(99))).toEqual({ ok: false, reason: "invalid" });
-  });
-
-  it("失敗を覚えるノードの数に上限がある（メモリを使い切らせない）", () => {
-    const r = rig({ maxTrackedNodes: 10 });
-    for (let i = 0; i < 1000; i++) r.codes.redeem(`n${i}`, wrong(i));
-    expect(r.codes.trackedNodes()).toBeLessThanOrEqual(10);
+    for (let i = 0; i < 2000; i++) r.codes.redeem(`n${i}`, wrong(i));
+    expect("trackedNodes" in r.codes).toBe(false);
+    const res = r.codes.redeem("n1", wrong(1));
+    expect(res).toEqual({ ok: false, reason: "invalid" });
   });
 });
 

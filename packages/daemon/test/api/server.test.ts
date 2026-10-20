@@ -560,15 +560,12 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     expect((await r.call({ nodeId: "a", bindCode: other })).status).toBe(401);
   });
 
-  it("ノード単位のロックで 429（Retry-After つき）。他のノードは使える", async () => {
-    const r = await rigBind();
-    for (let i = 0; i < 5; i++) await r.call({ nodeId: "a", bindCode: `${String(i).repeat(26)}` });
-    const locked = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
-    expect(locked.status).toBe(429);
-    expect(locked.json.error.code).toBe("tooManyRequests");
-    expect(Number(locked.headers.get("retry-after"))).toBeGreaterThan(0);
-    const other = await r.call({ nodeId: "a2", bindCode: r.bind.issue("a2") });
-    expect(other.status).toBe(401); // a2 は木にいない。ロックではなく通常の失敗
+  it("ノードごとのロックはない。同じノードの失敗が続いても、正しいコードで紐付けられる（nodeId は誰でも申告できる）", async () => {
+    const r = await rigBind({ throttle: createThrottle({ perSecond: 1000 }) });
+    for (let i = 0; i < 20; i++)
+      await r.call({ nodeId: "a", bindCode: `${String((i % 9) + 1).repeat(26)}` });
+    const res = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
+    expect(res.status).toBe(200);
   });
 
   it("全体は、ロックではなく短いスロットル（1 秒あたり N 回の失敗）。不正な本文・型違いも数える。次の秒には解ける", async () => {
@@ -624,7 +621,7 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     expect((await r.call({ nodeId: "ghost", bindCode: r.bind.issue("ghost") })).status).toBe(401);
   });
 
-  it("紐付けの成功・失敗・ロック・スロットルを logger に記録する（コード・ハッシュ・先頭の文字・トークンは書かない）", async () => {
+  it("紐付けの成功・失敗・スロットルを logger に記録する（コード・ハッシュ・先頭の文字・トークンは書かない）", async () => {
     const logs: Record<string, unknown>[] = [];
     const now = 5_000;
     const r = await rigBind({
@@ -643,7 +640,7 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     expect(logs[0]).toMatchObject({ nodeId: "a", at: "2026-10-20T00:00:00.000Z" });
     expect(logs[1]).toMatchObject({ event: "bindFailed", reason: "invalid" });
     expect(logs[2]).toMatchObject({ event: "bindFailed", reason: "malformed" });
-    expect(events).toContain("bindLocked");
+    expect(events).not.toContain("bindLocked");
     // 失敗の記録に nodeId は含めない（申告された値は信用できない）
     for (const l of logs.filter((x) => x.event !== "bindSucceeded"))
       expect(l).not.toHaveProperty("nodeId");

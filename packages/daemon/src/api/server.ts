@@ -57,7 +57,7 @@ export type Handlers = {
 /**
  * 記録するイベント（`at` は ISO 8601 UTC）。`internalError`: 500 の原因（応答には出さない）。bind の入口の結果:
  * `bindSucceeded`（成功。`nodeId` を持つのはこれだけ）、`bindFailed`（`reason`: invalid＝コードが無効・
- * rejected＝ノードの状態が許さない・malformed＝本文の形が不正）、`bindLocked`（ノードごとのロール中。`reason: "node"`）、
+ * rejected＝ノードの状態が許さない・malformed＝本文の形が不正。ロックはしない）、
  * `bindThrottled`（全体のスロットル。`reason: "global"`）。コードの値・ハッシュ・先頭の文字・トークンは書かない
  * （失敗では、申告された nodeId も書かない）。logger が例外を投げても、応答は変えない。
  */
@@ -75,7 +75,6 @@ export type ApiLogEvent =
       readonly reason: "invalid" | "rejected" | "malformed";
       readonly at: string;
     }
-  | { readonly event: "bindLocked"; readonly reason: "node"; readonly at: string }
   | { readonly event: "bindThrottled"; readonly reason: "global"; readonly at: string };
 
 export type ApiLogger = (event: ApiLogEvent) => void;
@@ -403,21 +402,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       denied(failure("unauthenticated", "bind コードが無効", "bind コードを再発行する"), reason, {
         "www-authenticate": "Bearer",
       });
-    if (!redeemed.ok) {
-      if (redeemed.reason === "locked") {
-        log({ event: "bindLocked", reason: "node", at: now() });
-        return reject(
-          res,
-          failure(
-            "tooManyRequests",
-            "失敗が続いたため、しばらく受け付けない",
-            "しばらく待って、もう一度試す",
-          ),
-          { "retry-after": String(Math.max(1, Math.ceil(redeemed.retryAfterMs / 1000))) },
-        );
-      }
-      return unauthorized(redeemed.reason);
-    }
+    if (!redeemed.ok) return unauthorized(redeemed.reason);
     let token: string;
     try {
       token = deps.credentials.issueNodeToken(redeemed.nodeId, "child");
