@@ -7,6 +7,7 @@ step() { printf '\n==> %s\n' "$1"; }
 
 step "lint";            pnpm lint
 step "build";           pnpm build
+step "resolve core";    node scripts/check-core-resolution.mjs
 step "typecheck";       pnpm typecheck
 step "test";            pnpm test
 step "validate plugin"; pnpm validate:plugin
