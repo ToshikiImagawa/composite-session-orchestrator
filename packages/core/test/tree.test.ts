@@ -7,7 +7,9 @@ import {
   countByState,
   depthOf,
   descendantsOf,
+  isDirectChild,
   isInSubtree,
+  isStrictDescendant,
   NODE_STATES,
   type NodeRole,
   type NodeState,
@@ -397,6 +399,41 @@ describe("isInSubtree（読み取り範囲: 自分の部分木のみ）", () => 
       expect(isInSubtree(bad as never, "m1", "a")).toBe(false);
       expect(isInSubtree(nodes, bad as never, "a")).toBe(false);
       expect(isInSubtree(nodes, "m1", bad as never)).toBe(false);
+    }
+  });
+});
+
+describe("isStrictDescendant・isDirectChild（部分木の規則）", () => {
+  const nodes = [
+    { id: "root", role: "integrator" as const, parentId: null },
+    { id: "m1", role: "integrator" as const, parentId: "root" },
+    { id: "a", role: "implement" as const, parentId: "m1" },
+    { id: "m2", role: "integrator" as const, parentId: "root" },
+  ];
+  it("isStrictDescendant: 自分自身を含まない子孫だけ真", () => {
+    expect(isStrictDescendant(nodes, "root", "a")).toBe(true);
+    expect(isStrictDescendant(nodes, "root", "m1")).toBe(true);
+    expect(isStrictDescendant(nodes, "m1", "a")).toBe(true);
+    expect(isStrictDescendant(nodes, "m1", "m1")).toBe(false);
+    expect(isStrictDescendant(nodes, "m1", "root")).toBe(false);
+    expect(isStrictDescendant(nodes, "m1", "m2")).toBe(false);
+    expect(isStrictDescendant(nodes, "m1", "zzz")).toBe(false);
+    expect(isStrictDescendant(nodes, "zzz", "a")).toBe(false);
+  });
+  it("isDirectChild: 直接の子だけ真", () => {
+    expect(isDirectChild(nodes, "root", "m1")).toBe(true);
+    expect(isDirectChild(nodes, "m1", "a")).toBe(true);
+    expect(isDirectChild(nodes, "root", "a")).toBe(false); // 孫
+    expect(isDirectChild(nodes, "m1", "m1")).toBe(false);
+    expect(isDirectChild(nodes, "m1", "zzz")).toBe(false);
+    expect(isDirectChild(nodes, "zzz", "a")).toBe(false);
+  });
+  it("壊れた入力でも例外を出さず偽", () => {
+    for (const bad of [null, undefined, 5, {}]) {
+      expect(isStrictDescendant(bad as never, "m1", "a")).toBe(false);
+      expect(isStrictDescendant(nodes, bad as never, "a")).toBe(false);
+      expect(isDirectChild(bad as never, "m1", "a")).toBe(false);
+      expect(isDirectChild(nodes, "m1", bad as never)).toBe(false);
     }
   });
 });
