@@ -160,6 +160,17 @@ function runningProcesses(worktree: string, processes: readonly unknown[]): Bloc
   return out.sort(sortPid);
 }
 
+/**
+ * 作業ツリー配下で動作中（または、動作中でないと確認できない）プロセスの pid を昇順で返す。
+ * 回収可能判定の条件 6 と同じ規則。停止後のプロセスの確認（daemon のアダプタ）でも使う。
+ */
+export function findRunningProcesses(
+  worktreePath: string,
+  processes: readonly ProcessInfo[],
+): number[] {
+  return runningProcesses(worktreePath, processes).map((b) => (b.kind === "process" ? b.pid : -1));
+}
+
 /** ノードが回収可能かを、満たしていない条件と原因つきで判定する。回収の実行直前の再判定にも使う。 */
 export function assessReclaim(
   input: ReclaimInput,
