@@ -275,7 +275,7 @@ describe("性質（fast-check）", () => {
     const shuffled = treeArb.chain((t) =>
       fc.tuple(
         fc.constant(t),
-        fc.shuffledSubarray(t, { minLength: t.length, maxLength: t.length }),
+        fc.shuffledSubarray([...t], { minLength: t.length, maxLength: t.length }),
       ),
     );
     fc.assert(
