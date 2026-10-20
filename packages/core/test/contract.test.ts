@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { err, type Failure, isErr, isOk, mapResult, ok, type Result } from "../src/index.js";
+import {
+  CONTRACT_ROLES,
+  DAEMON_OPERATIONS,
+  type DaemonRequest,
+  err,
+  type Failure,
+  failure,
+  isErr,
+  isFailure,
+  isOk,
+  mapResult,
+  ok,
+  type Result,
+  ROLE_OPERATIONS,
+} from "../src/index.js";
 
 describe("Result（NFR_010）", () => {
   it("ok は値を持つ", () => {
@@ -9,11 +23,7 @@ describe("Result（NFR_010）", () => {
   });
 
   it("err は原因と次の操作を必ず持つ", () => {
-    const f: Failure = {
-      code: "not_found",
-      cause: "ノード n1 がない",
-      nextActions: ["一覧を取得する"],
-    };
+    const f: Failure = failure("not_found", "ノード n1 がない", "一覧を取得する");
     const r: Result<number> = err(f);
     expect(isErr(r)).toBe(true);
     expect(r).toEqual({ ok: false, error: f });
@@ -21,7 +31,54 @@ describe("Result（NFR_010）", () => {
 
   it("mapResult は成功のみ変換し、失敗はそのまま返す", () => {
     expect(mapResult(ok(1), (n) => n + 1)).toEqual(ok(2));
-    const e = err({ code: "x", cause: "c", nextActions: ["a"] });
+    const e = err(failure("x", "c", "a"));
     expect(mapResult(e, (n: number) => n + 1)).toBe(e);
+  });
+});
+
+describe("failure / isFailure", () => {
+  it("次の操作が空なら型でも実行時でも拒否する", () => {
+    // @ts-expect-error nextActions は 1 件以上が必要
+    expect(() => failure("x", "c")).toThrow(RangeError);
+  });
+
+  it("isFailure は nextActions が空・欠落の値を弾く", () => {
+    expect(isFailure({ code: "x", cause: "c", nextActions: ["a"] })).toBe(true);
+    expect(isFailure({ code: "x", cause: "c", nextActions: [] })).toBe(false);
+    expect(isFailure({ code: "x", cause: "c" })).toBe(false);
+    expect(isFailure(null)).toBe(false);
+  });
+});
+
+describe("操作の契約（NFR_004, DC_003）", () => {
+  it("DAEMON_OPERATIONS に重複がない", () => {
+    expect(new Set(DAEMON_OPERATIONS).size).toBe(DAEMON_OPERATIONS.length);
+  });
+
+  it("node.purge は人間のコマンドだけが持つ", () => {
+    const holders = CONTRACT_ROLES.filter((r) =>
+      (ROLE_OPERATIONS[r] as readonly string[]).includes("node.purge"),
+    );
+    expect(holders).toEqual(["human"]);
+  });
+
+  it("child ロールは spawn / purge を型で表せない", () => {
+    const child = (r: DaemonRequest<"child">) => r;
+    const b = { requestId: "r1", role: "child" } as const;
+    const good = child({ ...b, operation: "report.progress", params: { text: "半分" } });
+    expect(good.operation).toBe("report.progress");
+    // @ts-expect-error child は node.purge を持たない
+    child({ ...b, operation: "node.purge", params: { nodeId: "n" } });
+    // @ts-expect-error child は node.spawn を持たない
+    child({ ...b, operation: "node.spawn", params: { brief: "", parentId: "" } });
+  });
+
+  it("操作ごとに params の型が決まる", () => {
+    const integ = (r: DaemonRequest<"integrator">) => r;
+    const b = { requestId: "r2", role: "integrator", operation: "node.stop" } as const;
+    const good = integ({ ...b, params: { nodeId: "n1", mode: "graceful" } });
+    expect(good.params).toEqual({ nodeId: "n1", mode: "graceful" });
+    // @ts-expect-error mode は graceful / immediate のみ
+    integ({ ...b, params: { nodeId: "n1", mode: "now" } });
   });
 });
