@@ -6,6 +6,7 @@
  * （識別子と主要な項目のみ）。各操作の実装タスクで確定する。境界での値の検証（zod など）は将来課題。
  */
 
+import type { ReportEvidence, ReportKind } from "./events.js";
 import type { NodeState } from "./index.js";
 
 /** 失敗。原因と次に取るべき操作を必ず持つ（NFR_010）。 */
@@ -95,6 +96,29 @@ export interface OperationMap {
     params: { nodeId: string };
     result: { operations: readonly DaemonOperation[] };
   };
+  /** 受信箱の項目（`ref`）の判断要求の内容を読む。 */
+  "decision.get": {
+    params: { decisionId: string };
+    result: {
+      decisionId: string;
+      nodeId: string;
+      status: "open" | "answered";
+      question?: string;
+      options?: readonly string[];
+      answer?: string;
+    };
+  };
+  /** 受信箱の項目（`ref`）の報告の内容を読む。 */
+  "report.get": {
+    params: { reportId: string };
+    result: {
+      reportId: string;
+      nodeId: string;
+      kind: ReportKind;
+      text: string;
+      evidence?: readonly ReportEvidence[];
+    };
+  };
   // 子（報告は親へのみ）
   "report.progress": { params: { text: string }; result: { accepted: true } };
   "report.decision": {
@@ -114,12 +138,24 @@ export interface OperationMap {
     result: { accepted: true };
   };
   "node.reclaimInstruct": { params: { nodeId: string }; result: { accepted: true } };
-  "node.purge": { params: { nodeId: string }; result: { purged: readonly string[] } };
+  /**
+   * 最終削除（FR_031）。最上位の木単位。`tombstone`: 削除後に 1 行の墓標（タイトル、結果、最終コミット、日付）を残すか。
+   * 省略時は保持ポリシーの既定に従う（daemon の設定。この契約では決めない）。
+   */
+  "node.purge": {
+    params: { nodeId: string; tombstone?: boolean };
+    result: { purged: readonly string[] };
+  };
+  /** `node.purge` の事前確認。削除される木（ノード ID）、木全体のアーカイブ日、経過日数を返す。何も変えない。 */
+  "node.purgePreview": {
+    params: { nodeId: string };
+    result: { nodeIds: readonly string[]; archivedAt: string; elapsedDays: number };
+  };
 }
 
 export type DaemonOperation = keyof OperationMap;
 
-/** ロールごとに公開する操作（NFR_004）。`node.purge` は人間のコマンドだけ（DC_003）。 */
+/** ロールごとに公開する操作（NFR_004）。`node.purge`・`node.purgePreview` は人間のコマンドだけ（DC_003）。 */
 export const ROLE_OPERATIONS = {
   integrator: [
     "node.spawn",
@@ -134,6 +170,8 @@ export const ROLE_OPERATIONS = {
     "node.reclaimPreview",
     "node.reclaim",
     "node.capabilities",
+    "decision.get",
+    "report.get",
   ],
   child: [
     "report.progress",
@@ -143,7 +181,7 @@ export const ROLE_OPERATIONS = {
     "scope.extend",
     "node.bind",
   ],
-  human: ["decision.answer", "node.reclaimInstruct", "node.purge"],
+  human: ["decision.answer", "node.reclaimInstruct", "node.purge", "node.purgePreview"],
 } as const satisfies Record<ContractRole, readonly DaemonOperation[]>;
 
 export type RoleOperation<R extends ContractRole> = (typeof ROLE_OPERATIONS)[R][number];

@@ -247,8 +247,12 @@ describe("フック（PreToolUse）", () => {
         })
       ).allow,
     ).toBe(false);
-    // 未知のツールは範囲違反ではないので、scope.violation（受信箱に載る）にしない。
-    expect(r.sink.types).toEqual(["scope.violation"]);
+    // 未知のツールは範囲違反ではないので、scope.violation（受信箱に載る）にせず、node.toolDenied として記録する。
+    expect(r.sink.types).toEqual(["node.toolDenied", "scope.violation"]);
+    expect(r.sink.records[0]).toMatchObject({
+      actor: { system: true },
+      body: { type: "node.toolDenied", payload: { nodeId: "a", tool: "WebFetch" } },
+    });
   });
 
   it("記録に失敗しても、拒否は変えない（フェイルクローズ）", async () => {
@@ -725,6 +729,12 @@ describe("予期しない終了（finished の監視）", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]?.[0]).toBe("a");
     expect(seen[0]?.[1]).toContain("crashed");
+    expect(r.sink.records).toHaveLength(1);
+    expect(r.sink.records[0]).toMatchObject({
+      actor: { system: true },
+      body: { type: "node.exited", payload: { nodeId: "a" } },
+    });
+    expect(JSON.stringify(r.sink.records[0]?.body)).toContain("crashed");
     const s = await r.adapter.send("a", "x");
     expect(s.ok ? null : s.error.code).toBe("unknownNode");
   });
@@ -737,6 +747,17 @@ describe("予期しない終了（finished の監視）", () => {
     r.launcher.sessions[0]?.finish();
     await p;
     expect(seen).toEqual([]);
+    expect(r.sink.types.some((t) => t === "node.exited")).toBe(false);
+  });
+
+  it("node.exited の記録に失敗しても、通知と掃除は行う", async () => {
+    const seen: string[] = [];
+    const r = rig({ onUnexpectedExit: (n) => void seen.push(n) });
+    await startNode(r);
+    r.sink.failNext = 1;
+    r.launcher.sessions[0]?.finish(new Error("x"));
+    await settle();
+    expect(seen).toEqual(["a"]);
   });
 });
 

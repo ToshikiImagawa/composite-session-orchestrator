@@ -73,7 +73,7 @@ export interface SdkAdapterDeps {
   readonly startTimeoutMs?: number;
   /** `interrupt()` を待つ時間（ミリ秒）。超えたら `abort()` に切り替える。既定 10000。 */
   readonly interruptTimeoutMs?: number;
-  /** 稼働中の子が、停止の要求なしに終了したときの通知（記録は daemon 側。イベント種別は T10b の課題）。 */
+  /** 稼働中の子が、停止の要求なしに終了したときの通知。アダプタは `node.exited` を記録した上で通知する。 */
   readonly onUnexpectedExit?: (nodeId: string, reason: string) => void;
 }
 
@@ -317,6 +317,8 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
       .then((reason) => {
         if (this.nodes.get(nodeId) !== entry || entry.stopping) return;
         this.nodes.delete(nodeId);
+        // 記録に失敗しても、通知と掃除は行う。
+        this.record({ type: "node.exited", payload: { nodeId, reason } });
         try {
           this.deps.onUnexpectedExit?.(nodeId, reason);
         } catch {
@@ -409,7 +411,13 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
       );
       if (decision.allow) return { allow: true };
       // 拒否した範囲違反も記録する（NFR_011）。記録に失敗しても拒否は変えない。
-      // 未知のツールの拒否は範囲違反ではないので、scope.violation（受信箱に載る）にしない。
+      // 未知のツールの拒否は範囲違反ではないので、scope.violation（受信箱に載る）にせず、node.toolDenied で記録する。
+      if (decision.unknownTool !== undefined) {
+        this.record({
+          type: "node.toolDenied",
+          payload: { nodeId, tool: decision.unknownTool },
+        });
+      }
       if (decision.violation !== undefined) {
         this.record({
           type: "scope.violation",

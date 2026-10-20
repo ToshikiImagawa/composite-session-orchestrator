@@ -36,3 +36,6 @@ export const INBOX_KIND_PRIORITY: Readonly<Record<InboxKind, Priority>> = {
   progress: "progress",
   info: "info",
 };
+
+/** 受信箱の項目の要約（`summary`）の最大文字数。短い要約だけを載せ、全文は参照先（`ref`）で読む。 */
+export const INBOX_SUMMARY_MAX = 200;

@@ -12,6 +12,7 @@ import {
   isFailure,
   isOk,
   mapResult,
+  type OperationMap,
   ok,
   type Result,
   ROLE_OPERATIONS,
@@ -63,6 +64,34 @@ describe("操作の契約（NFR_004, DC_003）", () => {
       (ROLE_OPERATIONS[r] as readonly string[]).includes("node.purge"),
     );
     expect(holders).toEqual(["human"]);
+  });
+
+  it("人間は purge の事前確認（node.purgePreview）を持ち、統合ノードは decision.get・report.get を持つ", () => {
+    expect(ROLE_OPERATIONS.human).toContain("node.purgePreview");
+    expect(ROLE_OPERATIONS.integrator).toEqual(
+      expect.arrayContaining(["decision.get", "report.get"]),
+    );
+    for (const op of ["node.purgePreview", "decision.get", "report.get"]) {
+      const holders = CONTRACT_ROLES.filter((r) =>
+        (ROLE_OPERATIONS[r] as readonly string[]).includes(op),
+      );
+      expect(holders, op).toHaveLength(1);
+    }
+  });
+
+  it("node.purge の墓標の選択は任意（省略は後方互換）、purgePreview は削除される木・アーカイブ日・経過日数を返す", () => {
+    const human = (r: DaemonRequest<"human">) => r;
+    const b = { requestId: "r3", role: "human" } as const;
+    human({ ...b, operation: "node.purge", params: { nodeId: "n" } });
+    human({ ...b, operation: "node.purge", params: { nodeId: "n", tombstone: false } });
+    // @ts-expect-error tombstone は真偽値
+    human({ ...b, operation: "node.purge", params: { nodeId: "n", tombstone: "yes" } });
+    const preview: OperationMap["node.purgePreview"]["result"] = {
+      nodeIds: ["root", "a"],
+      archivedAt: "2026-07-01T00:00:00Z",
+      elapsedDays: 111,
+    };
+    expect(preview.nodeIds).toHaveLength(2);
   });
 
   it("child ロールは spawn / purge を型で表せない", () => {

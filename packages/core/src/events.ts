@@ -20,7 +20,7 @@
 
 import { type Failure, failure, ok, type Result } from "./contract.js";
 import { type InboxItem, isValidInboxTime } from "./inbox.js";
-import { INBOX_KINDS, type InboxKind } from "./inbox-kinds.js";
+import { INBOX_KINDS, INBOX_SUMMARY_MAX, type InboxKind } from "./inbox-kinds.js";
 import type { NodeRole, NodeState } from "./index.js";
 import type { ScopeViolationReason } from "./scope.js";
 import {
@@ -67,6 +67,10 @@ export type EventBody =
         readonly id: string;
         readonly kind: InboxKind;
         readonly nodeId: string;
+        /** 短い要約（`INBOX_SUMMARY_MAX` 文字以下）。 */
+        readonly summary?: string;
+        /** 参照 ID（`decisionId`・`reportId` など）。 */
+        readonly ref?: string;
       };
     }
   | {
@@ -82,13 +86,51 @@ export type EventBody =
       };
     }
   | {
+      /** ツール呼び出しの拒否のうち、範囲違反でないもの（許可していないツール）。記録のみ。受信箱には載せない（NFR_011）。 */
+      readonly type: "node.toolDenied";
+      readonly payload: { readonly nodeId: string; readonly tool: string };
+    }
+  | {
+      /** 子の予期しない終了（停止の要求なしに終わった）。記録のみ。状態の扱いは別のイベントで決める。 */
+      readonly type: "node.exited";
+      readonly payload: { readonly nodeId: string; readonly reason: string };
+    }
+  | {
+      /** 報告の保存（進捗・完了・範囲外の申告）。記録のみ。受信箱の項目は `ref` で指す。 */
+      readonly type: "report.added";
+      readonly payload: {
+        readonly reportId: string;
+        readonly nodeId: string;
+        readonly kind: ReportKind;
+        readonly text: string;
+        /** 完了報告の、受け入れ基準ごとの根拠（FR_022）。完了（`done`）のときだけ。 */
+        readonly evidence?: readonly ReportEvidence[];
+      };
+    }
+  | {
       readonly type: "decision.requested";
-      readonly payload: { readonly decisionId: string; readonly nodeId: string };
+      readonly payload: {
+        readonly decisionId: string;
+        readonly nodeId: string;
+        /** 判断を求める内容。 */
+        readonly question?: string;
+        readonly options?: readonly string[];
+      };
     }
   | {
       readonly type: "decision.answered";
       readonly payload: { readonly decisionId: string; readonly answer: string };
     };
+
+export const REPORT_KINDS = ["progress", "done", "outOfScope"] as const;
+export type ReportKind = (typeof REPORT_KINDS)[number];
+const isReportKind = (x: unknown): x is ReportKind =>
+  typeof x === "string" && (REPORT_KINDS as readonly string[]).includes(x);
+
+export interface ReportEvidence {
+  readonly criterion: string;
+  readonly evidence: string;
+}
 
 export const STOP_OUTCOMES = ["withinGrace", "interrupted", "aborted"] as const;
 /** 停止の観測: 猶予内に result が来た／猶予を超えて `interrupt()` に落ちた／`abort()` した。 */
@@ -142,6 +184,9 @@ export interface DecisionRecord {
   readonly decisionId: string;
   readonly nodeId: string;
   readonly status: "open" | "answered";
+  /** 判断を求める内容（記録されていれば）。 */
+  readonly question?: string;
+  readonly options?: readonly string[];
   /** 採用された回答（先に確定した回答）。 */
   readonly answer?: string;
   readonly answeredBy?: Actor;
@@ -159,6 +204,33 @@ export interface ViolationRecord {
   readonly nodeId: string;
   readonly reason: ScopeViolationReason;
   readonly subject: string;
+  readonly actor: Actor;
+}
+
+export interface ToolDenialRecord {
+  readonly seq: number;
+  readonly at: string;
+  readonly nodeId: string;
+  readonly tool: string;
+  readonly actor: Actor;
+}
+
+export interface ExitRecord {
+  readonly seq: number;
+  readonly at: string;
+  readonly nodeId: string;
+  readonly reason: string;
+  readonly actor: Actor;
+}
+
+export interface ReportRecord {
+  readonly seq: number;
+  readonly at: string;
+  readonly reportId: string;
+  readonly nodeId: string;
+  readonly kind: ReportKind;
+  readonly text: string;
+  readonly evidence?: readonly ReportEvidence[];
   readonly actor: Actor;
 }
 
@@ -194,6 +266,12 @@ export interface OrchState {
   readonly stopRequests: readonly StopRequestRecord[];
   /** 停止の観測の記録（猶予内に止まったかの実測。猶予の既定値の見直しに使う）。 */
   readonly stopObservations: readonly StopObservation[];
+  /** 許可していないツールの拒否の記録（範囲違反ではない。受信箱には載せない）。 */
+  readonly toolDenials: readonly ToolDenialRecord[];
+  /** 子の予期しない終了の記録。 */
+  readonly exits: readonly ExitRecord[];
+  /** 保存した報告（受信箱の項目の `ref` で参照する）。 */
+  readonly reports: readonly ReportRecord[];
   /** 最後に適用したイベントの `seq`。 */
   readonly lastSeq: number;
   /** 適用済みの要求識別子 → 内容の指紋（冪等性の判定用）。 */
@@ -220,6 +298,7 @@ export type FoldFailureCode =
   | "unknownDecision"
   | "unknownStopRequest"
   | "observationAlreadyRecorded"
+  | "duplicateReport"
   | "invalidState";
 
 /** どのイベント（`seq`）で拒否したかを持つ失敗。壊れたイベントで `seq` が分からないときは 0。 */
@@ -248,6 +327,9 @@ export const initialState = (): OrchState => ({
   violations: [],
   stopRequests: [],
   stopObservations: [],
+  toolDenials: [],
+  exits: [],
+  reports: [],
   lastSeq: 0,
   requests: {},
 });
@@ -331,6 +413,10 @@ interface Draft {
   violations: ViolationRecord[];
   stopRequests: StopRequestRecord[];
   stopObservations: StopObservation[];
+  toolDenials: ToolDenialRecord[];
+  exits: ExitRecord[];
+  reports: ReportRecord[];
+  reportIds: Set<string>;
   lastSeq: number;
   requests: Map<string, string>;
   /** 直前の `step` で、イベントの一部が無視されたこと（`ApplyOutcome.ignored` に渡す）。 */
@@ -362,6 +448,26 @@ const stopRequestShape = (r: unknown): boolean =>
   (r.kind === "stop" || r.kind === "retryStop") &&
   (r.mode === "graceful" || r.mode === "immediate") &&
   (r.graceMs === undefined || isGraceMs(r.graceMs));
+const toolDenialShape = (r: unknown): boolean =>
+  isRec(r) &&
+  Number.isInteger(r.seq) &&
+  isId(r.nodeId) &&
+  isId(r.tool) &&
+  parseActor(r.actor) !== undefined;
+const exitShape = (r: unknown): boolean =>
+  isRec(r) &&
+  Number.isInteger(r.seq) &&
+  isId(r.nodeId) &&
+  typeof r.reason === "string" &&
+  parseActor(r.actor) !== undefined;
+const reportShape = (r: unknown): boolean =>
+  isRec(r) &&
+  Number.isInteger(r.seq) &&
+  isId(r.reportId) &&
+  isId(r.nodeId) &&
+  isReportKind(r.kind) &&
+  typeof r.text === "string" &&
+  parseActor(r.actor) !== undefined;
 const observationShape = (o: unknown): boolean =>
   isRec(o) &&
   Number.isInteger(o.seq) &&
@@ -391,7 +497,20 @@ function toDraft(state: OrchState): Draft | undefined {
   // 古いスナップショットには無い項目なので、欠けていても受け入れる。
   const stopRequests = arrayOf<StopRequestRecord>(state.stopRequests, stopRequestShape);
   const stopObservations = arrayOf<StopObservation>(state.stopObservations, observationShape);
-  if (!nodes || !inbox || !decisions || !violations || !stopRequests || !stopObservations)
+  const toolDenials = arrayOf<ToolDenialRecord>(state.toolDenials, toolDenialShape);
+  const exits = arrayOf<ExitRecord>(state.exits, exitShape);
+  const reports = arrayOf<ReportRecord>(state.reports, reportShape);
+  if (
+    !nodes ||
+    !inbox ||
+    !decisions ||
+    !violations ||
+    !stopRequests ||
+    !stopObservations ||
+    !toolDenials ||
+    !exits ||
+    !reports
+  )
     return undefined;
 
   const d: Draft = {
@@ -405,6 +524,10 @@ function toDraft(state: OrchState): Draft | undefined {
     violations: [...violations],
     stopRequests: [...stopRequests],
     stopObservations: [...stopObservations],
+    toolDenials: [...toolDenials],
+    exits: [...exits],
+    reports: [...reports],
+    reportIds: new Set(reports.map((r) => r.reportId)),
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
     note: undefined,
@@ -430,6 +553,9 @@ function toState(d: Draft): OrchState {
     violations: Object.freeze(d.violations),
     stopRequests: Object.freeze(d.stopRequests),
     stopObservations: Object.freeze(d.stopObservations),
+    toolDenials: Object.freeze(d.toolDenials),
+    exits: Object.freeze(d.exits),
+    reports: Object.freeze(d.reports),
     lastSeq: d.lastSeq,
     requests: Object.freeze(Object.fromEntries(d.requests)),
   });
@@ -772,10 +898,17 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     }
 
     case "inbox.added": {
-      const { id, kind, nodeId } = p;
+      const { id, kind, nodeId, summary, ref } = p;
       if (!isId(id) || !isId(nodeId) || !INBOX_KINDS.includes(kind as InboxKind)) {
         return invalid(seq, "inbox.added の payload");
       }
+      if (
+        summary !== undefined &&
+        (typeof summary !== "string" || summary.length > INBOX_SUMMARY_MAX)
+      ) {
+        return invalid(seq, `inbox.added の summary（${INBOX_SUMMARY_MAX} 文字以下の文字列）`);
+      }
+      if (ref !== undefined && !isId(ref)) return invalid(seq, "inbox.added の ref");
       if (!isValidInboxTime(raw.at)) return invalid(seq, "inbox.added の at（ISO 8601 UTC）");
       const node = nodeAt(d, nodeId);
       if (node === undefined) return unknownNode(seq, nodeId);
@@ -791,14 +924,85 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           nodeId,
           dependsOn: [...node.dependsOn],
           at: raw.at,
+          ...(summary === undefined ? {} : { summary: summary as string }),
+          ...(ref === undefined ? {} : { ref: ref as string }),
+        }),
+      );
+      return commit();
+    }
+
+    case "node.toolDenied": {
+      const { nodeId, tool } = p;
+      if (!isId(nodeId) || !isId(tool)) return invalid(seq, "node.toolDenied の payload");
+      if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
+      d.toolDenials.push(freezeRecord({ seq, at: raw.at, nodeId, tool, actor }));
+      return commit();
+    }
+
+    case "node.exited": {
+      const { nodeId, reason } = p;
+      if (!isId(nodeId) || typeof reason !== "string")
+        return invalid(seq, "node.exited の payload");
+      if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
+      d.exits.push(freezeRecord({ seq, at: raw.at, nodeId, reason, actor }));
+      return commit();
+    }
+
+    case "report.added": {
+      const { reportId, nodeId, kind, text, evidence } = p;
+      if (!isId(reportId) || !isId(nodeId) || !isReportKind(kind) || typeof text !== "string") {
+        return invalid(seq, "report.added の payload");
+      }
+      let evidenceList: ReportEvidence[] | undefined;
+      if (evidence !== undefined) {
+        // 根拠は完了報告（FR_022）だけが持つ。
+        if (
+          kind !== "done" ||
+          !Array.isArray(evidence) ||
+          !evidence.every(
+            (x) => isRec(x) && typeof x.criterion === "string" && typeof x.evidence === "string",
+          )
+        ) {
+          return invalid(
+            seq,
+            "report.added の evidence（完了報告の { criterion, evidence } の配列）",
+          );
+        }
+        evidenceList = evidence.map((x: Rec) => ({
+          criterion: x.criterion as string,
+          evidence: x.evidence as string,
+        }));
+      }
+      if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
+      if (d.reportIds.has(reportId)) {
+        return reject(seq, "duplicateReport", `報告 ${reportId} は既にある`, "別の ID を使う");
+      }
+      d.reportIds.add(reportId);
+      d.reports.push(
+        freezeRecord({
+          seq,
+          at: raw.at,
+          reportId,
+          nodeId,
+          kind,
+          text,
+          ...(evidenceList === undefined ? {} : { evidence: Object.freeze(evidenceList) }),
+          actor,
         }),
       );
       return commit();
     }
 
     case "decision.requested": {
-      const { decisionId, nodeId } = p;
+      const { decisionId, nodeId, question, options } = p;
       if (!isId(decisionId) || !isId(nodeId)) return invalid(seq, "decision.requested の payload");
+      if (
+        (question !== undefined && typeof question !== "string") ||
+        (options !== undefined &&
+          !(Array.isArray(options) && options.every((o) => typeof o === "string")))
+      ) {
+        return invalid(seq, "decision.requested の question・options");
+      }
       if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
       if (d.decisionIdx.has(decisionId)) {
         return reject(
@@ -810,7 +1014,14 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       }
       d.decisionIdx.set(decisionId, d.decisions.length);
       d.decisions.push(
-        freezeRecord({ decisionId, nodeId, status: "open", rejected: Object.freeze([]) }),
+        freezeRecord({
+          decisionId,
+          nodeId,
+          status: "open",
+          ...(question === undefined ? {} : { question: question as string }),
+          ...(options === undefined ? {} : { options: Object.freeze([...(options as string[])]) }),
+          rejected: Object.freeze([]),
+        }),
       );
       return commit();
     }

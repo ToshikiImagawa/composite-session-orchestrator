@@ -26,6 +26,10 @@ export interface InboxItem {
   readonly dependsOn: readonly string[];
   /** ISO 8601（UTC）。 */
   readonly at: string;
+  /** 短い要約（`INBOX_SUMMARY_MAX` 文字以下）。全文は `ref` の参照先で読む。 */
+  readonly summary?: string;
+  /** 参照 ID（判断要求の `decisionId`、報告の `reportId` など）。種類（`kind`）が参照先を決める。 */
+  readonly ref?: string;
 }
 
 /** ノードの依存（ノード → 依存先）。項目を持たない中間ノードを含められる。 */
