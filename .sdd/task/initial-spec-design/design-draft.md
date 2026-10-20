@@ -32,7 +32,7 @@ risk: "high"
 | モジュール | ステータス | 備考 |
 |:--|:--|:--|
 | `packages/core` | 🔴 | 優先度の整列のみ存在 |
-| `packages/core` の型の整合 | 🔴 | `NodeStatus` / `Priority` を spec の `NodeState` / `InboxKind` に合わせる（名称の統一、`stopping` / `stopIncomplete` の追加、`Priority` のコメントに `stopIncomplete` は failed の帯と明記）。core のコードは本 PR では変更しない |
+| `packages/core` の型の整合 | 🟢 | `NodeStatus` / `Priority` を spec の `NodeState` / `InboxKind` に合わせる（名称の統一、`stopping` / `stopIncomplete` の追加、`Priority` のコメントに `stopIncomplete` は failed の帯と明記）。実装済み（`merged` は spec に無いため削除。`merged` は状態ではなく merge 役ノードの作業であり、統合済みは役割と `verified` で表す） |
 | `packages/daemon` | 🔴 | スキャフォールドのみ |
 | `packages/mcp` | 🔴 | スキャフォールドのみ |
 | `packages/cli` | 🔴 | スキャフォールドのみ |
