@@ -7,6 +7,7 @@ import {
   countByState,
   depthOf,
   descendantsOf,
+  isInSubtree,
   NODE_STATES,
   type NodeRole,
   type NodeState,
@@ -370,5 +371,32 @@ describe("性質（fast-check）", () => {
       }),
       { numRuns: 1000 },
     );
+  });
+});
+
+describe("isInSubtree（読み取り範囲: 自分の部分木のみ）", () => {
+  const nodes = [
+    { id: "root", role: "integrator" as const, parentId: null },
+    { id: "m1", role: "integrator" as const, parentId: "root" },
+    { id: "a", role: "implement" as const, parentId: "m1" },
+    { id: "m2", role: "integrator" as const, parentId: "root" },
+    { id: "b", role: "implement" as const, parentId: "m2" },
+  ];
+  it("自分と子孫は真、兄弟の部分木・祖先・未知のノードは偽", () => {
+    expect(isInSubtree(nodes, "m1", "m1")).toBe(true);
+    expect(isInSubtree(nodes, "m1", "a")).toBe(true);
+    expect(isInSubtree(nodes, "root", "b")).toBe(true);
+    expect(isInSubtree(nodes, "m1", "b")).toBe(false);
+    expect(isInSubtree(nodes, "m1", "root")).toBe(false);
+    expect(isInSubtree(nodes, "m1", "zzz")).toBe(false);
+    expect(isInSubtree(nodes, "zzz", "a")).toBe(false);
+    expect(isInSubtree(nodes, "", "")).toBe(false);
+  });
+  it("壊れた入力でも例外を出さず偽", () => {
+    for (const bad of [null, undefined, 5, {}]) {
+      expect(isInSubtree(bad as never, "m1", "a")).toBe(false);
+      expect(isInSubtree(nodes, bad as never, "a")).toBe(false);
+      expect(isInSubtree(nodes, "m1", bad as never)).toBe(false);
+    }
   });
 });

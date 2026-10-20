@@ -26,6 +26,7 @@ export * from "./contract.js";
 export * from "./events.js";
 export * from "./inbox.js";
 export * from "./inbox-kinds.js";
+export * from "./limits.js";
 export * from "./reclaim.js";
 export * from "./scope.js";
 export * from "./transition.js";
