@@ -239,6 +239,15 @@ describe("scope.decide（拡張の判定。承認でアダプタの範囲を更�
     );
   });
 
+  it("判定したら、受信箱の拡張要求の項目を解決済みにする（inbox.fetch には出なくなる）", async () => {
+    const r = rig();
+    const id = await ask(r);
+    const item = r.s().inbox.find((i) => i.ref === id);
+    expect(item?.resolved).toBeUndefined();
+    await r.decide({ extensionId: id, decision: "reject" });
+    expect(r.s().inbox.find((i) => i.ref === id)?.resolved).toBeDefined();
+  });
+
   it("却下・切り出し: 記録だけ。アダプタは更新しない", async () => {
     const r = rig();
     const id = await ask(r);

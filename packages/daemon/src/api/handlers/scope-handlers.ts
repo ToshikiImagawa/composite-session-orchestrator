@@ -224,6 +224,12 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
             ...(decision === "approve" ? { granted: ext.target } : {}),
           },
         },
+        // 判定したら、親の受信箱の、この拡張要求の項目を解決済みにする（同じ記録で。再送は重複しない）。
+        ...state.inbox
+          .filter(
+            (i) => i.kind === "violation" && i.ref === extensionId && i.resolved === undefined,
+          )
+          .map((i): EventBody => ({ type: "inbox.resolved", payload: { itemId: i.id } })),
       ];
       const decided = appendAtomically(log, deps.clock, req.requestId, actor, bodies);
       if (!decided.ok) return decided;

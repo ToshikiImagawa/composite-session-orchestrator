@@ -251,6 +251,20 @@ describe("decision.answer（回答で、止めた子を必ず再開する）", (
     expect(r.s().inbox.at(-1)?.summary).toContain("b");
   });
 
+  it("人間が破棄を判断した（node.discardDecided）停止中の子は、回答が来ても再開しない", async () => {
+    const r = rig();
+    const id = await paused(r);
+    r.log.append({
+      requestId: "disc-1",
+      actor: { human: true },
+      body: { type: "node.discardDecided", payload: { nodeId: "a" } },
+    });
+    const res = await r.answer(id, "A");
+    expect(res.ok).toBe(true);
+    expect(stateOf(r.s(), "a")).toBe("stopped");
+    expect(r.calls.started).toEqual([]);
+  });
+
   it("同時に同じ回答が 2 件来ても、再開の起動は 1 回", async () => {
     const r = rig();
     const id = await paused(r);
