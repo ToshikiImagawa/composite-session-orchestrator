@@ -10,6 +10,7 @@ import type { Brief } from "./brief.js";
 import type { ExtensionTarget, ReportEvidence, ReportKind } from "./events.js";
 import type { InboxItem } from "./inbox.js";
 import type { NodeRole, NodeState } from "./index.js";
+import type { Blocker, UnmetReason } from "./reclaim.js";
 
 /** 失敗。原因と次に取るべき操作を必ず持つ（NFR_010）。 */
 export interface Failure {
@@ -76,10 +77,14 @@ export interface OperationMap {
   /** 子の生成。ブリーフ（spec 5.2）を受ける。作業ツリー・ブランチは params に含めず、アダプタが親ブランチから決める。 */
   "node.spawn": {
     params: { parentId: string; role: NodeRole } & Brief;
-    result: { nodeId: string };
+    /** 依存先が未完了なら `pending`（待っている先行ノードを `waitingFor` に）、そうでなければ起動して `running`。 */
+    result: { nodeId: string; status: "running" | "pending"; waitingFor?: string[] };
   };
   /** 追加指示。届いたかではなく、受け付けて（`node.instructed` を記録して）送る段取りに入ったことを返す。 */
-  "node.send": { params: { nodeId: string; text: string }; result: { status: "queued" } };
+  "node.send": {
+    params: { nodeId: string; text: string };
+    result: { status: "queued"; duplicate: boolean };
+  };
   "node.stop": {
     /** 停止。猶予時間（`graceMs`。1〜`MAX_GRACE_MS` の整数）は穏当な停止（graceful）のときだけ指定できる。 */
     params: { nodeId: string } & ({ mode: "graceful"; graceMs?: number } | { mode: "immediate" });
@@ -108,7 +113,15 @@ export interface OperationMap {
     );
     result: { state: NodeState };
   };
-  "node.reclaimPreview": { params: { nodeId: string }; result: { reclaimable: boolean } };
+  /** 回収の事前確認。結果は `assessReclaim` の結果の構造（満たしていない条件と、原因のノード・プロセス）。 */
+  "node.reclaimPreview": {
+    params: { nodeId: string };
+    result: {
+      reclaimable: boolean;
+      unmet: readonly UnmetReason[];
+      blockers: readonly Blocker[];
+    };
+  };
   "node.reclaim": { params: { nodeId: string }; result: { reclaimed: readonly string[] } };
   "node.capabilities": {
     params: { nodeId: string };
@@ -195,21 +208,27 @@ export const ROLE_OPERATIONS = {
     "report.get",
   ],
   child: ["report.progress", "report.decision", "report.outOfScope", "report.done", "scope.extend"],
-  human: ["decision.answer", "node.reclaimInstruct", "node.purge", "node.purgePreview"],
+  human: [
+    "decision.answer",
+    "scope.decide",
+    "node.reclaimInstruct",
+    "node.purge",
+    "node.purgePreview",
+  ],
 } as const satisfies Record<ContractRole, readonly DaemonOperation[]>;
 
 export type RoleOperation<R extends ContractRole> = (typeof ROLE_OPERATIONS)[R][number];
 
 /** 操作の一覧（重複なし）。 */
-export const DAEMON_OPERATIONS: readonly RoleOperation<ContractRole>[] = CONTRACT_ROLES.flatMap(
-  (r) => ROLE_OPERATIONS[r],
-);
+export const DAEMON_OPERATIONS: readonly RoleOperation<ContractRole>[] = [
+  ...new Set(CONTRACT_ROLES.flatMap((r) => ROLE_OPERATIONS[r])),
+];
 
 /** 部分木の規則: 対象は、呼び出した統合ノードの、自分自身を含まない子孫／直接の子／自分自身か子孫。 */
 export type SubtreeRule = "strictDescendant" | "directChild" | "selfOrDescendant";
 
-/** 統合ノードの、呼び出し側のノードの部分木では判定しない操作（一覧系は呼び出し側で絞り、`scope.decide` は拒否する）。 */
-type NonSubtreeIntegratorOperation = "inbox.fetch" | "tree.list" | "scope.decide";
+/** 統合ノードの、呼び出し側のノードの部分木では判定しない操作（一覧系は、呼び出し側で絞る）。 */
+type NonSubtreeIntegratorOperation = "inbox.fetch" | "tree.list";
 export type SubtreeOperation = Exclude<RoleOperation<"integrator">, NonSubtreeIntegratorOperation>;
 
 /**
@@ -231,6 +250,7 @@ export const SUBTREE_RULES: Readonly<Record<SubtreeOperation, SubtreeRule>> = {
   "node.reclaim": "strictDescendant",
   "node.capabilities": "strictDescendant",
   "decision.present": "strictDescendant",
+  "scope.decide": "strictDescendant", // 対象は拡張の発生元のノード（拡張要求の `nodeId`）。人間は全ノード
   "decision.get": "selfOrDescendant",
   "report.get": "selfOrDescendant",
 };
@@ -252,7 +272,7 @@ export const INTEGRATOR_OPERATION_CLASS: Readonly<
   "tree.list": "callerFiltered",
   "decision.present": "subtree",
   "node.split": "subtree",
-  "scope.decide": "denied",
+  "scope.decide": "subtree",
   "node.review": "subtree",
   "node.reclaimPreview": "subtree",
   "node.reclaim": "subtree",

@@ -108,8 +108,8 @@ describe("操作の契約（NFR_004, DC_003）", () => {
     );
     expect(INTEGRATOR_OPERATION_CLASS["inbox.fetch"]).toBe("callerFiltered");
     expect(INTEGRATOR_OPERATION_CLASS["tree.list"]).toBe("callerFiltered");
-    // 発生元の記録がまだないので、記録ができるまでは統合ロールからの呼び出しを拒否する
-    expect(INTEGRATOR_OPERATION_CLASS["scope.decide"]).toBe("denied");
+    // 拡張要求の判定は、発生元（拡張要求の nodeId）が自分の部分木のときだけ（人間は全ノード）
+    expect(INTEGRATOR_OPERATION_CLASS["scope.decide"]).toBe("subtree");
   });
 
   it("部分木の規則の表: 操作ごとに strictDescendant・directChild・selfOrDescendant を決める", () => {
@@ -123,6 +123,7 @@ describe("操作の契約（NFR_004, DC_003）", () => {
       "node.reclaim": "strictDescendant",
       "node.capabilities": "strictDescendant",
       "decision.present": "strictDescendant", // pauseNodeIds のすべて
+      "scope.decide": "strictDescendant", // 拡張の発生元のノード
       "decision.get": "selfOrDescendant", // 記録のノード
       "report.get": "selfOrDescendant",
     });
@@ -226,7 +227,9 @@ describe("node.send・node.stop・scope.extend の契約", () => {
   const child = (r: DaemonRequest<"child">) => r;
 
   it("node.send の結果は { status: 'queued' }（届いたかではなく、受け付けた）", () => {
-    expectTypeOf<DaemonResponse<"node.send">>().toEqualTypeOf<Result<{ status: "queued" }>>();
+    expectTypeOf<DaemonResponse<"node.send">>().toEqualTypeOf<
+      Result<{ status: "queued"; duplicate: boolean }>
+    >();
   });
 
   it("node.stop の graceMs は graceful のときだけ指定できる", () => {
