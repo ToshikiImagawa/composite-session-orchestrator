@@ -73,7 +73,7 @@ const rig = () => {
     revoked: [] as string[],
     failures: [] as string[],
   };
-  const flags = { startFails: false };
+  const flags = { startFails: false, revokeThrows: false };
   const adapter = {
     kind: "cli" as const,
     capabilities: () => ({
@@ -114,6 +114,7 @@ const rig = () => {
       },
       revokeNode: (id) => {
         calls.revoked.push(id);
+        if (flags.revokeThrows) throw new Error("失効できない");
       },
     },
     onFailure: (_id, cause) => calls.failures.push(cause),
@@ -169,6 +170,7 @@ describe("decision.present の pauseNodeIds（判断待ちの間に子を止め�
     const seq = r.s().lastSeq;
     expect((await r.present({ ...Q, pauseNodeIds: ["d"] })).error?.code).toBe("notActive");
     expect((await r.present({ ...Q, pauseNodeIds: ["root"] })).ok).toBe(false);
+    expect((await r.present({ ...Q, pauseNodeIds: ["p"] })).error?.code).toBe("notActive"); // 依存待ち（pending）
     expect(r.s().lastSeq).toBe(seq);
   });
 });
@@ -229,6 +231,50 @@ describe("decision.answer（回答で、止めた子を必ず再開する）", (
     expect(retry.ok).toBe(true);
     expect(stateOf(r.s(), "a")).toBe("running");
     expect(r.calls.started).toHaveLength(2);
+  });
+
+  it("人間などが止めた子は、回答が来ても再開しない（受信箱に載せる）。判断による停止だけの子は再開する", async () => {
+    const r = rig();
+    const res = await r.present({ ...Q, pauseNodeIds: ["a", "b"] });
+    const id = res.value?.decisionId as string;
+    await r.flush();
+    r.ev("a", { type: "confirmStopped" });
+    // b は、停止の途中で応答がなく、人間が止め直した（retryStop）
+    r.ev("b", { type: "stopTimeout" });
+    r.ev("b", { type: "retryStop" });
+    r.ev("b", { type: "confirmStopped" });
+    const ans = await r.answer(id, "A");
+    expect(ans.ok).toBe(true);
+    expect(stateOf(r.s(), "a")).toBe("running");
+    expect(stateOf(r.s(), "b")).toBe("stopped");
+    expect(r.calls.started.map((x) => x.nodeId)).toEqual(["a"]);
+    expect(r.s().inbox.at(-1)?.summary).toContain("b");
+  });
+
+  it("同時に同じ回答が 2 件来ても、再開の起動は 1 回", async () => {
+    const r = rig();
+    const id = await paused(r);
+    const [x, y] = await Promise.all([r.answer(id, "B", "c-1"), r.answer(id, "B", "c-2")]);
+    expect(x.ok && y.ok).toBe(true);
+    expect(r.calls.started).toHaveLength(1);
+    expect(r.calls.issued).toEqual(["a"]);
+  });
+
+  it("再開の指示に、ブリーフ（目的・受け入れ基準・範囲）と回答を含める", async () => {
+    const r = rig();
+    const id = await paused(r);
+    await r.answer(id, "B");
+    const text = r.calls.started[0]?.instruction ?? "";
+    for (const part of ["B", "o", "c", "src", "pnpm test"]) expect(text).toContain(part);
+  });
+
+  it("失効に失敗したら、応答に警告を含める", async () => {
+    const r = rig();
+    const id = await paused(r);
+    r.flags.startFails = true;
+    r.flags.revokeThrows = true;
+    const res = await r.answer(id, "A");
+    expect(res.error?.cause).toContain("失効できなかった");
   });
 
   it("後から来た別の回答（却下）では、再開を試みない。止めていない判断は、そのまま", async () => {

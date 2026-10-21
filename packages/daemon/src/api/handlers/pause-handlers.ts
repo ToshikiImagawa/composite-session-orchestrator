@@ -3,21 +3,39 @@
  * 状態ハンドラ（`createStateHandlers`。`allowPause: true`）の `decision.present`・`decision.answer` を包む。
  * PRD: FR_018
  *
- * - 止める: 判断要求を記録したあと、各対象を `node.stop`（穏当）で止める。止める操作の失敗は、判断要求の記録を妨げない
- *   （`onFailure` に記録）。起動前（pending）・動作中・待機中の子だけを対象にできる（終わった子・止まった子を指定したら、
- *   何も記録せずに失敗させる。回答のときに、意図しない子を再開しないため）。
- * - 再開: 回答が確定したあと（採用済みの回答と同じ内容の再送を含む）、対象のうち停止済み（stopped）の子を再開する
- *   （`restart` を記録し、動作中になったら、作業ツリー・範囲・回答を渡して `adapter.start`）。停止の途中（stopping・
- *   stopIncomplete）の子はまだ再開できないので、回答は記録済みのまま `resumePending` で失敗させる。同じ回答を再送すると、
- *   再開をやり直す（冪等。起動済みの子を二重に起動しない）。起動に失敗したら、トークンを失効して停止済みに戻し、失敗を返す。
- * - 判断待ちの間に人間が止めた子も、回答で再開される（止めた主体は区別しない）。
+ * - 止める: 判断要求を記録したあと、各対象を `node.stop`（穏当。requestId は判断と対象から決める）で止める。止める操作の
+ *   失敗は、判断要求の記録を妨げない（`onFailure` に記録）。動作中・待機中の子だけを対象にできる（終わった子・止まった子・
+ *   依存待ち〔pending〕の子を指定したら、何も記録せずに失敗させる）。
+ * - 再開: 回答が確定したあと（採用済みの回答と同じ内容の再送を含む）、対象のうち停止済み（stopped）で、**停止の要求が
+ *   すべてこの判断が出したもの**（一時停止・再開の失敗の後始末）の子だけを再開する。人間などが止めた子は、再開せずに、
+ *   判断を出した統合ノードの受信箱に載せる。再開は、トークンを発行して `adapter.start`（ブリーフと回答を渡す）に成功してから、
+ *   `restart` を記録する。停止の途中（stopping・stopIncomplete）の子はまだ再開できないので、回答は記録済みのまま
+ *   `resumePending` で失敗させ、同じ回答の再送で再開をやり直す。同じ判断・同じ子の再開は、同時に 1 つだけ走らせる。
+ *   起動に失敗したら、トークンを失効して失敗を返す（失効に失敗したら、応答に警告を含める）。
  */
 
-import { effectiveScope, type Failure, type OperationMap, type Result, stateOf } from "@cso/core";
+import {
+  COMPLETED_STATES,
+  effectiveScope,
+  type Failure,
+  type OperationMap,
+  type OrchState,
+  type Result,
+  type Scope,
+  stateOf,
+} from "@cso/core";
 import type { RuntimeAdapter } from "../../sdk/runtime.js";
 import type { CredentialStore } from "../credentials.js";
 import type { HandlerRequest } from "../server.js";
-import { alreadyApplied, appendAtomically, fail, type LogPort } from "./context.js";
+import {
+  alreadyApplied,
+  appendAtomically,
+  derivedRequestId,
+  deriveId,
+  fail,
+  type LogPort,
+  summarize,
+} from "./context.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 type Async<Op extends keyof OperationMap> = R<Op> | Promise<R<Op>>;
@@ -41,7 +59,32 @@ export interface PauseHandlerDeps {
   readonly onFailure?: (nodeId: string, cause: string) => void;
 }
 
-const PAUSABLE = new Set(["pending", "running", "waiting"]);
+const PAUSABLE = new Set(["running", "waiting"]);
+
+const dependenciesDone = (state: OrchState, dependsOn: readonly string[]): boolean =>
+  dependsOn.every((d) => COMPLETED_STATES.has(stateOf(state, d) ?? "pending"));
+
+/** 再開した子への指示: ブリーフ（目的・受け入れ基準・範囲）と、判断の回答。 */
+function instructionAfterAnswer(
+  nodeId: string,
+  state: OrchState,
+  scope: Scope,
+  answer: string,
+): string {
+  const n = state.nodes.find((x) => x.id === nodeId);
+  return [
+    `判断が出ました。回答: ${answer}`,
+    "作業を再開してください。",
+    ...(n?.objective === undefined ? [] : [`目的: ${n.objective}`]),
+    ...(n?.acceptanceCriteria === undefined
+      ? []
+      : ["受け入れ基準:", ...n.acceptanceCriteria.map((c) => `- ${c}`)]),
+    "範囲:",
+    `- 書き込み可能な場所: ${scope.writableLocations.join("、") || "なし"}`,
+    `- 禁止する場所: ${scope.forbiddenLocations.join("、") || "なし"}`,
+    `- 許可するコマンド: ${scope.allowedCommands.join("、") || "なし"}`,
+  ].join("\n");
+}
 
 export function createPauseHandlers(deps: PauseHandlerDeps) {
   const { log, ports, credentials } = deps;
@@ -53,71 +96,108 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
     }
   };
 
-  /** 再開 1 件。成功したら undefined、失敗なら原因（応答に出す短い説明）。 */
-  async function resumeOne(
+  const pauseRequestId = (decisionId: string, target: string): string =>
+    `pause-${decisionId}-${target}`;
+  const cleanupRequestId = (decisionId: string, target: string, episode: number): string =>
+    `resume-${decisionId}-${target}-${episode}-cleanup`;
+
+  /**
+   * 判断による一時停止だけが、停止の最後の要求か。判断の要求より後の、このノードの停止要求（停止・再試行）が、
+   * すべてこの判断が出したもの（一時停止、または再開の失敗の後始末）なら true。人間などが止めた子は false。
+   */
+  function pausedOnlyByDecision(
+    state: OrchState,
+    decision: { decisionId: string; nodeId: string },
+    target: string,
+  ): boolean {
+    const actor = { nodeId: decision.nodeId };
+    const mine = (requestId: string) =>
+      Object.hasOwn(state.requests, derivedRequestId(actor, requestId, 0));
+    if (!mine(pauseRequestId(decision.decisionId, target))) return false;
+    const since =
+      state.inbox.find((i) => i.kind === "decision" && i.ref === decision.decisionId)?.seq ?? 0;
+    const stops = state.stopRequests.filter((q) => q.nodeId === target && q.seq > since).length;
+    let own = 1;
+    for (let k = 0; k <= stops; k++)
+      if (mine(cleanupRequestId(decision.decisionId, target, k))) own++;
+    return stops === own;
+  }
+
+  /** 同じ判断・同じ子の再開を、同時に 1 つだけ走らせる（同じ Promise を共有する）。 */
+  const resuming = new Map<string, Promise<ResumeOutcome>>();
+
+  interface ResumeOutcome {
+    readonly kind: "resumed" | "skipped" | "notStopped" | "failed";
+    /** 失敗の短い説明、または警告。 */
+    readonly message?: string;
+  }
+
+  /** 再開 1 件。 */
+  function resumeOne(
     decision: { decisionId: string; nodeId: string },
     target: string,
     answer: string,
-  ): Promise<string | undefined> {
+  ): Promise<ResumeOutcome> {
+    const key = `${decision.decisionId}\0${target}`;
+    const running = resuming.get(key);
+    if (running !== undefined) return running;
+    const promise = resumeExclusive(decision, target, answer).finally(() => resuming.delete(key));
+    resuming.set(key, promise);
+    return promise;
+  }
+
+  async function resumeExclusive(
+    decision: { decisionId: string; nodeId: string },
+    target: string,
+    answer: string,
+  ): Promise<ResumeOutcome> {
     const actor = { nodeId: decision.nodeId };
     const before = log.state();
-    const now = stateOf(before, target);
-    if (now === "stopping" || now === "stopIncomplete") return `${target}（停止の途中）`;
-    if (now !== "stopped") return undefined; // 動作中・終了済みなど。再開するものがない
-    // 停止の試行ごとに別の番号にする（起動の失敗で止め直した後の再試行が、重複として無視されないように）。
+    const node = before.nodes.find((n) => n.id === target);
+    const now = node?.state;
+    if (now === "stopping" || now === "stopIncomplete") {
+      return { kind: "failed", message: `${target}（停止の途中）` };
+    }
+    if (node === undefined || now !== "stopped") return { kind: "notStopped" }; // 動作中・終了済みなど
+    if (!pausedOnlyByDecision(before, decision, target)) return { kind: "skipped" }; // 人間などが止めた子
     const episode = before.stopRequests.filter((q) => q.nodeId === target).length;
     const cwd = await ports.cwdOf(target).catch(() => undefined);
     const scope = effectiveScope(before, target);
     const adapter = deps.adapterFor(target);
     if (cwd === undefined || scope === undefined || adapter === undefined) {
-      return `${target}（作業ツリー・範囲・ランタイムを確認できない）`;
+      return { kind: "failed", message: `${target}（作業ツリー・範囲・ランタイムを確認できない）` };
     }
-    const restartId = `resume-${decision.decisionId}-${target}-${episode}`;
-    const already = alreadyApplied(before, actor, restartId);
-    const restarted = appendAtomically(
-      log,
-      deps.clock,
-      `resume-${decision.decisionId}-${target}-${episode}`,
-      actor,
-      [
-        {
-          type: "node.stateChanged",
-          payload: { nodeId: target, event: { type: "restart", dependenciesDone: true } },
-        },
-      ],
-    );
-    if (!restarted.ok) {
-      note(target, `再開を記録できない: ${restarted.error.code}: ${restarted.error.cause}`);
-      return `${target}（再開を記録できない）`;
-    }
-    if (already) return undefined; // 記録済み（起動済み）。二重に起動しない
-    if (stateOf(restarted.value.state, target) !== "running") return undefined; // 依存待ち（pending）。起動は別
-    const abort = (cause: string): string => {
+    const warnings: string[] = [];
+    const abort = (cause: string): ResumeOutcome => {
       note(target, cause);
       try {
         credentials.revokeNode(target);
       } catch (e) {
         note(target, `トークンを失効できない: ${String(e)}`);
+        warnings.push(`${target} のトークンを失効できなかった（要確認）`);
       }
-      const back = appendAtomically(
-        log,
-        deps.clock,
-        `resume-${decision.decisionId}-${target}-${episode}-cleanup`,
-        actor,
-        [
-          {
-            type: "node.stateChanged",
-            payload: { nodeId: target, event: { type: "stop", mode: "immediate" } },
-          },
-          {
-            type: "node.stateChanged",
-            payload: { nodeId: target, event: { type: "confirmStopped" } },
-          },
-        ],
-      );
-      if (!back.ok) note(target, `停止を記録できない: ${back.error.code}: ${back.error.cause}`);
-      return `${target}（起動できなかった）`;
+      if (stateOf(log.state(), target) === "running") {
+        const back = appendAtomically(
+          log,
+          deps.clock,
+          cleanupRequestId(decision.decisionId, target, episode),
+          actor,
+          [
+            {
+              type: "node.stateChanged",
+              payload: { nodeId: target, event: { type: "stop", mode: "immediate" } },
+            },
+            {
+              type: "node.stateChanged",
+              payload: { nodeId: target, event: { type: "confirmStopped" } },
+            },
+          ],
+        );
+        if (!back.ok) note(target, `停止を記録できない: ${back.error.code}: ${back.error.cause}`);
+      }
+      return { kind: "failed", message: [`${target}（起動できなかった）`, ...warnings].join("。") };
     };
+    // 起動してから、再開を記録する（起動の失敗で、動作中なのにプロセスがない状態を作らない）。
     let token: string;
     try {
       token = credentials.issueNodeToken(target, "child");
@@ -129,14 +209,38 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
         nodeId: target,
         worktreePath: cwd,
         scope,
-        instruction: `判断が出ました。回答: ${answer}\n作業を再開してください。`,
+        instruction: instructionAfterAnswer(node.id, before, scope, answer),
         mcp: { url: ports.mcpUrl, token },
       });
       if (!started.ok) return abort(`起動に失敗: ${started.error.code}: ${started.error.cause}`);
     } catch (e) {
       return abort(`起動が例外: ${String(e)}`);
     }
-    return undefined;
+    const restarted = appendAtomically(
+      log,
+      deps.clock,
+      `resume-${decision.decisionId}-${target}-${episode}`,
+      actor,
+      [
+        {
+          type: "node.stateChanged",
+          payload: {
+            nodeId: target,
+            event: { type: "restart", dependenciesDone: dependenciesDone(before, node.dependsOn) },
+          },
+        },
+      ],
+    );
+    if (!restarted.ok) {
+      note(target, `再開を記録できない: ${restarted.error.code}: ${restarted.error.cause}`);
+      try {
+        await adapter.stop(target, { mode: "immediate", stopSeq: log.state().lastSeq });
+      } catch (e) {
+        note(target, `起動した子を止められない: ${String(e)}`);
+      }
+      return abort("再開を記録できない");
+    }
+    return { kind: "resumed" };
   }
 
   return {
@@ -153,7 +257,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
         if (!retry && st !== undefined && !PAUSABLE.has(st)) {
           return fail(
             "notActive",
-            `ノード ${t} は ${st} で、一時停止の対象にできない（pending・running・waiting のとき）`,
+            `ノード ${t} は ${st} で、一時停止の対象にできない（running・waiting のとき）`,
             "止める対象から外す",
           );
         }
@@ -163,7 +267,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       for (const t of targets) {
         if (!PAUSABLE.has(stateOf(log.state(), t) ?? "")) continue; // 再送で、すでに止めている
         const stopped = await deps.stop({
-          requestId: `pause-${r.value.decisionId}-${t}`,
+          requestId: pauseRequestId(r.value.decisionId, t),
           operation: "node.stop",
           role: "integrator",
           caller: { nodeId: caller },
@@ -185,9 +289,34 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       if (d === undefined || targets.length === 0) return r;
       const answer = d.answer ?? params.choice ?? params.text ?? "";
       const failed: string[] = [];
+      const skipped: string[] = [];
       for (const t of targets) {
-        const why = await resumeOne(d, t, answer);
-        if (why !== undefined) failed.push(why);
+        const o = await resumeOne(d, t, answer);
+        if (o.kind === "failed") failed.push(o.message ?? t);
+        else if (o.kind === "skipped") skipped.push(t);
+      }
+      // 再開しなかった子（人間などが止めた子）は、判断を出した統合ノードの受信箱に載せる。
+      if (skipped.length > 0) {
+        const listed = appendAtomically(
+          log,
+          deps.clock,
+          `resume-${d.decisionId}-skipped`,
+          { nodeId: d.nodeId },
+          [
+            {
+              type: "inbox.added",
+              payload: {
+                id: deriveId("inbox", d.nodeId, d.decisionId, "resume-skipped"),
+                kind: "info",
+                nodeId: d.nodeId,
+                summary: summarize(
+                  `判断 ${d.decisionId} の回答で、再開しなかった子（人間などが止めたため）: ${skipped.join("、")}`,
+                ),
+              },
+            },
+          ],
+        );
+        if (!listed.ok) note(d.nodeId, `再開しなかった子を記録できない: ${listed.error.code}`);
       }
       if (failed.length === 0) return r;
       return fail(
