@@ -161,6 +161,8 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
       ["decision.answer", { decisionId: "d", choice: "A", text: "B" }],
       ["node.purge", { nodeId: "root", tombstone: "yes" }],
       ["report.done", { evidence: [{ criterion: "c" }] }],
+      ["report.done", { evidence: [{ criterion: "c", evidence: "   " }] }],
+      ["report.done", { evidence: [{ criterion: " ", evidence: "e" }] }],
       ["report.done", { evidence: "x" }],
     ] as const) {
       expect(code(validateParams(op as never, p)), `${op} ${JSON.stringify(p)}`).toBe(

@@ -264,10 +264,10 @@ const VALIDATORS: Validators = {
       fail(`evidence が不正（${LIMITS.evidenceCount} 件以下の配列）`);
     const evidence = (v as unknown[]).map((x) => {
       const e = strict(x, ["criterion", "evidence"]);
-      return {
-        criterion: text(e, "criterion", LIMITS.evidenceLength),
-        evidence: text(e, "evidence", LIMITS.evidenceLength),
-      };
+      const criterion = text(e, "criterion", LIMITS.evidenceLength);
+      const body = text(e, "evidence", LIMITS.evidenceLength);
+      if (criterion.trim() === "" || body.trim() === "") fail("criterion・evidence が空白だけ");
+      return { criterion, evidence: body };
     });
     return { evidence };
   },

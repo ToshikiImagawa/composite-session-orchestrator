@@ -121,9 +121,15 @@ export function createStateHandlers(deps: StateHandlerDeps) {
       const caller = callerOf(req);
       // 根拠は 1 件以上必須。ブリーフ（受け入れ基準）を持つノードは、すべての基準に根拠が要る。
       const criteria = log.state().nodes.find((n) => n.id === caller)?.acceptanceCriteria ?? [];
-      const covered = new Set(req.params.evidence.map((e) => e.criterion));
-      const missing = criteria.filter((c) => !covered.has(c));
-      if (req.params.evidence.length === 0 || missing.length > 0) {
+      const norm = (t: string): string => t.normalize("NFC").trim();
+      const usable = req.params.evidence.filter((e) => norm(e.evidence) !== "");
+      const covered = new Set(usable.map((e) => norm(e.criterion)));
+      const missing: string[] = criteria.filter((c) => !covered.has(norm(c)));
+      if (
+        req.params.evidence.length === 0 ||
+        usable.length !== req.params.evidence.length ||
+        missing.length > 0
+      ) {
         return fail(
           "evidenceRequired",
           missing.length > 0

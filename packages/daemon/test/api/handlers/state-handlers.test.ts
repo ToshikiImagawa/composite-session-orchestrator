@@ -381,6 +381,43 @@ describe("report.done の基準ごとの網羅（ブリーフを持つノード�
     expect(res.error?.cause).toContain("Y が通る");
     expect(r.state().lastSeq).toBe(before);
   });
+  it("基準の照合は、NFC 正規化と前後の空白の除去をしてから行う", async () => {
+    const r = withBrief();
+    const res = await r.call(
+      "report.done",
+      r.req(
+        "report.done",
+        {
+          evidence: [
+            { criterion: "  X が通る\n", evidence: "t1" },
+            { criterion: "Y が通る ", evidence: "t2" },
+          ],
+        },
+        C,
+      ),
+    );
+    expect(res.ok).toBe(true);
+  });
+  it("根拠の本文が空白だけのものは、何も書かずに拒否する", async () => {
+    const r = withBrief();
+    const before = r.state().lastSeq;
+    const res = await r.call(
+      "report.done",
+      r.req(
+        "report.done",
+        {
+          evidence: [
+            { criterion: "X が通る", evidence: "t1" },
+            { criterion: "Y が通る", evidence: "   " },
+          ],
+        },
+        C,
+      ),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("evidenceRequired");
+    expect(r.state().lastSeq).toBe(before);
+  });
   it("すべての基準に根拠があれば受け付ける", async () => {
     const r = withBrief();
     const res = await r.call(

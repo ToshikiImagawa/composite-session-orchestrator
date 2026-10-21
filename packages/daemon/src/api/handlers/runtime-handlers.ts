@@ -195,6 +195,15 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       const { nodeId, text } = req.params;
       const outside = outsideSubtree(callerOf(req), nodeId);
       if (outside) return outside;
+      const actor = { nodeId: callerOf(req) };
+      const entry = [{ type: "node.instructed", payload: { nodeId, text } }] as const;
+      // 重複の判定は、状態の検査より前に行う（再試行の間にノードが進んでいても成功）。判定は追記が行う
+      // （同じ内容なら重複で何も書かず、内容が違えば `requestIdConflict`）。重複は、送らない。
+      if (alreadyApplied(log.state(), actor, req.requestId)) {
+        const dup = appendAtomically(log, clock, req.requestId, actor, entry);
+        if (!dup.ok) return dup;
+        if (dup.value.duplicate) return { ok: true, value: { status: "queued" } };
+      }
       const state = stateOf(log.state(), nodeId);
       if (state === undefined) {
         return fail("notFound", "ノードが見つからない", "ID を確認する");
@@ -209,15 +218,10 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       }
       const adapter = adapterFor(nodeId);
       if (adapter === undefined) return noRuntime(nodeId);
-      // 先に記録し（同じ requestId の再試行は、記録も送信も重複させない）、そのあとアダプタへ渡す。
-      const actor = { nodeId: callerOf(req) };
-      if (alreadyApplied(log.state(), actor, req.requestId)) {
-        return { ok: true, value: { status: "queued" } };
-      }
-      const recorded = appendAtomically(log, clock, req.requestId, actor, [
-        { type: "node.instructed", payload: { nodeId, text } },
-      ]);
+      // 先に記録し、そのあとアダプタへ渡す（新規のときだけ送る）。
+      const recorded = appendAtomically(log, clock, req.requestId, actor, entry);
       if (!recorded.ok) return recorded;
+      if (recorded.value.duplicate) return { ok: true, value: { status: "queued" } };
       const r = await adapter.send(nodeId, text);
       return r.ok ? { ok: true, value: { status: "queued" } } : r;
     },
@@ -239,6 +243,13 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       if (!t.ok)
         return { ok: false, error: failure(t.error.code, t.error.cause, ...t.error.nextActions) };
       const effect = t.value.effect;
+      if (graceMs !== undefined && effect !== "gracefulStop") {
+        return fail(
+          "graceMsNotApplicable",
+          "graceMs は、新しく始める穏当な停止（graceful）のときだけ指定できる（停止中・起動前の取り消し・即時停止では効かない）",
+          "graceMs を省略する",
+        );
+      }
       const adapter = adapterFor(nodeId);
       if (effect !== "cancelStart" && adapter === undefined) return noRuntime(nodeId);
 
