@@ -134,8 +134,7 @@ describe("scope.extend（範囲の拡張要求）", () => {
       status: "open",
       target: GIT.target,
     });
-    expect(r.s().inbox.at(-1)).toMatchObject({ kind: "violation", nodeId: "a" });
-    expect(r.s().inbox.at(-1)?.summary).toContain(id);
+    expect(r.s().inbox.at(-1)).toMatchObject({ kind: "violation", nodeId: "a", ref: id });
     const seq = r.s().lastSeq;
     expect(await r.extend(GIT, "a", "e-1")).toEqual(res);
     expect(r.s().lastSeq).toBe(seq);

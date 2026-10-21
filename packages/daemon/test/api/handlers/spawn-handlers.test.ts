@@ -263,6 +263,7 @@ describe("node.spawn（子の生成と起動）", () => {
     expect(res.ok).toBe(true);
     expect(stateOf(r.s(), res.value.nodeId)).toBe("pending");
     expect(res.value).toMatchObject({ status: "pending", waitingFor: ["a"] });
+    expect(res.value).toMatchObject({ status: "pending", waitingFor: ["a"] });
     expect(r.calls.provisioned).toHaveLength(1);
     expect(r.calls.issued).toEqual([]);
     expect(r.calls.started).toEqual([]);
@@ -313,7 +314,8 @@ describe("node.spawn（子の生成と起動）", () => {
     const id = r.calls.provisioned[0] as string;
     expect(r.calls.removed).toEqual([id]);
     expect(r.calls.revoked).toEqual([id]);
-    expect(stateOf(r.s(), id)).toBe("stopped");
+    expect(stateOf(r.s(), id)).toBe("archived"); // 作業ツリーを消せたので、破棄の判断を記録してアーカイブまで進める
+    expect(r.s().nodes.find((x) => x.id === id)?.discarded).toBeDefined();
   });
 
   it("ブリーフのない親（根など）は、設定の根の範囲と比べる。範囲を超える子・設定がない場合は失敗する", async () => {

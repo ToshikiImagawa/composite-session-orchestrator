@@ -169,8 +169,8 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
             id: deriveId("inbox", caller, req.requestId, "inbox"),
             kind: "violation",
             nodeId: caller,
-            // 受信箱の `ref` は拡張要求を指せない（core の参照先は判断要求・報告だけ）ので、ID は要約に入れる。
-            summary: summarize(`範囲の拡張要求 ${extensionId}（${target.kind}）: ${target.value}`),
+            summary: summarize(`範囲の拡張要求（${target.kind}）: ${target.value}`),
+            ref: extensionId,
           },
         },
       ];

@@ -89,6 +89,13 @@ interface BriefParams {
   readonly dependsOn?: readonly string[];
 }
 
+/** 生成の結果。依存先が未完了なら `pending`（待っている先行ノードを `waitingFor` に）、起動したら `running`。 */
+interface Spawned {
+  readonly nodeId: string;
+  readonly status: "running" | "pending";
+  readonly waitingFor?: string[];
+}
+
 const LIVE = new Set(["running", "waiting"]);
 /** 後始末済み・終わった子。同じ requestId の再試行で、成功として返してはならない。 */
 const DEAD = new Set(["stopping", "stopIncomplete", "stopped", "reclaimable", "archived"]);
@@ -162,33 +169,65 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     } catch (e) {
       note(nodeId, `トークンを失効できない: ${String(e)}`);
     }
+    let removedOk = worktreePath === undefined;
     if (worktreePath !== undefined) {
       try {
         const r = await ports.removeWorktree(nodeId, { expectedPath: worktreePath });
-        if (!r.ok) note(nodeId, `作業ツリーを消せない: ${r.error.code}: ${r.error.cause}`);
+        if (r.ok) removedOk = true;
+        else note(nodeId, `作業ツリーを消せない: ${r.error.code}: ${r.error.cause}`);
       } catch (e) {
         note(nodeId, `作業ツリーを消せない: ${String(e)}`);
       }
     }
     const state = nodeOf(log.state(), nodeId)?.state;
-    if (state === undefined || state === "stopped") return;
-    const bodies: EventBody[] =
-      state === "running"
-        ? [
-            {
-              type: "node.stateChanged",
-              payload: { nodeId, event: { type: "stop", mode: "immediate" } },
-            },
-            { type: "node.stateChanged", payload: { nodeId, event: { type: "confirmStopped" } } },
-          ]
-        : [
-            {
-              type: "node.stateChanged",
-              payload: { nodeId, event: { type: "stop", mode: "immediate" } },
-            },
-          ];
-    const r = appendAtomically(log, deps.clock, `${requestId}/cleanup`, { nodeId: caller }, bodies);
-    if (!r.ok) note(nodeId, `停止を記録できない: ${r.error.code}: ${r.error.cause}`);
+    if (state === undefined) return;
+    if (state !== "stopped") {
+      const bodies: EventBody[] =
+        state === "running"
+          ? [
+              {
+                type: "node.stateChanged",
+                payload: { nodeId, event: { type: "stop", mode: "immediate" } },
+              },
+              { type: "node.stateChanged", payload: { nodeId, event: { type: "confirmStopped" } } },
+            ]
+          : [
+              {
+                type: "node.stateChanged",
+                payload: { nodeId, event: { type: "stop", mode: "immediate" } },
+              },
+            ];
+      const r = appendAtomically(
+        log,
+        deps.clock,
+        `${requestId}/cleanup`,
+        { nodeId: caller },
+        bodies,
+      );
+      if (!r.ok) {
+        note(nodeId, `停止を記録できない: ${r.error.code}: ${r.error.cause}`);
+        return;
+      }
+    }
+    // 作業ツリーを消せたら、システムによる破棄の判断を記録して、アーカイブまで進める（成果のない失敗した生成）。
+    // 消せなかったら、停止のまま残す（作業ツリーが残るので、人間が確認して回収する）。
+    if (!removedOk) return;
+    const archived = appendAtomically(
+      log,
+      deps.clock,
+      `${requestId}/cleanup-archive`,
+      { system: true },
+      [
+        { type: "node.discardDecided", payload: { nodeId } },
+        {
+          type: "node.stateChanged",
+          payload: { nodeId, event: { type: "markReclaimable", discarded: true } },
+        },
+        { type: "node.stateChanged", payload: { nodeId, event: { type: "archive" } } },
+      ],
+    );
+    if (!archived.ok)
+      note(nodeId, `アーカイブできない: ${archived.error.code}: ${archived.error.cause}`);
   }
 
   /** 起動の手順（トークン発行 → adapter.start → start の記録）。失敗したら後始末して、定型の失敗を返す。 */
@@ -197,7 +236,7 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     adapter: RuntimeAdapter,
     brief: BriefParams,
     role: NodeRecord["role"],
-  ): Promise<Result<{ nodeId: string }, Failure>> {
+  ): Promise<Result<Spawned, Failure>> {
     const { requestId, caller, nodeId, worktreePath } = ctx;
     const abort = async (code: string, what: string, cause: string) => {
       note(nodeId, cause);
@@ -248,17 +287,19 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
         `起動を記録できない: ${recorded.error.code}: ${recorded.error.cause}`,
       );
     }
-    return { ok: true, value: { nodeId } };
+    return { ok: true, value: { nodeId, status: "running" } };
   }
 
+  const waitingOf = (state: OrchState, dependsOn: readonly string[]): string[] =>
+    dependsOn.filter((d) => !COMPLETED_STATES.has(stateOf(state, d) ?? "pending"));
   const dependsDone = (state: OrchState, dependsOn: readonly string[]): boolean =>
-    dependsOn.every((d) => COMPLETED_STATES.has(stateOf(state, d) ?? "pending"));
+    waitingOf(state, dependsOn).length === 0;
 
   /** spawn・split の共通の本体。 */
   async function create(
     req: { requestId: string; caller: string },
     input: { parentId: string; role: NodeRecord["role"]; brief: BriefParams; tag: string },
-  ): Promise<Result<{ nodeId: string }, Failure>> {
+  ): Promise<Result<Spawned, Failure>> {
     const { requestId, caller } = req;
     const { parentId, role, brief, tag } = input;
     const actor = { nodeId: caller };
@@ -310,7 +351,14 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
           role,
         );
       }
-      return { ok: true, value: { nodeId } };
+      const waiting = waitingOf(log.state(), dependsOn);
+      return {
+        ok: true,
+        value:
+          node.state === "pending" && waiting.length > 0
+            ? { nodeId, status: "pending", waitingFor: waiting }
+            : { nodeId, status: "running" },
+      };
     }
 
     const parent = nodeOf(state, parentId);
@@ -423,7 +471,12 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     // 記録（pending）。起動は、依存が揃っていれば続けて行う。揃っていなければ pending のまま返す。
     const recorded = appendAtomically(log, deps.clock, requestId, actor, [created]);
     if (!recorded.ok) return abort({ ok: false, error: recorded.error });
-    if (!dependsDone(state, dependsOn)) return { ok: true, value: { nodeId } };
+    if (!dependsDone(state, dependsOn)) {
+      return {
+        ok: true,
+        value: { nodeId, status: "pending", waitingFor: waitingOf(state, dependsOn) },
+      };
+    }
     return startNode({ requestId, caller, nodeId, worktreePath }, adapter, brief, role);
   }
 
