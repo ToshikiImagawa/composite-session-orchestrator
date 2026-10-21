@@ -108,7 +108,7 @@ describe("起動を、実物の git の口（loadWorktreePorts）を通して確
     expect(git(s.config.repoRoot, "branch", "--list", "cso/*")).not.toBe("");
   });
 
-  it("git の口が失敗したら、notConfigured ではなく、原因つきの失敗で起動しない。launcher が未実装なら notConfigured", async () => {
+  it("git の口が失敗したら、notConfigured ではなく、原因つきの失敗で起動しない。実 SDK の launcher は読み込める（起動はしない）", async () => {
     const s = setup();
     // repoRoot をリンク経由にして、createGitPorts を失敗させる
     const link = join(s.base, "repo-link");
@@ -128,7 +128,8 @@ describe("起動を、実物の git の口（loadWorktreePorts）を通して確
     expect(err.join("")).not.toContain("notConfigured");
 
     const launcher = await loadLauncher(s.config as never);
-    expect(launcher.ok).toBe(false);
-    if (!launcher.ok) expect(launcher.error.code).toBe("notConfigured");
+    // 実 SDK のモジュールを読み込むだけで、セッションは起動しない（認証情報は要らない）。
+    expect(launcher.ok).toBe(true);
+    if (launcher.ok) expect(typeof launcher.value.launch).toBe("function");
   });
 });
