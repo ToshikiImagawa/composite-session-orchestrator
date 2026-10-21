@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -107,5 +107,20 @@ describe("loadConfigFile", () => {
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.error.code).toBe("invalidConfig");
     expect(loadConfigFile("relative.json").ok).toBe(false);
+  });
+
+  it("他のユーザーが書き換えられるファイル・リンクは拒否する", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cso-cfg-"));
+    const p = join(dir, "daemon.json");
+    writeFileSync(p, JSON.stringify(base));
+    chmodSync(p, 0o666);
+    const loose = loadConfigFile(p);
+    expect(loose.ok).toBe(false);
+    if (!loose.ok) expect(loose.error.cause).toContain("書き換えられる");
+    chmodSync(p, 0o600);
+    expect(loadConfigFile(p).ok).toBe(true);
+    const link = join(dir, "link.json");
+    symlinkSync(p, link);
+    expect(loadConfigFile(link).ok).toBe(false);
   });
 });

@@ -8,7 +8,7 @@
  * - `mcpUrl` は、子に渡す MCP の接続先。トークンを外へ送らないよう、ループバック（127.0.0.1・localhost・::1）に限る。
  */
 
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import {
   briefProblem,
   type Failure,
@@ -174,6 +174,18 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
 export function loadConfigFile(path: string): Result<DaemonConfig, Failure> {
   if (typeof path !== "string" || !path.startsWith("/")) {
     return bad("設定ファイルは、絶対パスで指定する");
+  }
+  // 設定ファイルは、他のユーザーが書き換えられないこと（通常のファイルで、グループ・他者の書き込み権限がない）。
+  try {
+    const st = lstatSync(path);
+    if (!st.isFile()) return bad(`設定ファイル ${path} が通常のファイルでない（リンクは使えない）`);
+    if ((st.mode & 0o022) !== 0) {
+      return bad(`設定ファイル ${path} を、他のユーザーが書き換えられる（chmod go-w で直す）`);
+    }
+  } catch (e) {
+    return bad(
+      `設定ファイル ${path} を調べられない（${String(e instanceof Error ? e.message : e)}）`,
+    );
   }
   let text: string;
   try {
