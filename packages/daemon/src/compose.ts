@@ -38,6 +38,7 @@ import {
 } from "./api/index.js";
 import type { DaemonConfig } from "./config.js";
 import { EventLog } from "./eventlog.js";
+import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
 import { createLsofProbe, nodeExec, type ProcessProbe } from "./sdk/lsof-probe.js";
 import { nodeTimers } from "./sdk/node-timers.js";
@@ -373,6 +374,17 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       log,
       async start() {
         if (running !== undefined) return running;
+        // 待ち受けの前に、前回の実行から残った子（記録は動作中だが、アダプタは管理していない）を、記録とプロセスに合わせる。
+        const outcomes = await reconcileOnStartup({
+          log,
+          clock,
+          cwdOf,
+          probe,
+          worktreeRoot: config.worktreeRoot,
+          has: (id) => adapter.has(id),
+          onFailure: (nodeId, cause) => note("reconcileFailure", { nodeId, cause }),
+        });
+        for (const o of outcomes) note("reconciled", { ...o });
         const { port, url } = await server.listen(config.port);
         running = { port, url, humanTokenPath, rootTokenPath };
         note("started", { port, rootNodeId: config.rootNodeId });

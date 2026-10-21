@@ -309,3 +309,40 @@ describe("起動の安全（レビュー反映）", () => {
     expect(cancelled).toBe(2);
   });
 });
+
+describe("createDaemon（起動時の整合。待ち受けの前に reconcileOnStartup を呼ぶ）", () => {
+  it("前回の実行中の子で、プロセスがもう無ければ、start の後には running のままではない", async () => {
+    const r = rig();
+    mkdirSync(r.config.stateDir, { mode: 0o700 });
+    const store = openSqliteStore(join(r.config.stateDir, "state.db"));
+    if (!store.ok) throw new Error("store");
+    const log = EventLog.open(store.value, { clock: () => "2026-10-20T00:00:00Z" });
+    if (!log.ok) throw new Error("log");
+    const add = (requestId: string, body: Parameters<typeof log.value.append>[0]["body"]) =>
+      log.value.append({ requestId, actor: { system: true }, body });
+    add("seed-root", {
+      type: "node.created",
+      payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+    });
+    add("seed-root-start", {
+      type: "node.stateChanged",
+      payload: { nodeId: "root", event: { type: "start" } },
+    });
+    add("seed-c1", {
+      type: "node.created",
+      payload: { nodeId: "c1", role: "implement", parentId: "root", dependsOn: [] },
+    });
+    add("seed-c1-start", {
+      type: "node.stateChanged",
+      payload: { nodeId: "c1", event: { type: "start" } },
+    });
+    store.value.close();
+    const cwd = join(r.config.worktreeRoot, "c1");
+    mkdirSync(cwd);
+    r.deps = { ...r.deps, worktree: { ...r.deps.worktree, cwdOf: async () => cwd } };
+
+    const d = await boot(r);
+    const c1 = d.daemon.log.state().nodes.find((n) => n.id === "c1");
+    expect(c1?.state).not.toBe("running");
+  });
+});
