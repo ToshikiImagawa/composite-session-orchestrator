@@ -260,8 +260,6 @@ describe("createHandlers の組み立て", () => {
       nowMs: () => 0,
       retentionDays: 90,
       defaultTombstone: true,
-      buildMarker: () =>
-        ({ type: "node.toolDenied", payload: { nodeId: "x", tool: "t" } }) as never,
       revokeNode: () => undefined,
     };
     const base = open();

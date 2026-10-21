@@ -11,10 +11,10 @@ const SYS = { system: true } as const;
 let tick = 0;
 const clock = (): string => `2026-10-20T00:00:${String(++tick % 60).padStart(2, "0")}Z`;
 
-/** 標識の代わり（`node.purged` は core の T26 後。ここでは、前提なしに畳み込める既存のイベントを使う）。 */
-const marker = (nodeId: string): EventBody => ({
-  type: "node.toolDenied",
-  payload: { nodeId, tool: "purged-marker" },
+/** 標識（`node.purged`）。 */
+const marker = (rootId: string): EventBody => ({
+  type: "node.purged",
+  payload: { rootId, nodeIds: ["c", "t"], archivedAt: "2026-01-10T00:00:00Z" },
 });
 
 const setup = (store = createMemoryStore().open(), onFatal?: (cause: string) => void) => {
@@ -73,7 +73,7 @@ describe("EventLog.purgeTree（最終削除）", () => {
       requestId: "purge-1",
       actor: { human: true },
       nodeIds: ["c", "t"],
-      marker: marker("root"),
+      marker: marker("t"),
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -84,6 +84,7 @@ describe("EventLog.purgeTree（最終削除）", () => {
     expect(r.value.event.seq).toBe(before.lastSeq + 1);
     const reopened = EventLog.open(store.open(), { clock });
     expect(reopened.ok && reopened.value.state()).toEqual(log.state());
+    expect(log.state().tombstones.map((x) => x.rootId)).toEqual(["t"]);
     const next = log.append({
       requestId: "after",
       actor: SYS,
@@ -98,7 +99,7 @@ describe("EventLog.purgeTree（最終削除）", () => {
       requestId: "purge-1",
       actor: { human: true } as const,
       nodeIds: ["c", "t"],
-      marker: marker("root"),
+      marker: marker("t"),
     };
     const first = log.purgeTree(req);
     const second = log.purgeTree(req);
@@ -119,7 +120,7 @@ describe("EventLog.purgeTree（最終削除）", () => {
       requestId: "purge-x",
       actor: { human: true },
       nodeIds: ["c", "t"],
-      marker: marker("root"),
+      marker: marker("t"),
     });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("purgeUnsafe");
@@ -133,7 +134,7 @@ describe("EventLog.purgeTree（最終削除）", () => {
       requestId: "purge-y",
       actor: { human: true },
       nodeIds: ["c", "t", "ghost"],
-      marker: marker("root"),
+      marker: marker("t"),
     });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("purgeUnsafe");
@@ -152,7 +153,7 @@ describe("EventLog.purgeTree（最終削除）", () => {
         requestId: "purge-z",
         actor: { human: true },
         nodeIds: ["c", "t"],
-        marker: marker("root"),
+        marker: marker("t"),
       });
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error.code).toBe("storeIntegrity");
@@ -188,7 +189,7 @@ describe("EventLog.purgeTree（最終削除）", () => {
         requestId: "purge-sql",
         actor: { human: true },
         nodeIds: ["c", "t"],
-        marker: marker("root"),
+        marker: marker("t"),
       });
       expect(r.ok && r.value.deleted).toBeGreaterThan(0);
       const state = log.state();

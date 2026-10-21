@@ -46,8 +46,6 @@ export interface PurgeHandlerDeps {
   readonly retentionDays: number;
   /** `tombstone` を省略したときの既定。 */
   readonly defaultTombstone: boolean;
-  /** 標識のイベントを作る（core の `node.purged`）。 */
-  readonly buildMarker: (info: PurgeMarkerInfo) => EventBody;
   /** 木のノードのトークンの失効（冪等）。 */
   readonly revokeNode: (nodeId: string) => void;
   /** 監査の記録（前後）。例外を外へ出さない扱いで呼ぶ。 */
@@ -55,6 +53,17 @@ export interface PurgeHandlerDeps {
   /** 応答に出さない原因の記録先。 */
   readonly onFailure?: (nodeId: string, cause: string) => void;
 }
+
+/** 標識のイベント（core の `node.purged`）。 */
+export const purgeMarker = (info: PurgeMarkerInfo): EventBody => ({
+  type: "node.purged",
+  payload: {
+    rootId: info.rootId,
+    nodeIds: [...info.nodeIds],
+    archivedAt: info.archivedAt,
+    ...(info.tombstone === undefined ? {} : { tombstone: info.tombstone }),
+  },
+});
 
 const firstLine = (text: string): string => (text.split("\n")[0] ?? "").trim().slice(0, 200);
 
@@ -105,7 +114,7 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
       // 再送: 記録済みなら、何も消さずに最初の結果を返す（木はもう存在しないので、計画より先に判定する）。
       if (alreadyApplied(log.state(), actor, req.requestId)) {
         const again = log.purgeTree(
-          purgeRequest([], deps.buildMarker({ rootId: nodeId, nodeIds: [], archivedAt: "" })),
+          purgeRequest([], purgeMarker({ rootId: nodeId, nodeIds: [], archivedAt: "" })),
         );
         if (!again.ok) return again;
         return { ok: true, value: { purged: purgedOf(again.value) } };
@@ -145,7 +154,7 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
         elapsedDays,
         tombstone: withTombstone,
       });
-      const r = log.purgeTree(purgeRequest(nodeIds, deps.buildMarker(info)));
+      const r = log.purgeTree(purgeRequest(nodeIds, purgeMarker(info)));
       if (!r.ok) {
         audit("purgeFailed", { nodeId, code: r.error.code, cause: r.error.cause });
         deps.onFailure?.(nodeId, `最終削除に失敗: ${r.error.code}: ${r.error.cause}`);

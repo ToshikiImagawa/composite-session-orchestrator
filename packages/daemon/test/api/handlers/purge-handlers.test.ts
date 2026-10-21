@@ -1,10 +1,7 @@
 import type { EventBody, Failure, NodeEvent } from "@cso/core";
 import { failure } from "@cso/core";
 import { describe, expect, it } from "vitest";
-import {
-  createPurgeHandlers,
-  type PurgeMarkerInfo,
-} from "../../../src/api/handlers/purge-handlers.js";
+import { createPurgeHandlers } from "../../../src/api/handlers/purge-handlers.js";
 import type { HandlerRequest } from "../../../src/api/server.js";
 import { EventLog } from "../../../src/eventlog.js";
 import { createMemoryStore } from "../../../src/memory-store.js";
@@ -15,13 +12,6 @@ const clock = (): string => `2026-01-10T00:00:${String(++n % 60).padStart(2, "0"
 const SCOPE = { writableLocations: ["src"], forbiddenLocations: [".git"], allowedCommands: [] };
 const DAY = 86_400_000;
 const ARCHIVED_AT = Date.parse("2026-01-10T00:02:00Z");
-
-/** 標識の代わり（`node.purged` は core の T26 後。既存のイベントで畳み込める形にして、payload に木のノードを載せる）。 */
-const buildMarker = (info: PurgeMarkerInfo): EventBody =>
-  ({
-    type: "node.toolDenied",
-    payload: { nodeId: "root", tool: "purged", nodeIds: info.nodeIds, info },
-  }) as unknown as EventBody;
 
 const rig = (
   over: { retentionDays?: number; defaultTombstone?: boolean; discarded?: boolean } = {},
@@ -80,7 +70,6 @@ const rig = (
     revoked: [] as string[],
     audit: [] as string[],
     failures: [] as string[],
-    markers: [] as PurgeMarkerInfo[],
   };
   let nowMs = ARCHIVED_AT;
   const h = createPurgeHandlers({
@@ -88,10 +77,6 @@ const rig = (
     nowMs: () => nowMs,
     retentionDays: over.retentionDays ?? 90,
     defaultTombstone: over.defaultTombstone ?? true,
-    buildMarker: (info) => {
-      calls.markers.push(info);
-      return buildMarker(info);
-    },
     revokeNode: (id) => calls.revoked.push(id),
     audit: (event) => calls.audit.push(event),
     onFailure: (_id, cause) => calls.failures.push(cause),
@@ -179,19 +164,22 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     const a = rig();
     a.advance(90);
     a.call("node.purge", { nodeId: "t" });
-    expect(a.calls.markers[0]?.tombstone).toEqual({ title: "木の目的", outcome: "verified" });
+    expect(a.log.state().tombstones[0]?.tombstone).toEqual({
+      title: "木の目的",
+      outcome: "verified",
+    });
     const b = rig();
     b.advance(90);
     b.call("node.purge", { nodeId: "t", tombstone: false });
-    expect(b.calls.markers[0]?.tombstone).toBeUndefined();
+    expect(b.log.state().tombstones[0]?.tombstone).toBeUndefined();
     const c = rig({ defaultTombstone: false });
     c.advance(90);
     c.call("node.purge", { nodeId: "t" });
-    expect(c.calls.markers[0]?.tombstone).toBeUndefined();
+    expect(c.log.state().tombstones[0]?.tombstone).toBeUndefined();
     const d = rig({ defaultTombstone: false });
     d.advance(90);
     d.call("node.purge", { nodeId: "t", tombstone: true });
-    expect(d.calls.markers[0]?.tombstone?.title).toBe("木の目的");
+    expect(d.log.state().tombstones[0]?.tombstone?.title).toBe("木の目的");
   });
 
   it("設定で保持期間を 0 にすれば、すぐ消せる", () => {
@@ -233,7 +221,6 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
       nowMs: () => ARCHIVED_AT + 90 * DAY,
       retentionDays: 90,
       defaultTombstone: true,
-      buildMarker,
       revokeNode: (id) => revoked.push(id),
       audit: (e) => audits.push(e),
       onFailure: (_id, cause) => failures.push(cause),
@@ -254,6 +241,6 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     const r = rig({ discarded: true });
     r.advance(90);
     expect(r.call("node.purge", { nodeId: "t" }).ok).toBe(true);
-    expect(r.calls.markers[0]?.tombstone?.outcome).toBe("discarded");
+    expect(r.log.state().tombstones[0]?.tombstone?.outcome).toBe("discarded");
   });
 });
