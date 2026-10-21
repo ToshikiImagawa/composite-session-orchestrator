@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyEvent,
   type EventBody,
+  effectiveScope,
   foldEvents,
   INBOX_KINDS,
   initialState,
@@ -1293,21 +1294,16 @@ describe("decision.requested の pauseNodeIds（判断待ちの間に止める�
 
 describe("範囲の拡張要求（scope.extensionRequested・scope.extensionDecided）", () => {
   const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+  const target = { kind: "write", value: "/w/docs" } as const;
   const requested = (over: Record<string, unknown> = {}) =>
     ev({
       type: "scope.extensionRequested",
-      payload: {
-        extensionId: "x1",
-        nodeId: "a",
-        target: "/w/docs",
-        reason: "仕様書も直す",
-        ...over,
-      },
+      payload: { extensionId: "x1", nodeId: "a", target, reason: "仕様書も直す", ...over },
     } as EventBody);
   const decided = (over: Record<string, unknown> = {}) =>
     ev({
       type: "scope.extensionDecided",
-      payload: { extensionId: "x1", decision: "approve", ...over },
+      payload: { extensionId: "x1", decision: "approve", granted: target, ...over },
     } as EventBody);
   /** a を running にしてから、続きのイベントを適用する。 */
   const run = (...make: (() => OrchEvent)[]) => {
@@ -1315,31 +1311,53 @@ describe("範囲の拡張要求（scope.extensionRequested・scope.extensionDeci
     return foldEvents([...b, ...make.map((m) => m())]);
   };
 
-  it("要求は open で記録され、判定で状態が変わる", () => {
+  it("要求は open で記録され、判定で状態が変わる。承認には granted が残る", () => {
     const s = must(run(() => requested()));
     expect(s.extensions).toEqual([
       expect.objectContaining({
         extensionId: "x1",
         nodeId: "a",
-        target: "/w/docs",
+        target,
         reason: "仕様書も直す",
         status: "open",
       }),
     ]);
+    const approved = must(
+      run(
+        () => requested(),
+        () => decided(),
+      ),
+    ).extensions[0];
+    expect(approved).toMatchObject({ status: "approved", granted: target });
+    expect(approved?.decidedBy).toEqual({ system: true });
     for (const [decision, status] of [
-      ["approve", "approved"],
       ["reject", "rejected"],
       ["split", "split"],
     ] as const) {
       const r = must(
         run(
           () => requested(),
-          () => decided({ decision }),
+          () => decided({ decision, granted: undefined }),
         ),
       ).extensions[0];
       expect(r?.status).toBe(status);
-      expect(r?.decidedBy).toEqual({ system: true });
+      expect(r).not.toHaveProperty("granted");
     }
+  });
+
+  it("approve には granted が必須（種類は要求と同じ）。reject・split に granted は付けられない", () => {
+    const code = (over: Record<string, unknown>) =>
+      codeOf(
+        run(
+          () => requested(),
+          () => decided(over),
+        ),
+      );
+    expect(code({ granted: undefined })).toBe("invalidPayload");
+    expect(code({ granted: { kind: "command", value: "ls" } })).toBe("invalidPayload");
+    expect(code({ granted: { kind: "write", value: "" } })).toBe("invalidPayload");
+    expect(code({ decision: "reject" })).toBe("invalidPayload");
+    expect(code({ decision: "split" })).toBe("invalidPayload");
   });
 
   it("running・waiting 以外のノードからの要求は拒否する", () => {
@@ -1360,13 +1378,31 @@ describe("範囲の拡張要求（scope.extensionRequested・scope.extensionDeci
     for (const bad of [
       { extensionId: "x 1" },
       { nodeId: "a b" },
-      { target: "" },
+      { target: "docs" }, // 構造化されていない
+      { target: { kind: "read", value: "/w" } },
+      { target: { kind: "write", value: "" } },
+      { target: { kind: "write", value: "a".repeat(LIMITS.extensionTarget + 1) } },
+      { target: { kind: "write", value: "a\u0000" } },
+      { target: { kind: "write", value: "/w", extra: 1 } },
       { reason: "" },
-      { target: "a\u0000" },
-      { target: 1 },
+      { reason: "a".repeat(LIMITS.extensionReason + 1) },
     ]) {
       expect(codeOf(run(() => requested(bad))), JSON.stringify(bad)).toBe("invalidPayload");
     }
+  });
+
+  it("open の拡張要求は、ノードごとに上限まで。超えたら tooManyOpenExtensions、判定済みは数えない", () => {
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => () => requested({ extensionId: `x${i}` }));
+    expect(codeOf(run(...many(LIMITS.openExtensionsPerNode)))).toBeNull();
+    expect(codeOf(run(...many(LIMITS.openExtensionsPerNode + 1)))).toBe("tooManyOpenExtensions");
+    // 1 件を判定すれば、もう 1 件出せる
+    const afterDecide = run(
+      ...many(LIMITS.openExtensionsPerNode),
+      () => decided({ extensionId: "x0", decision: "reject", granted: undefined }),
+      () => requested({ extensionId: "extra" }),
+    );
+    expect(codeOf(afterDecide)).toBeNull();
   });
 
   it("判定: 未知の要求は unknownExtension、判定済みへの再判定は extensionAlreadyDecided、不正な decision は invalidPayload", () => {
@@ -1376,7 +1412,7 @@ describe("範囲の拡張要求（scope.extensionRequested・scope.extensionDeci
         run(
           () => requested(),
           () => decided(),
-          () => decided({ decision: "reject" }),
+          () => decided({ decision: "reject", granted: undefined }),
         ),
       ),
     ).toBe("extensionAlreadyDecided");
@@ -1408,8 +1444,75 @@ describe("範囲の拡張要求（scope.extensionRequested・scope.extensionDeci
 
   it("古いスナップショット（extensions がない）からも復元できる", () => {
     const old = { ...initialState() } as Record<string, unknown>;
-    delete old.extensions;
+    old.extensions = undefined;
     const r = applyEvent(old as never, ev(created("root", "integrator", null)));
     expect(r.ok).toBe(true);
+  });
+});
+
+describe("effectiveScope（有効な範囲 = ブリーフ + 承認済みの拡張）", () => {
+  const scope = {
+    writableLocations: ["/w"],
+    forbiddenLocations: ["/w/.git"],
+    allowedCommands: ["ls"],
+  };
+  const run = (...bodies: EventBody[]) => {
+    const b = base();
+    const c = ev({
+      type: "node.created",
+      payload: {
+        nodeId: "c",
+        role: "implement",
+        parentId: "root",
+        dependsOn: [],
+        objective: "o",
+        acceptanceCriteria: ["a"],
+        scope,
+      },
+    } as EventBody);
+    const start = ev(changed("c", { type: "start" }));
+    return must(foldEvents([...b, c, start, ...bodies.map((x) => ev(x))]));
+  };
+  const request = (extensionId: string, kind: "write" | "command", value: string): EventBody =>
+    ({
+      type: "scope.extensionRequested",
+      payload: { extensionId, nodeId: "c", target: { kind, value }, reason: "r" },
+    }) as EventBody;
+  const approve = (extensionId: string, kind: "write" | "command", value: string): EventBody =>
+    ({
+      type: "scope.extensionDecided",
+      payload: { extensionId, decision: "approve", granted: { kind, value } },
+    }) as EventBody;
+  const reject = (extensionId: string): EventBody =>
+    ({
+      type: "scope.extensionDecided",
+      payload: { extensionId, decision: "reject" },
+    }) as EventBody;
+
+  it("拡張がなければブリーフの範囲のまま", () => {
+    expect(effectiveScope(run(), "c")).toEqual(scope);
+  });
+
+  it("承認済みの拡張だけを加える（open・却下は加えない）。順序は判定の順で、重複は加えない", () => {
+    const s = run(
+      request("x1", "write", "/w/docs"),
+      request("x2", "command", "git status"),
+      request("x3", "write", "/etc"),
+      request("x4", "write", "/w/docs"),
+      approve("x1", "write", "/w/docs"),
+      approve("x2", "command", "git status"),
+      reject("x3"),
+      approve("x4", "write", "/w/docs"),
+    );
+    expect(effectiveScope(s, "c")).toEqual({
+      writableLocations: ["/w", "/w/docs"],
+      forbiddenLocations: ["/w/.git"],
+      allowedCommands: ["ls", "git status"],
+    });
+  });
+
+  it("ブリーフのないノード・存在しないノードは undefined", () => {
+    expect(effectiveScope(run(), "root")).toBeUndefined();
+    expect(effectiveScope(run(), "zzz")).toBeUndefined();
   });
 });

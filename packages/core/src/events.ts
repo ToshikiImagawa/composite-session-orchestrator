@@ -132,7 +132,7 @@ export type EventBody =
       readonly payload: {
         readonly extensionId: string;
         readonly nodeId: string;
-        readonly target: string;
+        readonly target: ExtensionTarget;
         readonly reason: string;
       };
     }
@@ -142,6 +142,8 @@ export type EventBody =
       readonly payload: {
         readonly extensionId: string;
         readonly decision: ExtensionDecision;
+        /** 承認（approve）のとき必須: 許可した対象（要求と同じ種類）。却下・切り出しでは付けない。 */
+        readonly granted?: ExtensionTarget;
       };
     }
   | {
@@ -242,11 +244,17 @@ const EXTENSION_STATUS: Readonly<Record<ExtensionDecision, "approved" | "rejecte
   split: "split",
 };
 
+/** 拡張の対象: 書き込み可能な場所の追加（`write`）か、許可するコマンドの追加（`command`）。 */
+export interface ExtensionTarget {
+  readonly kind: "write" | "command";
+  readonly value: string;
+}
+
 /** 範囲の拡張要求（FR_015）。 */
 export interface ExtensionRecord {
   readonly extensionId: string;
   readonly nodeId: string;
-  readonly target: string;
+  readonly target: ExtensionTarget;
   readonly reason: string;
   readonly status: "open" | "approved" | "rejected" | "split";
   /** 要求のイベントの `seq`。 */
@@ -254,6 +262,8 @@ export interface ExtensionRecord {
   /** 判定のイベントの `seq` と判定者（判定済みのとき）。 */
   readonly decidedSeq?: number;
   readonly decidedBy?: Actor;
+  /** 承認したときの、許可した対象。 */
+  readonly granted?: ExtensionTarget;
 }
 
 export interface ViolationRecord {
@@ -361,6 +371,7 @@ export type FoldFailureCode =
   | "duplicateReport"
   | "unknownRef"
   | "duplicateExtension"
+  | "tooManyOpenExtensions"
   | "unknownExtension"
   | "extensionAlreadyDecided"
   | "invalidState";
@@ -569,7 +580,7 @@ const extensionShape = (x: unknown): boolean =>
   isRec(x) &&
   isId(x.extensionId) &&
   isId(x.nodeId) &&
-  typeof x.target === "string" &&
+  isRec(x.target) &&
   typeof x.reason === "string" &&
   (x.status === "open" ||
     x.status === "approved" ||
@@ -690,6 +701,14 @@ function briefRecord(
       allowedCommands: Object.freeze([...sc.allowedCommands]),
     }),
   };
+}
+
+/** 拡張の対象の形を検査して写す。不正なら `undefined`。 */
+function parseExtensionTarget(x: unknown): ExtensionTarget | undefined {
+  if (!isRec(x) || Object.keys(x).some((k) => k !== "kind" && k !== "value")) return undefined;
+  if (x.kind !== "write" && x.kind !== "command") return undefined;
+  if (!isBoundedText(x.value, LIMITS.extensionTarget) || x.value.trim() === "") return undefined;
+  return Object.freeze({ kind: x.kind, value: x.value });
 }
 
 const reject = (
@@ -1250,19 +1269,21 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     }
 
     case "scope.extensionRequested": {
-      const { extensionId, nodeId, target, reason } = p;
+      const { extensionId, nodeId, reason } = p;
       if (!isId(extensionId) || !isId(nodeId)) {
         return invalid(seq, "scope.extensionRequested の payload");
       }
-      if (
-        !isBoundedText(target, LIMITS.question) ||
-        target.trim() === "" ||
-        !isBoundedText(reason, LIMITS.question) ||
-        reason.trim() === ""
-      ) {
+      const target = parseExtensionTarget(p.target);
+      if (target === undefined) {
         return invalid(
           seq,
-          `scope.extensionRequested の target・reason（空でない ${LIMITS.question} 文字以下）`,
+          `scope.extensionRequested の target（{ kind: write か command, value: 空でない ${LIMITS.extensionTarget} 文字以下 }）`,
+        );
+      }
+      if (!isBoundedText(reason, LIMITS.extensionReason) || reason.trim() === "") {
+        return invalid(
+          seq,
+          `scope.extensionRequested の reason（空でない ${LIMITS.extensionReason} 文字以下）`,
         );
       }
       const node = nodeAt(d, nodeId);
@@ -1281,6 +1302,16 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           "duplicateExtension",
           `拡張要求 ${extensionId} は既にある`,
           "別の ID を使う",
+        );
+      }
+      const open = d.extensions.filter((x) => x.nodeId === nodeId && x.status === "open").length;
+      if (open >= LIMITS.openExtensionsPerNode) {
+        return reject(
+          seq,
+          "tooManyOpenExtensions",
+          `ノード ${nodeId} の未判定の拡張要求が上限（${LIMITS.openExtensionsPerNode} 件）に達している`,
+          "親の判定を待つ",
+          "まとめて 1 件で要求し直す",
         );
       }
       d.extensionIdx.set(extensionId, d.extensions.length);
@@ -1302,6 +1333,14 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (!isId(extensionId) || !isExtensionDecision(decision)) {
         return invalid(seq, "scope.extensionDecided の payload");
       }
+      // 承認には許可した対象（granted）が要り、却下・切り出しには付けない。
+      const granted = p.granted === undefined ? undefined : parseExtensionTarget(p.granted);
+      if (decision === "approve" ? granted === undefined : p.granted !== undefined) {
+        return invalid(
+          seq,
+          "scope.extensionDecided の granted（approve のときだけ、許可した対象を付ける）",
+        );
+      }
       const i = d.extensionIdx.get(extensionId);
       const cur = i === undefined ? undefined : d.extensions[i];
       if (i === undefined || cur === undefined) {
@@ -1320,11 +1359,18 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           "判定の結果を確認する",
         );
       }
+      if (granted !== undefined && granted.kind !== cur.target.kind) {
+        return invalid(
+          seq,
+          `scope.extensionDecided の granted（要求の種類 ${cur.target.kind} と違う）`,
+        );
+      }
       d.extensions[i] = freezeRecord({
         ...cur,
         status: EXTENSION_STATUS[decision],
         decidedSeq: seq,
         decidedBy: actor,
+        ...(granted === undefined ? {} : { granted }),
       });
       return commit();
     }
@@ -1400,4 +1446,29 @@ export function foldEvents(
     if (!r.ok) return r;
   }
   return ok(toState(draft));
+}
+
+/**
+ * ノードの有効な範囲: ブリーフの範囲に、承認済みの拡張（`granted`）を判定の順に加えたもの。
+ * 書き込み可能な場所（`write`）と許可するコマンド（`command`）だけが増え、禁止の場所は変わらない。
+ * ブリーフのないノード・存在しないノードは `undefined`。純粋関数（イベント列から導かれ、状態に二重に持たない）。
+ */
+export function effectiveScope(state: OrchState, nodeId: string): Scope | undefined {
+  const node = state.nodes.find((n) => n.id === nodeId);
+  if (node?.scope === undefined) return undefined;
+  const writable = [...node.scope.writableLocations];
+  const commands = [...node.scope.allowedCommands];
+  const granted = (state.extensions ?? [])
+    .filter((x) => x.nodeId === nodeId && x.status === "approved" && x.granted !== undefined)
+    .sort((a, b) => (a.decidedSeq ?? 0) - (b.decidedSeq ?? 0));
+  for (const x of granted) {
+    const g = x.granted as ExtensionTarget;
+    const list = g.kind === "write" ? writable : commands;
+    if (!list.includes(g.value)) list.push(g.value);
+  }
+  return Object.freeze({
+    writableLocations: Object.freeze(writable),
+    forbiddenLocations: Object.freeze([...node.scope.forbiddenLocations]),
+    allowedCommands: Object.freeze(commands),
+  });
 }

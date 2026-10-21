@@ -28,6 +28,10 @@ export const LIMITS = {
   scopeEntryCount: 100,
   scopeEntryLength: 4096,
   dependsOnCount: 50,
+  /** 範囲の拡張要求（FR_015）: 対象（場所またはコマンド）・理由の長さと、ノードあたりの未判定（open）の件数。 */
+  extensionTarget: 1024,
+  extensionReason: 4 * 1024,
+  openExtensionsPerNode: 10,
   /** 判断要求（`decision.requested`）で、判断待ちの間に止める子の件数。 */
   pauseNodeCount: 100,
   /** 完了の判定（`node.review`）の差し戻し理由・コメント。 */

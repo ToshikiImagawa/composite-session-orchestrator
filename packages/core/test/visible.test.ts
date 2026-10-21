@@ -48,11 +48,21 @@ const full = () => {
     ev({ type: "node.exited", payload: { nodeId: "b", reason: "x" } }),
     ev({
       type: "scope.extensionRequested",
-      payload: { extensionId: "xa", nodeId: "a", target: "/t", reason: "r" },
+      payload: {
+        extensionId: "xa",
+        nodeId: "a",
+        target: { kind: "write", value: "/t" },
+        reason: "r",
+      },
     }),
     ev({
       type: "scope.extensionRequested",
-      payload: { extensionId: "xb", nodeId: "b", target: "/t", reason: "r" },
+      payload: {
+        extensionId: "xb",
+        nodeId: "b",
+        target: { kind: "write", value: "/t" },
+        reason: "r",
+      },
     }),
   ]);
   if (!r.ok) throw new Error(`${r.error.code} ${r.error.cause}`);

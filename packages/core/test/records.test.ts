@@ -319,6 +319,9 @@ describe("子が入れる文字列・配列の上限（コードポイントで�
       scopeEntryCount: 100,
       scopeEntryLength: 4096,
       dependsOnCount: 50,
+      extensionTarget: 1024,
+      extensionReason: 4 * 1024,
+      openExtensionsPerNode: 10,
       pauseNodeCount: 100,
       feedback: 8 * 1024,
     });
