@@ -62,7 +62,7 @@ export interface WorktreePorts {
   factsFor(nodeId: string): Promise<WorktreeFacts | undefined>;
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string },
+    opts: { expectedPath: string; force?: boolean },
   ): Promise<Result<undefined, Failure>>;
   provisionWorktree(req: {
     parentId: string;

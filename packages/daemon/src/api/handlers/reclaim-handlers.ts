@@ -42,8 +42,11 @@ export type WorktreeFacts = Omit<ReclaimNodeFacts, "discarded">;
 
 /**
  * 回収の実体（git・lsof）への口。実装（T10b）が守る契約:
- * - `removeWorktree` は `git worktree remove` を `--force` なしで行い、ブランチは `git branch -d`（統合済みだけ）で消す
+ * - `removeWorktree` は、既定では `git worktree remove` を `--force` なしで行い、ブランチは `git branch -d`（統合済みだけ）で消す
  *   （`-D` は使わない）。未保存の変更・未統合の成果があれば、強制せずに失敗を返す（失うものがある場合は拒否する）。
+ *   `force: true` のときだけ、`--force` と `-D` で消す（成果を捨てる）。`force` を渡してよいのは、記録上、人間が破棄を判断した
+ *   停止ノードだけで、その判断はハンドラが行う（ポートは、渡された `force` を実行するだけ）。`expectedPath` の照合と、登録されていない
+ *   場所を消さないことは、`force` でも変わらない。
  * - `removeWorktree` は `expectedPath`（判定に使った作業ツリーの実パス）と、実際に削除するパスが同じかを照合し、
  *   違えば何も消さずに失敗する（判定と削除の対象のずれを防ぐ）。
  * - すべての口は、取得に失敗したら例外か `undefined`・`null`・`Failure` で返してよい（ハンドラが安全側＝回収不可に倒す）。
@@ -56,7 +59,7 @@ export interface ReclaimPorts {
   /** 作業ツリーを消す。失敗は `Failure` で返す（例外は、ハンドラが `Failure` に変える）。 */
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string },
+    opts: { expectedPath: string; force?: boolean },
   ): Promise<Result<undefined, Failure>>;
   /** daemon の作業ツリー置き場（作業ツリーのパスがこの配下であることを検査する）。 */
   readonly worktreeRoot: string;
@@ -360,7 +363,16 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
         }
         let removed: Result<undefined, Failure>;
         try {
-          removed = await ports.removeWorktree(n.id, { expectedPath: again.facts.worktreePath });
+          // 強制（作業ツリーの `--force`・ブランチの `-D`）は、記録上、人間が破棄を判断した（`discarded`）、停止した
+          // （stopped・そこから回収可能にした）ノードだけ（仕様 5.8）。判断は、ここで行う。ポートは渡された `force` を実行するだけ。
+          const record = log.state().nodes.find((x) => x.id === n.id);
+          const force =
+            record?.discarded !== undefined &&
+            (record.state === "stopped" || record.state === "reclaimable");
+          removed = await ports.removeWorktree(n.id, {
+            expectedPath: again.facts.worktreePath,
+            ...(force ? { force: true } : {}),
+          });
         } catch (e) {
           removed = { ok: false, error: failure("removeFailed", String(e), "原因を取り除く") };
         }
