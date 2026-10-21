@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { HookOutcome, LaunchOptions } from "../../src/sdk/agent.js";
-import { launcherWith } from "../../src/sdk/claude-launcher.js";
+import {
+  DEFAULT_MAX_BUDGET_USD,
+  DEFAULT_MAX_TURNS,
+  launcherWith,
+  limitsFrom,
+} from "../../src/sdk/claude-launcher.js";
 
 type Msg = Record<string, unknown>;
 
@@ -97,6 +102,35 @@ describe("createClaudeLauncher（実 SDK の query() への結線。フェイク
     expect(o.abortController).toBeInstanceOf(AbortController);
   });
 
+  it("利用者・プロジェクトの MCP 設定を読まず（strictMcpConfig）、ターン数と費用に控えめな上限を付ける（既定、または指定）", () => {
+    const f = fakeQuery();
+    launcherWith(f.query).launch(options());
+    const o = f.calls[0]?.options as Record<string, unknown>;
+    expect(o.strictMcpConfig).toBe(true);
+    expect(o.maxTurns).toBe(DEFAULT_MAX_TURNS);
+    expect(o.maxBudgetUsd).toBe(DEFAULT_MAX_BUDGET_USD);
+    const g = fakeQuery();
+    launcherWith(g.query, { maxTurns: 7, maxBudgetUsd: 1.5 }).launch(options());
+    const p = g.calls[0]?.options as Record<string, unknown>;
+    expect([p.maxTurns, p.maxBudgetUsd]).toEqual([7, 1.5]);
+  });
+
+  it("limitsFrom は、daemon の設定の maxTurns・maxBudgetUsd を読む（なければ既定）", () => {
+    expect(limitsFrom({ maxTurns: 9, maxBudgetUsd: 2 })).toEqual({ maxTurns: 9, maxBudgetUsd: 2 });
+    expect(limitsFrom({})).toEqual({
+      maxTurns: DEFAULT_MAX_TURNS,
+      maxBudgetUsd: DEFAULT_MAX_BUDGET_USD,
+    });
+    expect(limitsFrom(undefined)).toEqual({
+      maxTurns: DEFAULT_MAX_TURNS,
+      maxBudgetUsd: DEFAULT_MAX_BUDGET_USD,
+    });
+    expect(limitsFrom({ maxTurns: -1, maxBudgetUsd: "x" })).toEqual({
+      maxTurns: DEFAULT_MAX_TURNS,
+      maxBudgetUsd: DEFAULT_MAX_BUDGET_USD,
+    });
+  });
+
   it("最初の指示は、入力（streaming input）の最初のメッセージとして届く。send は、その後に積まれる", async () => {
     const f = fakeQuery();
     const s = launcherWith(f.query).launch(options());
@@ -127,6 +161,15 @@ describe("createClaudeLauncher（実 SDK の query() への結線。フェイク
     const s = launcherWith(f.query).launch(options());
     f.emit({ type: "system", subtype: "init", session_id: "sess-1" });
     await expect(s.ready()).resolves.toEqual({ sessionId: "sess-1" });
+  });
+
+  it("init のセッション ID が、空でない文字列でなければ、ready は reject する（記録の取り違えを防ぐ）", async () => {
+    for (const bad of [undefined, "", 7, null]) {
+      const f = fakeQuery();
+      const s = launcherWith(f.query).launch(options());
+      f.emit({ type: "system", subtype: "init", session_id: bad });
+      await expect(s.ready()).rejects.toThrow("session_id");
+    }
   });
 
   it("init の前に出力が終わる・例外になるなら、ready は reject する", async () => {

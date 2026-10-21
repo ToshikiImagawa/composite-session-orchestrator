@@ -12,10 +12,44 @@
  * 自動テストはフェイクの `query` で行う（実 SDK の起動は認証情報が要るので CI に入れない。手動確認は docs の手順書）。
  */
 
-import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
+import {
+  type HookCallback,
+  type Options,
+  type SDKUserMessage,
+  query as sdkQuery,
+} from "@anthropic-ai/claude-agent-sdk";
 import type { AgentLauncher, AgentSession, HookOutcome, LaunchOptions } from "./agent.js";
 
 type QueryFn = typeof sdkQuery;
+
+/** 子ごとの上限の既定（控えめ。daemon の設定 `maxTurns`・`maxBudgetUsd` で変える）。 */
+export const DEFAULT_MAX_TURNS = 100;
+export const DEFAULT_MAX_BUDGET_USD = 5;
+
+export interface ChildLimits {
+  readonly maxTurns: number;
+  readonly maxBudgetUsd: number;
+}
+
+/** daemon の設定から、子ごとの上限を読む。なければ（不正なら）既定。 */
+export function limitsFrom(config: unknown): ChildLimits {
+  const c = (typeof config === "object" && config !== null ? config : {}) as Record<
+    string,
+    unknown
+  >;
+  const turns = c.maxTurns;
+  const budget = c.maxBudgetUsd;
+  return {
+    maxTurns:
+      typeof turns === "number" && Number.isInteger(turns) && turns >= 1
+        ? turns
+        : DEFAULT_MAX_TURNS,
+    maxBudgetUsd:
+      typeof budget === "number" && Number.isFinite(budget) && budget > 0
+        ? budget
+        : DEFAULT_MAX_BUDGET_USD,
+  };
+}
 
 type Msg = Record<string, unknown>;
 const isRec = (x: unknown): x is Msg => typeof x === "object" && x !== null && !Array.isArray(x);
@@ -35,13 +69,16 @@ const allow = () => ({
 });
 
 /** 実 SDK ではなく、渡された `query` を使う launcher（試験用の口。`createClaudeLauncher` が実 SDK を渡す）。 */
-export function launcherWith(queryFn: QueryFn): AgentLauncher {
+export function launcherWith(
+  queryFn: QueryFn,
+  limits: ChildLimits = limitsFrom({}),
+): AgentLauncher {
   return {
     launch(options: LaunchOptions): AgentSession {
       const ac = new AbortController();
 
       // 入力: 積んだ順に流す。close で終わる。
-      const queue: Msg[] = [];
+      const queue: SDKUserMessage[] = [];
       let wake: (() => void) | undefined;
       let closed = false;
       const push = (text: string): void => {
@@ -54,7 +91,7 @@ export function launcherWith(queryFn: QueryFn): AgentLauncher {
         wake?.();
         wake = undefined;
       };
-      async function* input(): AsyncGenerator<Msg> {
+      async function* input(): AsyncGenerator<SDKUserMessage> {
         for (;;) {
           const m = queue.shift();
           if (m !== undefined) {
@@ -69,7 +106,7 @@ export function launcherWith(queryFn: QueryFn): AgentLauncher {
       }
       push(options.initialPrompt);
 
-      const preToolUse = async (raw: unknown) => {
+      const preToolUse: HookCallback = async (raw) => {
         try {
           if (
             !isRec(raw) ||
@@ -90,27 +127,29 @@ export function launcherWith(queryFn: QueryFn): AgentLauncher {
         }
       };
 
-      const q = queryFn({
-        prompt: input() as never,
-        options: {
-          cwd: options.cwd,
-          env: { ...options.env },
-          settingSources: [],
-          abortController: ac,
-          permissionMode: "dontAsk",
-          ...(options.mcpServers === undefined
-            ? {}
-            : {
-                mcpServers: Object.fromEntries(
-                  Object.entries(options.mcpServers).map(([name, s]) => [
-                    name,
-                    { type: "http" as const, url: s.url, headers: { ...s.headers } },
-                  ]),
-                ),
-              }),
-          hooks: { PreToolUse: [{ hooks: [(input) => preToolUse(input) as never] }] },
-        },
-      });
+      const sdkOptions: Options = {
+        cwd: options.cwd,
+        env: { ...options.env },
+        settingSources: [],
+        // 利用者・プロジェクトの MCP 設定（`.mcp.json` など）を読まない。使うのは、ここで渡したものだけ。
+        strictMcpConfig: true,
+        maxTurns: limits.maxTurns,
+        maxBudgetUsd: limits.maxBudgetUsd,
+        abortController: ac,
+        permissionMode: "dontAsk",
+        ...(options.mcpServers === undefined
+          ? {}
+          : {
+              mcpServers: Object.fromEntries(
+                Object.entries(options.mcpServers).map(([name, s]) => [
+                  name,
+                  { type: "http" as const, url: s.url, headers: { ...s.headers } },
+                ]),
+              ),
+            }),
+        hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
+      };
+      const q = queryFn({ prompt: input(), options: sdkOptions });
 
       // 出力を読み続ける。init で ready、result で nextResult、終了・例外で finished。
       let readyResolve!: (v: { sessionId: string }) => void;
@@ -136,7 +175,11 @@ export function launcherWith(queryFn: QueryFn): AgentLauncher {
             if (!isRec(m)) continue;
             if (m.type === "system" && m.subtype === "init" && !initialized) {
               initialized = true;
-              readyResolve({ sessionId: String(m.session_id) });
+              if (typeof m.session_id !== "string" || m.session_id === "") {
+                readyReject(new Error("init の session_id が、空でない文字列でない"));
+              } else {
+                readyResolve({ sessionId: m.session_id });
+              }
             } else if (m.type === "result") {
               const w = resultWaiters;
               resultWaiters = [];
@@ -172,5 +215,5 @@ export function launcherWith(queryFn: QueryFn): AgentLauncher {
 
 /** `cso-daemon` の `loaders` が読み込む入口。実際の Agent SDK を使う launcher。 */
 export function createClaudeLauncher(_config?: unknown): AgentLauncher {
-  return launcherWith(sdkQuery);
+  return launcherWith(sdkQuery, limitsFrom(_config));
 }

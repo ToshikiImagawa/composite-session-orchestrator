@@ -47,6 +47,10 @@ export interface DaemonConfig {
   readonly retentionDays?: number;
   /** `node.purge` の `tombstone` を省略したときに、墓標を残すか。省略すると `DEFAULT_PURGE_TOMBSTONE`（残す）。 */
   readonly purgeTombstone?: boolean;
+  /** 子ごとの、エージェントのターン数の上限（API の往復）。省略すると 100。 */
+  readonly maxTurns?: number;
+  /** 子ごとの、費用の上限（USD）。省略すると 5。 */
+  readonly maxBudgetUsd?: number;
   /** スケジューラが同時に起動する数の上限（親ごと・全体。1〜64）。省略した項目は既定の 4。 */
   readonly startLimits?: { readonly perParent?: number; readonly total?: number };
   /** 窓口の待ち受けポート（127.0.0.1）。0 なら空いているポート。既定 0。 */
@@ -66,6 +70,8 @@ const KEYS = [
   "startLimits",
   "retentionDays",
   "purgeTombstone",
+  "maxTurns",
+  "maxBudgetUsd",
 ] as const;
 
 const bad = (cause: string): { ok: false; error: Failure } => ({
@@ -144,6 +150,24 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
   }
   if (raw.purgeTombstone !== undefined && typeof raw.purgeTombstone !== "boolean") {
     return bad("purgeTombstone は真偽値");
+  }
+  if (
+    raw.maxTurns !== undefined &&
+    (typeof raw.maxTurns !== "number" ||
+      !Number.isInteger(raw.maxTurns) ||
+      raw.maxTurns < 1 ||
+      raw.maxTurns > 100_000)
+  ) {
+    return bad("maxTurns は 1〜100000 の整数");
+  }
+  if (
+    raw.maxBudgetUsd !== undefined &&
+    (typeof raw.maxBudgetUsd !== "number" ||
+      !Number.isFinite(raw.maxBudgetUsd) ||
+      raw.maxBudgetUsd <= 0 ||
+      raw.maxBudgetUsd > 10_000)
+  ) {
+    return bad("maxBudgetUsd は 0 より大きく 10000 以下の数");
   }
   let startLimits: { perParent?: number; total?: number } | undefined;
   if (raw.startLimits !== undefined) {
@@ -246,6 +270,8 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       port,
       ...(regenerableIgnored === undefined ? {} : { regenerableIgnored }),
       ...(startLimits === undefined ? {} : { startLimits }),
+      ...(raw.maxTurns === undefined ? {} : { maxTurns: raw.maxTurns as number }),
+      ...(raw.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: raw.maxBudgetUsd as number }),
       ...(raw.retentionDays === undefined ? {} : { retentionDays: raw.retentionDays as number }),
       ...(raw.purgeTombstone === undefined
         ? {}
