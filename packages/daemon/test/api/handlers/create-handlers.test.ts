@@ -195,4 +195,63 @@ describe("createHandlers の組み立て", () => {
     await made.tick(); // close の後は、何もしない
     expect(started).toEqual(["p"]);
   });
+
+  it("decision.answer の成功後に、起動できる pending の子が起動する", async () => {
+    const log = open();
+    const add = (body: EventBody): void => {
+      const r = log.append({ requestId: `seed-${Math.random()}`, actor: { system: true }, body });
+      if (!r.ok) throw new Error(r.error.code);
+    };
+    const scope = {
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: ["pnpm test"],
+    };
+    add({
+      type: "node.created",
+      payload: { nodeId: "m1", role: "integrator", parentId: null, dependsOn: [] },
+    });
+    add({ type: "node.stateChanged", payload: { nodeId: "m1", event: { type: "start" } } });
+    add({
+      type: "node.created",
+      payload: {
+        nodeId: "p",
+        role: "implement",
+        parentId: "m1",
+        dependsOn: [],
+        objective: "p",
+        acceptanceCriteria: ["c"],
+        scope,
+      },
+    });
+    const started: string[] = [];
+    const adapter = {
+      start: async (req: { nodeId: string; worktreePath: string }) => {
+        started.push(req.nodeId);
+        return ok({ sessionId: "s", cwd: req.worktreePath, removedEnv: [] });
+      },
+    } as unknown as RuntimeAdapter;
+    const h = createHandlers({ log, clock }, { adapterFor: () => adapter }, undefined, {
+      ...spawnDeps,
+      rootScope: scope,
+    });
+    const present = await h["decision.present"]?.({
+      requestId: "dp-1",
+      operation: "decision.present",
+      role: "integrator",
+      caller: { nodeId: "m1" },
+      params: { question: "どうする？", options: ["a", "b"] },
+    } as never);
+    expect(present?.ok).toBe(true);
+    expect(started).toEqual([]); // 回答の前は、起動しない（tick を呼ぶ契機がまだない）
+    const decisionId = (present as { value: { decisionId: string } }).value.decisionId;
+    const answered = await h["decision.answer"]?.({
+      requestId: "da-1",
+      operation: "decision.answer",
+      role: "human",
+      params: { decisionId, choice: "a" },
+    } as never);
+    expect(answered?.ok).toBe(true);
+    await vi.waitFor(() => expect(started).toEqual(["p"]));
+  });
 });
