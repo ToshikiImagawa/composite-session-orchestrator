@@ -137,7 +137,8 @@ function describePreview(p: Preview, tombstone: boolean | undefined): string {
         ? "墓標を残す"
         : "墓標を残さない";
   const remains = keep
-    ? `  墓標に残る内容: タイトル「${p.tombstoneTitle}」（目的の 1 行目）・結果（検証済みか破棄か）・日付\n`
+    ? `  墓標に残る内容: タイトル「${p.tombstoneTitle}」（目的の 1 行目）・結果（検証済みか破棄か）・最終コミットの SHA（記録があれば）・日付\n` +
+      "  最終コミットの SHA は、成果の保管ではなく、取り戻すための手がかり: ブランチを消した後も git が掃除（gc）するまでの間（到達できないオブジェクトは既定でおよそ 2 週間）は、git branch <名前> <SHA> で戻せることがある\n"
     : "  墓標は残らない。標識として、削除した日時・木の根・ノード数・人間の操作だけが記録に残る\n";
   const blockers =
     p.blockers.length === 0

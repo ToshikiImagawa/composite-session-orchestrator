@@ -19,7 +19,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { type Failure, failure, isPathUnder, type Result } from "@cso/core";
+import { type Failure, failure, isCommitSha, isPathUnder, type Result } from "@cso/core";
 
 export interface GitResult {
   readonly code: number | null;
@@ -84,7 +84,9 @@ export const DEFAULT_REGENERABLE_IGNORED: readonly string[] = ["node_modules", "
 export interface GitPorts {
   factsFor(
     nodeId: string,
-  ): Promise<{ merged: boolean; clean: boolean; worktreePath: string } | undefined>;
+  ): Promise<
+    { merged: boolean; clean: boolean; worktreePath: string; headCommit?: string } | undefined
+  >;
   removeWorktree(
     nodeId: string,
     opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
@@ -212,6 +214,13 @@ export function createGitPorts(
     );
   };
 
+  /** ブランチの先端（最終コミット）。SHA の形でなければ（取れなければ）、省略する。 */
+  const headFields = async (nodeId: string): Promise<{ headCommit?: string }> => {
+    const r = await git(["rev-parse", "--verify", "-q", `${branchOf(nodeId)}^{commit}`]);
+    const sha = r.stdout.trim();
+    return r.code === 0 && isCommitSha(sha) ? { headCommit: sha } : {};
+  };
+
   const ports: GitPorts = {
     provisionWorktree: ({ parentId, nodeId }) =>
       serial(async () => {
@@ -290,7 +299,12 @@ export function createGitPorts(
           // 強制の回収で、作業ツリーは消えたがブランチだけ残った（途中の失敗）ノード: 消すべきものが残っていない作業ツリーとして
           // 事実を返し、判定を通して、ブランチの削除をやり直せるようにする（破棄の判断は、ハンドラが記録で確かめる）。
           if (!dirExists(path) && (await branchExists(branchOf(nodeId)))) {
-            return { worktreePath: path, merged: false, clean: true };
+            return {
+              worktreePath: path,
+              merged: false,
+              clean: true,
+              ...(await headFields(nodeId)),
+            };
           }
           return undefined;
         }
@@ -308,7 +322,7 @@ export function createGitPorts(
           ]);
           merged = anc.code === 0;
         }
-        return { merged, clean, worktreePath: real };
+        return { merged, clean, worktreePath: real, ...(await headFields(nodeId)) };
       }),
 
     removeWorktree: (nodeId, { expectedPath, force, onTip }) =>

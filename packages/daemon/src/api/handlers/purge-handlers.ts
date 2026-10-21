@@ -33,7 +33,7 @@ export interface PurgeMarkerInfo {
   readonly tombstone?: {
     readonly title: string;
     readonly outcome: "verified" | "discarded";
-    /** 記録があるときだけ（回収のときに記録する経路は第 2 段階）。 */
+    /** 記録（`node.lastCommit`）があるときだけ。 */
     readonly lastCommit?: string;
   };
 }
@@ -182,6 +182,7 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
                 title: firstLine(target?.objective ?? "") || nodeId,
                 outcome:
                   target?.discarded !== undefined ? ("discarded" as const) : ("verified" as const),
+                ...(target?.lastCommit === undefined ? {} : { lastCommit: target.lastCommit }),
               },
             }
           : {}),

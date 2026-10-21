@@ -39,7 +39,14 @@ describe("node.purged（最終削除の標識）", () => {
     const r = foldEvents([
       ...root(),
       purged(
-        { ...base, tombstone: { title: "目的", outcome: "verified", lastCommit: "abc123" } },
+        {
+          ...base,
+          tombstone: {
+            title: "目的",
+            outcome: "verified",
+            lastCommit: "0123456789abcdef0123456789abcdef01234567",
+          },
+        },
         9,
       ),
     ]);
@@ -55,7 +62,11 @@ describe("node.purged（最終削除の標識）", () => {
         rootId: "t",
         nodeIds: ["c", "t"],
         archivedAt: "2026-01-10T00:00:00Z",
-        tombstone: { title: "目的", outcome: "verified", lastCommit: "abc123" },
+        tombstone: {
+          title: "目的",
+          outcome: "verified",
+          lastCommit: "0123456789abcdef0123456789abcdef01234567",
+        },
       },
     ]);
   });

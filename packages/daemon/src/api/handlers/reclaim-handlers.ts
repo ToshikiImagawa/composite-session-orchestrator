@@ -20,6 +20,7 @@ import {
   discardedNodeIds,
   type Failure,
   failure,
+  isCommitSha,
   isStrictDescendant,
   type NodeRecord,
   type OperationMap,
@@ -38,7 +39,10 @@ import { appendAtomically, fail, type LogPort } from "./context.js";
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
 /** 作業ツリーの事実（`discarded` は、`node.discardDecided` の記録から導く）。 */
-export type WorktreeFacts = Omit<ReclaimNodeFacts, "discarded">;
+export type WorktreeFacts = Omit<ReclaimNodeFacts, "discarded"> & {
+  /** ブランチの先端（最終コミットの SHA）。取れなければ省略する（回収は止めない）。 */
+  readonly headCommit?: string;
+};
 
 /**
  * 回収の実体（git・lsof）への口。実装（T10b）が守る契約:
@@ -363,6 +367,43 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
           ]);
           if (!marked.ok) return { ok: false, error: marked.error };
         }
+        // 作業ツリーを消す前に、最終コミットを記録する（墓標の `lastCommit` の情報源。FR_031）。記録できなくても、回収は進める。
+        const head = again.facts.headCommit;
+        let recorded = current?.lastCommit;
+        if (head === undefined) {
+          deps.onFailure?.(n.id, "最終コミットを取得できなかった（記録せずに回収を進める）");
+        } else if (current?.lastCommit !== head) {
+          const rec = appendAtomically(log, deps.clock, `${requestId}/${n.id}/lastCommit`, actor, [
+            { type: "node.lastCommit", payload: { nodeId: n.id, commit: head } },
+          ]);
+          if (rec.ok) recorded = head;
+          else {
+            deps.onFailure?.(
+              n.id,
+              `最終コミットを記録できなかった（回収を進める）: ${rec.error.code}: ${rec.error.cause}`,
+            );
+          }
+        }
+        // 強制のときは、`-D` の直前に、ポートが先端を渡す。判定から削除までの間に先端が動いていたら（手でコミットが足されたなど）、
+        // 実際に消えるブランチの先端で、記録を上書きする。
+        const onTip = (tip: string): void => {
+          ports.onForced?.(n.id, tip);
+          if (!isCommitSha(tip) || tip === recorded) return;
+          const upd = appendAtomically(
+            log,
+            deps.clock,
+            `${requestId}/${n.id}/lastCommit/${tip}`,
+            actor,
+            [{ type: "node.lastCommit", payload: { nodeId: n.id, commit: tip } }],
+          );
+          if (upd.ok) recorded = tip;
+          else {
+            deps.onFailure?.(
+              n.id,
+              `強制の直前の最終コミットを記録できなかった（回収を進める）: ${upd.error.code}: ${upd.error.cause}`,
+            );
+          }
+        };
         let removed: Result<undefined, Failure>;
         try {
           // 強制（作業ツリーの `--force`・ブランチの `-D`）は、記録上、人間が破棄を判断した（`discarded`）、停止した
@@ -373,7 +414,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
             (record.state === "stopped" || record.state === "reclaimable");
           removed = await ports.removeWorktree(n.id, {
             expectedPath: again.facts.worktreePath,
-            ...(force ? { force: true, onTip: (tip: string) => ports.onForced?.(n.id, tip) } : {}),
+            ...(force ? { force: true, onTip } : {}),
           });
         } catch (e) {
           removed = { ok: false, error: failure("removeFailed", String(e), "原因を取り除く") };

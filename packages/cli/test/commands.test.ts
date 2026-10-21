@@ -134,6 +134,15 @@ describe("purge の確認の文面と、実行できない理由（FR_031）", (
     expect(r.stdout).toContain("保持期間");
   });
 
+  it("墓標の最終コミットの SHA は、保管ではなく、取り戻す手がかりで、gc までの間だけ戻せる旨を表示する", async () => {
+    const { client } = happy();
+    const r = await runCommand(["purge", "n1", "--dry-run"], deps(client));
+    expect(r.stdout).toContain("最終コミットの SHA");
+    expect(r.stdout).toContain("手がかり");
+    expect(r.stdout).toContain("gc");
+    expect(r.stdout).toContain("git branch <名前> <SHA>");
+  });
+
   it("--no-tombstone なら、墓標のタイトルは残らず、標識だけが残る旨を表示する", async () => {
     const { client } = happy();
     const r = await runCommand(["purge", "n1", "--dry-run", "--no-tombstone"], deps(client));

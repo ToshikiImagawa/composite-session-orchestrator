@@ -206,7 +206,12 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
   it("事実: 作ったばかりは、統合済みできれい。変更・未追跡のファイル・未統合のコミットがあれば、そう返す。なければ undefined", async () => {
     const s = setup();
     const p = await provision(s, "c1");
-    expect(await s.ports.factsFor("c1")).toEqual({ merged: true, clean: true, worktreePath: p });
+    expect(await s.ports.factsFor("c1")).toEqual({
+      merged: true,
+      clean: true,
+      worktreePath: p,
+      headCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+    });
     writeFileSync(join(p, "new.txt"), "x\n");
     expect((await s.ports.factsFor("c1"))?.clean).toBe(false); // 未追跡
     git(p, "add", ".");
@@ -351,6 +356,27 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
       });
       expect(r.ok).toBe(true);
       expect(tips).toEqual([sha]);
+    });
+
+    it("factsFor は、ブランチの先端（最終コミット）を headCommit に載せる（SHA の形）", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      writeFileSync(join(p, "x.txt"), "x\n");
+      git(p, "add", "-A");
+      git(p, "commit", "-m", "work");
+      const sha = git(p, "rev-parse", "HEAD").trim();
+      const facts = await s.ports.factsFor("c1");
+      expect(facts?.headCommit).toBe(sha);
+      expect(facts?.headCommit).toMatch(/^[0-9a-f]{40}$/);
+    });
+
+    it("作業ツリーが消えてブランチだけ残ったノードの事実にも、headCommit を載せる", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      const sha = git(p, "rev-parse", "HEAD").trim();
+      git(s.repoRoot, "worktree", "remove", "--force", p);
+      const facts = await s.ports.factsFor("c1");
+      expect(facts?.headCommit).toBe(sha);
     });
 
     it("force: -D だけ失敗したら removeFailed（作業ツリーは消えた・ブランチだけ残った）。そのあとの再実行で、残りを消せる", async () => {
