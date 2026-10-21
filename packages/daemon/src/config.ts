@@ -48,6 +48,16 @@ export interface DaemonConfig {
   readonly retentionDays?: number;
   /** `node.purge` の `tombstone` を省略したときに、墓標を残すか。省略すると `DEFAULT_PURGE_TOMBSTONE`（残す）。 */
   readonly purgeTombstone?: boolean;
+  /**
+   * 自動の最終削除。省略すると、オフ。**有効にすると、保持期間（`retentionDays`）を過ぎた、アーカイブ済みの最上位の木が、
+   * 取り返しのつかない形で（ログの行を物理削除して）自動的に消える。** 人間のコマンド（`cso purge`）と同じ検査を通る。
+   * 最初の実行は 1 周期後。`intervalMinutes` は 1〜1440（既定 60）、`maxTreesPerRun` は 1 回の実行で消す木の数の上限で 1〜100（既定 5）。
+   */
+  readonly autoPurge?: {
+    readonly enabled: boolean;
+    readonly intervalMinutes?: number;
+    readonly maxTreesPerRun?: number;
+  };
   /** 子に渡す環境変数の、既定（PATH・HOME・認証・プロキシなど）に加える名前（完全一致）。 */
   readonly childEnvAllow?: readonly string[];
   /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
@@ -75,6 +85,7 @@ const KEYS = [
   "startLimits",
   "retentionDays",
   "purgeTombstone",
+  "autoPurge",
   "maxTurns",
   "maxBudgetUsd",
   "childEnvAllow",
@@ -157,6 +168,32 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
   }
   if (raw.purgeTombstone !== undefined && typeof raw.purgeTombstone !== "boolean") {
     return bad("purgeTombstone は真偽値");
+  }
+  let autoPurge:
+    | { enabled: boolean; intervalMinutes?: number; maxTreesPerRun?: number }
+    | undefined;
+  if (raw.autoPurge !== undefined) {
+    const v = raw.autoPurge;
+    const okInt = (x: unknown, max: number): boolean =>
+      x === undefined || (typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= max);
+    if (
+      !isRec(v) ||
+      Object.keys(v).some(
+        (k) => k !== "enabled" && k !== "intervalMinutes" && k !== "maxTreesPerRun",
+      ) ||
+      typeof v.enabled !== "boolean" ||
+      !okInt(v.intervalMinutes, 1440) ||
+      !okInt(v.maxTreesPerRun, 100)
+    ) {
+      return bad(
+        "autoPurge は、enabled（真偽値）・intervalMinutes（1〜1440 の整数。任意）・maxTreesPerRun（1〜100 の整数。任意）だけを持つオブジェクト",
+      );
+    }
+    autoPurge = {
+      enabled: v.enabled,
+      ...(v.intervalMinutes === undefined ? {} : { intervalMinutes: v.intervalMinutes as number }),
+      ...(v.maxTreesPerRun === undefined ? {} : { maxTreesPerRun: v.maxTreesPerRun as number }),
+    };
   }
   if (
     raw.maxTurns !== undefined &&
@@ -300,6 +337,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(regenerableIgnored === undefined ? {} : { regenerableIgnored }),
       ...(startLimits === undefined ? {} : { startLimits }),
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
+      ...(autoPurge === undefined ? {} : { autoPurge }),
       ...(raw.childHome === undefined
         ? {}
         : { childHome: raw.childHome as "isolated" | "inherit" }),

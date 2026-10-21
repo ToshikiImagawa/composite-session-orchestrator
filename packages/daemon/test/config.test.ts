@@ -91,6 +91,40 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("autoPurge（自動の最終削除）は、省略するとオフ。enabled（必須）・intervalMinutes（1〜1440）・maxTreesPerRun（1〜100）だけを持つ", () => {
+    const d = parseConfig(JSON.stringify(base));
+    expect(d.ok && d.value.autoPurge).toBeUndefined();
+    const on = parseConfig(
+      JSON.stringify({
+        ...base,
+        autoPurge: { enabled: true, intervalMinutes: 5, maxTreesPerRun: 2 },
+      }),
+    );
+    expect(on.ok && on.value.autoPurge).toEqual({
+      enabled: true,
+      intervalMinutes: 5,
+      maxTreesPerRun: 2,
+    });
+    const min = parseConfig(JSON.stringify({ ...base, autoPurge: { enabled: false } }));
+    expect(min.ok && min.value.autoPurge).toEqual({ enabled: false });
+    for (const v of [
+      true,
+      "on",
+      null,
+      [],
+      {},
+      { enabled: "yes" },
+      { enabled: true, intervalMinutes: 0 },
+      { enabled: true, intervalMinutes: 1441 },
+      { enabled: true, intervalMinutes: 1.5 },
+      { enabled: true, maxTreesPerRun: 0 },
+      { enabled: true, maxTreesPerRun: 101 },
+      { enabled: true, unknown: 1 },
+    ]) {
+      bad({ autoPurge: v }, "autoPurge");
+    }
+  });
+
   it("retentionDays（最終削除の保持期間）は 0 以上の整数（既定は 90）。purgeTombstone は真偽値（任意）", () => {
     const d = parseConfig(JSON.stringify(base));
     expect(d.ok && d.value.retentionDays).toBeUndefined();
