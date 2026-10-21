@@ -4,6 +4,7 @@ import { createReadHandlers } from "../read-handlers.js";
 import type { Handlers } from "../server.js";
 import { createInstructionDelivery } from "./instruction-delivery.js";
 import { createPauseHandlers } from "./pause-handlers.js";
+import { createPurgeHandlers, type PurgeHandlerDeps } from "./purge-handlers.js";
 import { createReclaimHandlers, type ReclaimPorts } from "./reclaim-handlers.js";
 import { createRuntimeHandlers, type RuntimeHandlerDeps } from "./runtime-handlers.js";
 import { createScopeHandlers } from "./scope-handlers.js";
@@ -12,6 +13,11 @@ import { createStateHandlers, type StateHandlerDeps } from "./state-handlers.js"
 
 export type { LogPort } from "./context.js";
 export { createPauseHandlers, type PauseHandlerDeps } from "./pause-handlers.js";
+export {
+  createPurgeHandlers,
+  type PurgeHandlerDeps,
+  type PurgeMarkerInfo,
+} from "./purge-handlers.js";
 export {
   createReclaimHandlers,
   type ReclaimHandlerDeps,
@@ -53,6 +59,8 @@ export function createHandlersWithScheduler(
     SpawnHandlerDeps,
     "ports" | "credentials" | "rootScope" | "onFailure" | "startLimits"
   >,
+  /** 渡すと（ログが `purgeTree` を持つとき）、最終削除の操作（node.purge・node.purgePreview）も有効になる。 */
+  purge?: Omit<PurgeHandlerDeps, "log">,
 ): { handlers: Handlers; tick: () => Promise<void>; close: () => Promise<void> } {
   const onFailure = spawn?.onFailure === undefined ? {} : { onFailure: spawn.onFailure };
   // 追加指示の配送は、node.send と node.review（差し戻しの理由）で共有する。
@@ -110,11 +118,15 @@ export function createHandlersWithScheduler(
       if (r.ok) void tick();
       return r;
     };
+  const purgeTree = deps.log.purgeTree?.bind(deps.log);
   const built = {
     ...createReadHandlers(() => deps.log.state()),
     ...state,
     ...(rt === undefined ? {} : rt),
     ...(reclaim === undefined ? {} : createReclaimHandlers({ ...deps, ports: reclaim })),
+    ...(purgeTree === undefined || purge === undefined
+      ? {}
+      : createPurgeHandlers({ ...purge, log: { state: () => deps.log.state(), purgeTree } })),
     ...(!full
       ? {}
       : {
