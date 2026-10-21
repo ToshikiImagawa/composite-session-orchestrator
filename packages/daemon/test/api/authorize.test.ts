@@ -40,9 +40,11 @@ const state = (): OrchState => {
     created("m1", "integrator", "root"),
     start("m1"),
     created("a", "implement", "m1"),
+    start("a"),
     created("m2", "integrator", "root"),
     start("m2"),
     created("b", "implement", "m2"),
+    start("b"),
     ev({ type: "decision.requested", payload: { decisionId: "da", nodeId: "a", question: "q" } }),
     ev({ type: "decision.requested", payload: { decisionId: "db", nodeId: "b", question: "q" } }),
     ev({
@@ -52,6 +54,13 @@ const state = (): OrchState => {
     ev({
       type: "report.added",
       payload: { reportId: "rb", nodeId: "b", kind: "progress", text: "t" },
+    }),
+    ...(["xa:a", "xb:b", "xm1:m1"] as const).map((x) => {
+      const [extensionId, nodeId] = x.split(":") as [string, string];
+      return ev({
+        type: "scope.extensionRequested",
+        payload: { extensionId, nodeId, target: { kind: "write", value: "docs" }, reason: "r" },
+      });
     }),
   ]);
   if (!r.ok) throw new Error(r.error.code);
@@ -149,11 +158,21 @@ describe("読める範囲（部分木の規則）", () => {
     expect(code(run(m1, "decision.present", present(["zzz"])))).toBe("forbidden");
   });
 
-  it("scope.decide は、発生元の記録ができるまで統合ロールからの呼び出しを拒否する（フェイルクローズ）", () => {
-    expect(code(run(m1, "scope.decide", { extensionId: "e", decision: "approve" }))).toBe(
-      "forbidden",
-    );
-    expect(code(run(root, "scope.decide", { extensionId: "e", decision: "approve" }))).toBe(
+  it("scope.decide は、拡張の発生元のノードが自分の子孫（自分を含まない）のときだけ。範囲外と未知は区別しない（notFound）", () => {
+    const decide = (extensionId: string) => ({ extensionId, decision: "approve" });
+    expect(run(m1, "scope.decide", decide("xa")).ok).toBe(true); // a は m1 の子
+    expect(run(root, "scope.decide", decide("xa")).ok).toBe(true);
+    expect(run(root, "scope.decide", decide("xm1")).ok).toBe(true);
+    expect(code(run(m1, "scope.decide", decide("xb")))).toBe("notFound"); // b は別の部分木
+    expect(code(run(m1, "scope.decide", decide("xm1")))).toBe("notFound"); // 自分の拡張は判定できない
+    expect(code(run(m1, "scope.decide", decide("nope")))).toBe("notFound");
+  });
+
+  it("scope.decide は、人間なら全ノードを対象にでき、子ロールは操作を持たない", () => {
+    for (const x of ["xa", "xb", "xm1"]) {
+      expect(run(human, "scope.decide", { extensionId: x, decision: "reject" }).ok).toBe(true);
+    }
+    expect(code(run(childA, "scope.decide", { extensionId: "xa", decision: "approve" }))).toBe(
       "forbidden",
     );
   });
@@ -218,12 +237,17 @@ describe("主体の検査（checkPrincipal: トークンのロールとノード
     expect(code(checkPrincipal(childA, incomplete))).toBe("unauthenticated");
     const stopped = stateOf("a", { type: "stop", mode: "immediate" }, { type: "confirmStopped" });
     expect(code(checkPrincipal(childA, stopped))).toBe("unauthenticated");
-    const reclaimable = stateOf(
-      "a",
-      { type: "stop", mode: "immediate" },
-      { type: "confirmStopped" },
-      { type: "markReclaimable", discarded: true },
-    );
+    // 破棄の判断（node.discardDecided）を経て、回収可能になる。
+    const change = (event: NodeEvent): EventBody => ({
+      type: "node.stateChanged",
+      payload: { nodeId: "a", event },
+    });
+    const reclaimable = withState([
+      change({ type: "stop", mode: "immediate" }),
+      change({ type: "confirmStopped" }),
+      { type: "node.discardDecided", payload: { nodeId: "a" } },
+      change({ type: "markReclaimable", discarded: true }),
+    ]);
     expect(code(checkPrincipal(childA, reclaimable))).toBe("unauthenticated");
   });
 });

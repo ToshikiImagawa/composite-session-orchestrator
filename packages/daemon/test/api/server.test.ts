@@ -76,7 +76,7 @@ const start = async (
       },
       "node.send": (req) => {
         calls.push(req);
-        return ok({ status: "queued" });
+        return ok({ status: "queued", duplicate: false });
       },
       "node.purge": (req) => {
         calls.push(req);

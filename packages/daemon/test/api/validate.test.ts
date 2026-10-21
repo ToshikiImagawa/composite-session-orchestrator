@@ -60,7 +60,7 @@ describe("parseEnvelope（要求の封筒）", () => {
 const BRIEF = {
   objective: "ログイン画面を作る",
   acceptanceCriteria: ["表示できる"],
-  scope: { writableLocations: ["/w"], forbiddenLocations: [], allowedCommands: ["git status"] },
+  scope: { writableLocations: ["src"], forbiddenLocations: [], allowedCommands: ["git status"] },
 };
 
 describe("validateParams（操作ごとの引数。余計なキーは拒否）", () => {
