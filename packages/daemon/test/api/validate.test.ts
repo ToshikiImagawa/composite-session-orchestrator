@@ -60,7 +60,7 @@ describe("parseEnvelope（要求の封筒）", () => {
 const BRIEF = {
   objective: "ログイン画面を作る",
   acceptanceCriteria: ["表示できる"],
-  scope: { writableLocations: ["/w"], forbiddenLocations: [], allowedCommands: ["git status"] },
+  scope: { writableLocations: ["src"], forbiddenLocations: [], allowedCommands: ["git status"] },
 };
 
 describe("validateParams（操作ごとの引数。余計なキーは拒否）", () => {
@@ -134,6 +134,24 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
       ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, branch: "x" }],
       ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, worktree: "/w" }],
       ["node.spawn", { parentId: "root", role: "boss", ...BRIEF }],
+      [
+        "node.spawn",
+        {
+          parentId: "root",
+          role: "implement",
+          ...BRIEF,
+          scope: { writableLocations: ["/etc"], forbiddenLocations: [], allowedCommands: [] },
+        },
+      ],
+      [
+        "node.split",
+        {
+          nodeId: "a",
+          keep: "stop",
+          ...BRIEF,
+          scope: { writableLocations: ["src"], forbiddenLocations: ["/x"], allowedCommands: [] },
+        },
+      ],
       ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, objective: "" }],
       ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, acceptanceCriteria: [] }],
       ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, dependsOn: ["a b"] }],
