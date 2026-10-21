@@ -307,4 +307,108 @@ export class EventLog {
       };
     }
   }
+
+  /**
+   * 複数のイベントを、1 トランザクションで追記する（`seq` は連番）。全件を順に検査しながら書き、1 件でも失敗したら
+   * 全件をロールバックして、何も書かず、状態も `seq` も変えない。追記済みの要求（同じ `requestId`・同一内容）は
+   * 重複として最初のイベントを返し（`applied: false`）、残りを追記する（再試行で完了する）。
+   */
+  appendAll(requests: readonly AppendRequest[]): Result<AppendOutcome[], Failure> {
+    if (
+      !Array.isArray(requests) ||
+      requests.length === 0 ||
+      !requests.every(
+        (r) => isRec(r) && typeof r.requestId === "string" && isRec(r.body) && isRec(r.actor),
+      )
+    ) {
+      return {
+        ok: false,
+        error: failure(
+          "invalidRequest",
+          "追記の要求の形が不正（1 件以上の { requestId, actor, body }）",
+          "requestId・actor・body を確認する",
+        ),
+      };
+    }
+    let at: string;
+    try {
+      at = this.clock();
+    } catch (e) {
+      return {
+        ok: false,
+        error: failure("invalidClock", `時計の取得に失敗: ${String(e)}`, "時計の設定を確認する"),
+      };
+    }
+    if (typeof at !== "string" || !isValidInboxTime(at)) {
+      return {
+        ok: false,
+        error: failure("invalidClock", "時計の値が ISO 8601（UTC）でない", "時計の設定を確認する"),
+      };
+    }
+    class Abort extends Error {
+      constructor(readonly failure: Failure) {
+        super(failure.code);
+      }
+    }
+    let next: OrchState | undefined;
+    try {
+      const outcomes = this.store.transaction((): AppendOutcome[] => {
+        let state = this.current;
+        const out: AppendOutcome[] = [];
+        for (const request of requests) {
+          const event = {
+            seq: state.lastSeq + 1,
+            at,
+            requestId: request.requestId,
+            actor: request.actor,
+            ...request.body,
+          } as OrchEvent;
+          const r = applyEvent(state, event);
+          if (!r.ok) throw new Abort(r.error);
+          if (!r.value.applied) {
+            const stored = this.store.findByRequestId(request.requestId);
+            const first = stored === undefined ? undefined : parseRow(stored);
+            if (first === undefined || !first.ok) {
+              throw new Abort(
+                failure(
+                  "corruptRow",
+                  `requestId ${request.requestId} の最初の行を読み出せない`,
+                  "ログの行を確認する",
+                ),
+              );
+            }
+            out.push({ event: first.value, applied: false, state });
+            continue;
+          }
+          const row = toRow(event);
+          this.store.append(row);
+          if (this.snapshotEvery > 0 && event.seq % this.snapshotEvery === 0) {
+            this.store.saveSnapshot({
+              lastSeq: event.seq,
+              state: JSON.stringify(r.value.state),
+              stateVersion: STATE_VERSION,
+              lastEventHash: eventHash(row),
+            });
+          }
+          state = r.value.state;
+          out.push({ event, applied: true, state });
+        }
+        next = state;
+        return out;
+      });
+      if (next !== undefined) this.current = next; // コミット後に反映する
+      return ok(outcomes);
+    } catch (e) {
+      if (e instanceof Abort) return { ok: false, error: e.failure };
+      return {
+        ok: false,
+        error: failure(
+          "storeError",
+          `ストアへの書き込みに失敗: ${String(e)}`,
+          "ストアの状態を確認する",
+          "同じ requestId で再試行する",
+        ),
+      };
+    }
+  }
 }

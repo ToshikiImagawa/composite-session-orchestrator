@@ -383,3 +383,76 @@ describe("性質（fast-check）", () => {
     );
   });
 });
+
+describe("appendAll（複数イベントを 1 トランザクションで。全件を事前に検査する）", () => {
+  const req = (requestId: string, body: EventBody) => ({ requestId, actor: SYS, body });
+
+  it("seq を連番で採番して全件を追記し、状態は 1 回で更新される。再起動しても同じ", () => {
+    const shared = createMemoryStore();
+    const log = openLog(shared.open());
+    const outcomes = must(
+      log.appendAll([
+        req("a1", created("root", "integrator", null)),
+        req("a2", changed("root", { type: "start" })),
+        req("a3", created("a", "implement", "root")),
+      ]),
+    );
+    expect(outcomes.map((o) => [o.event.seq, o.applied])).toEqual([
+      [1, true],
+      [2, true],
+      [3, true],
+    ]);
+    expect(log.state().lastSeq).toBe(3);
+    expect(log.state().nodes.map((n) => n.id)).toEqual(["root", "a"]);
+    expect(openLog(shared.open()).state()).toEqual(log.state());
+  });
+
+  it("途中で検査に失敗したら、何も書かず、状態も seq も変えない（全件がロールバック）", () => {
+    const shared = createMemoryStore();
+    const log = openLog(shared.open());
+    seed(log);
+    const before = log.state();
+    const rows = shared.open().readAll().length;
+    const r = log.appendAll([
+      req("b1", changed("a", { type: "start" })),
+      req("b2", changed("a", { type: "start" })), // 2 回目は不正（running からの start）
+    ]);
+    expect(r.ok).toBe(false);
+    expect(log.state()).toEqual(before);
+    expect(shared.open().readAll()).toHaveLength(rows);
+    expect(must(append(log, "after", changed("a", { type: "start" }))).event.seq).toBe(
+      before.lastSeq + 1,
+    );
+  });
+
+  it("追記済みの要求は重複として最初のイベントを返し、残りを追記する（再試行で完了する）", () => {
+    const shared = createMemoryStore();
+    const log = openLog(shared.open());
+    must(append(log, "c1", created("root", "integrator", null)));
+    const outcomes = must(
+      log.appendAll([
+        req("c1", created("root", "integrator", null)),
+        req("c2", changed("root", { type: "start" })),
+      ]),
+    );
+    expect(outcomes.map((o) => o.applied)).toEqual([false, true]);
+    expect(outcomes[0]?.event.seq).toBe(1);
+    expect(outcomes[1]?.event.seq).toBe(2);
+  });
+
+  it("要求の形が不正・空の配列は失敗する。スナップショットは、境界の seq を含むときに保存される", () => {
+    const shared = createMemoryStore();
+    const log = openLog(shared.open(), 2);
+    expect(log.appendAll([{ requestId: 5 } as never]).ok).toBe(false);
+    expect(log.appendAll([]).ok).toBe(false);
+    must(
+      log.appendAll([
+        req("d1", created("root", "integrator", null)),
+        req("d2", changed("root", { type: "start" })),
+        req("d3", created("a", "implement", "root")),
+      ]),
+    );
+    expect(shared.open().loadSnapshot()?.lastSeq).toBe(2);
+    expect(openLog(shared.open(), 2).state()).toEqual(log.state());
+  });
+});
