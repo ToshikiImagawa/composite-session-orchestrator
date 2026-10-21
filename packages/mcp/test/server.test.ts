@@ -112,3 +112,62 @@ describe("tools/call", () => {
     expect(page.entries[0].nextActions).toBeDefined();
   });
 });
+
+describe("tools/list の入力スキーマ（Anthropic API が受け付ける形）", () => {
+  it.each(MCP_ROLES)(
+    "%s の全ツールが、トップレベルに type: object と properties を持ち、oneOf・anyOf・allOf を持たない",
+    async (role) => {
+      const c = await connect(role, fakeRelay());
+      for (const t of (await c.listTools()).tools) {
+        const s = t.inputSchema as Record<string, unknown>;
+        expect(s.type, t.name).toBe("object");
+        expect(s.properties, t.name).toBeDefined();
+        for (const k of ["oneOf", "anyOf", "allOf", "enum", "not"])
+          expect(s[k], `${t.name}.${k}`).toBeUndefined();
+      }
+    },
+  );
+
+  it("node_stop は mode の enum と graceMs、node_review は verdict の enum と feedback を持つ", async () => {
+    const c = await connect("integrator", fakeRelay());
+    const tools = (await c.listTools()).tools;
+    const props = (n: string) =>
+      (
+        (tools.find((t) => t.name === n) as { inputSchema: unknown }).inputSchema as {
+          properties: Record<string, { enum?: string[]; type?: string; description?: string }>;
+        }
+      ).properties;
+    expect(props("node_stop").mode?.enum).toEqual(["graceful", "immediate"]);
+    expect(props("node_stop").graceMs?.type).toBe("integer");
+    expect(props("node_stop").graceMs?.description).toContain("graceful");
+    expect(props("node_review").verdict?.enum).toEqual(["accept", "reject"]);
+    expect(props("node_review").feedback?.description).toContain("reject");
+  });
+
+  it("ブリーフの項目（node_spawn・node_split）は、型を持つ", async () => {
+    const c = await connect("integrator", fakeRelay());
+    const tools = (await c.listTools()).tools;
+    for (const n of ["node_spawn", "node_split"]) {
+      const p = (
+        (tools.find((t) => t.name === n) as { inputSchema: unknown }).inputSchema as {
+          properties: Record<
+            string,
+            {
+              type?: string;
+              items?: { type?: string };
+              properties?: Record<string, { type?: string }>;
+            }
+          >;
+        }
+      ).properties;
+      expect(p.objective?.type, n).toBe("string");
+      expect(p.acceptanceCriteria?.type, n).toBe("array");
+      expect(p.acceptanceCriteria?.items?.type, n).toBe("string");
+      expect(p.dependsOn?.type, n).toBe("array");
+      expect(p.scope?.type, n).toBe("object");
+      for (const k of ["writableLocations", "forbiddenLocations", "allowedCommands"]) {
+        expect(p.scope?.properties?.[k]?.type, `${n}.${k}`).toBe("array");
+      }
+    }
+  });
+});

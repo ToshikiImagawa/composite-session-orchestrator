@@ -131,12 +131,74 @@ const SCHEMAS: Readonly<Record<McpOperation, z.ZodType>> = {
   }),
 };
 
+type JsonSchema = { type: "object"; [k: string]: unknown };
+
+/** ブリーフの項目の JSON Schema（zod の `unknown` は `{}` になるので、手で書く）。 */
+const BRIEF_PROPERTIES: Readonly<Record<string, unknown>> = {
+  objective: { type: "string", description: "子の目的" },
+  acceptanceCriteria: {
+    type: "array",
+    items: { type: "string" },
+    description: "受け入れ基準（1 件以上）",
+  },
+  scope: {
+    type: "object",
+    description: "作業範囲。場所は作業ツリー内の相対パス",
+    properties: {
+      writableLocations: { type: "array", items: { type: "string" } },
+      forbiddenLocations: { type: "array", items: { type: "string" } },
+      allowedCommands: { type: "array", items: { type: "string" } },
+    },
+    required: ["writableLocations", "forbiddenLocations", "allowedCommands"],
+  },
+  dependsOn: {
+    type: "array",
+    items: { type: "string" },
+    description: "依存する先行ノードの識別子（省略可）",
+  },
+};
+const BRIEF_REQUIRED = ["objective", "acceptanceCriteria", "scope"];
+
+/**
+ * トップレベルが oneOf だけだと、Anthropic API が 400 で拒否するので、1 つの object に平らにしたもの。
+ * 厳密な検査（graceMs は graceful のときだけ、feedback は reject のとき必須）は `parseToolInput` が行う。
+ */
+const FLAT_SCHEMAS: Readonly<Partial<Record<McpOperation, JsonSchema>>> = {
+  "node.stop": {
+    type: "object",
+    properties: {
+      nodeId: { type: "string" },
+      mode: { type: "string", enum: ["graceful", "immediate"] },
+      graceMs: {
+        type: "integer",
+        minimum: 1,
+        maximum: MAX_GRACE_MS,
+        description: "猶予（ミリ秒）。mode が graceful のときだけ指定できる。省略すると既定の猶予",
+      },
+    },
+    required: ["nodeId", "mode"],
+    additionalProperties: false,
+  },
+  "node.review": {
+    type: "object",
+    properties: {
+      nodeId: { type: "string" },
+      verdict: { type: "string", enum: ["accept", "reject"] },
+      feedback: {
+        type: "string",
+        description: "コメント。verdict が reject のときは必須（差し戻しの理由）、accept では任意",
+      },
+    },
+    required: ["nodeId", "verdict"],
+    additionalProperties: false,
+  },
+};
+
 /** MCP の `tools/list` に載せる、操作の入力の JSON Schema。変換できなければ、緩い object（検査は `parseToolInput` が行う）。 */
-export function inputSchemaFor(operation: DaemonOperation): {
-  type: "object";
-  [k: string]: unknown;
-} {
+export function inputSchemaFor(operation: DaemonOperation): JsonSchema {
   try {
+    const flat = FLAT_SCHEMAS[operation as McpOperation];
+    if (flat !== undefined) return flat;
     const schema = Object.hasOwn(SCHEMAS, operation)
       ? SCHEMAS[operation as McpOperation]
       : undefined;
@@ -145,8 +207,21 @@ export function inputSchemaFor(operation: DaemonOperation): {
         string,
         unknown
       >;
-      if (js.type === "object" || js.oneOf !== undefined || js.anyOf !== undefined) {
-        return { type: "object", ...js };
+      if (js.type === "object" && js.oneOf === undefined && js.anyOf === undefined) {
+        if (operation === "node.spawn" || operation === "node.split") {
+          const props = (js.properties ?? {}) as Record<string, unknown>;
+          const required = new Set([
+            ...((js.required as string[] | undefined) ?? []),
+            ...BRIEF_REQUIRED,
+          ]);
+          return {
+            ...js,
+            type: "object",
+            properties: { ...props, ...BRIEF_PROPERTIES },
+            required: [...required],
+          };
+        }
+        return { ...js, type: "object" };
       }
     }
   } catch {
