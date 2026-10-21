@@ -11,7 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@cso/core": "workspace:*"
+    "@cso/core": "workspace:*",
+    "zod": "4.6.5"
   },
   "engines": {
     "node": ">=22"
