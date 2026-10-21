@@ -29,9 +29,10 @@ import {
   type OrchEvent,
   type OrchState,
   ok,
+  purgeEventSeqs,
   type Result,
 } from "@cso/core";
-import type { EventStore, StoredEvent } from "./event-store.js";
+import { type EventStore, type StoredEvent, StoreIntegrityError } from "./event-store.js";
 
 export interface AppendRequest {
   readonly requestId: string;
@@ -55,6 +56,28 @@ export interface EventLogOptions {
   readonly verifySnapshot?: boolean;
   /** `verifySnapshot` で、スナップショットがログ全体の畳み込みと食い違い、捨てたときの通知（運用の記録用）。 */
   readonly onSnapshotMismatch?: () => void;
+  /**
+   * 最終削除の後に、追記のみの保証を確かめられなかったとき（`StoreIntegrityError`）に呼ぶ。以降、このログは書き込みを拒否する
+   * （`logBroken`）ので、呼び出し側は daemon を止める（fail closed）。
+   */
+  readonly onFatal?: (cause: string) => void;
+}
+
+/** 最終削除の要求。`marker` は、削除の後に残す標識のイベント（`node.purged`）。 */
+export interface PurgeRequest {
+  readonly requestId: string;
+  readonly actor: Actor;
+  /** 削除する木のノード（`planPurge` の結果）。 */
+  readonly nodeIds: readonly string[];
+  readonly marker: EventBody;
+}
+
+export interface PurgeOutcome {
+  /** 標識のイベント。`applied: false` のときは、同じ `requestId` で先に記録された標識。 */
+  readonly event: OrchEvent;
+  readonly applied: boolean;
+  /** 消した行数。 */
+  readonly deleted: number;
 }
 
 /** スナップショットに保存する core の状態のスキーマの版。`OrchState` の形を変えたら上げる（2: 停止の試行・観測の記録を追加、3: 範囲外のツール拒否・予期しない終了・報告の記録と、判断要求の内容を追加、4: 範囲の拡張要求・追加指示の記録と、ノードのブリーフ・判断要求の止める子を追加、5: 破棄の判断・アーカイブ時刻・指示の配送の記録を追加、6: 受信箱の項目の解決済みの記録を追加）。 */
@@ -204,7 +227,19 @@ export class EventLog {
     private readonly clock: () => string,
     private readonly snapshotEvery: number,
     private current: OrchState,
+    private readonly onFatal?: (cause: string) => void,
   ) {}
+
+  /** 最終削除の後の保証が確かめられなかった。以降の書き込みを拒否する。 */
+  private broken = false;
+
+  private brokenFailure(): Failure {
+    return failure(
+      "logBroken",
+      "最終削除の後に、イベントログの追記のみの保証を確かめられなかったため、書き込みを止めている",
+      "daemon を止めて、イベントログのファイルを確認する",
+    );
+  }
 
   /** ストアから状態を復元して開く。壊れた行・矛盾したログは、例外でなく失敗として返す。 */
   static open(store: EventStore, options: EventLogOptions): Result<EventLog, Failure> {
@@ -222,7 +257,15 @@ export class EventLog {
       };
     }
     if (!restored.ok) return restored;
-    return ok(new EventLog(store, options.clock, options.snapshotEvery ?? 1000, restored.value));
+    return ok(
+      new EventLog(
+        store,
+        options.clock,
+        options.snapshotEvery ?? 1000,
+        restored.value,
+        options.onFatal,
+      ),
+    );
   }
 
   state(): OrchState {
@@ -234,6 +277,7 @@ export class EventLog {
    * 同じ `requestId` で同一内容の再試行は、行を増やさず最初のイベントを返す。
    */
   append(request: AppendRequest): Result<AppendOutcome, Failure> {
+    if (this.broken) return { ok: false, error: this.brokenFailure() };
     if (
       !isRec(request) ||
       typeof request.requestId !== "string" ||
@@ -325,6 +369,7 @@ export class EventLog {
    * 重複として最初のイベントを返し（`applied: false`）、残りを追記する（再試行で完了する）。
    */
   appendAll(requests: readonly AppendRequest[]): Result<AppendOutcome[], Failure> {
+    if (this.broken) return { ok: false, error: this.brokenFailure() };
     if (
       !Array.isArray(requests) ||
       requests.length === 0 ||
@@ -419,6 +464,104 @@ export class EventLog {
           "ストアの状態を確認する",
           "同じ requestId で再試行する",
         ),
+      };
+    }
+  }
+
+  /**
+   * 木の最終削除（FR_031）。木のノードを主語とするイベントの行を物理削除し、同じトランザクションで標識 `marker` を追記する
+   * （最大の `seq` + 1。消した `seq` は再利用されない）。実行前に、残りの行 + 標識を畳み込み、成功すること、結果のノードが
+   * 「現在のノードから木を除いたもの」と一致することを確かめる。合わなければ何も消さずに `purgeUnsafe` で拒否する。
+   * 同じ `requestId` の再送は、何も消さずに最初の標識を返す。追記のみの保証を確かめられなければ `storeIntegrity` を返し、
+   * `onFatal` を呼んで、以降の書き込みを拒否する。
+   */
+  purgeTree(request: PurgeRequest): Result<PurgeOutcome, Failure> {
+    if (this.broken) return { ok: false, error: this.brokenFailure() };
+    const unsafe = (cause: string): Result<never, Failure> => ({
+      ok: false,
+      error: failure(
+        "purgeUnsafe",
+        `最終削除を安全に行えない（${cause}）`,
+        "削除する木・依存関係を確認する",
+      ),
+    });
+    try {
+      const stored = this.store.findByRequestId(request.requestId);
+      if (stored !== undefined) {
+        const first = parseRow(stored);
+        if (!first.ok) return first;
+        return ok({ event: first.value, applied: false, deleted: 0 });
+      }
+      const at = this.clock();
+      if (typeof at !== "string" || !isValidInboxTime(at)) {
+        return {
+          ok: false,
+          error: failure(
+            "invalidClock",
+            "時計の値が ISO 8601（UTC）でない",
+            "時計の設定を確認する",
+          ),
+        };
+      }
+      const set = new Set(request.nodeIds);
+      const current = new Set(this.current.nodes.map((n) => n.id));
+      for (const id of set) {
+        if (!current.has(id)) return unsafe(`ノード ${id} が存在しない`);
+      }
+      const parsed = parseRows(this.store.readAll());
+      if (!parsed.ok) return parsed;
+      const seqs = purgeEventSeqs(parsed.value, set);
+      const dropped = new Set(seqs);
+      const event = {
+        seq: Math.max(this.current.lastSeq, this.store.lastSeq()) + 1,
+        at,
+        requestId: request.requestId,
+        actor: request.actor,
+        ...request.marker,
+      } as OrchEvent;
+      const folded = foldEvents(
+        [...parsed.value.filter((e) => !dropped.has(e.seq)), event],
+        initialState(),
+      );
+      if (!folded.ok) return unsafe(`残りのログを畳み込めない: ${folded.error.cause}`);
+      const expected = [...current].filter((id) => !set.has(id)).sort();
+      const actual = folded.value.nodes.map((n) => n.id).sort();
+      if (!isDeepStrictEqual(expected, actual)) return unsafe("削除後のノードが、想定と合わない");
+      try {
+        this.store.purgeRows(seqs, toRow(event));
+      } catch (e) {
+        if (e instanceof StoreIntegrityError) {
+          this.broken = true;
+          try {
+            this.onFatal?.(e.message);
+          } catch {
+            // 通知の失敗は、書き込みの停止を妨げない
+          }
+          return {
+            ok: false,
+            error: failure(
+              "storeIntegrity",
+              e.message,
+              "daemon を止めて、イベントログのファイルを確認する",
+            ),
+          };
+        }
+        return {
+          ok: false,
+          error: failure(
+            "storeError",
+            `最終削除に失敗した（何も変わっていない）: ${String(e)}`,
+            "ストアの状態を確認する",
+            "同じ requestId で再試行する",
+          ),
+        };
+      }
+      this.current = folded.value;
+      return ok({ event, applied: true, deleted: seqs.length });
+    } catch (e) {
+      return {
+        ok: false,
+        error: failure("storeError", `最終削除に失敗: ${String(e)}`, "ストアの状態を確認する"),
       };
     }
   }
