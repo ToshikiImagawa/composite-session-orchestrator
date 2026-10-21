@@ -59,6 +59,11 @@ const startNode = async (r: Rig, nodeId = "a") => {
   return res.value;
 };
 
+const LOOPBACK_NO_PROXY = {
+  NO_PROXY: "127.0.0.1,localhost,[::1]",
+  no_proxy: "127.0.0.1,localhost,[::1]",
+};
+
 describe("capabilities（CLI）", () => {
   it("追加指示は遅延（実行中はツール完了後に届く）、停止は穏当・即時とも可、フックと識別子は可", () => {
     expect(rig().adapter.capabilities("a")).toEqual({
@@ -88,7 +93,7 @@ describe("start", () => {
     const v = await startNode(r);
     const opts = r.launcher.sessions[0]?.options;
     expect(opts?.cwd).toBe(WT);
-    expect(opts?.env).toEqual({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "k" });
+    expect(opts?.env).toEqual({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "k", ...LOOPBACK_NO_PROXY });
     expect(opts?.settingSources).toEqual([]);
     expect(opts?.initialPrompt).toBe("do the task");
     expect(v).toMatchObject({
@@ -234,7 +239,9 @@ describe("フック（PreToolUse）", () => {
     });
     expect(d.allow).toBe(false);
     expect(d.allow ? "" : d.reason).toContain("範囲");
-    expect(r.sink.records).toHaveLength(1);
+    // 範囲違反の記録と、親（統合ノード）の受信箱の項目（violation）を、1 トランザクションで記録する（T10v）。
+    expect(r.sink.types).toEqual(["scope.violation", "inbox.added"]);
+    expect(r.sink.groups).toEqual([2]);
     expect(r.sink.records[0]).toMatchObject({
       actor: { system: true },
       body: {
@@ -242,6 +249,15 @@ describe("フック（PreToolUse）", () => {
         payload: { nodeId: "a", reason: "outsideWritable", subject: "/wt/a/package.json" },
       },
     });
+    const item = r.sink.records[1]?.body;
+    expect(item).toMatchObject({
+      type: "inbox.added",
+      payload: { nodeId: "a", kind: "violation" },
+    });
+    const summary = item?.type === "inbox.added" ? (item.payload.summary ?? "") : "";
+    expect(summary).toContain("outsideWritable");
+    expect(summary).toContain("/wt/a/package.json");
+    expect(isSafeId(item?.type === "inbox.added" ? item.payload.id : "")).toBe(true);
   });
 
   it("未知のツールとバックグラウンド実行は拒否する", async () => {
@@ -258,7 +274,7 @@ describe("フック（PreToolUse）", () => {
       ).allow,
     ).toBe(false);
     // 未知のツールは範囲違反ではないので、scope.violation（受信箱に載る）にせず、node.toolDenied として記録する。
-    expect(r.sink.types).toEqual(["node.toolDenied", "scope.violation"]);
+    expect(r.sink.types).toEqual(["node.toolDenied", "scope.violation", "inbox.added"]);
     expect(r.sink.records[0]).toMatchObject({
       actor: { system: true },
       body: { type: "node.toolDenied", payload: { nodeId: "a", tool: "WebFetch" } },
@@ -645,11 +661,10 @@ describe("stop: 堅牢化（例外・戻らない・result が来ない）", () 
   });
 
   it("記録口が例外を投げても reject しない", async () => {
-    const sink = {
-      record: () => {
-        throw new Error("sink exploded");
-      },
+    const explode = () => {
+      throw new Error("sink exploded");
     };
+    const sink = { record: explode, recordAll: explode };
     const r = rig({ sink });
     await startNode(r);
     const res = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
@@ -740,13 +755,19 @@ describe("予期しない終了（finished の監視）", () => {
     expect(seen[0]?.[0]).toBe("a");
     expect(seen[0]?.[1]).toContain("crashed");
     // 記録: 予期しない終了、失敗の報告、受信箱の failure の項目（報告を ref で指す）
-    expect(r.sink.types).toEqual(["node.exited", "report.added", "inbox.added"]);
+    expect(r.sink.types).toEqual([
+      "node.exited",
+      "node.stateChanged:stop",
+      "node.stateChanged:confirmStopped",
+      "report.added",
+      "inbox.added",
+    ]);
     expect(r.sink.records[0]).toMatchObject({
       actor: { system: true },
       body: { type: "node.exited", payload: { nodeId: "a" } },
     });
-    const report = r.sink.records[1]?.body;
-    const inbox = r.sink.records[2]?.body;
+    const report = r.sink.records[3]?.body;
+    const inbox = r.sink.records[4]?.body;
     expect(report).toMatchObject({
       type: "report.added",
       payload: { nodeId: "a", kind: "failure" },
@@ -759,6 +780,177 @@ describe("予期しない終了（finished の監視）", () => {
     expect(JSON.stringify(r.sink.records[0]?.body)).toContain("crashed");
     const s = await r.adapter.send("a", "x");
     expect(s.ok ? null : s.error.code).toBe("unknownNode");
+  });
+
+  it("終了と状態の遷移（stopped）を、1 トランザクションで記録する。プロセスが残っていなければ stopped（起動時の整合と同じ規則。T10c）", async () => {
+    const r = rig({}, [[]]);
+    await startNode(r);
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(r.sink.types).toEqual([
+      "node.exited",
+      "node.stateChanged:stop",
+      "node.stateChanged:confirmStopped",
+      "report.added",
+      "inbox.added",
+    ]);
+    expect(r.sink.groups).toEqual([5]);
+    expect(r.probeCalls).toEqual([WT]);
+    expect(r.sink.records[1]?.body).toMatchObject({
+      type: "node.stateChanged",
+      payload: { nodeId: "a", event: { type: "stop", mode: "immediate" } },
+    });
+  });
+
+  it("作業ツリー配下にプロセスが残っている（または調べられない）なら、stopIncomplete にして、受信箱に stopIncomplete の項目を出す", async () => {
+    const leftover = [{ pid: 4321, cwd: WT, hasOpenFiles: false }];
+    for (const probes of [[leftover], [null]] as const) {
+      const r = rig({}, probes as never);
+      await startNode(r);
+      r.launcher.sessions[0]?.finish(new Error("crashed"));
+      await settle();
+      expect(r.sink.types).toEqual([
+        "node.exited",
+        "node.stateChanged:stop",
+        "node.stateChanged:stopTimeout",
+        "report.added",
+        "inbox.added",
+        "inbox.added",
+      ]);
+      expect(r.sink.groups).toEqual([6]);
+      const kinds = r.sink.records.flatMap((x) =>
+        x.body.type === "inbox.added" ? [x.body.payload.kind] : [],
+      );
+      expect(kinds).toEqual(["failure", "stopIncomplete"]);
+    }
+  });
+
+  it("プロセスの調査が例外でも、stopIncomplete にする（フェイルクローズ）。通知と掃除は行う", async () => {
+    const seen: string[] = [];
+    const r = rig({
+      onUnexpectedExit: (n) => void seen.push(n),
+      probe: async () => {
+        throw new Error("lsof failed");
+      },
+    });
+    await startNode(r);
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(seen).toEqual(["a"]);
+    expect(r.sink.types).toContain("node.stateChanged:stopTimeout");
+    expect(r.adapter.has("a")).toBe(false);
+  });
+
+  it("同じ範囲違反（種類と対象）は、受信箱に 1 度だけ出す。違反ごとの記録は残す。ノードごとに受信箱の項目の上限がある", async () => {
+    const r = rig();
+    await startNode(r);
+    const h = sessionOf(r).options.hooks.preToolUse;
+    const write = (f: string) => h({ toolName: "Write", toolInput: { file_path: f }, cwd: WT });
+    await write("a.txt");
+    await write("a.txt");
+    expect(r.sink.types).toEqual(["scope.violation", "inbox.added", "scope.violation"]);
+    for (let i = 0; i < 40; i++) await write(`f${i}.txt`);
+    const items = r.sink.types.filter((t) => t === "inbox.added").length;
+    const violations = r.sink.types.filter((t) => t === "scope.violation").length;
+    // 受信箱は 20 件まで。超えたら「ほかにも違反がある」を 1 件だけ出す（21 件目）。違反の記録は、毎回残る。
+    expect(items).toBe(21);
+    expect(violations).toBe(42);
+    const last = [...r.sink.records].reverse().find((x) => x.body.type === "inbox.added")?.body;
+    expect(last).toMatchObject({ type: "inbox.added", payload: { kind: "violation" } });
+    expect(last?.type === "inbox.added" ? (last.payload.summary ?? "") : "").toContain("ほかにも");
+  });
+
+  it("範囲違反の記録にも上限がある: 同じ対象は 50 件、ノード全体で 1000 件まで。超えた分は、件数だけ数える（記録しない）", async () => {
+    const r = rig();
+    await startNode(r);
+    const h = sessionOf(r).options.hooks.preToolUse;
+    for (let i = 0; i < 70; i++) {
+      await h({ toolName: "Write", toolInput: { file_path: "same.txt" }, cwd: WT });
+    }
+    expect(r.sink.types.filter((t) => t === "scope.violation")).toHaveLength(50);
+    expect(r.sink.types.filter((t) => t === "inbox.added")).toHaveLength(1);
+    for (let i = 0; i < 1100; i++) {
+      await h({ toolName: "Write", toolInput: { file_path: `d${i}.txt` }, cwd: WT });
+    }
+    expect(r.sink.types.filter((t) => t === "scope.violation")).toHaveLength(1000);
+    // 拒否は、記録の上限を超えても、変わらない
+    const denied = await h({ toolName: "Write", toolInput: { file_path: "z.txt" }, cwd: WT });
+    expect(denied.allow).toBe(false);
+  });
+
+  it("終了の記録（1 トランザクション）に失敗したら、onFailure に出し、停止を除いた最小の記録（終了・失敗の報告・受信箱）で記録し直す", async () => {
+    const failures: string[] = [];
+    const seen: string[] = [];
+    const r = rig({
+      onFailure: (id, cause) => void failures.push(`${id}: ${cause}`),
+      onUnexpectedExit: (n) => void seen.push(n),
+    });
+    await startNode(r);
+    r.sink.failNext = 1;
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("a");
+    expect(r.sink.types).toEqual(["node.exited", "report.added", "inbox.added"]);
+    expect(r.sink.groups).toEqual([3]);
+    expect(seen).toEqual(["a"]);
+  });
+
+  it("最小の記録にも失敗したら、onFailure に出して、通知と掃除は行う", async () => {
+    const failures: string[] = [];
+    const seen: string[] = [];
+    const r = rig({
+      onFailure: (id, cause) => void failures.push(`${id}: ${cause}`),
+      onUnexpectedExit: (n) => void seen.push(n),
+    });
+    await startNode(r);
+    r.sink.failNext = 2;
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(failures).toHaveLength(2);
+    expect(seen).toEqual(["a"]);
+    expect(r.adapter.has("a")).toBe(false);
+  });
+
+  it("子の HOME を、ノードごとのディレクトリに分ける（homeFor を渡したとき）。作れなければ、起動しない（フェイルクローズ）", async () => {
+    const made: string[] = [];
+    const r = rig({
+      parentEnv: { PATH: "/bin", HOME: "/root" },
+      homeFor: (id) => {
+        made.push(id);
+        return `/state/homes/${id}`;
+      },
+    });
+    await startNode(r);
+    expect(made).toEqual(["a"]);
+    expect(sessionOf(r).options.env).toEqual({
+      PATH: "/bin",
+      HOME: "/state/homes/a",
+      ...LOOPBACK_NO_PROXY,
+    });
+    const bad = rig({
+      homeFor: () => {
+        throw new Error("EACCES");
+      },
+    });
+    const res = await bad.adapter.start({
+      nodeId: "a",
+      worktreePath: "/link/a",
+      scope: SCOPE,
+      instruction: "x",
+    });
+    expect(res.ok ? null : res.error.code).toBe("startFailed");
+    expect(bad.launcher.sessions).toHaveLength(0);
+  });
+
+  it("除いた環境変数の名前は、50 件で打ち切り、残りは「ほか N 件」と 1 つにまとめる", async () => {
+    const parentEnv: Record<string, string> = { PATH: "/bin" };
+    for (let i = 0; i < 120; i++) parentEnv[`SECRET_${String(i).padStart(3, "0")}`] = "v";
+    const r = rig({ parentEnv });
+    const v = await startNode(r);
+    expect(v.removedEnv).toHaveLength(51);
+    expect(v.removedEnv[50]).toBe("ほか 70 件");
+    expect(JSON.stringify(v.removedEnv)).not.toContain('"v"');
   });
 
   it("停止の最中の終了は、予期しない終了にしない", async () => {
@@ -781,7 +973,13 @@ describe("予期しない終了（finished の監視）", () => {
     expect(exited?.type).toBe("node.exited");
     const reason = exited?.type === "node.exited" ? exited.payload.reason : "";
     expect(isBoundedText(reason, LIMITS.reason)).toBe(true);
-    expect(r.sink.types).toEqual(["node.exited", "report.added", "inbox.added"]);
+    expect(r.sink.types).toEqual([
+      "node.exited",
+      "node.stateChanged:stop",
+      "node.stateChanged:confirmStopped",
+      "report.added",
+      "inbox.added",
+    ]);
   });
 
   it("未知のツール名が長い・制御文字を含んでも、記録できる形にして記録する", async () => {
@@ -854,6 +1052,11 @@ describe("フック: リンクの解決", () => {
     expect(
       (await hook({ toolName: "Write", toolInput: { file_path: "src/boom" }, cwd: WT })).allow,
     ).toBe(false);
-    expect(r.sink.types).toEqual(["scope.violation", "scope.violation"]);
+    expect(r.sink.types).toEqual([
+      "scope.violation",
+      "inbox.added",
+      "scope.violation",
+      "inbox.added",
+    ]);
   });
 });

@@ -87,7 +87,7 @@ export interface GitPorts {
   ): Promise<{ merged: boolean; clean: boolean; worktreePath: string } | undefined>;
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string },
+    opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
   ): Promise<Result<undefined, Failure>>;
   provisionWorktree(req: {
     parentId: string;
@@ -285,8 +285,15 @@ export function createGitPorts(
 
     factsFor: (nodeId) =>
       serial(async () => {
-        if ((await isRegistered(nodeId)) !== true) return undefined;
         const path = pathOf(nodeId);
+        if ((await isRegistered(nodeId)) !== true) {
+          // 強制の回収で、作業ツリーは消えたがブランチだけ残った（途中の失敗）ノード: 消すべきものが残っていない作業ツリーとして
+          // 事実を返し、判定を通して、ブランチの削除をやり直せるようにする（破棄の判断は、ハンドラが記録で確かめる）。
+          if (!dirExists(path) && (await branchExists(branchOf(nodeId)))) {
+            return { worktreePath: path, merged: false, clean: true };
+          }
+          return undefined;
+        }
         const real = realOrUndefined(path);
         if (real === undefined) return undefined;
         const clean = await isClean(path);
@@ -304,7 +311,7 @@ export function createGitPorts(
         return { merged, clean, worktreePath: real };
       }),
 
-    removeWorktree: (nodeId, { expectedPath }) =>
+    removeWorktree: (nodeId, { expectedPath, force, onTip }) =>
       serial(async () => {
         const path = pathOf(nodeId);
         // 判定に使った実パスと、削除するパスが同じか（違えば何もしない）。
@@ -321,7 +328,8 @@ export function createGitPorts(
         }
         const branch = branchOf(nodeId);
         // 削除の前に、ブランチが統合済みか確かめる。統合されていなければ、作業ツリーも消さずに失敗する（成果を失わない）。
-        if (registered || (await branchExists(branch))) {
+        // `force`（破棄の判断を経た停止ノード。判断は呼び出し側が行う）のときは、成果を捨てる判断済みなので、確かめない。
+        if (force !== true && (registered || (await branchExists(branch)))) {
           const up = await git(["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
           const anc =
             up.code === 0 && up.stdout.trim() !== ""
@@ -336,15 +344,23 @@ export function createGitPorts(
           }
         }
         // `git worktree remove` は、gitignore の対象（`.env` など）を黙って消すので、消す前に、同じ規則できれいか確かめる。
-        if (registered && !(await isClean(path))) {
+        if (force !== true && registered && !(await isClean(path))) {
           return fail(
             "removeFailed",
             "作業ツリーに、未保存の変更・未追跡のファイル・再生成できない gitignore の対象がある（消さなかった）",
             "作業ツリーの中身を確認する（強制は削除しない）",
           );
         }
+        // 強制で消す前に、ブランチの先端を残す（捨てる成果を、あとから辿れるように）。
+        if (force === true && onTip !== undefined && (await branchExists(branch))) {
+          const tip = await git(["rev-parse", branch]);
+          if (tip.code === 0 && tip.stdout.trim() !== "") onTip(tip.stdout.trim());
+        }
         if (registered) {
-          const r = await git(["worktree", "remove", path]); // --force は使わない
+          // `--force` は、`force`（破棄の判断を経たノード）のときだけ。登録されていない場所は、強制でも消さない（下）。
+          const r = await git(
+            force === true ? ["worktree", "remove", "--force", path] : ["worktree", "remove", path],
+          );
           if (r.code !== 0) {
             return fail(
               "removeFailed",
@@ -360,8 +376,16 @@ export function createGitPorts(
           );
         }
         if (await branchExists(branch)) {
-          const r = await git(["branch", "-d", branch]); // 統合済みだけ。-D は使わない
+          // 統合済みだけ（`-d`）。`-D` は、`force` のときだけ。
+          const r = await git(["branch", force === true ? "-D" : "-d", branch]);
           if (r.code !== 0) {
+            if (force === true) {
+              return fail(
+                "removeFailed",
+                `作業ツリーは消えたが、ブランチ ${branch} だけ残った: ${r.stderr.trim().slice(0, 200)}`,
+                "もう一度回収する（残りだけを消す）",
+              );
+            }
             return fail(
               "branchNotMerged",
               `ブランチ ${branch} に、統合されていない成果がある（残した）: ${r.stderr.trim()}`,

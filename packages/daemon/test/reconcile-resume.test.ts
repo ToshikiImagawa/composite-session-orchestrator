@@ -203,6 +203,15 @@ describe("再起動で失われた、判断待ちの子の再開", () => {
     await r.reconcile();
     expect(stateOf(r.s(), "a")).toBe("stopIncomplete");
     expect(r.s().exits.some((e) => e.nodeId === "a")).toBe(false);
+    // アダプタの予期しない終了と同じく、失敗の報告と、受信箱の failure の項目も出す（stopIncomplete の項目に加えて）。
+    expect(r.s().reports.filter((x) => x.nodeId === "a" && x.kind === "failure")).toHaveLength(1);
+    expect(
+      r
+        .s()
+        .inbox.filter((i) => i.nodeId === "a")
+        .map((i) => i.kind)
+        .sort(),
+    ).toEqual(["decision", "failure", "stopIncomplete"].sort());
     const res = await r.answer(decisionId);
     expect(res.ok).toBe(false); // 停止の途中なので、再開できない
     expect(res.error?.code).toBe("resumePending");

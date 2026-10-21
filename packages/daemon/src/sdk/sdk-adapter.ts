@@ -19,6 +19,7 @@
  */
 
 import {
+  type EventBody,
   type Failure,
   failure,
   findRunningProcesses,
@@ -28,9 +29,11 @@ import {
   ok,
   type Result,
   type Scope,
+  type ScopeViolationReason,
   type StopOutcome,
   sanitizeText,
 } from "@cso/core";
+import { derivedRequestId } from "../api/handlers/context.js";
 import type {
   AgentLauncher,
   AgentSession,
@@ -66,6 +69,17 @@ export interface SdkAdapterDeps {
   readonly newRequestId: () => string;
   /** 子の環境の元になる親の環境変数。 */
   readonly parentEnv: Readonly<Record<string, string | undefined>>;
+  /** 子に渡す環境変数の、既定に加える名前（完全一致。daemon の設定 `childEnvAllow`）。 */
+  readonly childEnvAllow?: readonly string[];
+  /** 子の HOME にするディレクトリ（ノードごと。作る処理を含む）。省略すると、HOME は親のまま。作れなければ（例外）、起動しない。 */
+  readonly homeFor?: (nodeId: string) => string;
+  /**
+   * 判断を待っている（waiting で、未回答の判断がある）子なら、その判断の記録の鍵（`waitRequestKey`）。予期しない終了の記録の
+   * 最初のイベントの要求 ID を、この鍵から決める（判断への回答の側が、人間が止めた子と区別し、回答で再開する）。
+   */
+  readonly waitKeyOf?: (nodeId: string) => string | undefined;
+  /** 応答に出さない原因（記録の失敗など）の記録先。 */
+  readonly onFailure?: (nodeId: string, cause: string) => void;
   /** 穏当な停止の猶予の既定値（ミリ秒）。既定 60000。 */
   readonly defaultGraceMs?: number;
   /** 停止後のプロセス確認を続ける時間（ミリ秒）。既定 30000。 */
@@ -79,6 +93,9 @@ export interface SdkAdapterDeps {
   /** 稼働中の子が、停止の要求なしに終了したときの通知。アダプタは `node.exited` を記録した上で通知する。 */
   readonly onUnexpectedExit?: (nodeId: string, reason: string) => void;
 }
+
+/** 起動の記録に残す、除いた環境変数の名前の上限（残りは「ほか N 件」）。 */
+const REMOVED_ENV_MAX = 50;
 
 const STOP_MESSAGE =
   "停止の要求です。区切りのよいところで、これまでの成果を保存して（書き込み済みの成果は残す）、作業を止めてください。";
@@ -101,11 +118,26 @@ interface StopFlow {
   escalate(): void;
 }
 
+/** フックが参照する、ノードごとの状態（範囲と、範囲違反の数え上げ）。 */
+interface HookState {
+  scope: Scope;
+  /** 範囲違反（種類と対象）ごとの、記録した件数。 */
+  readonly violations: Map<string, number>;
+  /** 記録した範囲違反の総数。 */
+  violationTotal: number;
+  /** 上限を超えて、記録しなかった範囲違反の件数。 */
+  suppressed: number;
+  /** 受信箱に出した、範囲違反の項目の数。 */
+  inboxItems: number;
+  /** 「ほかにも違反がある」を出したか。 */
+  overflowNoted: boolean;
+}
+
 interface NodeEntry {
   readonly session: AgentSession;
   readonly cwd: string;
   /** フックが参照する範囲（`updateScope` で差し替える）。 */
-  readonly state: { scope: Scope };
+  readonly state: HookState;
   /** 停止を始めた（停止未完了のあとも真のまま。以後の指示は受け付けない）。 */
   stopping: boolean;
   flow?: StopFlow | undefined;
@@ -187,8 +219,34 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
           "作業ツリーを作り直す",
         );
       }
-      const { env, removed } = childEnv(d.parentEnv);
-      const state = { scope: request.scope };
+      const { env, removed: removedAll } = childEnv(d.parentEnv, d.childEnvAllow);
+      if (d.homeFor !== undefined) {
+        try {
+          env.HOME = d.homeFor(nodeId); // 子の HOME を、ノードごとのディレクトリに分ける（親の設定・資格情報を持ち込まない）
+        } catch (e) {
+          return fail(
+            "startFailed",
+            `子の HOME を用意できない: ${String(e)}`,
+            "状態の置き場の権限を確認する",
+            "もう一度起動する",
+          );
+        }
+      }
+      const removed =
+        removedAll.length <= REMOVED_ENV_MAX
+          ? removedAll
+          : [
+              ...[...removedAll].sort().slice(0, REMOVED_ENV_MAX),
+              `ほか ${removedAll.length - REMOVED_ENV_MAX} 件`,
+            ];
+      const state: HookState = {
+        scope: request.scope,
+        violations: new Map(),
+        violationTotal: 0,
+        suppressed: 0,
+        inboxItems: 0,
+        overflowNoted: false,
+      };
       const mcpServers: Record<string, McpServerConfig> | undefined = request.mcp
         ? {
             node: {
@@ -315,26 +373,100 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     return `${prefix}-${raw}`.slice(0, ID_MAX_LENGTH);
   }
 
-  /** 予期しない終了を記録する: 終了、失敗の報告、受信箱の failure の項目（報告を `ref` で指す）。 */
-  private recordExit(nodeId: string, rawReason: unknown): void {
+  /**
+   * 予期しない終了を記録する（1 トランザクション）: 終了、停止の要求と、停止の確認（作業ツリー配下にプロセスが残っていなければ
+   * `confirmStopped` → stopped、残っている・調べられないなら `stopTimeout` → stopIncomplete。起動時の整合と同じ規則）、
+   * 失敗の報告、受信箱の failure の項目（報告を `ref` で指す）。停止未完了のときは、受信箱に stopIncomplete の項目も出す。
+   */
+  private async recordExit(nodeId: string, cwd: string, rawReason: unknown): Promise<void> {
     const reason = sanitizeText(rawReason, LIMITS.reason);
-    this.record({ type: "node.exited", payload: { nodeId, reason } });
+    // 判断を待っていた子なら、記録の最初の要求 ID を、判断から決める（回答で再開できるように。再起動の整合と同じ）。
+    let waitKey: string | undefined;
+    try {
+      waitKey = this.deps.waitKeyOf?.(nodeId);
+    } catch {
+      waitKey = undefined;
+    }
+    let pids: number[] | null = null;
+    try {
+      pids = await this.probeWithin(cwd, 5_000);
+    } catch {
+      pids = null;
+    }
+    const gone = pids !== null && pids.length === 0;
     const reportId = this.safeId("report");
-    const failed = this.record({
-      type: "report.added",
-      payload: { reportId, nodeId, kind: "failure", text: reason },
-    });
-    if (failed) return; // 参照先がないと項目を足せない
-    this.record({
-      type: "inbox.added",
+    const stateEvent = (type: "stop" | "confirmStopped" | "stopTimeout"): EventBody => ({
+      type: "node.stateChanged",
       payload: {
-        id: this.safeId("inbox"),
-        kind: "failure",
         nodeId,
-        summary: sanitizeText(`子が予期せず終了した: ${reason}`, LIMITS.summary),
-        ref: reportId,
+        event: type === "stop" ? { type: "stop", mode: "immediate" } : { type },
       },
     });
+    const bodies: EventBody[] = [
+      { type: "node.exited", payload: { nodeId, reason } },
+      stateEvent("stop"),
+      stateEvent(gone ? "confirmStopped" : "stopTimeout"),
+      { type: "report.added", payload: { reportId, nodeId, kind: "failure", text: reason } },
+      {
+        type: "inbox.added",
+        payload: {
+          id: this.safeId("inbox"),
+          kind: "failure",
+          nodeId,
+          summary: sanitizeText(`子が予期せず終了した: ${reason}`, LIMITS.summary),
+          ref: reportId,
+        },
+      },
+    ];
+    if (!gone) {
+      bodies.push({
+        type: "inbox.added",
+        payload: {
+          id: this.safeId("inbox"),
+          kind: "stopIncomplete",
+          nodeId,
+          summary: sanitizeText(
+            pids === null
+              ? "子が予期せず終了した。作業ツリー配下のプロセスを調べられず、停止を確認できない"
+              : `子が予期せず終了した。作業ツリー配下にプロセスが残っている（pid ${pids.join(", ")}）`,
+            LIMITS.summary,
+          ),
+        },
+      });
+    }
+    const failed = this.recordAll(bodies, waitKey);
+    if (failed === undefined) return;
+    this.deps.onFailure?.(nodeId, `終了の記録に失敗: ${failed.code}: ${failed.cause}`);
+    // 停止の遷移（stop・confirmStopped・stopTimeout）を除いた、最小の記録（終了・失敗の報告・受信箱）で、記録し直す。
+    const minimal = bodies.filter(
+      (b) =>
+        b.type !== "node.stateChanged" &&
+        !(b.type === "inbox.added" && b.payload.kind === "stopIncomplete"),
+    );
+    const again = this.recordAll(minimal);
+    if (again !== undefined) {
+      this.deps.onFailure?.(nodeId, `終了の最小の記録にも失敗: ${again.code}: ${again.cause}`);
+    }
+  }
+
+  /** 複数のイベントを、1 トランザクションで記録する。失敗は、記録せずに握りつぶす（呼び出し側の処理は止めない）。 */
+  private recordAll(bodies: readonly EventBody[], waitKey?: string): Failure | undefined {
+    try {
+      const r = this.deps.sink.recordAll(
+        bodies.map((body, i) => ({
+          // `waitKey` があれば、要求 ID を鍵から決める（`appendAtomically` と同じ導出。判断の待ちの記録として、回答の側が見つける）。
+          requestId:
+            waitKey === undefined
+              ? this.deps.newRequestId()
+              : derivedRequestId({ system: true }, waitKey, i),
+          actor: { system: true } as const,
+          body,
+        })),
+      );
+      return r.ok ? undefined : r.error;
+    } catch (e) {
+      return failure("recordFailed", `記録に失敗: ${String(e)}`, "記録の口を確認する");
+    }
   }
 
   /** 稼働中の子が、停止の要求なしに終了したら、通知して管理から外す。 */
@@ -350,11 +482,11 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
         () => "子が終了した",
         (e: unknown) => `子が異常終了した: ${String(e)}`,
       )
-      .then((reason) => {
+      .then(async (reason) => {
         if (this.nodes.get(nodeId) !== entry || entry.stopping) return;
         this.nodes.delete(nodeId);
         // 記録に失敗しても、通知と掃除は行う。理由は子の例外などの外部の値なので、記録できる形にする。
-        this.recordExit(nodeId, reason);
+        await this.recordExit(nodeId, entry.cwd, reason);
         try {
           this.deps.onUnexpectedExit?.(nodeId, reason);
         } catch {
@@ -428,7 +560,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
 
   private async onPreToolUse(
     nodeId: string,
-    state: { scope: Scope },
+    state: HookState,
     cwd: string,
     input: HookInput,
   ): Promise<HookOutcome> {
@@ -455,19 +587,78 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
         });
       }
       if (decision.violation !== undefined) {
-        this.record({
-          type: "scope.violation",
-          payload: {
-            nodeId,
-            reason: decision.violation.reason,
-            subject: decision.violation.subject,
-          },
-        });
+        this.recordViolation(nodeId, state, decision.violation.reason, decision.violation.subject);
       }
       return { allow: false, reason: decision.reason };
     } catch {
       return { allow: false, reason: "フックの判定に失敗したため拒否した。" };
     }
+  }
+
+  /** ノードごとの、受信箱に出す範囲違反の項目の上限（同じ違反は、1 度だけ）。 */
+  private static readonly VIOLATION_INBOX_MAX = 20;
+  /** 範囲違反の記録の上限: 同じ対象（種類と対象）につき 50 件、ノード全体で 1000 件。超えた分は、件数だけを数える。 */
+  private static readonly VIOLATION_PER_SUBJECT_MAX = 50;
+  private static readonly VIOLATION_TOTAL_MAX = 1000;
+
+  /**
+   * 範囲違反を記録する（上限の範囲で、毎回）。親の受信箱に出す項目（violation）は、同じ違反（種類と対象）につき 1 度だけ、
+   * ノードごとに 20 件まで。20 件を超えたら、「ほかにも違反がある」を 1 件だけ出す。受信箱の項目は、違反の記録と同じ
+   * トランザクションで記録する（T10v）。記録の上限を超えた違反は、記録せず、件数だけ数える（拒否は変わらない）。
+   */
+  private recordViolation(
+    nodeId: string,
+    state: HookState,
+    reason: ScopeViolationReason,
+    subject: string,
+  ): void {
+    const key = `${reason}\0${subject}`;
+    const count = state.violations.get(key) ?? 0;
+    if (
+      count >= SdkRuntimeAdapter.VIOLATION_PER_SUBJECT_MAX ||
+      state.violationTotal >= SdkRuntimeAdapter.VIOLATION_TOTAL_MAX
+    ) {
+      state.suppressed += 1;
+      return;
+    }
+    const bodies: EventBody[] = [{ type: "scope.violation", payload: { nodeId, reason, subject } }];
+    let item = false;
+    let overflow = false;
+    if (count === 0) {
+      if (state.inboxItems < SdkRuntimeAdapter.VIOLATION_INBOX_MAX) {
+        item = true;
+        bodies.push({
+          type: "inbox.added",
+          payload: {
+            id: this.safeId("inbox"),
+            kind: "violation",
+            nodeId,
+            summary: sanitizeText(`範囲違反（${reason}）: ${subject}`, LIMITS.summary),
+          },
+        });
+      } else if (!state.overflowNoted) {
+        overflow = true;
+        bodies.push({
+          type: "inbox.added",
+          payload: {
+            id: this.safeId("inbox"),
+            kind: "violation",
+            nodeId,
+            summary: sanitizeText(
+              "ほかにも範囲違反がある（受信箱には、これ以上出さない。記録を確認する）",
+              LIMITS.summary,
+            ),
+          },
+        });
+      }
+    }
+    const failed =
+      bodies.length === 1 ? this.record(bodies[0] as EventBody) : this.recordAll(bodies);
+    if (failed !== undefined) return;
+    state.violations.set(key, count + 1);
+    state.violationTotal += 1;
+    if (item) state.inboxItems += 1;
+    if (overflow) state.overflowNoted = true;
   }
 
   private record(body: Parameters<EventSink["record"]>[0]["body"]): Failure | undefined {
