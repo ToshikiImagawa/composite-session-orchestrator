@@ -133,21 +133,69 @@ describe("入口の検査（invalid_argument, NFR_010）", () => {
     bad(renderInbox(ok1, [] as never));
   });
 
+  it("items が配列でなければ、保存データの不備として internal_data を返す（管理者に知らせる）", () => {
+    for (const items of [undefined, {}, "x"]) {
+      const r = renderInbox(items as never);
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("internal_data");
+        expect(r.error.nextActions.join(" ")).toContain("管理者");
+        expect(r.error.nextActions.join(" ")).toContain("ログ");
+      }
+    }
+  });
+});
+
+describe("不正な項目は、その項目だけを除外する（受信箱全体は失敗にしない）", () => {
+  const valid = (id: string, seq: number) => item({ id, seq });
+  const run = (...items: unknown[]) => {
+    const r = renderInbox(items as InboxItem[]);
+    if (!r.ok) throw new Error(`failure: ${r.error.code}`);
+    return r.value;
+  };
+
   it.each([
-    [{ ...item({ id: "a" }), kind: "unknown" }],
-    [{ ...item({ id: "a" }), id: 1 }],
-    [{ ...item({ id: "a" }), nodeId: undefined }],
-    [{ ...item({ id: "a" }), seq: "1" }],
-    [{ ...item({ id: "a" }), dependsOn: "x" }],
-    [{ ...item({ id: "a" }), summary: 5 }],
+    [{ ...item({ id: "x" }), kind: "unknown" }],
+    [{ ...item({ id: "x" }), id: 1 }],
+    [{ ...item({ id: "x" }), nodeId: undefined }],
+    [{ ...item({ id: "x" }), seq: "1" }],
+    [{ ...item({ id: "x" }), dependsOn: "x" }],
+    [{ ...item({ id: "x" }), id: "i d" }],
+    [{ ...item({ id: "x" }), id: "../x" }],
+    [{ ...item({ id: "x" }), id: "" }],
+    [{ ...item({ id: "x" }), nodeId: "n/1" }],
+    [{ ...item({ id: "x" }), nodeId: "*" }],
+    [{ ...item({ id: "x" }), ref: "dec 1" }],
+    [{ ...item({ id: "x" }), dependsOn: ["ok", "a;b"] }],
     [null],
     ["str"],
-  ])("不正な項目 %j は拒否する", (bad1) => {
-    bad(renderInbox([bad1 as never]));
+  ])("不正な項目 %j だけを除外し、除外した件数を知らせる", (bad1) => {
+    const page = run(valid("a", 1), bad1, valid("b", 2));
+    expect(page.entries.map((e) => e.id)).toEqual(["a", "b"]);
+    expect(page.excluded).toBe(1);
+    expect(page.total).toBe(2);
   });
 
-  it("items が配列でなければ拒否する", () => {
-    bad(renderInbox(undefined as never));
-    bad(renderInbox({} as never));
+  it("除外がなければ excluded は 0", () => {
+    expect(run(valid("a", 1)).excluded).toBe(0);
+  });
+
+  it("除外した項目の seq は asOfSeq に含めない", () => {
+    const page = run(valid("a", 1), { ...valid("b", 99), id: "b d" });
+    expect(page.asOfSeq).toBe(1);
+  });
+
+  it("isSafeId に合う識別子（. _ : - を含む）は受け付ける", () => {
+    const page = run(
+      item({ id: "inbox-1.a_b:c", nodeId: "node-1", ref: "dec:1", dependsOn: ["n.0"] }),
+    );
+    expect(page.excluded).toBe(0);
+    expect(page.entries).toHaveLength(1);
+  });
+
+  it("summary と at は読み取り側で検査しない（core が書き込み時に保証し、at は整列が不正値を最後に置く）", () => {
+    const page = run(item({ id: "a", at: "not-a-date" }), item({ id: "b" }));
+    expect(page.excluded).toBe(0);
+    expect(page.entries.map((e) => e.id)).toEqual(["b", "a"]);
   });
 });

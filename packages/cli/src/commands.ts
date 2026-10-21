@@ -7,7 +7,13 @@
  *
  * 結果が確認できないとき（接続不可・不正な応答）は、同じ requestId で再実行できる（冪等、NFR_003）。
  */
-import { type DaemonRequest, DEFAULT_PURGE_TOMBSTONE, type Failure, isFailure } from "@cso/core";
+import {
+  type DaemonRequest,
+  DEFAULT_PURGE_TOMBSTONE,
+  type Failure,
+  isFailure,
+  isSafeId,
+} from "@cso/core";
 import type { DaemonClient, HumanOperation } from "./client.js";
 
 export interface CommandDeps {
@@ -33,9 +39,6 @@ const USAGE = `使い方:
   --request-id <id>  結果が確認できなかった要求を、同じ識別子で再実行する
   -h, --help         この使い方を表示する（終了コード 0）
 終了コード: 0 成功 / 1 失敗・結果が確認できない / 2 引数の誤り`;
-
-/** daemon の ID 形式は未確定のため、英数字で始まる安全な文字だけを受け付ける（ワイルドカード・区切り・空白・制御文字は拒否）。 */
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   purge: ["--dry-run", "--yes", "--tombstone", "--no-tombstone"],
@@ -146,7 +149,7 @@ export async function runCommand(
     const a = rest[i] as string;
     if (a === "--request-id") {
       const v = rest[i + 1];
-      if (v === undefined || !SAFE_ID.test(v)) {
+      if (v === undefined || !isSafeId(v)) {
         return usageError("--request-id には識別子（英数字と . _ : -）を 1 つ指定する");
       }
       requestId = v;
@@ -164,7 +167,7 @@ export async function runCommand(
   if (nodeId === undefined || positional.length !== 1) {
     return usageError(`${command} にはノード識別子を 1 つ指定する`);
   }
-  if (!SAFE_ID.test(nodeId)) {
+  if (!isSafeId(nodeId)) {
     return usageError(
       `ノード識別子が不正: ${JSON.stringify(nodeId)}（英数字で始まり、英数字と . _ : - のみ）`,
     );

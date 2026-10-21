@@ -15,6 +15,7 @@ import {
   type EventBody,
   type Failure,
   failure,
+  ID_MAX_LENGTH,
   LIMITS,
   type OrchEvent,
   type OrchState,
@@ -39,6 +40,17 @@ export function deriveId(prefix: string, caller: string, requestId: string, tag:
 export const summarize = (text: string): string =>
   sanitizeText(text.replace(/\s+/g, " ").trim(), LIMITS.summary);
 
+/**
+ * 派生した requestId（`<要求>:<番号>`）。core のイベントの requestId は識別子（128 文字以下）なので、長い要求は
+ * ハッシュに置き換えてから番号を付ける（同じ要求からは常に同じ値）。
+ */
+export function derivedRequestId(requestId: string, index: number): string {
+  const suffix = `:${index}`;
+  if (requestId.length + suffix.length <= ID_MAX_LENGTH) return `${requestId}${suffix}`;
+  const h = createHash("sha256").update(requestId, "utf8").digest("hex").slice(0, 48);
+  return `h-${h}${suffix}`;
+}
+
 export interface Appended {
   readonly state: OrchState;
   /** 追記した（または、重複として最初のものを返した）イベント。`bodies` と同じ順。 */
@@ -62,7 +74,7 @@ export function appendAtomically(
     const event = {
       seq: probe.lastSeq + 1,
       at,
-      requestId: `${requestId}:${i}`,
+      requestId: derivedRequestId(requestId, i),
       actor,
       ...body,
     } as OrchEvent;
@@ -72,7 +84,7 @@ export function appendAtomically(
   }
   const events: OrchEvent[] = [];
   for (const [i, body] of bodies.entries()) {
-    const r = log.append({ requestId: `${requestId}:${i}`, actor, body });
+    const r = log.append({ requestId: derivedRequestId(requestId, i), actor, body });
     if (r.ok) events.push(r.value.event);
     if (!r.ok) {
       const cause = `${r.error.cause}（${i + 1}/${bodies.length} 件目で失敗）`;
@@ -97,7 +109,7 @@ function toFailure(e: Failure): Failure {
 
 /** 要求の最初のイベントが追記済みか（再試行の判定）。 */
 export const alreadyApplied = (state: OrchState, requestId: string): boolean =>
-  Object.hasOwn(state.requests, `${requestId}:0`);
+  Object.hasOwn(state.requests, derivedRequestId(requestId, 0));
 
 export const fail = (
   code: string,
