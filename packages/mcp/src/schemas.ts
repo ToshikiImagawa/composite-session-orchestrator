@@ -131,6 +131,30 @@ const SCHEMAS: Readonly<Record<McpOperation, z.ZodType>> = {
   }),
 };
 
+/** MCP の `tools/list` に載せる、操作の入力の JSON Schema。変換できなければ、緩い object（検査は `parseToolInput` が行う）。 */
+export function inputSchemaFor(operation: DaemonOperation): {
+  type: "object";
+  [k: string]: unknown;
+} {
+  try {
+    const schema = Object.hasOwn(SCHEMAS, operation)
+      ? SCHEMAS[operation as McpOperation]
+      : undefined;
+    if (schema !== undefined) {
+      const js = z.toJSONSchema(schema, { io: "input", unrepresentable: "any" }) as Record<
+        string,
+        unknown
+      >;
+      if (js.type === "object" || js.oneOf !== undefined || js.anyOf !== undefined) {
+        return { type: "object", ...js };
+      }
+    }
+  } catch {
+    // 下の既定にする
+  }
+  return { type: "object" };
+}
+
 export interface ParsedToolInput {
   readonly operation: DaemonOperation;
   /** daemon へ送る検証済みの引数。top レベルは新しいオブジェクトで、入れ子の値（ブリーフの scope など）は入力と共有する。 */
