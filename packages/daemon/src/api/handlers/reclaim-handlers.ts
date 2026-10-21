@@ -22,6 +22,7 @@ import {
   type NodeRecord,
   type OrchState,
   type ProcessInfo,
+  type ReclaimAssessment,
   type ReclaimNode,
   type ReclaimNodeFacts,
   type Result,
@@ -34,21 +35,34 @@ import { appendAtomically, fail, type LogPort } from "./context.js";
 /** 作業ツリーの事実（`discarded` は daemon が決める）。 */
 export type WorktreeFacts = Omit<ReclaimNodeFacts, "discarded">;
 
+/**
+ * 回収の実体（git・lsof）への口。実装（T10b）が守る契約:
+ * - `removeWorktree` は `git worktree remove` を `--force` なしで行い、ブランチは `git branch -d`（統合済みだけ）で消す
+ *   （`-D` は使わない）。未保存の変更・未統合の成果があれば、強制せずに失敗を返す（失うものがある場合は拒否する）。
+ * - `removeWorktree` は `expectedPath`（判定に使った作業ツリーの実パス）と、実際に削除するパスが同じかを照合し、
+ *   違えば何も消さずに失敗する（判定と削除の対象のずれを防ぐ）。
+ * - すべての口は、取得に失敗したら例外か `undefined`・`null`・`Failure` で返してよい（ハンドラが安全側＝回収不可に倒す）。
+ */
 export interface ReclaimPorts {
   /** ノードの作業ツリーの事実。調べられない・作業ツリーがなければ `undefined`（回収不可）。 */
   factsFor(nodeId: string): Promise<WorktreeFacts | undefined>;
   /** 作業ツリー配下のプロセスの調査。取得できなければ `null`（回収不可）。 */
   readonly probe: ProcessProbe;
-  /** 作業ツリーを消す。失敗は `Failure` で返す（例外にしない）。 */
-  removeWorktree(nodeId: string): Promise<Result<undefined, Failure>>;
-  /** daemon の作業ツリー置き場（渡すと、配下でないパスを拒否する）。 */
-  readonly worktreeRoot?: string;
+  /** 作業ツリーを消す。失敗は `Failure` で返す（例外は、ハンドラが `Failure` に変える）。 */
+  removeWorktree(
+    nodeId: string,
+    opts: { expectedPath: string },
+  ): Promise<Result<undefined, Failure>>;
+  /** daemon の作業ツリー置き場（作業ツリーのパスがこの配下であることを検査する）。 */
+  readonly worktreeRoot: string;
 }
 
 export interface ReclaimHandlerDeps {
   readonly log: LogPort;
   readonly clock: () => string;
   readonly ports: ReclaimPorts;
+  /** 応答に出さない生の原因（ポートの失敗・例外）の記録先。 */
+  readonly onFailure?: (nodeId: string, cause: string) => void;
 }
 
 const REASON_TEXT: Record<UnmetReason, string> = {
@@ -102,6 +116,7 @@ const describeUnmet = (list: readonly Unmet[]): string =>
 
 export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
   const { log, ports } = deps;
+  let reclaiming = false;
 
   const outsideSubtree = (caller: string, nodeId: string) =>
     isStrictDescendant(log.state().nodes, caller, nodeId)
@@ -115,9 +130,46 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
   const openDecisionNodes = (state: OrchState): string[] =>
     state.decisions.filter((d) => d.status === "open").map((d) => d.nodeId);
 
+  const safely = async <T>(nodeId: string, f: () => Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await f();
+    } catch (e) {
+      deps.onFailure?.(nodeId, String(e));
+      return fallback;
+    }
+  };
+
+  /** 1 ノードの判定。事実とプロセスは、注入されたもの（なければ取り直す）。取得の失敗は回収不可（安全側）。 */
+  async function assessNode(
+    nodes: readonly ReclaimNode[],
+    open: readonly string[],
+    nodeId: string,
+    shared?: { processes: readonly ProcessInfo[] | null },
+  ): Promise<{ result: Result<ReclaimAssessment, Failure>; facts?: WorktreeFacts }> {
+    const found = await safely(nodeId, () => ports.factsFor(nodeId), undefined);
+    let processes: readonly ProcessInfo[] | null = null;
+    if (found !== undefined) {
+      processes =
+        shared !== undefined
+          ? shared.processes
+          : await safely(nodeId, () => ports.probe(found.worktreePath), null);
+    }
+    const result = assessReclaim(
+      {
+        nodes,
+        facts: found === undefined ? {} : { [nodeId]: { ...found, discarded: false } },
+        openDecisionNodeIds: open,
+        processes,
+        worktreeRoot: ports.worktreeRoot,
+      },
+      nodeId,
+    );
+    return found === undefined ? { result } : { result, facts: found };
+  }
+
   /**
    * 対象と配下を、配下から順に判定する。先に判定した回収可能なノードは、後のノード（親）の判定では回収可能とみなす。
-   * アーカイブ済みは判定せず、回収済みとして数える。
+   * アーカイブ済みは判定せず、回収済みとして数える。プロセスの調査は、置き場全体で 1 回だけ行い、全ノードで共有する。
    */
   async function assess(
     state: OrchState,
@@ -127,28 +179,14 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     const virtual = new Map<string, ReclaimNode>(state.nodes.map((n) => [n.id, n]));
     const open = openDecisionNodes(state);
     const unmet: Unmet[] = [];
+    const shared = {
+      processes: plan.every((n) => n.state === "archived")
+        ? []
+        : await safely("", () => ports.probe(ports.worktreeRoot), null),
+    };
     for (const n of plan) {
       if (n.state === "archived") continue;
-      const found = await ports.factsFor(n.id);
-      const facts = found === undefined ? {} : { [n.id]: { ...found, discarded: false } };
-      let processes: readonly ProcessInfo[] | null = null;
-      if (found !== undefined) {
-        try {
-          processes = await ports.probe(found.worktreePath);
-        } catch {
-          processes = null;
-        }
-      }
-      const r = assessReclaim(
-        {
-          nodes: [...virtual.values()],
-          facts,
-          openDecisionNodeIds: open,
-          processes,
-          ...(ports.worktreeRoot === undefined ? {} : { worktreeRoot: ports.worktreeRoot }),
-        },
-        n.id,
-      );
+      const { result: r } = await assessNode([...virtual.values()], open, n.id, shared);
       if (!r.ok) {
         unmet.push({ nodeId: n.id, unmet: ["stateNotEligible"], blockers: [] });
         continue;
@@ -212,54 +250,86 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
       const caller = req.caller?.nodeId ?? "";
       const outside = outsideSubtree(caller, nodeId);
       if (outside) return outside;
-      const { plan, unmet } = await assess(log.state(), nodeId);
-      if (unmet.length > 0) return notReclaimable(unmet);
-
-      const actor = { nodeId: caller };
-      const reclaimed: string[] = [];
-      for (const n of plan) {
-        const current = log.state().nodes.find((x) => x.id === n.id);
-        if (current?.state !== "archived") {
-          if (current?.state !== "reclaimable") {
-            const marked = appendAtomically(
-              log,
-              deps.clock,
-              `${req.requestId}/${n.id}/mark`,
-              actor,
-              [
-                {
-                  type: "node.stateChanged",
-                  payload: { nodeId: n.id, event: { type: "markReclaimable", discarded: false } },
-                },
-              ],
-            );
-            if (!marked.ok) return { ok: false, error: marked.error };
-          }
-          const removed = await ports.removeWorktree(n.id);
-          if (!removed.ok) {
-            return {
-              ok: false,
-              error: failure(
-                removed.error.code,
-                `ノード ${n.id} の作業ツリーを消せなかった（回収済み: ${reclaimed.join("、") || "なし"}）: ${removed.error.cause}`,
-                ...(removed.error.nextActions.length > 0
-                  ? removed.error.nextActions
-                  : (["原因を取り除いて、もう一度回収する"] as [string, ...string[]])),
-              ),
-            };
-          }
-          const archived = appendAtomically(
-            log,
-            deps.clock,
-            `${req.requestId}/${n.id}/archive`,
-            actor,
-            [{ type: "node.stateChanged", payload: { nodeId: n.id, event: { type: "archive" } } }],
-          );
-          if (!archived.ok) return { ok: false, error: archived.error };
-        }
-        reclaimed.push(n.id);
+      // 回収は daemon 全体で直列にする（判定と削除の間に、別の回収が割り込まないように）。
+      if (reclaiming) {
+        return fail("busy", "別の回収を実行中", "少し待って、もう一度回収する");
       }
-      return { ok: true, value: { reclaimed } };
+      reclaiming = true;
+      try {
+        return await execute(req.requestId, caller, nodeId);
+      } finally {
+        reclaiming = false;
+      }
     },
   };
+
+  async function execute(
+    requestId: string,
+    caller: string,
+    nodeId: string,
+  ): Promise<Result<{ reclaimed: readonly string[] }, Failure>> {
+    const { plan, unmet } = await assess(log.state(), nodeId);
+    if (unmet.length > 0) return notReclaimable(unmet);
+
+    const actor = { nodeId: caller };
+    const reclaimed: string[] = [];
+    const done = () => (reclaimed.length === 0 ? "なし" : reclaimed.join("、"));
+    for (const n of plan) {
+      const current = log.state().nodes.find((x) => x.id === n.id);
+      if (current?.state !== "archived") {
+        // 各ノードの記録の直前に、そのノードだけ、事実とプロセスを取り直して判定する（判定から時間が経っている）。
+        const state = log.state();
+        const again = await assessNode(state.nodes, openDecisionNodes(state), n.id);
+        if (!again.result.ok || !again.result.value.reclaimable || again.facts === undefined) {
+          const list: Unmet[] = again.result.ok
+            ? [
+                {
+                  nodeId: n.id,
+                  unmet: again.result.value.unmet,
+                  blockers: again.result.value.blockers,
+                },
+              ]
+            : [{ nodeId: n.id, unmet: ["stateNotEligible"], blockers: [] }];
+          const f = notReclaimable(list);
+          return {
+            ok: false,
+            error: failure(
+              f.error.code,
+              `${f.error.cause}（回収済み: ${done()}）`,
+              ...(f.error.nextActions as [string, ...string[]]),
+            ),
+          };
+        }
+        if (current?.state !== "reclaimable") {
+          const marked = appendAtomically(log, deps.clock, `${requestId}/${n.id}/mark`, actor, [
+            {
+              type: "node.stateChanged",
+              payload: { nodeId: n.id, event: { type: "markReclaimable", discarded: false } },
+            },
+          ]);
+          if (!marked.ok) return { ok: false, error: marked.error };
+        }
+        let removed: Result<undefined, Failure>;
+        try {
+          removed = await ports.removeWorktree(n.id, { expectedPath: again.facts.worktreePath });
+        } catch (e) {
+          removed = { ok: false, error: failure("removeFailed", String(e), "原因を取り除く") };
+        }
+        if (!removed.ok) {
+          deps.onFailure?.(n.id, `${removed.error.code}: ${removed.error.cause}`);
+          return fail(
+            "removeFailed",
+            `ノード ${n.id} の作業ツリーを消せなかった（回収済み: ${done()}）。記録は回収可能のまま`,
+            "作業ツリーの状態を確認して、もう一度回収する",
+          );
+        }
+        const archived = appendAtomically(log, deps.clock, `${requestId}/${n.id}/archive`, actor, [
+          { type: "node.stateChanged", payload: { nodeId: n.id, event: { type: "archive" } } },
+        ]);
+        if (!archived.ok) return { ok: false, error: archived.error };
+      }
+      reclaimed.push(n.id);
+    }
+    return { ok: true, value: { reclaimed } };
+  }
 }

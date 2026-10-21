@@ -60,6 +60,7 @@ const rig = (
   verified("c");
 
   const removed: string[] = [];
+  const expectedPaths: [string, string][] = [];
   const probed: string[] = [];
   const state = {
     facts: {
@@ -80,7 +81,8 @@ const rig = (
       probed.push(path);
       return state.processes;
     },
-    removeWorktree: async (id): Promise<Result<undefined, Failure>> => {
+    removeWorktree: async (id, opts): Promise<Result<undefined, Failure>> => {
+      expectedPaths.push([id, opts.expectedPath]);
       if (state.removeFailsFor.has(id))
         return { ok: false, error: failure("removeFailed", `${id} を消せない`, "もう一度試す") };
       removed.push(id);
@@ -105,7 +107,7 @@ const rig = (
     // biome-ignore lint/suspicious/noExplicitAny: 操作ごとの型は呼び出し側で保証
     return (await (h[op] as any)(req)) as { ok: boolean; value?: any; error?: Failure };
   };
-  return { log, call, ev, removed, probed, state, s: () => log.state() };
+  return { log, call, ev, removed, expectedPaths, probed, state, s: () => log.state() };
 };
 
 describe("node.reclaimPreview（回収の事前確認。何も変えない）", () => {
@@ -254,6 +256,62 @@ describe("node.reclaim（回収の実行。実行時に再判定し、配下か�
     expect(retry.ok).toBe(true);
     expect(retry.value.reclaimed).toEqual(["b", "c", "m2"]);
     for (const id of ["b", "c", "m2"]) expect(stateOf(r.s(), id)).toBe("archived");
+  });
+
+  it("記録の直前に、そのノードだけ取り直して再判定する: 途中でプロセスが現れたら、そこで止めて回収済みを示す", async () => {
+    const r = rig();
+    r.ev("m2", { type: "reportDone" });
+    r.ev("m2", { type: "accept" });
+    const original = r.state.processes;
+    let calls = 0;
+    // 最初の一括判定のあと、c の記録の直前の取り直しで、c の作業ツリーにプロセスが現れる
+    r.state.facts.c = { merged: true, clean: true, worktreePath: `${WT}/c` };
+    Object.defineProperty(r.state, "processes", {
+      get: () => (++calls > 2 ? [{ pid: 9, cwd: `${WT}/c`, hasOpenFiles: false }] : original),
+    });
+    const res = await r.call("node.reclaim", { nodeId: "m2" }, "root");
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("notReclaimable");
+    expect(res.error?.cause).toContain("回収済み: b");
+    expect(stateOf(r.s(), "b")).toBe("archived");
+    expect(stateOf(r.s(), "c")).toBe("verified");
+  });
+
+  it("作業ツリーの削除には、判定に使ったパスを expectedPath で渡す", async () => {
+    const r = rig();
+    await r.call("node.reclaim", { nodeId: "a" });
+    expect(r.expectedPaths).toEqual([["a", `${WT}/a`]]);
+  });
+
+  it("削除が例外を投げたら Failure に変え、回収済みを示す。生の原因は応答に出さない", async () => {
+    const r = rig();
+    r.ev("m2", { type: "reportDone" });
+    r.ev("m2", { type: "accept" });
+    r.state.removeFailsFor.add("b");
+    const res = await r.call("node.reclaim", { nodeId: "m2" }, "root");
+    expect(res.error?.code).toBe("removeFailed");
+    expect(res.error?.cause).not.toContain("消せない");
+  });
+
+  it("回収は直列: 実行中の回収があれば、後の要求は busy を返す", async () => {
+    const r = rig();
+    const [first, second] = await Promise.all([
+      r.call("node.reclaim", { nodeId: "a" }),
+      r.call("node.reclaim", { nodeId: "a" }),
+    ]);
+    expect([first.ok, second.ok].sort()).toEqual([false, true]);
+    expect([first, second].find((x) => !x.ok)?.error?.code).toBe("busy");
+  });
+
+  it("事実の取得が例外なら、回収不可（安全側）で失敗する", async () => {
+    const r = rig();
+    r.state.facts = new Proxy(r.state.facts, {
+      get: () => {
+        throw new Error("git が壊れた");
+      },
+    });
+    const res = await r.call("node.reclaimPreview", { nodeId: "a" });
+    expect(res.error?.code).toBe("notReclaimable");
   });
 
   it("同じ requestId の再試行は、記録を重複させない", async () => {
