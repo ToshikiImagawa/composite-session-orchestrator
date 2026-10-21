@@ -6,4 +6,5 @@
  */
 export * from "./compose.js";
 export * from "./config.js";
+export * from "./loaders.js";
 export * from "./main.js";
