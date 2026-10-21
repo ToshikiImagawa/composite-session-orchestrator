@@ -41,6 +41,8 @@ export const summarize = (text: string): string =>
 
 export interface Appended {
   readonly state: OrchState;
+  /** 追記した（または、重複として最初のものを返した）イベント。`bodies` と同じ順。 */
+  readonly events: readonly OrchEvent[];
 }
 
 /**
@@ -68,8 +70,10 @@ export function appendAtomically(
     if (!r.ok) return { ok: false, error: toFailure(r.error) };
     probe = r.value.state;
   }
+  const events: OrchEvent[] = [];
   for (const [i, body] of bodies.entries()) {
     const r = log.append({ requestId: `${requestId}:${i}`, actor, body });
+    if (r.ok) events.push(r.value.event);
     if (!r.ok) {
       const cause = `${r.error.cause}（${i + 1}/${bodies.length} 件目で失敗）`;
       return {
@@ -83,7 +87,7 @@ export function appendAtomically(
       };
     }
   }
-  return { ok: true, value: { state: log.state() } };
+  return { ok: true, value: { state: log.state(), events } };
 }
 
 /** core の失敗（`seq` つき）を、窓口の失敗にそろえる。 */
