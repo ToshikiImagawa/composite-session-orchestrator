@@ -21,6 +21,21 @@ export const LIMITS = {
   tool: 1024,
   /** 受信箱の項目の要約。 */
   summary: INBOX_SUMMARY_MAX,
+  /** ブリーフ（spec 5.2）: 目的、受け入れ基準の件数と 1 件の長さ、作業範囲の各一覧の件数と 1 件の長さ、依存先の件数。 */
+  objective: 8 * 1024,
+  criteriaCount: 50,
+  criterionLength: 1024,
+  scopeEntryCount: 100,
+  scopeEntryLength: 4096,
+  dependsOnCount: 50,
+  /** 範囲の拡張要求（FR_015）: 対象（場所またはコマンド）・理由の長さと、ノードあたりの未判定（open）の件数。 */
+  extensionTarget: 1024,
+  extensionReason: 4 * 1024,
+  openExtensionsPerNode: 10,
+  /** 判断要求（`decision.requested`）で、判断待ちの間に止める子の件数。 */
+  pauseNodeCount: 100,
+  /** 完了の判定（`node.review`）の差し戻し理由・コメント。 */
+  feedback: 8 * 1024,
 } as const;
 
 /** タブ・改行（LF）以外の制御文字（C0・DEL・C1）と、書式制御文字（Cf。U+202E、ゼロ幅文字など）。 */

@@ -22,6 +22,7 @@ export const NODE_STATES = [
 ] as const;
 export type NodeState = (typeof NODE_STATES)[number];
 
+export * from "./brief.js";
 export * from "./contract.js";
 export * from "./events.js";
 export * from "./ids.js";

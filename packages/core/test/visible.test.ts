@@ -46,6 +46,24 @@ const full = () => {
     }),
     ev({ type: "node.toolDenied", payload: { nodeId: "b", tool: "WebFetch" } }),
     ev({ type: "node.exited", payload: { nodeId: "b", reason: "x" } }),
+    ev({
+      type: "scope.extensionRequested",
+      payload: {
+        extensionId: "xa",
+        nodeId: "a",
+        target: { kind: "write", value: "/t" },
+        reason: "r",
+      },
+    }),
+    ev({
+      type: "scope.extensionRequested",
+      payload: {
+        extensionId: "xb",
+        nodeId: "b",
+        target: { kind: "write", value: "/t" },
+        reason: "r",
+      },
+    }),
   ]);
   if (!r.ok) throw new Error(`${r.error.code} ${r.error.cause}`);
   return r.value;
@@ -58,6 +76,7 @@ describe("visibleState（呼び出した統合ノードが読める状態＝自�
     expect(v.inbox.map((x) => x.id)).toEqual(["ia"]);
     expect(v.decisions.map((x) => x.decisionId)).toEqual(["da"]);
     expect(v.reports.map((x) => x.reportId)).toEqual(["ra"]);
+    expect(v.extensions.map((x) => x.extensionId)).toEqual(["xa"]);
     expect(v.violations).toEqual([]);
     expect(v.toolDenials).toEqual([]);
     expect(v.exits).toEqual([]);

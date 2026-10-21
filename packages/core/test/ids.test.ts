@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { ID_MAX_LENGTH, ID_PATTERN, isSafeId } from "../src/index.js";
+import { ID_MAX_LENGTH, ID_PATTERN, isSafeId, LIMITS, pauseNodeIdsProblem } from "../src/index.js";
 
 describe("isSafeId（ノード・判断・報告などの識別子の形式）", () => {
   it("英数字で始まり、英数字と . _ : - だけの 128 文字以下を受け付ける", () => {
@@ -72,5 +72,23 @@ describe("isSafeId（ノード・判断・報告などの識別子の形式）",
         }
       }),
     );
+  });
+});
+
+describe("pauseNodeIdsProblem（判断待ちの間に止める子の一覧）", () => {
+  it("識別子の重複なしの配列（上限以下）は問題なし。空配列も可", () => {
+    expect(pauseNodeIdsProblem([])).toBeUndefined();
+    expect(pauseNodeIdsProblem(["a", "b.1"])).toBeUndefined();
+  });
+
+  it.each([
+    ["配列でない", "a"],
+    ["null", null],
+    ["識別子の形式が不正", ["a b"]],
+    ["文字列でない要素", [1]],
+    ["重複", ["a", "a"]],
+    ["上限超え", Array.from({ length: LIMITS.pauseNodeCount + 1 }, (_, i) => `n${i}`)],
+  ])("%s は拒否する", (_name, value) => {
+    expect(typeof pauseNodeIdsProblem(value)).toBe("string");
   });
 });

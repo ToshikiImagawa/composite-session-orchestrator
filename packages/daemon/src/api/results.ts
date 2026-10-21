@@ -12,7 +12,7 @@ type ResultKeys = {
 
 export const RESULT_KEYS: ResultKeys = {
   "node.spawn": ["nodeId"],
-  "node.send": ["delivered"],
+  "node.send": ["status"],
   "node.stop": ["state"],
   "inbox.fetch": ["items"],
   "tree.list": ["table"],
@@ -30,7 +30,6 @@ export const RESULT_KEYS: ResultKeys = {
   "report.outOfScope": ["accepted"],
   "report.done": ["accepted"],
   "scope.extend": ["extensionId"],
-  "node.bind": ["nodeId"],
   "decision.answer": ["accepted"],
   "node.reclaimInstruct": ["accepted"],
   "node.purge": ["purged"],

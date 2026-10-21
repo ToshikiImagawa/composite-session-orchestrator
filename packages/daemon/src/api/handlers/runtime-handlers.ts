@@ -203,7 +203,7 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       const adapter = adapterFor(nodeId);
       if (adapter === undefined) return noRuntime(nodeId);
       const r = await adapter.send(nodeId, text);
-      return r.ok ? { ok: true, value: { delivered: true } } : r;
+      return r.ok ? { ok: true, value: { status: "queued" } } : r;
     },
 
     "node.stop": (req: HandlerRequest<"node.stop">): R<"node.stop"> => {

@@ -5,6 +5,7 @@ import {
   DAEMON_OPERATIONS,
   type DaemonOperation,
   type DaemonRequest,
+  type DaemonResponse,
   DEFAULT_PURGE_TOMBSTONE,
   err,
   type Failure,
@@ -171,5 +172,78 @@ describe("操作の契約（NFR_004, DC_003）", () => {
     type Unassigned = Exclude<DaemonOperation, RoleOperation<ContractRole>>;
     expectTypeOf<Unassigned>().toEqualTypeOf<never>();
     expect(new Set(DAEMON_OPERATIONS).size).toBeGreaterThan(0);
+  });
+});
+
+describe("紐付けは契約から外れている（T13c）", () => {
+  it("node.bind はどのロールにも、操作の一覧にもない（紐付けは POST /v1/bind）", () => {
+    expect((DAEMON_OPERATIONS as readonly string[]).includes("node.bind")).toBe(false);
+    for (const r of CONTRACT_ROLES) {
+      expect((ROLE_OPERATIONS[r] as readonly string[]).includes("node.bind")).toBe(false);
+    }
+  });
+});
+
+describe("ブリーフを受ける操作（spec 5.2）", () => {
+  const scope = { writableLocations: ["/w"], forbiddenLocations: [], allowedCommands: [] };
+  const brief = { objective: "o", acceptanceCriteria: ["a"], scope };
+  const integ = (r: DaemonRequest<"integrator">) => r;
+
+  it("node.spawn は parentId・role と、ブリーフ（dependsOn は省略可）を受ける", () => {
+    const b = { requestId: "r", role: "integrator", operation: "node.spawn" } as const;
+    const r = integ({ ...b, params: { parentId: "p", role: "implement", ...brief } });
+    expect(r.params).toMatchObject({ role: "implement" });
+    integ({ ...b, params: { parentId: "p", role: "review", ...brief, dependsOn: ["n1"] } });
+    const p = { parentId: "p", role: "implement" } as const;
+    // @ts-expect-error 作業ツリー・ブランチは params に含めない（アダプタが決める）
+    integ({ ...b, params: { ...p, ...brief, branch: "x" } });
+    const old = { parentId: "p", brief: "x" } as const;
+    // @ts-expect-error 旧形式（brief 文字列）は受けない
+    integ({ ...b, params: old });
+  });
+
+  it("node.split は nodeId・keep と同じブリーフを受ける", () => {
+    const b = { requestId: "r", role: "integrator", operation: "node.split" } as const;
+    integ({ ...b, params: { nodeId: "n", keep: "mainline", ...brief } });
+    const noObjective = { nodeId: "n", keep: "stop", acceptanceCriteria: ["a"], scope } as const;
+    // @ts-expect-error ブリーフ（目的）がない
+    integ({ ...b, params: noObjective });
+  });
+
+  it("node.review: 差し戻し（reject）には feedback が必須、受理（accept）では任意", () => {
+    const b = { requestId: "r", role: "integrator", operation: "node.review" } as const;
+    integ({ ...b, params: { nodeId: "n", verdict: "accept" } });
+    integ({ ...b, params: { nodeId: "n", verdict: "accept", feedback: "よい" } });
+    integ({ ...b, params: { nodeId: "n", verdict: "reject", feedback: "基準 2 の根拠がない" } });
+    const noFeedback = { nodeId: "n", verdict: "reject" } as const;
+    // @ts-expect-error reject には feedback が要る
+    integ({ ...b, params: noFeedback });
+  });
+});
+
+describe("node.send・node.stop・scope.extend の契約", () => {
+  const integ = (r: DaemonRequest<"integrator">) => r;
+  const child = (r: DaemonRequest<"child">) => r;
+
+  it("node.send の結果は { status: 'queued' }（届いたかではなく、受け付けた）", () => {
+    expectTypeOf<DaemonResponse<"node.send">>().toEqualTypeOf<Result<{ status: "queued" }>>();
+  });
+
+  it("node.stop の graceMs は graceful のときだけ指定できる", () => {
+    const b = { requestId: "r", role: "integrator", operation: "node.stop" } as const;
+    integ({ ...b, params: { nodeId: "n", mode: "graceful" } });
+    integ({ ...b, params: { nodeId: "n", mode: "graceful", graceMs: 5000 } });
+    integ({ ...b, params: { nodeId: "n", mode: "immediate" } });
+    // @ts-expect-error immediate には猶予がない
+    integ({ ...b, params: { nodeId: "n", mode: "immediate", graceMs: 1000 } });
+  });
+
+  it("scope.extend の対象は { kind, value } に構造化される", () => {
+    const b = { requestId: "r", role: "child", operation: "scope.extend" } as const;
+    child({ ...b, params: { target: { kind: "write", value: "/w/docs" }, reason: "必要" } });
+    child({ ...b, params: { target: { kind: "command", value: "git status" }, reason: "必要" } });
+    const old = { target: "docs", reason: "必要" } as const;
+    // @ts-expect-error 文字列の対象は受けない
+    child({ ...b, params: old });
   });
 });
