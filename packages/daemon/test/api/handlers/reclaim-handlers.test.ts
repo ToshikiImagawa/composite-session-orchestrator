@@ -61,6 +61,8 @@ const rig = (
 
   const removed: string[] = [];
   const expectedPaths: [string, string][] = [];
+  /** `removeWorktree` に渡された `force`（渡されなければ undefined）。 */
+  const forces: [string, boolean | undefined][] = [];
   const probed: string[] = [];
   const state = {
     facts: {
@@ -83,6 +85,7 @@ const rig = (
     },
     removeWorktree: async (id, opts): Promise<Result<undefined, Failure>> => {
       expectedPaths.push([id, opts.expectedPath]);
+      forces.push([id, opts.force]);
       if (state.removeFailsFor.has(id))
         return { ok: false, error: failure("removeFailed", `${id} を消せない`, "もう一度試す") };
       removed.push(id);
@@ -114,6 +117,7 @@ const rig = (
     ev,
     removed,
     expectedPaths,
+    forces,
     probed,
     state,
     s: () => log.state(),
@@ -194,6 +198,89 @@ describe("node.reclaimPreview（回収の事前確認。何も変えない）", 
     expect(done.value.reclaimed).toEqual(["d"]);
     expect(stateOf(r.s(), "d")).toBe("archived");
     expect(r.s().nodes.find((n) => n.id === "d")?.archivedAt).toBeDefined();
+  });
+
+  describe("強制（force）を渡すかどうかの判断（ハンドラが行う。T10r2）", () => {
+    const stoppedNode = (r: ReturnType<typeof rig>, id: string, parent = "m1") => {
+      r.log.append({
+        requestId: `c-${id}`,
+        actor: SYS,
+        body: {
+          type: "node.created",
+          payload: { nodeId: id, role: "implement", parentId: parent, dependsOn: [] },
+        },
+      });
+      r.ev(id, { type: "start" });
+      r.ev(id, { type: "stop", mode: "immediate" });
+      r.ev(id, { type: "confirmStopped" });
+      r.state.facts[id] = { merged: false, clean: false, worktreePath: `${WT}/${id}` };
+    };
+    const decide = async (r: ReturnType<typeof rig>, id: string) =>
+      (await (r.handlers["node.reclaimInstruct"] as never as (q: unknown) => unknown)({
+        requestId: `ri-${id}`,
+        operation: "node.reclaimInstruct",
+        role: "human",
+        params: { nodeId: id },
+      })) as { ok: boolean };
+
+    it("記録上 discarded（人間が破棄を判断した）の停止ノードは、force: true で消す", async () => {
+      const r = rig();
+      stoppedNode(r, "d");
+      expect((await decide(r, "d")).ok).toBe(true);
+      const done = await r.call("node.reclaim", { nodeId: "d" });
+      expect(done.value.reclaimed).toEqual(["d"]);
+      expect(r.forces).toEqual([["d", true]]);
+    });
+
+    it("統合済み・検証済みのノード（破棄の判断なし）は、強制しない（force を渡さない）", async () => {
+      const r = rig();
+      const done = await r.call("node.reclaim", { nodeId: "a" });
+      expect(done.value.reclaimed).toEqual(["a"]);
+      expect(r.forces).toEqual([["a", undefined]]);
+    });
+
+    it("配下の回収では、破棄の判断のある配下だけ force。ほかの配下・統合ノード自身は強制しない", async () => {
+      const r = rig();
+      stoppedNode(r, "d", "m2");
+      expect((await decide(r, "d")).ok).toBe(true);
+      r.ev("m2", { type: "reportDone" });
+      r.ev("m2", { type: "accept" });
+      const done = await r.call("node.reclaim", { nodeId: "m2" }, "root");
+      expect(done.ok).toBe(true);
+      const byId = new Map(r.forces);
+      expect(byId.get("d")).toBe(true);
+      expect(byId.get("b")).toBeUndefined();
+      expect(byId.get("c")).toBeUndefined();
+      expect(byId.get("m2")).toBeUndefined();
+    });
+
+    it("判断を記録した後に再開（restart）したノードは、判断が消えるので、強制しない", async () => {
+      const r = rig();
+      stoppedNode(r, "d");
+      expect((await decide(r, "d")).ok).toBe(true);
+      r.ev("d", { type: "restart", dependenciesDone: true });
+      expect(r.s().nodes.find((n) => n.id === "d")?.discarded).toBeUndefined();
+      r.ev("d", { type: "reportDone" });
+      r.ev("d", { type: "accept" });
+      r.state.facts.d = { merged: true, clean: true, worktreePath: `${WT}/d` };
+      const done = await r.call("node.reclaim", { nodeId: "d" });
+      expect(done.value.reclaimed).toEqual(["d"]);
+      expect(r.forces).toEqual([["d", undefined]]);
+    });
+
+    it("force で消せなかったときの再試行も、force を渡す（記録は回収可能のまま、discarded は残る）", async () => {
+      const r = rig();
+      stoppedNode(r, "d");
+      expect((await decide(r, "d")).ok).toBe(true);
+      r.state.removeFailsFor.add("d");
+      expect((await r.call("node.reclaim", { nodeId: "d" })).ok).toBe(false);
+      r.state.removeFailsFor.delete("d");
+      expect((await r.call("node.reclaim", { nodeId: "d" })).ok).toBe(true);
+      expect(r.forces).toEqual([
+        ["d", true],
+        ["d", true],
+      ]);
+    });
   });
 
   it("停止していないノードの破棄の判断は、日本語の理由と次の操作つきで失敗する", async () => {

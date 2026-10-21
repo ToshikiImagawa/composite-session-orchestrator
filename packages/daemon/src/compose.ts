@@ -63,7 +63,7 @@ export interface WorktreePorts {
   factsFor(nodeId: string): Promise<WorktreeFacts | undefined>;
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string },
+    opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
   ): Promise<Result<undefined, Failure>>;
   provisionWorktree(req: {
     parentId: string;
@@ -373,6 +373,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     probe,
     removeWorktree: (id, opts) => deps.worktree.removeWorktree(id, opts),
     worktreeRoot: config.worktreeRoot,
+    onForced: (nodeId, tip) => note("reclaimForced", { nodeId, tip }),
   };
   const spawn: SpawnPorts = {
     cwdOf,

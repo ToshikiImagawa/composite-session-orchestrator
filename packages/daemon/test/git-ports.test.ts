@@ -31,7 +31,7 @@ const git = (cwd: string, ...args: string[]): string =>
     },
   }).trim();
 
-const setup = (options: { detached?: boolean } = {}) => {
+const setup = (options: { detached?: boolean; failBranchD?: boolean } = {}) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "cso-git-")));
   const repoRoot = join(base, "repo");
   const worktreeRoot = join(base, "worktrees");
@@ -45,6 +45,9 @@ const setup = (options: { detached?: boolean } = {}) => {
   const calls: string[][] = [];
   const runner: GitRunner = (args, opts) => {
     calls.push([...args]);
+    if (options.failBranchD === true && args[0] === "branch" && args[1] === "-D") {
+      return Promise.resolve({ code: 1, stdout: "", stderr: "error: cannot delete branch" });
+    }
     return nodeGit(args, opts);
   };
   const made = createGitPorts(
@@ -269,6 +272,111 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
     expect(existsSync(a)).toBe(true);
     expect(existsSync(b)).toBe(true);
     expect(existsSync(s.repoRoot)).toBe(true);
+  });
+
+  describe("force（破棄の判断を経た停止ノードだけ。判断は、呼び出し側が行う）", () => {
+    it("未保存の変更・未追跡のファイル・未統合のコミットがあっても、作業ツリーを消し、ブランチを -D で消す", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      mkdirSync(join(p, "src"));
+      writeFileSync(join(p, "src", "new.txt"), "未追跡\n");
+      writeFileSync(join(p, "w.txt"), "w\n");
+      git(p, "add", "w.txt");
+      git(p, "commit", "-q", "-m", "work"); // 未統合のコミット
+      writeFileSync(join(p, "a.txt"), "変更\n"); // 未保存の変更
+      const r = await s.ports.removeWorktree("c1", { expectedPath: p, force: true });
+      expect(r.ok).toBe(true);
+      expect(existsSync(p)).toBe(false);
+      expect(git(s.repoRoot, "branch", "--list", "cso/*")).toBe("");
+      const flat = s.calls.flat();
+      expect(flat).toContain("--force");
+      expect(flat).toContain("-D");
+    });
+
+    it("force でないとき（既定・false）は、同じ状態でも、強制せずに失敗し、何も消さない", async () => {
+      for (const opts of [{}, { force: false }]) {
+        const s = setup();
+        const p = await provision(s, "c1");
+        writeFileSync(join(p, "untracked.txt"), "x\n");
+        const r = await s.ports.removeWorktree("c1", { expectedPath: p, ...opts });
+        expect(r.ok).toBe(false);
+        expect(existsSync(join(p, "untracked.txt"))).toBe(true);
+        expect(s.calls.flat()).not.toContain("--force");
+        expect(s.calls.flat()).not.toContain("-D");
+      }
+    });
+
+    it("force でも、expectedPath が違えば、何も消さずに失敗する（pathMismatch）", async () => {
+      const s = setup();
+      const a = await provision(s, "a1");
+      const b = await provision(s, "b1");
+      writeFileSync(join(a, "wip.txt"), "x\n");
+      const r = await s.ports.removeWorktree("a1", { expectedPath: b, force: true });
+      expect(r.ok === false && r.error.code).toBe("pathMismatch");
+      expect(existsSync(a)).toBe(true);
+      expect(existsSync(b)).toBe(true);
+      expect(s.calls.some((c) => c.includes("--force"))).toBe(false);
+    });
+
+    it("force でも、登録されていない場所は消さない（worktreeConflict）", async () => {
+      const s = setup();
+      const p = join(s.worktreeRoot, "not-registered");
+      mkdirSync(p);
+      writeFileSync(join(p, "keep.txt"), "k\n");
+      // 登録されていない作業ツリーの名前は、ノード ID から決まる。ここでは、同じ名前のディレクトリを先に作る。
+      const first = await s.ports.provisionWorktree({ parentId: "root", nodeId: "c9" });
+      expect(first.ok).toBe(true);
+      const real = first.ok ? first.value.worktreePath : "";
+      git(s.repoRoot, "worktree", "remove", "--force", real); // 登録を外す（ディレクトリも消える）
+      mkdirSync(real);
+      writeFileSync(join(real, "keep.txt"), "k\n");
+      const r = await s.ports.removeWorktree("c9", { expectedPath: real, force: true });
+      expect(r.ok).toBe(false);
+      expect(existsSync(join(real, "keep.txt"))).toBe(true);
+      expect(existsSync(join(p, "keep.txt"))).toBe(true);
+    });
+
+    it("force: 消す前に、ブランチの先端の SHA を onTip に渡す", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      writeFileSync(join(p, "x.txt"), "x\n");
+      git(p, "add", "-A");
+      git(p, "commit", "-m", "work");
+      const sha = git(p, "rev-parse", "HEAD").trim();
+      const tips: string[] = [];
+      const r = await s.ports.removeWorktree("c1", {
+        expectedPath: p,
+        force: true,
+        onTip: (t) => tips.push(t),
+      });
+      expect(r.ok).toBe(true);
+      expect(tips).toEqual([sha]);
+    });
+
+    it("force: -D だけ失敗したら removeFailed（作業ツリーは消えた・ブランチだけ残った）。そのあとの再実行で、残りを消せる", async () => {
+      const s = setup({ failBranchD: true });
+      const p = await provision(s, "c1");
+      const r = await s.ports.removeWorktree("c1", { expectedPath: p, force: true });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("removeFailed");
+        expect(r.error.cause).toContain("ブランチ");
+        expect(r.error.cause).toContain("残った");
+      }
+      expect(existsSync(p)).toBe(false);
+      expect(git(s.repoRoot, "branch", "--list", "cso/*")).not.toBe("");
+      // 再実行（同じ expectedPath）。ここでは -D を、まだ失敗させる版なので、もう一度 removeFailed。冪等に、同じ失敗を返す
+      const again = await s.ports.removeWorktree("c1", { expectedPath: p, force: true });
+      expect(again.ok).toBe(false);
+    });
+
+    it("force でも、同じ呼び出しを繰り返せる（冪等。作業ツリーもブランチもなければ成功）", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      writeFileSync(join(p, "x.txt"), "x\n");
+      expect((await s.ports.removeWorktree("c1", { expectedPath: p, force: true })).ok).toBe(true);
+      expect((await s.ports.removeWorktree("c1", { expectedPath: p, force: true })).ok).toBe(true);
+    });
   });
 
   it("根が detached HEAD なら、作業ツリーを作らずに失敗する", async () => {
