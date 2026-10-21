@@ -174,7 +174,26 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     );
   };
 
+  const unsupported =
+    (what: string, ...next: [string, ...string[]]) =>
+    () =>
+      fail("notSupported", what, ...next);
+
   return {
+    // 人間の破棄の判断の記録（core の `node.discardDecided`。T13e）ができるまで、受け付けない。
+    "node.reclaimInstruct": unsupported(
+      "破棄の判断を記録する先（core のイベント）が未整備で、まだ使えない",
+      "停止したノードは、人間が手元で作業ツリーを確認して扱う",
+    ),
+    // 最終削除は、アーカイブ日（`archivedAt`）とログの最終削除の経路の設計後に実装する。
+    "node.purgePreview": unsupported(
+      "最終削除は、アーカイブ日の記録とログの削除経路の設計が済むまで、まだ使えない",
+      "アーカイブしたまま保持する",
+    ),
+    "node.purge": unsupported(
+      "最終削除は、アーカイブ日の記録とログの削除経路の設計が済むまで、まだ使えない",
+      "アーカイブしたまま保持する",
+    ),
     "node.reclaimPreview": async (
       req: HandlerRequest<"node.reclaimPreview">,
     ): Promise<Result<{ reclaimable: boolean }, Failure>> => {

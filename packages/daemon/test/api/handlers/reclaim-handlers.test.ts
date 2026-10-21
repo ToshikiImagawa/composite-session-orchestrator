@@ -274,3 +274,14 @@ describe("node.reclaim（回収の実行。実行時に再判定し、配下か�
     expect(res.ok).toBe(false);
   });
 });
+
+describe("未整備の操作（reclaimInstruct・purge・purgePreview）", () => {
+  it("何も書かずに notSupported で失敗する", async () => {
+    const r = rig();
+    const before = r.s().lastSeq;
+    for (const op of ["node.reclaimInstruct", "node.purge", "node.purgePreview"] as const) {
+      expect((await r.call(op, { nodeId: "a" })).error?.code, op).toBe("notSupported");
+    }
+    expect(r.s().lastSeq).toBe(before);
+  });
+});
