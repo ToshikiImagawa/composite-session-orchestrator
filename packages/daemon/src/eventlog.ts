@@ -53,6 +53,8 @@ export interface EventLogOptions {
   readonly snapshotEvery?: number;
   /** 起動時に、スナップショットから復元した状態を、ログ全体の畳み込みと突き合わせる。既定は無効。 */
   readonly verifySnapshot?: boolean;
+  /** `verifySnapshot` で、スナップショットがログ全体の畳み込みと食い違い、捨てたときの通知（運用の記録用）。 */
+  readonly onSnapshotMismatch?: () => void;
 }
 
 /** スナップショットに保存する core の状態のスキーマの版。`OrchState` の形を変えたら上げる（2: 停止の試行・観測の記録を追加、3: 範囲外のツール拒否・予期しない終了・報告の記録と、判断要求の内容を追加、4: 範囲の拡張要求・追加指示の記録と、ノードのブリーフ・判断要求の止める子を追加、5: 破棄の判断・アーカイブ時刻・指示の配送の記録を追加、6: 受信箱の項目の解決済みの記録を追加）。 */
@@ -175,13 +177,22 @@ function restoreFromSnapshot(store: EventStore): OrchState | undefined {
   return folded.ok ? folded.value : undefined;
 }
 
-function restore(store: EventStore, verify: boolean): Result<OrchState, Failure> {
+function restore(
+  store: EventStore,
+  verify: boolean,
+  onMismatch?: () => void,
+): Result<OrchState, Failure> {
   const fromSnapshot = restoreFromSnapshot(store);
   if (fromSnapshot !== undefined) {
     if (!verify) return ok(fromSnapshot);
     const full = foldAll(store);
     // 突き合わせで食い違えば、スナップショットを捨てて、ログ全体の結果を使う。
     if (full.ok && isDeepStrictEqual(full.value, fromSnapshot)) return ok(fromSnapshot);
+    try {
+      onMismatch?.();
+    } catch {
+      // 通知の失敗は、復元を止めない
+    }
     return full;
   }
   return foldAll(store);
@@ -199,7 +210,7 @@ export class EventLog {
   static open(store: EventStore, options: EventLogOptions): Result<EventLog, Failure> {
     let restored: Result<OrchState, Failure>;
     try {
-      restored = restore(store, options.verifySnapshot === true);
+      restored = restore(store, options.verifySnapshot === true, options.onSnapshotMismatch);
     } catch (e) {
       return {
         ok: false,

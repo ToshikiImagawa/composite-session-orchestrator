@@ -85,6 +85,8 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
       "ftp://127.0.0.1/x",
       "not a url",
       "http://10.0.0.5/mcp",
+      "http://user:pw@127.0.0.1:1/mcp",
+      "http://user@127.0.0.1:1/mcp",
     ]) {
       bad({ mcpUrl: url }, "mcpUrl");
     }

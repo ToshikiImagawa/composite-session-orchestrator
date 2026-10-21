@@ -1,10 +1,29 @@
-import { mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Failure, ok, type Result } from "@cso/core";
 import { afterEach, describe, expect, it } from "vitest";
-import { createDaemon, type Daemon, type DaemonDeps, type WorktreePorts } from "../src/compose.js";
+import {
+  createDaemon,
+  type Daemon,
+  type DaemonDeps,
+  trackTimers,
+  type WorktreePorts,
+} from "../src/compose.js";
 import type { DaemonConfig } from "../src/config.js";
+import { EventLog } from "../src/eventlog.js";
+import { openSqliteStore } from "../src/sqlite-store.js";
 import { FakeLauncher } from "./sdk/fakes.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -12,7 +31,7 @@ afterEach(async () => {
   for (const c of cleanups.splice(0)) await c();
 });
 
-const tmp = () => mkdtempSync(join(tmpdir(), "cso-compose-"));
+const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "cso-compose-")));
 
 const rig = (over: Partial<DaemonConfig> = {}, stateDir?: string) => {
   const base = tmp();
@@ -194,5 +213,99 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
     const bad = createDaemon({ ...r.config, rootNodeId: childId }, r.deps);
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.error.code).toBe("rootNodeMismatch");
+  });
+});
+
+describe("起動の安全（レビュー反映）", () => {
+  it("stateDir が 0700 でなければ（0755 など）起動に失敗する。SQLite のファイルは 0600", async () => {
+    const loose = rig();
+    mkdirSync(loose.config.stateDir);
+    chmodSync(loose.config.stateDir, 0o755);
+    const a = createDaemon(loose.config, loose.deps);
+    expect(a.ok).toBe(false);
+    if (!a.ok) expect(a.error.code).toBe("stateDirInvalid");
+
+    const r = rig();
+    const d = await boot(r);
+    for (const f of ["state.db", "state.db-wal", "state.db-shm"]) {
+      const p = join(r.config.stateDir, f);
+      if (existsSync(p)) expect(statSync(p).mode & 0o777, f).toBe(0o600);
+    }
+    expect(existsSync(join(r.config.stateDir, "state.db"))).toBe(true);
+    expect(d.daemon.log.state().nodes).toHaveLength(1);
+  });
+
+  it("根が作成だけで止まっていた（pending）なら、開始を記録する。使えない状態なら失敗する", async () => {
+    const r = rig();
+    mkdirSync(r.config.stateDir, { mode: 0o700 });
+    const store = openSqliteStore(join(r.config.stateDir, "state.db"));
+    if (!store.ok) throw new Error("store");
+    const log = EventLog.open(store.value, { clock: () => "2026-10-20T00:00:00Z" });
+    if (!log.ok) throw new Error("log");
+    log.value.append({
+      requestId: "bootstrap-root-created",
+      actor: { system: true },
+      body: {
+        type: "node.created",
+        payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+      },
+    });
+    store.value.close();
+    const d = await boot(r);
+    expect(d.daemon.log.state().nodes[0]?.state).toBe("running");
+
+    const stopped = rig();
+    const first = await boot(stopped);
+    first.daemon.log.append({
+      requestId: "stop-root",
+      actor: { system: true },
+      body: {
+        type: "node.stateChanged",
+        payload: { nodeId: "root", event: { type: "stop", mode: "immediate" } },
+      },
+    });
+    await first.daemon.stop();
+    cleanups.length = 0;
+    const again = createDaemon(stopped.config, stopped.deps);
+    expect(again.ok).toBe(false);
+    if (!again.ok) expect(again.error.code).toBe("rootNodeMismatch");
+  });
+
+  it("根のトークンのファイルが認証に通らなければ、発行し直して置き換える（一時ファイルを残さない）", async () => {
+    const r = rig();
+    const first = await boot(r);
+    const path = join(r.config.stateDir, "root-token");
+    await first.daemon.stop();
+    cleanups.length = 0;
+    writeFileSync(path, "garbage-token-that-is-not-valid-0123456789\n", { mode: 0o600 });
+    const second = await boot(r);
+    expect(second.rootToken).not.toBe("garbage-token-that-is-not-valid-0123456789");
+    expect((await call(second.url, second.rootToken, "tree.list", {})).status).toBe(200);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readdirSync(r.config.stateDir).filter((f) => f.includes(".tmp-"))).toEqual([]);
+  });
+
+  it("リンクを解決すると置き場が重なる設定は、起動に失敗する", () => {
+    const r = rig();
+    const link = join(tmp(), "link");
+    symlinkSync(r.config.worktreeRoot, link);
+    const made = createDaemon({ ...r.config, stateDir: join(link, "state") }, r.deps);
+    expect(made.ok).toBe(false);
+    if (!made.ok) expect(made.error.code).toBe("invalidConfig");
+  });
+
+  it("trackTimers: 止めるときに、残っているタイマーをまとめて取り消す", () => {
+    let cancelled = 0;
+    const tracker = trackTimers({
+      now: () => 0,
+      sleep: async () => undefined,
+      after: () => ({ promise: new Promise<void>(() => undefined), cancel: () => cancelled++ }),
+    });
+    tracker.timers.after(1000);
+    tracker.timers.after(2000);
+    tracker.cancelAll();
+    expect(cancelled).toBe(2);
+    tracker.cancelAll();
+    expect(cancelled).toBe(2);
   });
 });

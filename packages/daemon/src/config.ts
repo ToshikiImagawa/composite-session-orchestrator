@@ -5,7 +5,9 @@
  * - 置き場（状態・作業ツリー・リポジトリ）は、互いに重ならないこと（状態の置き場に作業ツリーを作らない、など）。
  * - 根の範囲（`rootScope`）は、ブリーフを持たない根の子の、権限の上限になる。場所は、根の作業ツリー（`rootCwd`）からの
  *   相対パスで書き、`validateScope(rootScope, rootCwd)` を満たすこと。
- * - `mcpUrl` は、子に渡す MCP の接続先。トークンを外へ送らないよう、ループバック（127.0.0.1・localhost・::1）に限る。
+ * - `mcpUrl` は、子に渡す MCP の接続先。トークンを外へ送らないよう、ループバック（127.0.0.1・localhost・::1）に限り、
+ *   ユーザー名・パスワードを含めない。
+ * - `rootScope` の場所の `.` は、作業ツリー全体を許す（書き込み可能な場所に `.` を書くと、根の作業ツリー全体が書き込み可能になる）。
  */
 
 import { lstatSync, readFileSync } from "node:fs";
@@ -125,9 +127,6 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
   const problem = briefProblem({ objective: "x", acceptanceCriteria: ["x"], scope: rs });
   if (problem !== undefined) return bad(`rootScope: ${problem}`);
   const scope = rs as unknown as Scope;
-  if ([...scope.writableLocations, ...scope.forbiddenLocations].some((p) => p.startsWith("/"))) {
-    return bad("rootScope の場所は、rootCwd からの相対パスで書く（絶対パスは使えない）");
-  }
   const issues = validateScope(scope, rootCwd);
   if (issues.length > 0) {
     return bad(
@@ -146,9 +145,13 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     typeof mcpUrl !== "string" ||
     url === undefined ||
     (url.protocol !== "http:" && url.protocol !== "https:") ||
-    !LOOPBACK.has(url.hostname)
+    !LOOPBACK.has(url.hostname) ||
+    url.username !== "" ||
+    url.password !== ""
   ) {
-    return bad("mcpUrl は、ループバック（127.0.0.1・localhost・[::1]）の http(s) の URL");
+    return bad(
+      "mcpUrl は、ループバック（127.0.0.1・localhost・[::1]）の http(s) の URL（ユーザー名・パスワードは含めない）",
+    );
   }
 
   return {
@@ -179,6 +182,10 @@ export function loadConfigFile(path: string): Result<DaemonConfig, Failure> {
   try {
     const st = lstatSync(path);
     if (!st.isFile()) return bad(`設定ファイル ${path} が通常のファイルでない（リンクは使えない）`);
+    const uid = process.getuid?.();
+    if (uid !== undefined && st.uid !== uid) {
+      return bad(`設定ファイル ${path} の所有者が、このプロセスのユーザーと違う`);
+    }
     if ((st.mode & 0o022) !== 0) {
       return bad(`設定ファイル ${path} を、他のユーザーが書き換えられる（chmod go-w で直す）`);
     }

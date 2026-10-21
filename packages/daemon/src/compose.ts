@@ -11,11 +11,18 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { lstatSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { type Failure, failure, type Result } from "@cso/core";
-import { assertSecureDirectory, processUid } from "./api/fs-safety.js";
+import { type EventBody, type Failure, failure, isPathUnder, type Result } from "@cso/core";
+import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import {
   type ApiLogger,
   type BindCodes,
@@ -98,6 +105,11 @@ function prepareStateDir(dir: string): Failure | undefined {
     }
     if (!exists) mkdirSync(dir, { recursive: true, mode: 0o700 });
     assertSecureDirectory(dir, processUid());
+    // 認証情報・状態を置くので、グループ・他者の権限を一切許さない（0700）。
+    const mode = lstatSync(dir).mode;
+    if ((mode & 0o077) !== 0) {
+      throw new Error(`権限が緩い（${(mode & 0o777).toString(8)}）。0700 にする`);
+    }
     return undefined;
   } catch (e) {
     return failure(
@@ -106,6 +118,49 @@ function prepareStateDir(dir: string): Failure | undefined {
       "置き場を、自分だけが書ける 0700 のディレクトリにする",
     );
   }
+}
+
+/** 作ったタイマーを覚えておき、止めるときにまとめて取り消す。 */
+export function trackTimers(base: Timers): { timers: Timers; cancelAll(): void } {
+  const pending = new Set<() => void>();
+  return {
+    timers: {
+      now: () => base.now(),
+      sleep: (ms) => base.sleep(ms),
+      after(ms) {
+        const t = base.after(ms);
+        const cancel = (): void => {
+          pending.delete(cancel);
+          t.cancel();
+        };
+        pending.add(cancel);
+        void t.promise.then(() => pending.delete(cancel));
+        return { promise: t.promise, cancel };
+      },
+    },
+    cancelAll() {
+      for (const c of [...pending]) c();
+    },
+  };
+}
+
+/** 置き場が、リンクを解決した実パスで、互いに重なっていないか。 */
+function realOverlap(config: DaemonConfig): string | undefined {
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  const s = real(config.stateDir);
+  const r = real(config.repoRoot);
+  const w = real(config.worktreeRoot);
+  const o = (a: string, b: string): boolean => isPathUnder(a, b) || isPathUnder(b, a);
+  if (o(s, w) || o(s, r) || o(w, r)) {
+    return "stateDir・repoRoot・worktreeRoot が、リンクを解決すると重なる";
+  }
+  return undefined;
 }
 
 export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Daemon, Failure> {
@@ -121,11 +176,26 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
 
   const dirProblem = prepareStateDir(config.stateDir);
   if (dirProblem !== undefined) return { ok: false, error: dirProblem };
+  const overlap = realOverlap(config);
+  if (overlap !== undefined) {
+    return fail("invalidConfig", `設定が不正: ${overlap}`, "置き場を、重ならない別の場所にする");
+  }
 
-  const opened = openSqliteStore(join(config.stateDir, "state.db"));
+  // SQLite のファイル（state.db・-wal・-shm）が、他のユーザーから読めないよう、作る間は umask を 077 にする。
+  const previousUmask = process.umask(0o077);
+  let opened: ReturnType<typeof openSqliteStore>;
+  try {
+    opened = openSqliteStore(join(config.stateDir, "state.db"));
+  } finally {
+    process.umask(previousUmask);
+  }
   if (!opened.ok) return opened;
   const store = opened.value;
-  const logOpened = EventLog.open(store, { clock, verifySnapshot: true });
+  const logOpened = EventLog.open(store, {
+    clock,
+    verifySnapshot: true,
+    onSnapshotMismatch: () => note("snapshotMismatch"),
+  });
   if (!logOpened.ok) {
     store.close();
     return logOpened;
@@ -139,43 +209,50 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     }
   };
 
-  // 根のノード: なければ作って開始する。あれば、役割・親を確かめる。
+  // 根のノード: なければ作って開始し、起動前（pending）なら開始を記録する。起動できない状態・根でないノードなら失敗する。
+  const rootMismatch = (why: string) => {
+    closeAll();
+    return fail(
+      "rootNodeMismatch",
+      `ノード ${config.rootNodeId} を、根の統合ノードとして使えない（${why}）`,
+      "rootNodeId を、根のノードの ID にする",
+      "別の置き場（stateDir）を使う",
+    );
+  };
+  const rootEvent = (requestId: string, body: EventBody): Failure | undefined => {
+    const r = log.append({ requestId, actor: { system: true }, body });
+    return r.ok ? undefined : r.error;
+  };
   const existing = log.state().nodes.find((n) => n.id === config.rootNodeId);
   if (existing === undefined) {
-    const created = log.append({
-      requestId: `bootstrap-root-created`,
-      actor: { system: true },
-      body: {
+    const err =
+      rootEvent("bootstrap-root-created", {
         type: "node.created",
         payload: { nodeId: config.rootNodeId, role: "integrator", parentId: null, dependsOn: [] },
-      },
-    });
-    const started = created.ok
-      ? log.append({
-          requestId: `bootstrap-root-started`,
-          actor: { system: true },
-          body: {
-            type: "node.stateChanged",
-            payload: { nodeId: config.rootNodeId, event: { type: "start" } },
-          },
-        })
-      : created;
-    if (!started.ok) {
+      }) ??
+      rootEvent("bootstrap-root-started", {
+        type: "node.stateChanged",
+        payload: { nodeId: config.rootNodeId, event: { type: "start" } },
+      });
+    if (err !== undefined) {
       closeAll();
       return fail(
         "bootstrapFailed",
-        `根のノード ${config.rootNodeId} を作れない（${started.error.code}）`,
+        `根のノード ${config.rootNodeId} を作れない（${err.code}）`,
         "ストアの状態を確認する",
       );
     }
   } else if (existing.role !== "integrator" || existing.parentId !== null) {
-    closeAll();
-    return fail(
-      "rootNodeMismatch",
-      `ノード ${config.rootNodeId} は、根の統合ノードではない（役割: ${existing.role}）`,
-      "rootNodeId を、根のノードの ID にする",
-      "別の置き場（stateDir）を使う",
-    );
+    return rootMismatch(`役割: ${existing.role}`);
+  } else if (existing.state === "pending") {
+    // 作成の記録のあと、開始の前に止まっていた。
+    const err = rootEvent("bootstrap-root-started", {
+      type: "node.stateChanged",
+      payload: { nodeId: config.rootNodeId, event: { type: "start" } },
+    });
+    if (err !== undefined) return rootMismatch(`開始を記録できない: ${err.code}`);
+  } else if (existing.state !== "running" && existing.state !== "waiting") {
+    return rootMismatch(`状態: ${existing.state}`);
   }
 
   // 認証。
@@ -190,16 +267,28 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       repository: new FileTokenRepository(join(config.stateDir, "node-tokens.json")),
       clock,
     });
-    let rootTokenExists = true;
+    // 根のトークン: ファイルがあり、認証に通るならそのまま。なければ・通らなければ、発行し直して、一時ファイルに書いてから置き換える。
+    let current: string | undefined;
     try {
-      lstatSync(rootTokenPath);
+      assertSecureFile(rootTokenPath, processUid());
+      current = readFileSync(rootTokenPath, "utf8").trim();
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-      rootTokenExists = false;
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        // 権限が緩い・リンクなど。信用せず、発行し直す（古いトークンは無効になる）。
+        note("rootTokenReissued", { reason: "ファイルが使えない" });
+      }
     }
-    if (!rootTokenExists) {
+    const who = current === undefined ? undefined : credentials.authenticate(current);
+    const valid =
+      who !== undefined &&
+      who.role === "integrator" &&
+      "nodeId" in who &&
+      who.nodeId === config.rootNodeId;
+    if (!valid) {
       const token = credentials.issueNodeToken(config.rootNodeId, "integrator");
-      writeFileSync(rootTokenPath, `${token}\n`, { mode: 0o600, flag: "wx" });
+      const tmp = `${rootTokenPath}.tmp-${randomBytes(6).toString("hex")}`;
+      writeFileSync(tmp, `${token}\n`, { mode: 0o600, flag: "wx" });
+      renameSync(tmp, rootTokenPath);
     }
   } catch (e) {
     closeAll();
@@ -211,7 +300,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   }
 
   const probe = deps.probe ?? createLsofProbe(nodeExec);
-  const timers = deps.timers ?? nodeTimers;
+  const tracked = trackTimers(deps.timers ?? nodeTimers);
+  const timers = tracked.timers;
   const adapter = new SdkRuntimeAdapter({
     launcher: deps.launcher,
     probe,
@@ -290,6 +380,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       },
       async stop() {
         await server.close();
+        tracked.cancelAll(); // アダプタが作った、残りのタイマーを止める
         running = undefined;
         closeAll();
         note("stopped");
