@@ -30,6 +30,8 @@ const rig = (
     facts?: Record<string, WorktreeFacts | undefined>;
     processes?: readonly ProcessInfo[] | null;
     failLastCommit?: boolean;
+    /** 強制のとき、ポートが `onTip` に渡す先端（判定のあとに動いた先端の模擬）。 */
+    tips?: Record<string, string>;
   } = {},
 ) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
@@ -88,6 +90,8 @@ const rig = (
     removeWorktree: async (id, opts): Promise<Result<undefined, Failure>> => {
       expectedPaths.push([id, opts.expectedPath]);
       forces.push([id, opts.force]);
+      const tip = over.tips?.[id];
+      if (opts.force === true && tip !== undefined) opts.onTip?.(tip);
       if (state.removeFailsFor.has(id))
         return { ok: false, error: failure("removeFailed", `${id} を消せない`, "もう一度試す") };
       removed.push(id);
@@ -304,6 +308,43 @@ describe("node.reclaimPreview（回収の事前確認。何も変えない）", 
       const done = await r.call("node.reclaim", { nodeId: "d" });
       expect(done.value.reclaimed).toEqual(["d"]);
       expect(r.s().nodes.find((x) => x.id === "d")?.lastCommit).toBe(SHA);
+    });
+
+    it("強制の直前に先端が動いていたら（判定のあとに手でコミットが足された）、実際に消えるブランチの先端で記録を上書きする", async () => {
+      const moved = "fedcba9876543210fedcba9876543210fedcba98";
+      const r = rig({ tips: { d: moved } });
+      stoppedNode(r, "d");
+      r.state.facts.d = {
+        merged: false,
+        clean: false,
+        worktreePath: `${WT}/d`,
+        headCommit: SHA,
+      };
+      expect((await decide(r, "d")).ok).toBe(true);
+      expect((await r.call("node.reclaim", { nodeId: "d" })).ok).toBe(true);
+      expect(r.s().nodes.find((x) => x.id === "d")?.lastCommit).toBe(moved);
+    });
+
+    it("強制の直前の先端が、記録した値と同じなら、二重に記録しない。SHA の形でない値は記録しない", async () => {
+      const same = rig({ tips: { d: SHA } });
+      stoppedNode(same, "d");
+      same.state.facts.d = {
+        merged: false,
+        clean: false,
+        worktreePath: `${WT}/d`,
+        headCommit: SHA,
+      };
+      expect((await decide(same, "d")).ok).toBe(true);
+      const before = same.s().lastSeq;
+      expect((await same.call("node.reclaim", { nodeId: "d" })).ok).toBe(true);
+      const events = same.s().lastSeq - before;
+      const bad = rig({ tips: { d: "not-a-sha" } });
+      stoppedNode(bad, "d");
+      bad.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: SHA };
+      expect((await decide(bad, "d")).ok).toBe(true);
+      expect((await bad.call("node.reclaim", { nodeId: "d" })).ok).toBe(true);
+      expect(bad.s().nodes.find((x) => x.id === "d")?.lastCommit).toBe(SHA);
+      expect(events).toBeGreaterThan(0);
     });
 
     it("記録上 discarded（人間が破棄を判断した）の停止ノードは、force: true で消す", async () => {

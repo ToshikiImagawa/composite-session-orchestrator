@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type EventBody, stateOf } from "@cso/core";
+import { type EventBody, failure, stateOf } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { createReclaimHandlers } from "../src/api/handlers/reclaim-handlers.js";
 import type { HandlerRequest } from "../src/api/server.js";
@@ -24,7 +24,7 @@ const git = (cwd: string, ...args: string[]): string =>
   }).trim();
 
 /** 実際の git で、破棄の判断を経た停止ノードを回収する（T10r2。実 SDK の確認で、未追跡のファイルがあると回収できなかった）。 */
-const setup = async () => {
+const setup = async (mode: "discard" | "verified" = "discard") => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "cso-reclaim-")));
   const repoRoot = join(base, "repo");
   const worktreeRoot = join(base, "worktrees");
@@ -61,25 +61,64 @@ const setup = async () => {
   const p = await ports.provisionWorktree({ parentId: "root", nodeId: "c1" });
   if (!p.ok) throw new Error(p.error.cause);
   const wt = p.value.worktreePath;
-  // 子の作業: 未追跡のファイルと、未統合のコミット、未保存の変更
-  mkdirSync(join(wt, "src"));
-  writeFileSync(join(wt, "src", "new.txt"), "新規\n");
-  writeFileSync(join(wt, "w.txt"), "w\n");
-  git(wt, "add", "w.txt");
-  git(wt, "commit", "-q", "-m", "work");
-  writeFileSync(join(wt, "a.txt"), "変更\n");
-  add({
-    type: "node.stateChanged",
-    payload: { nodeId: "c1", event: { type: "stop", mode: "immediate" } },
-  });
-  add({ type: "node.stateChanged", payload: { nodeId: "c1", event: { type: "confirmStopped" } } });
+  if (mode === "discard") {
+    // 子の作業: 未追跡のファイルと、未統合のコミット、未保存の変更
+    mkdirSync(join(wt, "src"));
+    writeFileSync(join(wt, "src", "new.txt"), "新規\n");
+    writeFileSync(join(wt, "w.txt"), "w\n");
+    git(wt, "add", "w.txt");
+    git(wt, "commit", "-q", "-m", "work");
+    writeFileSync(join(wt, "a.txt"), "変更\n");
+    add({
+      type: "node.stateChanged",
+      payload: { nodeId: "c1", event: { type: "stop", mode: "immediate" } },
+    });
+    add({
+      type: "node.stateChanged",
+      payload: { nodeId: "c1", event: { type: "confirmStopped" } },
+    });
+  } else {
+    // 統合済み・きれい（作った直後と同じ）で、検証済み
+    add({ type: "node.stateChanged", payload: { nodeId: "c1", event: { type: "reportDone" } } });
+    add({ type: "node.stateChanged", payload: { nodeId: "c1", event: { type: "accept" } } });
+  }
+  const counts = { lastCommit: 0 };
+  const flags: { failLastCommit: boolean; failRemoveOnce: boolean; beforeRemove?: () => void } = {
+    failLastCommit: false,
+    failRemoveOnce: false,
+  };
+  const handlerLog = {
+    state: () => log.state(),
+    append: (r: Parameters<typeof log.append>[0]) => log.append(r),
+    appendAll: (rs: Parameters<typeof log.appendAll>[0]) => {
+      if (rs.some((r) => r.body.type === "node.lastCommit")) {
+        if (flags.failLastCommit) {
+          return { ok: false as const, error: failure("storeFailed", "書けない", "もう一度試す") };
+        }
+        counts.lastCommit += 1;
+      }
+      return log.appendAll(rs);
+    },
+  };
+  const failures: string[] = [];
   const h = createReclaimHandlers({
-    log,
+    log: handlerLog,
     clock: () => "2026-10-20T00:00:00Z",
+    onFailure: (id, cause) => failures.push(`${id}: ${cause}`),
     ports: {
       factsFor: (id) => ports.factsFor(id),
       probe: async () => [],
-      removeWorktree: (id, opts) => ports.removeWorktree(id, opts),
+      removeWorktree: (id, opts) => {
+        flags.beforeRemove?.();
+        if (flags.failRemoveOnce) {
+          flags.failRemoveOnce = false;
+          return Promise.resolve({
+            ok: false as const,
+            error: failure("removeFailed", "消せない", "もう一度試す"),
+          });
+        }
+        return ports.removeWorktree(id, opts);
+      },
       worktreeRoot,
     },
   });
@@ -96,7 +135,7 @@ const setup = async () => {
       error?: { code: string };
       value?: unknown;
     };
-  return { repoRoot, wt, log, call };
+  return { repoRoot, wt, log, call, counts, flags, failures };
 };
 
 describe("破棄の判断を経た停止ノードの回収（実際の git）", () => {
@@ -138,5 +177,48 @@ describe("破棄の判断を経た停止ノードの回収（実際の git）", 
     );
     const r = await s.call("node.reclaim", "integrator", "c1");
     expect(r.ok).toBe(false);
+  });
+
+  it("統合済みの通常の回収（-d）でも、先端を node.lastCommit に記録して、作業ツリーとブランチを消す", async () => {
+    const s = await setup("verified");
+    const tip = git(s.wt, "rev-parse", "HEAD");
+    expect((await s.call("node.reclaim", "integrator", "c1")).ok).toBe(true);
+    expect(s.log.state().nodes.find((x) => x.id === "c1")?.lastCommit).toBe(tip);
+    expect(existsSync(s.wt)).toBe(false);
+    expect(git(s.repoRoot, "branch", "--list", "cso/*")).toBe("");
+    expect(stateOf(s.log.state(), "c1")).toBe("archived");
+  });
+
+  it("削除に失敗して再試行しても、同じ最終コミットを二重に記録しない", async () => {
+    const s = await setup("verified");
+    s.flags.failRemoveOnce = true;
+    expect((await s.call("node.reclaim", "integrator", "c1")).ok).toBe(false);
+    expect(s.counts.lastCommit).toBe(1);
+    expect((await s.call("node.reclaim", "integrator", "c1")).ok).toBe(true);
+    expect(s.counts.lastCommit).toBe(1);
+  });
+
+  it("最終コミットの記録に失敗しても、回収は進み、note を残す", async () => {
+    const s = await setup("verified");
+    s.flags.failLastCommit = true;
+    expect((await s.call("node.reclaim", "integrator", "c1")).ok).toBe(true);
+    expect(existsSync(s.wt)).toBe(false);
+    expect(s.log.state().nodes.find((x) => x.id === "c1")?.lastCommit).toBeUndefined();
+    expect(s.failures.some((f) => f.includes("最終コミットを記録できなかった"))).toBe(true);
+  });
+
+  it("強制の直前に、判定のあとで先端が動いていたら、実際に消えたブランチの先端を記録する", async () => {
+    const s = await setup();
+    expect((await s.call("node.reclaimInstruct", "human", "c1")).ok).toBe(true);
+    // 事実の取得（判定）のあと、ブランチを消す前に、人間が手でコミットを足した状態を作る
+    let moved = "";
+    s.flags.beforeRemove = () => {
+      writeFileSync(join(s.wt, "late.txt"), "late\n");
+      git(s.wt, "add", "late.txt");
+      git(s.wt, "commit", "-q", "-m", "late");
+      moved = git(s.wt, "rev-parse", "HEAD");
+    };
+    expect((await s.call("node.reclaim", "integrator", "c1")).ok).toBe(true);
+    expect(s.log.state().nodes.find((x) => x.id === "c1")?.lastCommit).toBe(moved);
   });
 });
