@@ -11,7 +11,7 @@
 
 import {
   type EventBody,
-  LIMITS,
+  type Failure,
   type NodeState,
   type OperationMap,
   type OrchState,
@@ -29,7 +29,6 @@ import {
   summarize,
 } from "./context.js";
 
-type Failure = import("@cso/core").Failure;
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
 export interface StateHandlerDeps {
@@ -59,7 +58,7 @@ export function createStateHandlers(deps: StateHandlerDeps) {
       const caller = callerOf(req);
       const state = log.state();
       if (
-        !alreadyApplied(state, req.requestId) &&
+        !alreadyApplied(state, { nodeId: caller }, req.requestId) &&
         !ACTIVE.has(stateOf(state, caller) as NodeState)
       ) {
         return notActive(caller, stateOf(state, caller));
@@ -120,6 +119,14 @@ export function createStateHandlers(deps: StateHandlerDeps) {
 
     "report.done": (req: HandlerRequest<"report.done">): R<"report.done"> => {
       const caller = callerOf(req);
+      // 暫定: 根拠は 1 件以上必須（基準ごとの網羅の確認は、契約の拡張〔acceptanceCriteria〕の後）。
+      if (req.params.evidence.length === 0) {
+        return fail(
+          "evidenceRequired",
+          "完了報告には、受け入れ基準ごとの根拠（テスト名・実行結果・コミットなど）が 1 件以上要る",
+          "根拠を添えて報告し直す",
+        );
+      }
       const reportId = deriveId("report", caller, req.requestId, "report");
       const evidence = req.params.evidence.map((e) => ({ ...e }));
       const bodies: EventBody[] = [
@@ -238,7 +245,11 @@ export function createStateHandlers(deps: StateHandlerDeps) {
           "自由入力（text）で答える",
         );
       }
-      const retry = alreadyApplied(state, req.requestId);
+      const retry = alreadyApplied(state, { human: true }, req.requestId);
+      if (d.status === "answered" && !retry && d.answer === answer) {
+        // 採用済みの回答と同じ内容の重複は、成功として返し、却下を記録しない。
+        return { ok: true, value: { accepted: true } };
+      }
       if (d.status === "answered" && !retry) {
         // 後から来た回答は採用しない。却下として記録し、採用された回答を伝える（FR_019）。
         appendAtomically(log, clock, req.requestId, { human: true }, [
@@ -287,6 +298,14 @@ export function createStateHandlers(deps: StateHandlerDeps) {
     "node.review": (req: HandlerRequest<"node.review">): R<"node.review"> => {
       const caller = callerOf(req);
       const { nodeId, verdict } = req.params;
+      // 認可（directChild）の二重の備え: 完了の判定は、そのノードの親だけ。
+      if (log.state().nodes.find((n) => n.id === nodeId)?.parentId !== caller) {
+        return fail(
+          "forbidden",
+          "完了の判定は、そのノードの親（統合ノード）だけができる",
+          "親の統合ノードに依頼する",
+        );
+      }
       const r = appendAtomically(log, clock, req.requestId, { nodeId: caller }, [
         {
           type: "node.stateChanged",
@@ -298,5 +317,3 @@ export function createStateHandlers(deps: StateHandlerDeps) {
     },
   };
 }
-
-void LIMITS;

@@ -11,7 +11,6 @@
 import { createHash } from "node:crypto";
 import {
   type Actor,
-  applyEvent,
   type EventBody,
   type Failure,
   failure,
@@ -28,6 +27,8 @@ import type { AppendOutcome, AppendRequest } from "../../eventlog.js";
 export interface LogPort {
   state(): OrchState;
   append(request: AppendRequest): Result<AppendOutcome, Failure>;
+  /** 複数のイベントを、1 トランザクションで追記する（1 件でも失敗したら全件を書かない）。 */
+  appendAll(requests: readonly AppendRequest[]): Result<AppendOutcome[], Failure>;
 }
 
 /** 呼び出し元・要求 ID・用途から、決定的で `isSafeId` を満たす ID を導く。 */
@@ -40,15 +41,17 @@ export function deriveId(prefix: string, caller: string, requestId: string, tag:
 export const summarize = (text: string): string =>
   sanitizeText(text.replace(/\s+/g, " ").trim(), LIMITS.summary);
 
+/** 呼び出し元を表す鍵（ノード ID・人間・システム）。内部の requestId を呼び出し元ごとに分けるのに使う。 */
+const callerKey = (actor: Actor): string =>
+  "nodeId" in actor ? actor.nodeId : "human" in actor ? "human" : "system";
+
 /**
- * 派生した requestId（`<要求>:<番号>`）。core のイベントの requestId は識別子（128 文字以下）なので、長い要求は
- * ハッシュに置き換えてから番号を付ける（同じ要求からは常に同じ値）。
+ * 内部（イベントログ）の requestId: `rq-<32 桁>:<番号>`。呼び出し元と要求の ID からハッシュで導く（固定長）。
+ * 呼び出し元ごとに分けるので、別の呼び出し元が同じ要求 ID を使っても衝突せず、他の呼び出し元の存在が失敗の
+ * メッセージに出ない。長い要求 ID も、core の識別子の上限（128 文字）に収まる。同じ呼び出し元の再試行は同じ値。
  */
-export function derivedRequestId(requestId: string, index: number): string {
-  const suffix = `:${index}`;
-  if (requestId.length + suffix.length <= ID_MAX_LENGTH) return `${requestId}${suffix}`;
-  const h = createHash("sha256").update(requestId, "utf8").digest("hex").slice(0, 48);
-  return `h-${h}${suffix}`;
+export function derivedRequestId(actor: Actor, requestId: string, index: number): string {
+  return `${deriveId("rq", callerKey(actor), requestId, "")}:${index}`;
 }
 
 export interface Appended {
@@ -58,48 +61,22 @@ export interface Appended {
 }
 
 /**
- * `bodies` を、派生した requestId で順に追記する。追記の前に、全体を適用できるか検査し、失敗なら何も書かない。
- * 追記の途中でストアが失敗したら、同じ requestId での再試行を促す失敗を返す。
+ * `bodies` を、呼び出し元ごとに派生した requestId で、1 トランザクションで追記する（`EventLog.appendAll`）。
+ * 全件を順に検査しながら書き、1 件でも失敗したら何も書かない。同じ呼び出し元・同じ requestId の再試行は、
+ * 追記済みを重複させず、残りを完了させる（冪等）。
  */
 export function appendAtomically(
   log: LogPort,
-  clock: () => string,
+  _clock: () => string,
   requestId: string,
   actor: Actor,
   bodies: readonly EventBody[],
 ): Result<Appended, Failure> {
-  let probe = log.state();
-  const at = clock();
-  for (const [i, body] of bodies.entries()) {
-    const event = {
-      seq: probe.lastSeq + 1,
-      at,
-      requestId: derivedRequestId(requestId, i),
-      actor,
-      ...body,
-    } as OrchEvent;
-    const r = applyEvent(probe, event);
-    if (!r.ok) return { ok: false, error: toFailure(r.error) };
-    probe = r.value.state;
-  }
-  const events: OrchEvent[] = [];
-  for (const [i, body] of bodies.entries()) {
-    const r = log.append({ requestId: derivedRequestId(requestId, i), actor, body });
-    if (r.ok) events.push(r.value.event);
-    if (!r.ok) {
-      const cause = `${r.error.cause}（${i + 1}/${bodies.length} 件目で失敗）`;
-      return {
-        ok: false,
-        error: failure(
-          r.error.code,
-          cause,
-          "同じ requestId でもう一度試す",
-          ...r.error.nextActions,
-        ),
-      };
-    }
-  }
-  return { ok: true, value: { state: log.state(), events } };
+  const r = log.appendAll(
+    bodies.map((body, i) => ({ requestId: derivedRequestId(actor, requestId, i), actor, body })),
+  );
+  if (!r.ok) return { ok: false, error: toFailure(r.error) };
+  return { ok: true, value: { state: log.state(), events: r.value.map((o) => o.event) } };
 }
 
 /** core の失敗（`seq` つき）を、窓口の失敗にそろえる。 */
@@ -108,8 +85,8 @@ function toFailure(e: Failure): Failure {
 }
 
 /** 要求の最初のイベントが追記済みか（再試行の判定）。 */
-export const alreadyApplied = (state: OrchState, requestId: string): boolean =>
-  Object.hasOwn(state.requests, derivedRequestId(requestId, 0));
+export const alreadyApplied = (state: OrchState, actor: Actor, requestId: string): boolean =>
+  Object.hasOwn(state.requests, derivedRequestId(actor, requestId, 0));
 
 export const fail = (
   code: string,
