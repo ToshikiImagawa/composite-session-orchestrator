@@ -152,11 +152,27 @@ export type EventBody =
       readonly payload: { readonly nodeId: string; readonly text: string };
     }
   | {
+      /** 受信箱の項目を解決済みにする（記録のみ。項目は消えない）。解決した者は封筒の `actor`。 */
+      readonly type: "inbox.resolved";
+      readonly payload: { readonly itemId: string };
+    }
+  | {
+      /** 追加指示の配送の記録（アダプタが子へ届けた）。`instructedSeq` は、対応する `node.instructed` のイベントの `seq`。記録のみ。 */
+      readonly type: "node.instructionDelivered";
+      readonly payload: { readonly instructedSeq: number };
+    }
+  | {
+      /** 停止したノードの破棄の判断（spec 5.8。成果を捨てることを含む）。判断した者は封筒の `actor`。状態は変えない。 */
+      readonly type: "node.discardDecided";
+      readonly payload: { readonly nodeId: string };
+    }
+  | {
       readonly type: "decision.answered";
       readonly payload: { readonly decisionId: string; readonly answer: string };
     };
 
-export const REPORT_KINDS = ["progress", "done", "outOfScope", "failure"] as const;
+/** 報告の種類。`review`: 完了の判定（受理）のコメント（`node.review` の `feedback`）。 */
+export const REPORT_KINDS = ["progress", "done", "outOfScope", "failure", "review"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
 const isReportKind = (x: unknown): x is ReportKind =>
   typeof x === "string" && (REPORT_KINDS as readonly string[]).includes(x);
@@ -216,6 +232,10 @@ export interface NodeRecord {
   readonly objective?: string;
   readonly acceptanceCriteria?: readonly string[];
   readonly scope?: Scope;
+  /** 破棄の判断（停止したノードだけ。再開すると消える）。回収の再判定の入力 `facts.discarded` の情報源。 */
+  readonly discarded?: { readonly seq: number; readonly at: string; readonly by: Actor };
+  /** アーカイブした時刻（`archive` のイベントの `at`）。 */
+  readonly archivedAt?: string;
 }
 
 export interface DecisionRecord {
@@ -295,6 +315,9 @@ export interface InstructionRecord {
   readonly nodeId: string;
   readonly text: string;
   readonly actor: Actor;
+  /** 配送を記録したイベント（`node.instructionDelivered`）の `seq` と時刻。ある指示が配送済み。 */
+  readonly deliveredSeq?: number;
+  readonly deliveredAt?: string;
 }
 
 export interface ExitRecord {
@@ -387,6 +410,9 @@ export type FoldFailureCode =
   | "duplicateReport"
   | "unknownRef"
   | "duplicateExtension"
+  | "alreadyDiscarded"
+  | "unknownInboxItem"
+  | "unknownInstruction"
   | "tooManyOpenExtensions"
   | "unknownExtension"
   | "extensionAlreadyDecided"
@@ -520,11 +546,11 @@ interface Draft {
   note: "graceMsIgnored" | undefined;
 }
 
-/** 受信箱の項目の `ref` が指す記録の種類。参照先のない種類（violation・stopIncomplete）は `ref` を持てない。 */
-const REF_TARGET: Readonly<Record<InboxKind, "decision" | "report" | undefined>> = {
+/** 受信箱の項目の `ref` が指す記録の種類。参照先のない種類（stopIncomplete など）は `ref` を持てない。violation は、拡張要求（`extensionId`）を指せる。 */
+const REF_TARGET: Readonly<Record<InboxKind, "decision" | "report" | "extension" | undefined>> = {
   decision: "decision",
   answer: "decision",
-  violation: undefined,
+  violation: "extension", // 範囲違反に起因する拡張要求（extensionId）。違反だけの項目は ref を持たない
   failure: "report",
   stopIncomplete: undefined,
   done: "report",
@@ -948,8 +974,13 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       }
       const depsOk = dependenciesCompleted(d, node);
       // restart の dependenciesDone は payload を信用せず、状態から判定する。
+      // markReclaimable の discarded も同様に、破棄の判断（node.discardDecided）の記録から判定する。
       const effective: NodeEvent =
-        event.type === "restart" ? { type: "restart", dependenciesDone: depsOk } : event;
+        event.type === "restart"
+          ? { type: "restart", dependenciesDone: depsOk }
+          : event.type === "markReclaimable"
+            ? { type: "markReclaimable", discarded: node.discarded !== undefined }
+            : event;
       const t = transition(node.state, effective);
       if (!t.ok)
         return reject(
@@ -981,7 +1012,13 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           );
         }
       }
-      d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({ ...node, state: next });
+      const { discarded: _discarded, ...rest } = node;
+      d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({
+        // 停止したノードの再開（restart）で、破棄の判断は消える。
+        ...(event.type === "restart" ? rest : node),
+        state: next,
+        ...(next === "archived" ? { archivedAt: raw.at } : {}),
+      });
       if (event.type === "stop" && t.value.changed && t.value.effect !== "cancelStart") {
         d.stopRequests.push(
           freezeRecord({
@@ -1107,14 +1144,16 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
             ? d.decisions[d.decisionIdx.get(ref as string) ?? -1]?.nodeId
             : target === "report"
               ? d.reportIdx.get(ref as string)?.nodeId
-              : undefined;
+              : target === "extension"
+                ? d.extensions[d.extensionIdx.get(ref as string) ?? -1]?.nodeId
+                : undefined;
         if (owner !== nodeId) {
           return reject(
             seq,
             "unknownRef",
             `ref ${String(ref)} は、種類 ${String(kind)} の項目が指せる、ノード ${nodeId} の記録ではない`,
             "判断要求・報告を先に記録する",
-            "種類に合う ID（decision・answer は decisionId、報告系は reportId）を指定する",
+            "種類に合う ID（decision・answer は decisionId、報告系は reportId、violation は extensionId）を指定する",
           );
         }
       }
@@ -1177,12 +1216,14 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
             (x) =>
               isRec(x) &&
               isBoundedText(x.criterion, LIMITS.evidenceLength) &&
-              isBoundedText(x.evidence, LIMITS.evidenceLength),
+              x.criterion.trim() !== "" &&
+              isBoundedText(x.evidence, LIMITS.evidenceLength) &&
+              x.evidence.trim() !== "",
           )
         ) {
           return invalid(
             seq,
-            `report.added の evidence（完了報告の { criterion, evidence } の ${LIMITS.evidenceCount} 件以下の配列）`,
+            `report.added の evidence（完了報告の { criterion, evidence（どちらも空白だけでない） } の ${LIMITS.evidenceCount} 件以下の配列）`,
           );
         }
         evidenceList = evidence.map((x: Rec) => ({
@@ -1307,6 +1348,83 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (node === undefined) return unknownNode(seq, nodeId);
       if (!RECORDABLE_STATES.has(node.state)) return notRecordable(seq, node, "追加指示");
       d.instructions.push(freezeRecord({ seq, at: raw.at as string, nodeId, text, actor }));
+      return commit();
+    }
+
+    case "inbox.resolved": {
+      const { itemId } = p;
+      if (!isId(itemId)) return invalid(seq, "inbox.resolved の itemId");
+      const i = d.inbox.findIndex((x) => x.id === itemId);
+      const cur = d.inbox[i];
+      if (cur === undefined) {
+        return reject(
+          seq,
+          "unknownInboxItem",
+          `受信箱の項目 ${itemId} は存在しない`,
+          "受信箱の項目の ID を確認する",
+        );
+      }
+      // 二度目の解決は、最初の記録を残す（状態は変えない）。
+      if (cur.resolved === undefined) {
+        d.inbox[i] = freezeRecord({
+          ...cur,
+          resolved: Object.freeze({ seq, at: raw.at as string, by: actor }),
+        });
+      }
+      return commit();
+    }
+
+    case "node.instructionDelivered": {
+      const { instructedSeq } = p;
+      if (!Number.isInteger(instructedSeq) || (instructedSeq as number) < 0) {
+        return invalid(seq, "node.instructionDelivered の instructedSeq");
+      }
+      const i = d.instructions.findIndex((x) => x.seq === instructedSeq);
+      const cur = d.instructions[i];
+      if (cur === undefined) {
+        return reject(
+          seq,
+          "unknownInstruction",
+          `指示（seq ${String(instructedSeq)}）は存在しない`,
+          "node.instructed の seq を確認する",
+        );
+      }
+      // 二度目の配送の記録は、最初の記録を残す（状態は変えない）。
+      if (cur.deliveredSeq === undefined) {
+        d.instructions[i] = freezeRecord({
+          ...cur,
+          deliveredSeq: seq,
+          deliveredAt: raw.at as string,
+        });
+      }
+      return commit();
+    }
+
+    case "node.discardDecided": {
+      const { nodeId } = p;
+      if (!isId(nodeId)) return invalid(seq, "node.discardDecided の nodeId");
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (node.state !== "stopped") {
+        return reject(
+          seq,
+          "invalidTransition",
+          `状態 ${node.state} のノードに破棄の判断は記録できない（stopped のときだけ）`,
+          "ノードの状態を確認する",
+        );
+      }
+      if (node.discarded !== undefined) {
+        return reject(
+          seq,
+          "alreadyDiscarded",
+          `ノード ${nodeId} の破棄は判断済み`,
+          "判断の結果を確認する",
+        );
+      }
+      d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({
+        ...node,
+        discarded: Object.freeze({ seq, at: raw.at as string, by: actor }),
+      });
       return commit();
     }
 
@@ -1513,4 +1631,9 @@ export function effectiveScope(state: OrchState, nodeId: string): Scope | undefi
     forbiddenLocations: Object.freeze([...node.scope.forbiddenLocations]),
     allowedCommands: Object.freeze(commands),
   });
+}
+
+/** 破棄の判断（`node.discardDecided`）を経たノードの識別子。回収の再判定の入力 `facts.discarded` の情報源（二重に持たない）。 */
+export function discardedNodeIds(state: OrchState): string[] {
+  return state.nodes.filter((n) => n.discarded !== undefined).map((n) => n.id);
 }

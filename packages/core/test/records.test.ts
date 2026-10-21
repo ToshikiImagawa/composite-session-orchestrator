@@ -247,8 +247,8 @@ describe("報告の保存（report.added）", () => {
       payload: { reportId: "r1", nodeId: "a", kind: "progress", text: "半分終わった", ...over },
     } as never);
 
-  it("報告の種類は progress・done・outOfScope", () => {
-    expect(REPORT_KINDS).toEqual(["progress", "done", "outOfScope", "failure"]);
+  it("報告の種類は progress・done・outOfScope・failure・review", () => {
+    expect(REPORT_KINDS).toEqual(["progress", "done", "outOfScope", "failure", "review"]);
   });
 
   it("報告を保存し、状態は変えない。done は受け入れ基準ごとの根拠を持てる", () => {

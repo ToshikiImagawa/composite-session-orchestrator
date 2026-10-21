@@ -1192,8 +1192,8 @@ describe("識別子は isSafeId の形式（書き込み側の検査）", () => 
 describe("node.created のブリーフ（目的・受け入れ基準・作業範囲）の保持", () => {
   const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
   const scope = {
-    writableLocations: ["/w"],
-    forbiddenLocations: ["/w/.git"],
+    writableLocations: ["w"],
+    forbiddenLocations: ["w/.git"],
     allowedCommands: ["git status"],
   };
   const withBrief = (extra: Record<string, unknown>): EventBody =>
@@ -1294,7 +1294,7 @@ describe("decision.requested の pauseNodeIds（判断待ちの間に止める�
 
 describe("範囲の拡張要求（scope.extensionRequested・scope.extensionDecided）", () => {
   const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
-  const target = { kind: "write", value: "/w/docs" } as const;
+  const target = { kind: "write", value: "w/docs" } as const;
   const requested = (over: Record<string, unknown> = {}) =>
     ev({
       type: "scope.extensionRequested",
@@ -1452,8 +1452,8 @@ describe("範囲の拡張要求（scope.extensionRequested・scope.extensionDeci
 
 describe("effectiveScope（有効な範囲 = ブリーフ + 承認済みの拡張）", () => {
   const scope = {
-    writableLocations: ["/w"],
-    forbiddenLocations: ["/w/.git"],
+    writableLocations: ["w"],
+    forbiddenLocations: ["w/.git"],
     allowedCommands: ["ls"],
   };
   const run = (...bodies: EventBody[]) => {
@@ -1495,18 +1495,18 @@ describe("effectiveScope（有効な範囲 = ブリーフ + 承認済みの拡�
 
   it("承認済みの拡張だけを加える（open・却下は加えない）。順序は判定の順で、重複は加えない", () => {
     const s = run(
-      request("x1", "write", "/w/docs"),
+      request("x1", "write", "w/docs"),
       request("x2", "command", "git status"),
       request("x3", "write", "/etc"),
-      request("x4", "write", "/w/docs"),
-      approve("x1", "write", "/w/docs"),
+      request("x4", "write", "w/docs"),
+      approve("x1", "write", "w/docs"),
       approve("x2", "command", "git status"),
       reject("x3"),
-      approve("x4", "write", "/w/docs"),
+      approve("x4", "write", "w/docs"),
     );
     expect(effectiveScope(s, "c")).toEqual({
-      writableLocations: ["/w", "/w/docs"],
-      forbiddenLocations: ["/w/.git"],
+      writableLocations: ["w", "w/docs"],
+      forbiddenLocations: ["w/.git"],
       allowedCommands: ["ls", "git status"],
     });
   });

@@ -202,6 +202,7 @@ describe("node.spawn（子の生成と起動）", () => {
     const res = await r.call("node.spawn", { parentId: "m1", ...brief() });
     expect(res.ok).toBe(true);
     const id = res.value.nodeId as string;
+    expect(res.value).toEqual({ nodeId: id, status: "running" });
     expect(stateOf(r.s(), id)).toBe("running");
     const rec = r.s().nodes.find((x) => x.id === id);
     expect(rec).toMatchObject({
@@ -261,6 +262,7 @@ describe("node.spawn（子の生成と起動）", () => {
     const res = await r.call("node.spawn", { parentId: "m1", ...brief({ dependsOn: ["a"] }) });
     expect(res.ok).toBe(true);
     expect(stateOf(r.s(), res.value.nodeId)).toBe("pending");
+    expect(res.value).toMatchObject({ status: "pending", waitingFor: ["a"] });
     expect(r.calls.provisioned).toHaveLength(1);
     expect(r.calls.issued).toEqual([]);
     expect(r.calls.started).toEqual([]);
@@ -423,7 +425,7 @@ describe("再試行・同時実行・起動の手順", () => {
     });
     expect(stateOf(r.s(), nodeId)).toBe("pending");
     const res = await r.call("node.spawn", { parentId: "m1", ...brief() }, "m1", "sp-r");
-    expect(res).toEqual({ ok: true, value: { nodeId } });
+    expect(res).toEqual({ ok: true, value: { nodeId, status: "running" } });
     expect(stateOf(r.s(), nodeId)).toBe("running");
     expect(r.calls.started).toHaveLength(1);
   });

@@ -111,7 +111,14 @@ const rig = () => {
       caller: { nodeId: caller },
       params,
     } as unknown as HandlerRequest<"scope.decide">)) as Loose;
-  return { log, extend, decide, calls, flags, ev, s: () => log.state() };
+  const decideAsHuman = async (params: Record<string, unknown>, requestId = `h-${++n}`) =>
+    (await h["scope.decide"]({
+      requestId,
+      operation: "scope.decide",
+      role: "human",
+      params,
+    } as unknown as HandlerRequest<"scope.decide">)) as Loose;
+  return { log, extend, decide, decideAsHuman, calls, flags, ev, s: () => log.state() };
 };
 const GIT = { target: { kind: "command", value: "git status" }, reason: "状態を見たい" };
 
@@ -206,6 +213,31 @@ describe("scope.decide（拡張の判定。承認でアダプタの範囲を更�
     expect(r.calls.updated).toHaveLength(1);
     expect(r.calls.updated[0]?.[0]).toBe("a");
     expect(r.calls.updated[0]?.[1].allowedCommands).toEqual(["pnpm test", "git status"]);
+  });
+
+  it("人間は、部分木の判定を受けずに、全ノードの拡張を判定できる（判定者は人間として記録する）", async () => {
+    const r = rig();
+    const idA = await ask(r); // a（m1 の子）
+    const idB = (await r.extend({ target: GIT.target, reason: "r" }, "b")).value
+      .extensionId as string; // b（m2 の子）
+    expect((await r.decideAsHuman({ extensionId: idA, decision: "approve" })).ok).toBe(true);
+    expect((await r.decideAsHuman({ extensionId: idB, decision: "reject" })).ok).toBe(true);
+    const [a, b] = r.s().extensions;
+    expect(a).toMatchObject({ status: "approved", decidedBy: { human: true } });
+    expect(b).toMatchObject({ status: "rejected", decidedBy: { human: true } });
+    expect(r.calls.updated).toHaveLength(1);
+    expect(r.calls.updated[0]?.[0]).toBe("a");
+  });
+
+  it("統合ノードは、発生元が自分の子孫でない拡張を判定できない（forbidden）。人間なら未知の要求は notFound", async () => {
+    const r = rig();
+    const idB = (await r.extend({ target: GIT.target, reason: "r" }, "b")).value
+      .extensionId as string;
+    const res = await r.decide({ extensionId: idB, decision: "approve" }, "m1");
+    expect(res.error?.code).toBe("forbidden");
+    expect((await r.decideAsHuman({ extensionId: "nope", decision: "approve" })).error?.code).toBe(
+      "notFound",
+    );
   });
 
   it("却下・切り出し: 記録だけ。アダプタは更新しない", async () => {

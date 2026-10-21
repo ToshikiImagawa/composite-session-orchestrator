@@ -157,6 +157,11 @@ export function authorizeScope(
       const owner = state.decisions.find((d) => d.decisionId === p.decisionId)?.nodeId;
       return satisfies(rule, nodes, caller, owner) ? OK : notFound("判断要求が見つからない");
     }
+    case "scope.decide": {
+      // 対象は、拡張の発生元のノード（拡張要求の nodeId）。
+      const owner = state.extensions.find((x) => x.extensionId === p.extensionId)?.nodeId;
+      return satisfies(rule, nodes, caller, owner) ? OK : notFound("拡張要求が見つからない");
+    }
     case "report.get": {
       const owner = state.reports.find((r) => r.reportId === p.reportId)?.nodeId;
       return satisfies(rule, nodes, caller, owner) ? OK : notFound("報告が見つからない");

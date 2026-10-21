@@ -118,8 +118,41 @@ describe("node.send（稼働中の子への追加指示）", () => {
   it("動作中のノードの指示をアダプタへ渡し、受け付けた結果を返す", async () => {
     const r = rig();
     const res = await r.call("node.send", { nodeId: "a", text: "続けて" });
-    expect(res).toEqual({ ok: true, value: { status: "queued" } });
+    expect(res).toEqual({ ok: true, value: { status: "queued", duplicate: false } });
     expect(r.adapter?.sent).toEqual([["a", "続けて"]]);
+  });
+
+  it("指示（node.instructed）を記録し、届けたら配送（node.instructionDelivered）を記録する", async () => {
+    const r = rig();
+    await r.call("node.send", { nodeId: "a", text: "続けて" });
+    const [i] = r.state().instructions;
+    expect(i).toMatchObject({ nodeId: "a", text: "続けて" });
+    expect(i?.deliveredSeq).toEqual(expect.any(Number));
+  });
+
+  it("同じ requestId の再送は、配送済みなら duplicate: true を返し、アダプタへ二度渡さず、指示を重複させない", async () => {
+    const r = rig();
+    const first = await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-1");
+    expect(first.value).toEqual({ status: "queued", duplicate: false });
+    const again = await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-1");
+    expect(again.value).toEqual({ status: "queued", duplicate: true });
+    expect(r.adapter?.sent).toHaveLength(1);
+    expect(r.state().instructions).toHaveLength(1);
+  });
+
+  it("アダプタが失敗したら、指示は記録済み・未配送のまま。同じ requestId の再送で、配送をやり直す（duplicate: false）", async () => {
+    const r = rig();
+    if (r.adapter)
+      r.adapter.sendResult = { ok: false, error: failure("sendFailed", "boom", "もう一度送る") };
+    const failed = await r.call("node.send", { nodeId: "a", text: "x" }, "s-2");
+    expect(failed.error?.code).toBe("sendFailed");
+    expect(r.state().instructions[0]?.deliveredSeq).toBeUndefined();
+    if (r.adapter) r.adapter.sendResult = ok({ status: "queued" as const });
+    const retry = await r.call("node.send", { nodeId: "a", text: "x" }, "s-2");
+    expect(retry.value).toEqual({ status: "queued", duplicate: false });
+    expect(r.state().instructions).toHaveLength(1);
+    expect(r.state().instructions[0]?.deliveredSeq).toEqual(expect.any(Number));
+    expect(r.adapter?.sent).toHaveLength(2);
   });
 
   it("動作中でないノード（pending・done・停止後）は、アダプタを呼ばずに失敗する（notActive）", async () => {

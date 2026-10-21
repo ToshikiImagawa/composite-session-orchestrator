@@ -33,9 +33,9 @@ type McpOperation = RoleOperation<McpRole>;
 /** 操作ごとの説明。`McpOperation` を網羅しないと型エラーになる。 */
 const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "node.spawn":
-    "子を生成する。引数: parentId・role・objective（目的）・acceptanceCriteria（受け入れ基準）・scope（writableLocations・forbiddenLocations・allowedCommands）・dependsOn（省略可）。作業ツリーとブランチは指定しない（システムが親のブランチから決める）。受け付け結果を即座に返す",
+    "子を生成する。引数: parentId・role・objective（目的）・acceptanceCriteria（受け入れ基準）・scope（writableLocations・forbiddenLocations は作業ツリー内の相対パス、allowedCommands）・dependsOn（省略可）。作業ツリーとブランチは指定しない（システムが親のブランチから決める）。結果は { nodeId, status: running か pending, waitingFor? }（依存先が未完了なら pending で、待っている先行ノードを waitingFor に示す）",
   "node.send":
-    '稼働中の子へ追加指示を送る。結果は { status: "queued" }（受け付けた。届いたかは受信箱・状態で確認する）',
+    "稼働中の子へ追加指示を送る。結果は { status: queued, duplicate }（受け付けた。duplicate は同じ要求の重複。届いたかは受信箱・状態で確認する）",
   "node.stop":
     "子を停止する。mode は graceful（穏当）か immediate（即時）。graceMs（1〜3600000 ミリ秒の整数）は graceful のときだけ指定でき、省略すると既定の猶予になる",
   "inbox.fetch": "受信箱を取得する。優先度・依存関係・時刻の順。detail と limit で量を絞れる",
@@ -45,10 +45,11 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "node.split":
     "脱線部分を新しい子へ移す。引数: nodeId・keep（mainline か stop。元の子を本筋に戻すか停止するか）と、新しい子のブリーフ（objective・acceptanceCriteria・scope・dependsOn）",
   "scope.decide":
-    "子の範囲の拡張要求（extensionId）を承認（approve）・却下（reject）・切り出し（split）のいずれかで判定する",
+    "子の範囲の拡張要求（extensionId）を承認（approve）・却下（reject）・切り出し（split）のいずれかで判定する。拡張の発生元のノードが自分の子孫のときだけ使える",
   "node.review":
     "子の完了報告を受理（accept）するか差し戻す（reject）。reject には feedback（理由）が必須で、accept では任意",
-  "node.reclaimPreview": "回収の事前確認。何が回収されるかを示す",
+  "node.reclaimPreview":
+    "回収の事前確認。結果は { reclaimable, unmet（満たしていない条件）, blockers（原因のノード・プロセス）}",
   "node.reclaim": "事前確認で示した対象を回収する。実行時に条件を再判定する",
   "node.capabilities": "ノードごとに可能な操作を参照する",
   "decision.get": "受信箱の項目（ref）の判断要求の内容を読む。自分の部分木のものだけ",

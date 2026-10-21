@@ -11,8 +11,8 @@ type ResultKeys = {
 };
 
 export const RESULT_KEYS: ResultKeys = {
-  "node.spawn": ["nodeId"],
-  "node.send": ["status"],
+  "node.spawn": ["nodeId", "status", "waitingFor"],
+  "node.send": ["status", "duplicate"],
   "node.stop": ["state"],
   "inbox.fetch": ["items"],
   "tree.list": ["table"],
@@ -20,7 +20,7 @@ export const RESULT_KEYS: ResultKeys = {
   "node.split": ["newNodeId"],
   "scope.decide": ["state"],
   "node.review": ["state"],
-  "node.reclaimPreview": ["reclaimable"],
+  "node.reclaimPreview": ["reclaimable", "unmet", "blockers"],
   "node.reclaim": ["reclaimed"],
   "node.capabilities": ["operations"],
   "decision.get": ["decisionId", "nodeId", "status", "question", "options", "answer"],

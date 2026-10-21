@@ -49,9 +49,12 @@ describe("ロール別のツール公開（NFR_004）", () => {
 
   it("MCP で公開するのは統合と子だけで、人間用の操作は含まない", () => {
     expect([...MCP_ROLES]).toEqual(["integrator", "child"]);
-    const human = new Set<DaemonOperation>(ROLE_OPERATIONS.human);
+    // 人間専用の操作（最終削除など）は、どのロールにも公開しない。人間と統合で共有する操作（scope.decide）は統合に公開してよい。
+    const shared = new Set<DaemonOperation>(MCP_ROLES.flatMap((r) => ROLE_OPERATIONS[r]));
+    const humanOnly = new Set<DaemonOperation>(ROLE_OPERATIONS.human.filter((o) => !shared.has(o)));
+    expect(humanOnly.has("node.purge")).toBe(true);
     for (const role of MCP_ROLES) {
-      for (const tool of toolsFor(role)) expect(human.has(tool.operation)).toBe(false);
+      for (const tool of toolsFor(role)) expect(humanOnly.has(tool.operation)).toBe(false);
     }
   });
 
@@ -134,6 +137,10 @@ describe("operationForTool", () => {
     expect(d("node_review")).toContain("feedback");
     expect(d("decision_present")).toContain("pauseNodeIds");
     expect(d("node_send")).toContain("queued");
+    expect(d("node_send")).toContain("duplicate");
+    expect(d("node_spawn")).toContain("waitingFor");
+    expect(d("node_reclaimPreview")).toContain("blockers");
+    expect(d("scope_decide")).toContain("子孫");
     expect(d("node_stop")).toContain("graceMs");
     expect(toolsFor("child").find((t) => t.name === "scope_extend")?.description).toContain("kind");
   });

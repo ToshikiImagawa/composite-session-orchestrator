@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { type Brief, briefProblem, LIMITS } from "../src/index.js";
 
 const scope = {
-  writableLocations: ["/w"],
+  writableLocations: ["w"],
   forbiddenLocations: [],
   allowedCommands: ["git status"],
 };
@@ -51,24 +51,23 @@ describe("briefProblem（spec 5.2 のブリーフの検査）", () => {
       ok({
         scope: {
           ...scope,
-          forbiddenLocations: Array.from(
-            { length: LIMITS.scopeEntryCount + 1 },
-            (_, i) => `/p${i}`,
-          ),
+          forbiddenLocations: Array.from({ length: LIMITS.scopeEntryCount + 1 }, (_, i) => `p${i}`),
         },
       }),
     ],
     ["acceptanceCriteria に重複", ok({ acceptanceCriteria: ["a", "b", "a"] })],
-    ["writableLocations に .. を含む", ok({ scope: { ...scope, writableLocations: ["/w/../x"] } })],
+    ["writableLocations に .. を含む", ok({ scope: { ...scope, writableLocations: ["w/../x"] } })],
     ["writableLocations が .. だけ", ok({ scope: { ...scope, writableLocations: [".."] } })],
     [
       "forbiddenLocations に .. を含む",
       ok({ scope: { ...scope, forbiddenLocations: ["a/../b"] } }),
     ],
+    ["writableLocations が絶対パス", ok({ scope: { ...scope, writableLocations: ["/w"] } })],
+    ["forbiddenLocations が絶対パス", ok({ scope: { ...scope, forbiddenLocations: ["/etc"] } })],
     ["writableLocations が / だけ", ok({ scope: { ...scope, writableLocations: ["/"] } })],
     ["forbiddenLocations が / だけ", ok({ scope: { ...scope, forbiddenLocations: ["/"] } })],
-    ["writableLocations に重複", ok({ scope: { ...scope, writableLocations: ["/w", "/w"] } })],
-    ["forbiddenLocations に重複", ok({ scope: { ...scope, forbiddenLocations: ["/a", "/a"] } })],
+    ["writableLocations に重複", ok({ scope: { ...scope, writableLocations: ["w", "w"] } })],
+    ["forbiddenLocations に重複", ok({ scope: { ...scope, forbiddenLocations: ["a", "a"] } })],
     ["allowedCommands に重複", ok({ scope: { ...scope, allowedCommands: ["ls", "ls"] } })],
     ["dependsOn に不正な ID", ok({ dependsOn: ["a b"] })],
     ["dependsOn に重複", ok({ dependsOn: ["a", "a"] })],
@@ -86,7 +85,7 @@ describe("briefProblem（spec 5.2 のブリーフの検査）", () => {
   it("..・/ を含まない通常の場所と、.. を名前に含むだけのものは受け入れる", () => {
     expect(
       briefProblem(
-        ok({ scope: { ...scope, writableLocations: ["/w/a..b", "src/..hidden", "/w/..."] } }),
+        ok({ scope: { ...scope, writableLocations: ["w/a..b", "src/..hidden", "w/..."] } }),
       ),
     ).toBeUndefined();
   });

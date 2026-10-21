@@ -13,6 +13,7 @@
  */
 
 import {
+  type Actor,
   type EventBody,
   type ExtensionRecord,
   effectiveScope,
@@ -179,13 +180,16 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
 
     "scope.decide": async (req: HandlerRequest<"scope.decide">): Promise<R<"scope.decide">> => {
       const caller = req.caller?.nodeId ?? "";
+      // 人間は、全ノードの拡張を判定できる（部分木の判定の外。判定者は人間として記録する）。
+      const human = req.role === "human";
+      const actor: Actor = human ? { human: true } : { nodeId: caller };
       const { extensionId, decision } = req.params;
       const state = log.state();
       const ext = state.extensions.find((x) => x.extensionId === extensionId);
       if (ext === undefined) {
         return fail("notFound", "拡張要求が見つからない", "拡張要求の ID を確認する");
       }
-      if (!isStrictDescendant(state.nodes, caller, ext.nodeId)) {
+      if (!human && !isStrictDescendant(state.nodes, caller, ext.nodeId)) {
         return fail(
           "forbidden",
           "判定できるのは、対象のノードの祖先（統合ノード）だけ",
@@ -221,13 +225,13 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
           },
         },
       ];
-      const decided = appendAtomically(log, deps.clock, req.requestId, { nodeId: caller }, bodies);
+      const decided = appendAtomically(log, deps.clock, req.requestId, actor, bodies);
       if (!decided.ok) return decided;
       if (decision === "approve") {
         const failed = applyToAdapter(ext, extensionId);
         if (failed) return failed;
       }
-      notifyChild(ext, decision, caller, req.requestId);
+      notifyChild(ext, decision, actor, req.requestId);
       return { ok: true, value: { state: stateOfNode() as NodeState } };
     },
   };
@@ -286,7 +290,7 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
   function notifyChild(
     ext: ExtensionRecord,
     decision: "approve" | "reject" | "split",
-    caller: string,
+    actor: Actor,
     requestId: string,
   ): void {
     if (!LIVE.has(stateOf(log.state(), ext.nodeId) ?? "pending")) return;
@@ -298,8 +302,8 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
           ? `範囲の拡張の要求（${what}）は却下された。範囲の内側で進める`
           : `範囲の拡張の要求（${what}）は、作業を切り出して別に進めることになった。範囲の内側で進める`;
     const notifyId = `${requestId}/notify`;
-    const before = alreadyApplied(log.state(), { nodeId: caller }, notifyId);
-    const r = appendAtomically(log, deps.clock, notifyId, { nodeId: caller }, [
+    const before = alreadyApplied(log.state(), actor, notifyId);
+    const r = appendAtomically(log, deps.clock, notifyId, actor, [
       { type: "node.instructed", payload: { nodeId: ext.nodeId, text } },
     ]);
     if (!r.ok) {

@@ -408,6 +408,25 @@ describe("inbox.fetch（呼び出し側の部分木の受信箱。差分取得�
     const all = await r.call("inbox.fetch", r.req("inbox.fetch", {}, ROOT));
     expect(all.value.items).toHaveLength(3);
   });
+
+  it("解決済み（inbox.resolved）の項目は返さない。項目そのものは記録に残る", async () => {
+    const r = rig();
+    await r.call("report.progress", r.req("report.progress", { text: "a1" }, A));
+    await r.call("report.progress", r.req("report.progress", { text: "a2" }, A));
+    const before = await r.call("inbox.fetch", r.req("inbox.fetch", {}, M1));
+    const [first, second] = before.value.items as { id: string }[];
+    const done = r.log.append({
+      requestId: "resolve-1",
+      actor: { human: true },
+      body: { type: "inbox.resolved", payload: { itemId: (first as { id: string }).id } },
+    });
+    expect(done.ok).toBe(true);
+    const after = await r.call("inbox.fetch", r.req("inbox.fetch", {}, M1));
+    expect(after.value.items.map((i: { id: string }) => i.id)).toEqual([
+      (second as { id: string }).id,
+    ]);
+    expect(r.state().inbox).toHaveLength(2);
+  });
 });
 
 describe("共通の性質", () => {

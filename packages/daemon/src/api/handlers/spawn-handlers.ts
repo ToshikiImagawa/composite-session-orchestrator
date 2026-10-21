@@ -433,8 +433,28 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     "node.spawn": (req: HandlerRequest<"node.spawn">): Promise<R<"node.spawn">> => {
       const { parentId, role, ...brief } = req.params;
       const caller = req.caller?.nodeId ?? "";
-      return exclusive(`${caller}\0${req.requestId}`, fingerprintOf(req.params), () =>
-        create({ requestId: req.requestId, caller }, { parentId, role, brief, tag: "spawn" }),
+      return exclusive(
+        `${caller}\0${req.requestId}`,
+        fingerprintOf(req.params),
+        async (): Promise<R<"node.spawn">> => {
+          const created = await create(
+            { requestId: req.requestId, caller },
+            { parentId, role, brief, tag: "spawn" },
+          );
+          if (!created.ok) return created;
+          // 結果: 依存先が未完了なら pending（待っている先行ノードを waitingFor に）、そうでなければ running。
+          const state = log.state();
+          const { nodeId } = created.value;
+          const node = nodeOf(state, nodeId);
+          if (node?.state !== "pending") return { ok: true, value: { nodeId, status: "running" } };
+          const waitingFor = node.dependsOn.filter(
+            (d) => !COMPLETED_STATES.has(stateOf(state, d) ?? "pending"),
+          );
+          return {
+            ok: true,
+            value: { nodeId, status: "pending", ...(waitingFor.length > 0 ? { waitingFor } : {}) },
+          };
+        },
       );
     },
 
