@@ -40,18 +40,19 @@ depends-on: ["design-initial-spec-design"]
 | T13 | daemon: 窓口（HTTP API・認証・読める範囲の判定）。ハンドラの実体（spawn・send・stop など）は別タスク | なし | T08, T10c | 完了（本 PR。入口・認証・認可〔部分木の規則・主体の検査〕・`decision.get`・`report.get` まで） | NFR_003, NFR_004, DC_003 |
 | T13b | daemon: トークンの永続化（ハッシュ・ロール・nodeId・発行日時。人間のトークンは 0600 のファイル。子は再起動時に再発行）と、`node.bind` 専用の認証経路（紐付けコード。一度きり・短い有効期限） | あり（Desktop の紐付け手順は項目 4 で確定） | T13 | 完了（本 PR。子の紐付けは `POST /v1/bind`。Desktop 側の手順は T21） | NFR_002, NFR_004, FR_032 |
 | T13c | core/mcp: 契約から `node.bind`（`OperationMap`・`ROLE_OPERATIONS` の子）を外す。紐付けは `POST /v1/bind` に移ったため。#23（core・mcp を変更中）の後に、別 PR で行う | なし | T13b, #23 | 完了（本 PR） | FR_032, NFR_004 |
-| T13d | core/mcp/daemon（validate のみ）: 契約の追加。`node.spawn`・`node.split` をブリーフ（spec 5.2）にし、`node.created` に `objective`・`acceptanceCriteria`・`scope` を保持、`node.review` に `feedback`、`decision.requested` に `pauseNodeIds`、`scope.extensionRequested`・`scope.extensionDecided` とその fold。ハンドラの実体（spawn・split など）は別タスク | なし | T13c | 完了（本 PR） | FR_005, FR_015, FR_016, FR_018, FR_022, FR_024 |
-| T14 | daemon: 窓口のハンドラ。暫定: `report.done` の根拠は 1 件以上必須（基準ごとの網羅の確認は、契約の拡張〔`node.created` に `acceptanceCriteria`。実装 2〕の後に PR②b で行う）。`node.review` の差し戻しの feedback も、契約の変更（実装 2）を待つ。`tree.list` の分割取得と、中間の統合ノードが親へ要約を報告する件は、T24 の前提。①イベントログだけで完結する操作（tree.list・inbox.fetch・report.*・decision.present・decision.answer・node.review）、②アダプタを伴う操作（node.spawn・send・stop・split・capabilities）、③回収・削除（reclaimPreview・reclaim・reclaimInstruct・purge・purgePreview）。`pauseNodeIds` の再開と `scope.extend`・`scope.decide` は、core の記録イベントが要る（T13d） | なし | T13, T13b, T13d（pauseNodeIds・scope.* のみ） | ①完了（本 PR）、②③未 | FR_005, FR_009〜FR_012, FR_018, FR_019, FR_024, FR_029, FR_031 |
+| T13d | core/mcp/daemon（validate のみ）: 契約の追加。`node.spawn`・`node.split` をブリーフ（spec 5.2）にし、`node.created` に `objective`・`acceptanceCriteria`・`scope` を保持、`node.review` に `feedback`、`decision.requested` に `pauseNodeIds`、`scope.extensionRequested`・`scope.extensionDecided` とその fold。拡張要求の対象の構造化（`{ kind: write | command, value }`）と、承認の `granted`・有効な範囲 `effectiveScope`、未判定の要求のノードごとの上限（10 件）、`node.instructed`、`node.send` の結果（`{ status: "queued" }`）、`node.stop` の `graceMs`。ハンドラの実体（spawn・split など）は別タスク | なし | T13c | 完了（本 PR） | FR_005, FR_015, FR_016, FR_018, FR_022, FR_024 |
+| T14 | daemon: 窓口のハンドラ。暫定: `report.done` の根拠は 1 件以上必須（基準ごとの網羅の確認は、契約の拡張〔`node.created` に `acceptanceCriteria`。実装 2〕の後に PR②b で行う）。`node.review` の差し戻しの feedback も、契約の変更（実装 2）を待つ。`tree.list` の分割取得と、中間の統合ノードが親へ要約を報告する件は、T24 の前提。①イベントログだけで完結する操作（tree.list・inbox.fetch・report.*・decision.present・decision.answer・node.review）、②アダプタを伴う操作（node.spawn・send・stop・split・capabilities）、③回収・削除（reclaimPreview・reclaim・reclaimInstruct・purge・purgePreview）。`pauseNodeIds` の再開と `scope.extend`・`scope.decide` は、core の記録イベントが要る（T13d） | なし | T13, T13b, T13d（pauseNodeIds・scope.* のみ） | ①完了（本 PR）、②③未。**②の前提（T13d で契約に入った検査）**: `node.spawn`・`node.split` のハンドラは、子の範囲を `isScopeSubset(child, parent, cwds)` で検査し（親の範囲に収まらなければ拒否）、作業ツリー（cwd）の確定後に `validateScope(scope, cwd)` を必ず行う（`briefProblem` は形・重複・`..`・`/` だけで、パスの中身は保証しない）。`node.send` は `node.instructed` を記録して `{ status: "queued" }` を返す。`node.review` の accept の `feedback` は `report.added`（kind: `review`）として記録する。**③の前提**: 範囲の拡張の承認（`scope.extensionDecided` の `granted`）を受けたら、`effectiveScope` を導いてアダプタの `updateScope` を呼ぶ（契機は `scope.extensionDecided`。承認の反映） | FR_005, FR_009〜FR_012, FR_018, FR_019, FR_024, FR_029, FR_031 |
 | T23 | daemon: HTML 画面、SSE による反映 | なし（能力表の表示値のみ確定待ちだが、画面の骨格は先行可能のためこちらに配置） | T09 | 未 | FR_021, IR_003, NFR_008 |
 | T24 | core/daemon: 中間統合ノードの配下の要約報告（上位の受信箱へ優先度付きで送る） | なし | T04, T07 | 未 | FR_013 |
 | T25 | mcp: MCP 境界の入力検証（zod）。ツール入力と daemon からの応答の形を検査する。依存追加は着手時点の最新版を確認して固定する。**daemon への結線の前提** | なし | T11 | 未 | NFR_010, NFR_004 |
+| T26 | core/daemon: 未回答の判断（`decision.requested` の open）にも、ノードごとの上限を設ける（拡張要求の未判定の上限〔10 件〕と同じ考え方。上限・超えたときの失敗コードは着手時に決める） | なし | T13d | 未 | FR_018, NFR_011 |
 
 ## 手動確認の結果に依存（仮置きで進め、結果で確定）
 
 | ID | タスク | 手動確認依存 | 依存 | 状態 | 対応要求 |
 |:--|:--|:--|:--|:--|:--|
 | T20 | daemon: `desktop` ランタイムアダプタ（能力表は保守的な値 `unverified`/`unreliable`。`stop` は代行依頼を受信箱へ） | あり（項目 1〜7 で能力表を確定） | T08, T09 | 未 | FR_032, FR_034, FR_036 |
-| T21 | Desktop の子の紐付け手順（暫定は初回メッセージ後） | あり（項目 4） | T20 | 未 | FR_032 |
+| T21 | Desktop の子の紐付け手順（暫定は初回メッセージ後） | あり（項目 4） | T20 | 未 ※ Desktop の子が紐付けの入口（`POST /v1/bind`）を呼ぶ手段（`curl` など）を実行できるかも、ここで確かめる | FR_032 |
 | T22 | plugin: フック設定・skill・起動コマンド（Desktop の子へのフック継承部分） | 一部あり（フック継承は未確認） | T10, T20 | 未 | IR_001, IR_002, NFR_012 |
 
 ## 実装前に決める未解決事項（設計 9.2 より）
