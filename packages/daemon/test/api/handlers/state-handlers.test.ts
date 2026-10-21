@@ -56,6 +56,7 @@ const rig = () => {
     };
   return { log, h, req, call, state: () => log.state() };
 };
+const EVIDENCE = [{ criterion: "テスト", evidence: "通過" }];
 const A = { role: "child", nodeId: "a" } as const;
 const M1 = { role: "integrator", nodeId: "m1" } as const;
 const ROOT = { role: "integrator", nodeId: "root" } as const;
@@ -143,7 +144,7 @@ describe("report.*（子 → 親への報告。報告の保存と、受信箱へ
 
   it("動作中でない子の報告は、何も書かずに失敗する（pending・done など）", async () => {
     const r = rig();
-    await r.call("report.done", r.req("report.done", { evidence: [] }, A));
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A));
     const before = r.state().lastSeq;
     const res = await r.call("report.progress", r.req("report.progress", { text: "x" }, A));
     expect(res.ok).toBe(false);
@@ -249,6 +250,20 @@ describe("decision.answer（人間の回答。一本化）", () => {
     expect(s.inbox.at(-1)).toMatchObject({ kind: "answer", nodeId: "a", ref: decisionId });
   });
 
+  it("採用済みの回答と同じ内容が届いたときは、ok を返し、却下を記録しない（重複の送信）", async () => {
+    const r = rig();
+    const decisionId = await ask(r);
+    await r.call("decision.answer", r.req("decision.answer", { decisionId, choice: "A" }, "human"));
+    const seq = r.state().lastSeq;
+    const same = await r.call(
+      "decision.answer",
+      r.req("decision.answer", { decisionId, choice: "A" }, "human"),
+    );
+    expect(same).toEqual({ ok: true, value: { accepted: true } });
+    expect(r.state().lastSeq).toBe(seq);
+    expect(r.state().decisions[0]?.rejected).toEqual([]);
+  });
+
   it("自由入力でも回答できる。選択肢にない choice は拒否する（何も書かない）", async () => {
     const r = rig();
     const decisionId = await ask(r);
@@ -315,9 +330,21 @@ describe("decision.answer（人間の回答。一本化）", () => {
   });
 });
 
+describe("report.done の根拠（暫定: 1 件以上必須。基準ごとの網羅の確認は、契約の拡張〔acceptanceCriteria〕の後）", () => {
+  it("根拠が空の完了報告は、何も書かずに失敗する（evidenceRequired）", async () => {
+    const r = rig();
+    const before = r.state().lastSeq;
+    const res = await r.call("report.done", r.req("report.done", { evidence: [] }, A));
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("evidenceRequired");
+    expect(r.state().lastSeq).toBe(before);
+    expect(stateOf(r.state(), "a")).toBe("running");
+  });
+});
+
 describe("node.review（完了の判定。受理か差し戻し）", () => {
   const done = async (r: ReturnType<typeof rig>) => {
-    await r.call("report.done", r.req("report.done", { evidence: [] }, A));
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A));
   };
   it("accept: done → verified。reject: done → running。結果は新しい状態", async () => {
     const r = rig();
@@ -334,6 +361,20 @@ describe("node.review（完了の判定。受理か差し戻し）", () => {
       r2.req("node.review", { nodeId: "a", verdict: "reject" }, M1),
     );
     expect(rej).toEqual({ ok: true, value: { state: "running" } });
+  });
+
+  it("ハンドラでも、呼び出し元がそのノードの親であることを確かめる（認可の二重の備え）", async () => {
+    const r = rig();
+    await done(r);
+    const before = r.state().lastSeq;
+    // root は a の親ではない（親は m1）
+    const res = await r.call(
+      "node.review",
+      r.req("node.review", { nodeId: "a", verdict: "accept" }, ROOT),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("forbidden");
+    expect(r.state().lastSeq).toBe(before);
   });
 
   it("done でないノードの判定は、何も書かずに失敗する（invalidTransition）", async () => {
@@ -393,9 +434,39 @@ describe("共通の性質", () => {
     for (const id of Object.keys(r.state().requests)) expect(isSafeId(id), id).toBe(true);
   });
 
+  it("内部の requestId は呼び出し元ごとに分ける。別の呼び出し元が同じ requestId を使っても衝突せず、他の呼び出し元の存在はメッセージに出ない", async () => {
+    const r = rig();
+    const B = { role: "child", nodeId: "b" } as const;
+    const a = await r.call(
+      "report.progress",
+      r.req("report.progress", { text: "A の報告" }, A, "shared-id"),
+    );
+    const b = await r.call(
+      "report.progress",
+      r.req("report.progress", { text: "B の報告" }, B, "shared-id"),
+    );
+    expect(a.ok && b.ok).toBe(true);
+    expect(r.state().reports.map((x) => [x.nodeId, x.text])).toEqual([
+      ["a", "A の報告"],
+      ["b", "B の報告"],
+    ]);
+    // 内部の requestId は固定長で、呼び出し元の ID・要求の ID を含まない
+    for (const id of Object.keys(r.state().requests).filter((k) => k.startsWith("rq-"))) {
+      expect(id).toMatch(/^rq-[0-9a-f]{32}:\d+$/);
+      expect(id).not.toContain("shared-id");
+    }
+    // 同じ呼び出し元の再試行は、冪等のまま
+    const again = await r.call(
+      "report.progress",
+      r.req("report.progress", { text: "A の報告" }, A, "shared-id"),
+    );
+    expect(again.ok).toBe(true);
+    expect(r.state().reports).toHaveLength(2);
+  });
+
   it("途中で失敗する操作は、何も書かない（事前に全体を検査する）", async () => {
     const r = rig();
-    await r.call("report.done", r.req("report.done", { evidence: [] }, A)); // a は done
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A)); // a は done
     const before = r.state().lastSeq;
     const res = await r.call(
       "report.decision",
