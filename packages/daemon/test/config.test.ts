@@ -102,6 +102,16 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     for (const v of ["yes", 1, null]) bad({ purgeTombstone: v }, "purgeTombstone");
   });
 
+  it("childEnvAllow は、環境変数の名前の配列（任意）", () => {
+    const ok1 = parseConfig(JSON.stringify({ ...base, childEnvAllow: ["AWS_PROFILE", "MY_VAR"] }));
+    expect(ok1.ok && ok1.value.childEnvAllow).toEqual(["AWS_PROFILE", "MY_VAR"]);
+    const none = parseConfig(JSON.stringify(base));
+    expect(none.ok && none.value.childEnvAllow).toBeUndefined();
+    for (const v of ["x", [""], ["A B"], ["A=1"], ["1A"], ["A", "A"], [1], Array(101).fill("A")]) {
+      bad({ childEnvAllow: v }, "childEnvAllow");
+    }
+  });
+
   it("maxTurns・maxBudgetUsd（子ごとの上限）は、正の数（任意）", () => {
     const ok1 = parseConfig(JSON.stringify({ ...base, maxTurns: 50, maxBudgetUsd: 2.5 }));
     expect(ok1.ok && [ok1.value.maxTurns, ok1.value.maxBudgetUsd]).toEqual([50, 2.5]);

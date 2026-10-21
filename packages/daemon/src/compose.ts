@@ -341,10 +341,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     probe,
     realpath: (p) => realpath(p),
     resolvePath: (p) => resolveForWrite(p, nodeFsOps),
-    sink: { record: (r) => log.append(r) },
+    sink: { record: (r) => log.append(r), recordAll: (rs) => log.appendAll(rs) },
     timers,
     newRequestId: () => `adp-${randomBytes(12).toString("hex")}`,
     parentEnv: deps.parentEnv ?? process.env,
+    ...(config.childEnvAllow === undefined ? {} : { childEnvAllow: config.childEnvAllow }),
     onUnexpectedExit: (nodeId, reason) => note("unexpectedExit", { nodeId, reason }),
   });
 

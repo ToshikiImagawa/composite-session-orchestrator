@@ -234,7 +234,9 @@ describe("フック（PreToolUse）", () => {
     });
     expect(d.allow).toBe(false);
     expect(d.allow ? "" : d.reason).toContain("範囲");
-    expect(r.sink.records).toHaveLength(1);
+    // 範囲違反の記録と、親（統合ノード）の受信箱の項目（violation）を、1 トランザクションで記録する（T10v）。
+    expect(r.sink.types).toEqual(["scope.violation", "inbox.added"]);
+    expect(r.sink.groups).toEqual([2]);
     expect(r.sink.records[0]).toMatchObject({
       actor: { system: true },
       body: {
@@ -242,6 +244,15 @@ describe("フック（PreToolUse）", () => {
         payload: { nodeId: "a", reason: "outsideWritable", subject: "/wt/a/package.json" },
       },
     });
+    const item = r.sink.records[1]?.body;
+    expect(item).toMatchObject({
+      type: "inbox.added",
+      payload: { nodeId: "a", kind: "violation" },
+    });
+    const summary = item?.type === "inbox.added" ? (item.payload.summary ?? "") : "";
+    expect(summary).toContain("outsideWritable");
+    expect(summary).toContain("/wt/a/package.json");
+    expect(isSafeId(item?.type === "inbox.added" ? item.payload.id : "")).toBe(true);
   });
 
   it("未知のツールとバックグラウンド実行は拒否する", async () => {
@@ -258,7 +269,7 @@ describe("フック（PreToolUse）", () => {
       ).allow,
     ).toBe(false);
     // 未知のツールは範囲違反ではないので、scope.violation（受信箱に載る）にせず、node.toolDenied として記録する。
-    expect(r.sink.types).toEqual(["node.toolDenied", "scope.violation"]);
+    expect(r.sink.types).toEqual(["node.toolDenied", "scope.violation", "inbox.added"]);
     expect(r.sink.records[0]).toMatchObject({
       actor: { system: true },
       body: { type: "node.toolDenied", payload: { nodeId: "a", tool: "WebFetch" } },
@@ -645,11 +656,10 @@ describe("stop: 堅牢化（例外・戻らない・result が来ない）", () 
   });
 
   it("記録口が例外を投げても reject しない", async () => {
-    const sink = {
-      record: () => {
-        throw new Error("sink exploded");
-      },
+    const explode = () => {
+      throw new Error("sink exploded");
     };
+    const sink = { record: explode, recordAll: explode };
     const r = rig({ sink });
     await startNode(r);
     const res = await r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
@@ -740,13 +750,19 @@ describe("予期しない終了（finished の監視）", () => {
     expect(seen[0]?.[0]).toBe("a");
     expect(seen[0]?.[1]).toContain("crashed");
     // 記録: 予期しない終了、失敗の報告、受信箱の failure の項目（報告を ref で指す）
-    expect(r.sink.types).toEqual(["node.exited", "report.added", "inbox.added"]);
+    expect(r.sink.types).toEqual([
+      "node.exited",
+      "node.stateChanged:stop",
+      "node.stateChanged:confirmStopped",
+      "report.added",
+      "inbox.added",
+    ]);
     expect(r.sink.records[0]).toMatchObject({
       actor: { system: true },
       body: { type: "node.exited", payload: { nodeId: "a" } },
     });
-    const report = r.sink.records[1]?.body;
-    const inbox = r.sink.records[2]?.body;
+    const report = r.sink.records[3]?.body;
+    const inbox = r.sink.records[4]?.body;
     expect(report).toMatchObject({
       type: "report.added",
       payload: { nodeId: "a", kind: "failure" },
@@ -759,6 +775,80 @@ describe("予期しない終了（finished の監視）", () => {
     expect(JSON.stringify(r.sink.records[0]?.body)).toContain("crashed");
     const s = await r.adapter.send("a", "x");
     expect(s.ok ? null : s.error.code).toBe("unknownNode");
+  });
+
+  it("終了と状態の遷移（stopped）を、1 トランザクションで記録する。プロセスが残っていなければ stopped（起動時の整合と同じ規則。T10c）", async () => {
+    const r = rig({}, [[]]);
+    await startNode(r);
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(r.sink.types).toEqual([
+      "node.exited",
+      "node.stateChanged:stop",
+      "node.stateChanged:confirmStopped",
+      "report.added",
+      "inbox.added",
+    ]);
+    expect(r.sink.groups).toEqual([5]);
+    expect(r.probeCalls).toEqual([WT]);
+    expect(r.sink.records[1]?.body).toMatchObject({
+      type: "node.stateChanged",
+      payload: { nodeId: "a", event: { type: "stop", mode: "immediate" } },
+    });
+  });
+
+  it("作業ツリー配下にプロセスが残っている（または調べられない）なら、stopIncomplete にして、受信箱に stopIncomplete の項目を出す", async () => {
+    const leftover = [{ pid: 4321, cwd: WT, hasOpenFiles: false }];
+    for (const probes of [[leftover], [null]] as const) {
+      const r = rig({}, probes as never);
+      await startNode(r);
+      r.launcher.sessions[0]?.finish(new Error("crashed"));
+      await settle();
+      expect(r.sink.types).toEqual([
+        "node.exited",
+        "node.stateChanged:stop",
+        "node.stateChanged:stopTimeout",
+        "report.added",
+        "inbox.added",
+        "inbox.added",
+      ]);
+      expect(r.sink.groups).toEqual([6]);
+      const kinds = r.sink.records.flatMap((x) =>
+        x.body.type === "inbox.added" ? [x.body.payload.kind] : [],
+      );
+      expect(kinds).toEqual(["failure", "stopIncomplete"]);
+    }
+  });
+
+  it("プロセスの調査が例外でも、stopIncomplete にする（フェイルクローズ）。通知と掃除は行う", async () => {
+    const seen: string[] = [];
+    const r = rig({
+      onUnexpectedExit: (n) => void seen.push(n),
+      probe: async () => {
+        throw new Error("lsof failed");
+      },
+    });
+    await startNode(r);
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(seen).toEqual(["a"]);
+    expect(r.sink.types).toContain("node.stateChanged:stopTimeout");
+    expect(r.adapter.has("a")).toBe(false);
+  });
+
+  it("同じ範囲違反（種類と対象）は、受信箱に 1 度だけ出す。違反ごとの記録は残す。ノードごとに受信箱の項目の上限がある", async () => {
+    const r = rig();
+    await startNode(r);
+    const h = sessionOf(r).options.hooks.preToolUse;
+    const write = (f: string) => h({ toolName: "Write", toolInput: { file_path: f }, cwd: WT });
+    await write("a.txt");
+    await write("a.txt");
+    expect(r.sink.types).toEqual(["scope.violation", "inbox.added", "scope.violation"]);
+    for (let i = 0; i < 40; i++) await write(`f${i}.txt`);
+    const items = r.sink.types.filter((t) => t === "inbox.added").length;
+    const violations = r.sink.types.filter((t) => t === "scope.violation").length;
+    expect(items).toBe(20);
+    expect(violations).toBe(42);
   });
 
   it("停止の最中の終了は、予期しない終了にしない", async () => {
@@ -781,7 +871,13 @@ describe("予期しない終了（finished の監視）", () => {
     expect(exited?.type).toBe("node.exited");
     const reason = exited?.type === "node.exited" ? exited.payload.reason : "";
     expect(isBoundedText(reason, LIMITS.reason)).toBe(true);
-    expect(r.sink.types).toEqual(["node.exited", "report.added", "inbox.added"]);
+    expect(r.sink.types).toEqual([
+      "node.exited",
+      "node.stateChanged:stop",
+      "node.stateChanged:confirmStopped",
+      "report.added",
+      "inbox.added",
+    ]);
   });
 
   it("未知のツール名が長い・制御文字を含んでも、記録できる形にして記録する", async () => {
@@ -854,6 +950,11 @@ describe("フック: リンクの解決", () => {
     expect(
       (await hook({ toolName: "Write", toolInput: { file_path: "src/boom" }, cwd: WT })).allow,
     ).toBe(false);
-    expect(r.sink.types).toEqual(["scope.violation", "scope.violation"]);
+    expect(r.sink.types).toEqual([
+      "scope.violation",
+      "inbox.added",
+      "scope.violation",
+      "inbox.added",
+    ]);
   });
 });

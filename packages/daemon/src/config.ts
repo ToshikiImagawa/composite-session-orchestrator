@@ -47,6 +47,8 @@ export interface DaemonConfig {
   readonly retentionDays?: number;
   /** `node.purge` の `tombstone` を省略したときに、墓標を残すか。省略すると `DEFAULT_PURGE_TOMBSTONE`（残す）。 */
   readonly purgeTombstone?: boolean;
+  /** 子に渡す環境変数の、既定（PATH・HOME・認証・プロキシなど）に加える名前（完全一致）。 */
+  readonly childEnvAllow?: readonly string[];
   /** 子ごとの、エージェントのターン数の上限（API の往復）。省略すると 100。 */
   readonly maxTurns?: number;
   /** 子ごとの、費用の上限（USD）。省略すると 5。 */
@@ -72,6 +74,7 @@ const KEYS = [
   "purgeTombstone",
   "maxTurns",
   "maxBudgetUsd",
+  "childEnvAllow",
 ] as const;
 
 const bad = (cause: string): { ok: false; error: Failure } => ({
@@ -168,6 +171,19 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       raw.maxBudgetUsd > 10_000)
   ) {
     return bad("maxBudgetUsd は 0 より大きく 10000 以下の数");
+  }
+  let childEnvAllow: string[] | undefined;
+  if (raw.childEnvAllow !== undefined) {
+    const v = raw.childEnvAllow;
+    if (
+      !Array.isArray(v) ||
+      v.length > 100 ||
+      new Set(v).size !== v.length ||
+      !v.every((x) => typeof x === "string" && /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(x))
+    ) {
+      return bad("childEnvAllow は、環境変数の名前（英数字と _。重複なし、100 件以下）の配列");
+    }
+    childEnvAllow = [...(v as string[])];
   }
   let startLimits: { perParent?: number; total?: number } | undefined;
   if (raw.startLimits !== undefined) {
@@ -270,6 +286,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       port,
       ...(regenerableIgnored === undefined ? {} : { regenerableIgnored }),
       ...(startLimits === undefined ? {} : { startLimits }),
+      ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
       ...(raw.maxTurns === undefined ? {} : { maxTurns: raw.maxTurns as number }),
       ...(raw.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: raw.maxBudgetUsd as number }),
       ...(raw.retentionDays === undefined ? {} : { retentionDays: raw.retentionDays as number }),

@@ -1,93 +1,137 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { childEnv } from "../../src/sdk/child-env.js";
+import { childEnv, DEFAULT_CHILD_ENV } from "../../src/sdk/child-env.js";
 
-describe("childEnv（親の環境変数から、セッション識別子に関わる変数を除く）", () => {
-  it("CLAUDE_CODE_SESSION_ID を除く（子のセッション識別子が親と混ざるのを防ぐ。Spike 02 #6）", () => {
-    const r = childEnv({ PATH: "/usr/bin", CLAUDE_CODE_SESSION_ID: "parent-session" });
-    expect(r.env).toEqual({ PATH: "/usr/bin" });
-    expect(r.removed).toEqual(["CLAUDE_CODE_SESSION_ID"]);
-  });
-
-  it("名前に SESSION を含む CLAUDE_* を除く（大文字小文字を問わない）", () => {
-    const r = childEnv({
-      CLAUDE_CODE_REMOTE_SESSION_ID: "x",
-      claude_code_session_dir: "z",
-      CLAUDE_CODE_SESSIONS: "w",
+describe("childEnv（許可リスト方式。親の環境変数から、許可した名前だけを子に渡す）", () => {
+  it("既定で渡す: PATH・HOME・LANG・TMPDIR など、実行に要る変数", () => {
+    const keep = {
+      PATH: "/usr/bin",
       HOME: "/home/u",
-    });
-    expect(Object.keys(r.env)).toEqual(["HOME"]);
-    expect([...r.removed].sort()).toEqual(
-      ["CLAUDE_CODE_REMOTE_SESSION_ID", "CLAUDE_CODE_SESSIONS", "claude_code_session_dir"].sort(),
-    );
+      LANG: "ja_JP.UTF-8",
+      TMPDIR: "/tmp",
+      TZ: "UTC",
+    };
+    const r = childEnv(keep);
+    expect(r.env).toEqual(keep);
+    expect(r.removed).toEqual([]);
   });
 
-  it("認証用の変数は残す（ANTHROPIC_*、CLAUDE_CODE_OAUTH_TOKEN、CLAUDE_CODE_USE_BEDROCK など）", () => {
+  it("既定で渡す: SDK の認証・接続に要る変数（ANTHROPIC_*、OAuth・Bedrock・Vertex の切り替え、プロキシ・証明書）", () => {
     const keep = {
       ANTHROPIC_API_KEY: "k",
       ANTHROPIC_BASE_URL: "u",
       CLAUDE_CODE_OAUTH_TOKEN: "t",
       CLAUDE_CODE_USE_BEDROCK: "1",
       CLAUDE_CONFIG_DIR: "/c",
+      HTTPS_PROXY: "http://p",
+      NO_PROXY: "localhost",
+      NODE_EXTRA_CA_CERTS: "/ca.pem",
+      SSL_CERT_FILE: "/ca.pem",
     };
     expect(childEnv(keep).env).toEqual(keep);
-    expect(childEnv(keep).removed).toEqual([]);
   });
 
-  it("識別子系だけを除き、*_TOKEN* / *_TOKEN_FILE / *_URL は SESSION を含んでも残す（認証・接続に要る。規則は T10b の実機検証で調整）", () => {
-    const keep = {
-      CLAUDE_CODE_SESSION_ACCESS_TOKEN: "a",
-      CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR: "1",
-      CLAUDE_SESSION_INGRESS_TOKEN_FILE: "/f",
-      CLAUDE_CODE_SESSION_URL: "https://x",
-      claude_session_token: "t",
+  it("許可していない変数は渡さない（GH_TOKEN・GITHUB_TOKEN・AWS_*・クラウドの認証など、秘密を含む）。除いた名前だけを返し、値は返さない", () => {
+    const input = {
+      PATH: "/usr/bin",
+      GH_TOKEN: "secret-gh",
+      GITHUB_TOKEN: "secret-gh2",
+      CLOUDSDK_AUTH_ACCESS_TOKEN: "secret-g",
+      AWS_SECRET_ACCESS_KEY: "secret-aws",
+      DATABASE_URL: "postgres://u:p@h/db",
     };
-    const r = childEnv({ ...keep, CLAUDE_CODE_SESSION_ID: "p" });
+    const r = childEnv(input);
+    expect(r.env).toEqual({ PATH: "/usr/bin" });
+    expect([...r.removed].sort()).toEqual(
+      [
+        "AWS_SECRET_ACCESS_KEY",
+        "CLOUDSDK_AUTH_ACCESS_TOKEN",
+        "DATABASE_URL",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+      ].sort(),
+    );
+    expect(JSON.stringify(r)).not.toContain("secret");
+    expect(JSON.stringify(r)).not.toContain("postgres://");
+  });
+
+  it("設定で、名前を追加できる（完全一致の名前だけ）", () => {
+    const r = childEnv({ PATH: "/bin", MY_TOOL_HOME: "/x", MY_TOOL_HOME2: "y", GH_TOKEN: "t" }, [
+      "MY_TOOL_HOME",
+    ]);
+    expect(r.env).toEqual({ PATH: "/bin", MY_TOOL_HOME: "/x" });
+    expect([...r.removed].sort()).toEqual(["GH_TOKEN", "MY_TOOL_HOME2"]);
+  });
+
+  it("セッション識別子に関わる変数は、既定でも、追加の指定でも、渡さない（子のセッション識別子が親と混ざるのを防ぐ。Spike 02 #6）", () => {
+    const parent = {
+      PATH: "/bin",
+      CLAUDE_CODE_SESSION_ID: "parent-session",
+      CLAUDE_CODE_REMOTE_SESSION_ID: "r",
+      claude_code_session_dir: "z",
+    };
+    const r = childEnv(parent, ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_REMOTE_SESSION_ID"]);
+    expect(r.env).toEqual({ PATH: "/bin" });
+    expect(r.removed).toContain("CLAUDE_CODE_SESSION_ID");
+    expect(r.removed).toContain("CLAUDE_CODE_REMOTE_SESSION_ID");
+  });
+
+  it("追加の指定で、SESSION を含んでも認証・接続に要る変数（*_TOKEN*・*_URL）は渡せる", () => {
+    const keep = { CLAUDE_SESSION_INGRESS_TOKEN_FILE: "/f", CLAUDE_CODE_SESSION_URL: "https://x" };
+    const r = childEnv({ ...keep, CLAUDE_CODE_SESSION_ID: "p" }, [
+      ...Object.keys(keep),
+      "CLAUDE_CODE_SESSION_ID",
+    ]);
     expect(r.env).toEqual(keep);
     expect(r.removed).toEqual(["CLAUDE_CODE_SESSION_ID"]);
   });
 
-  it("SESSION を含んでも CLAUDE で始まらない変数は残す", () => {
-    const keep = { TMUX_SESSION: "a", XDG_SESSION_ID: "b", SESSION_MANAGER: "c" };
-    expect(childEnv(keep).env).toEqual(keep);
-  });
-
-  it("値が undefined の項目は捨てる（env は文字列だけ）", () => {
-    const r = childEnv({ A: "1", B: undefined });
-    expect(r.env).toEqual({ A: "1" });
-    expect(r.removed).toEqual([]);
-  });
-
-  it("除いた変数の名前だけを返し、値は返さない。入力を変更しない", () => {
-    const input = { CLAUDE_CODE_SESSION_ID: "secret-value", A: "1" };
+  it("値が undefined の項目は捨てる（env は文字列だけ）。入力を変更しない", () => {
+    const input = { PATH: "/bin", B: undefined };
     const before = JSON.stringify(input);
     const r = childEnv(input);
-    expect(JSON.stringify(r)).not.toContain("secret-value");
+    expect(r.env).toEqual({ PATH: "/bin" });
+    expect(r.removed).toEqual([]);
     expect(JSON.stringify(input)).toBe(before);
   });
 
-  it("性質: 結果に SESSION を含む CLAUDE_* は残らず、それ以外は値を保つ（決定的）", () => {
+  it("既定の一覧は、秘密になりうる名前（GH_TOKEN など）を含まない", () => {
+    for (const bad of [
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "AWS_SECRET_ACCESS_KEY",
+      "CLAUDE_CODE_SESSION_ID",
+    ]) {
+      expect(DEFAULT_CHILD_ENV.names).not.toContain(bad);
+    }
+  });
+
+  it("性質: 結果は、許可した名前だけで値を保ち、それ以外は removed に入る（決定的）", () => {
     const key = fc.oneof(
       fc.constantFrom(
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_X_SESSION",
-        "claude_session",
         "PATH",
         "HOME",
+        "GH_TOKEN",
         "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_SESSION_ID",
+        "X",
       ),
       fc.string({ minLength: 1, maxLength: 12 }),
     );
     fc.assert(
-      fc.property(fc.dictionary(key, fc.string()), (env) => {
-        const r = childEnv(env);
-        for (const [k, v] of Object.entries(r.env)) {
-          expect(/^claude.*session/i.test(k) && !/token|_url$/i.test(k), k).toBe(false);
-          expect(env[k]).toBe(v);
-        }
-        for (const k of Object.keys(env)) expect(k in r.env || r.removed.includes(k), k).toBe(true);
-        expect(childEnv(env)).toEqual(r);
-      }),
+      fc.property(
+        fc.dictionary(key, fc.string()),
+        fc.array(key, { maxLength: 4 }),
+        (env, extra) => {
+          const r = childEnv(env, extra);
+          for (const [k, v] of Object.entries(r.env)) expect(env[k]).toBe(v);
+          for (const k of Object.keys(env))
+            expect(k in r.env || r.removed.includes(k), k).toBe(true);
+          expect("CLAUDE_CODE_SESSION_ID" in r.env).toBe(false);
+          expect("GH_TOKEN" in r.env).toBe(extra.includes("GH_TOKEN") && "GH_TOKEN" in env);
+          expect(childEnv(env, extra)).toEqual(r);
+        },
+      ),
     );
   });
 });
