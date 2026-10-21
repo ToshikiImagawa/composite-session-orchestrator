@@ -67,10 +67,18 @@ const rig = () => {
   node("b", "implement", "m2", CHILD);
   ev("b", { type: "start" });
 
-  const calls = { updated: [] as [string, Scope][], failures: [] as string[] };
+  const calls = {
+    updated: [] as [string, Scope][],
+    sent: [] as [string, string][],
+    failures: [] as string[],
+  };
   const flags = { updateFails: false };
   const adapter = {
     kind: "cli" as const,
+    send: async (id: string, text: string) => {
+      calls.sent.push([id, text]);
+      return ok({ status: "queued" as const });
+    },
     updateScope: (id: string, scope: Scope): Result<undefined, Failure> => {
       calls.updated.push([id, scope]);
       return flags.updateFails
@@ -124,6 +132,36 @@ describe("scope.extend（範囲の拡張要求）", () => {
     const seq = r.s().lastSeq;
     expect(await r.extend(GIT, "a", "e-1")).toEqual(res);
     expect(r.s().lastSeq).toBe(seq);
+  });
+
+  it("制御文字・glob 文字・シェルの連結子・入れ子の .git・前後の空白は、何も記録せずに拒否する", async () => {
+    const r = rig();
+    const seq = r.s().lastSeq;
+    const bad: [string, string][] = [
+      ["write", "src/*.ts"],
+      ["write", "src/{a,b}"],
+      ["write", "src/a\nb"],
+      ["write", "src/.git/hooks"],
+      ["write", ".git"],
+      ["write", " src"],
+      ["write", "src "],
+      ["command", "ls && rm -rf x"],
+      ["command", "ls; rm x"],
+      ["command", "ls | sh"],
+      ["command", "ls\nrm x"],
+      ["command", "echo `id`"],
+      ["command", "echo $(id)"],
+      ["command", " ls"],
+    ];
+    for (const [kind, value] of bad) {
+      const res = await r.extend({ target: { kind, value }, reason: "r" });
+      expect(res.ok, `${kind}:${value}`).toBe(false);
+      expect(res.error?.code).toBe("invalidTarget");
+    }
+    expect(r.s().lastSeq).toBe(seq);
+    expect(
+      (await r.extend({ target: { kind: "command", value: "git status" }, reason: "r" })).ok,
+    ).toBe(true);
   });
 
   it("書き込み先の絶対パス・.. ・/ は、何も記録せずに拒否する", async () => {
@@ -203,6 +241,48 @@ describe("scope.decide（拡張の判定。承認でアダプタの範囲を更�
     const retry = await r.decide({ extensionId: id, decision: "approve" }, "m1", "d-1");
     expect(retry.ok).toBe(true);
     expect(r.calls.updated).toHaveLength(2);
+  });
+
+  it("すでに approved の拡張への再承認は、記録せず、更新だけをやり直して成功する（requestId が違っても）", async () => {
+    const r = rig();
+    const id = await ask(r);
+    r.flags.updateFails = true;
+    await r.decide({ extensionId: id, decision: "approve" }, "m1", "d-1");
+    r.flags.updateFails = false;
+    const seq = r.s().lastSeq;
+    const again = await r.decide({ extensionId: id, decision: "approve" }, "m1", "d-other");
+    expect(again.ok).toBe(true);
+    expect(r.s().lastSeq).toBe(seq);
+    expect(r.calls.updated).toHaveLength(2);
+    // 却下済みへの承認は、成功にしない
+    const id2 = await ask(r, { kind: "command", value: "ls" });
+    await r.decide({ extensionId: id2, decision: "reject" });
+    expect((await r.decide({ extensionId: id2, decision: "approve" })).error?.code).toBe(
+      "extensionAlreadyDecided",
+    );
+  });
+
+  it("動作中でないノードの承認は、記録だけ行い、アダプタを更新しない（次回の起動で有効な範囲が使われる）", async () => {
+    const r = rig();
+    const id = await ask(r);
+    r.ev("a", { type: "reportDone" });
+    r.ev("a", { type: "accept" });
+    const res = await r.decide({ extensionId: id, decision: "approve" });
+    expect(res.ok).toBe(true);
+    expect(r.s().extensions[0]?.status).toBe("approved");
+    expect(r.calls.updated).toEqual([]);
+  });
+
+  it("判定の結果を、動作中の子に追加指示として記録して届ける（承認・却下・切り出し）", async () => {
+    const r = rig();
+    const id = await ask(r);
+    await r.decide({ extensionId: id, decision: "approve" });
+    expect(r.s().instructions.at(-1)?.nodeId).toBe("a");
+    expect(r.s().instructions.at(-1)?.text).toContain("承認");
+    expect(r.calls.sent.at(-1)?.[0]).toBe("a");
+    const id2 = await ask(r, { kind: "command", value: "ls" });
+    await r.decide({ extensionId: id2, decision: "reject" });
+    expect(r.s().instructions.at(-1)?.text).toContain("却下");
   });
 
   it("対象のノードの親（の祖先）でなければ forbidden。判定済みの再判定は拒否される", async () => {

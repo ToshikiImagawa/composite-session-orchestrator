@@ -28,7 +28,14 @@ import {
 } from "@cso/core";
 import type { RuntimeAdapter } from "../../sdk/runtime.js";
 import type { HandlerRequest } from "../server.js";
-import { appendAtomically, deriveId, fail, type LogPort, summarize } from "./context.js";
+import {
+  alreadyApplied,
+  appendAtomically,
+  deriveId,
+  fail,
+  type LogPort,
+  summarize,
+} from "./context.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
@@ -44,9 +51,27 @@ export interface ScopeHandlerDeps {
   readonly onFailure?: (nodeId: string, cause: string) => void;
 }
 
-/** 書き込み先として使えない値: 絶対パス・`..` を含む・`/` だけ。 */
-const badWritable = (v: string): boolean =>
-  v.startsWith("/") || v.split("/").some((seg) => seg === "..") || v.trim() === "";
+const LIVE: ReadonlySet<NodeState> = new Set(["running", "waiting"]);
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: 制御文字を拒否するための検査
+const CONTROL = /[\u0000-\u001f\u007f]/u;
+
+/** 拡張の対象として使えない値の理由。使えれば `undefined`。 */
+function targetProblem(target: { kind: string; value: string }): string | undefined {
+  const v = target.value;
+  if (v.trim() === "" || v !== v.trim()) return "前後の空白・空の値は使えない";
+  if (CONTROL.test(v)) return "制御文字（改行を含む）は使えない";
+  if (target.kind === "write") {
+    if (v.startsWith("/")) return "絶対パスは使えない";
+    const segs = v.split("/");
+    if (segs.some((seg) => seg === "..")) return ".. は使えない";
+    if (/[*?[\]{}]/u.test(v)) return "glob 文字（* ? [ ] { }）は使えない";
+    if (segs.some((seg) => seg.toLowerCase() === ".git")) return ".git（入れ子を含む）は使えない";
+    return undefined;
+  }
+  if (/[&;|`<>]|\$\(/u.test(v)) return "シェルの連結子・置換（& ; | ` < > $(）は使えない";
+  return undefined;
+}
 
 export function createScopeHandlers(deps: ScopeHandlerDeps) {
   const { log } = deps;
@@ -123,11 +148,12 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
     "scope.extend": (req: HandlerRequest<"scope.extend">): R<"scope.extend"> => {
       const caller = req.caller?.nodeId ?? "";
       const { target, reason } = req.params;
-      if (target.kind === "write" && badWritable(target.value)) {
+      const problem = targetProblem(target);
+      if (problem !== undefined) {
         return fail(
           "invalidTarget",
-          "書き込み先は、作業ツリーの内側の相対パスで指定する（絶対パス・.. ・/ は使えない）",
-          "相対パスで要求し直す",
+          `拡張の対象が使えない: ${problem}（書き込み先は、作業ツリーの内側の相対パス。コマンドは、単純な 1 つのコマンド）`,
+          "対象を直して要求し直す",
         );
       }
       const extensionId = deriveId("ext", caller, req.requestId, "extension");
@@ -166,9 +192,24 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
           "親の統合ノードに依頼する",
         );
       }
+      const stateOfNode = (): NodeState | undefined => stateOf(log.state(), ext.nodeId);
+      // 承認済みへの再承認: 記録はせず、アダプタの更新だけをやり直す（requestId が違っても。冪等）。
+      if (decision === "approve" && ext.status === "approved") {
+        const failed = applyToAdapter(ext, extensionId);
+        if (failed) return failed;
+        return { ok: true, value: { state: stateOfNode() as NodeState } };
+      }
       if (decision === "approve" && ext.status === "open") {
-        const problem = await checkApprove(ext);
-        if (problem) return problem;
+        // 検査は、記録する直前に取り直す（検査の途中の待ちの間に、範囲が変わっていないか）。
+        for (let attempt = 0; ; attempt++) {
+          const basis = JSON.stringify(effectiveScope(log.state(), ext.nodeId));
+          const problem = await checkApprove(ext);
+          if (problem) return problem;
+          if (JSON.stringify(effectiveScope(log.state(), ext.nodeId)) === basis) break;
+          if (attempt >= 1) {
+            return fail("busy", "検査の間に範囲が変わった", "もう一度判定する");
+          }
+        }
       }
       const bodies: EventBody[] = [
         {
@@ -183,44 +224,96 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
       const decided = appendAtomically(log, deps.clock, req.requestId, { nodeId: caller }, bodies);
       if (!decided.ok) return decided;
       if (decision === "approve") {
-        const after = log.state();
-        const scope = effectiveScope(after, ext.nodeId);
-        const adapter = deps.adapterFor(ext.nodeId);
-        let failedWith: string | undefined;
-        if (scope === undefined || adapter === undefined) {
-          failedWith = "アダプタまたは範囲が見つからない";
-        } else {
-          try {
-            const u = adapter.updateScope(ext.nodeId, scope);
-            if (!u.ok) failedWith = `${u.error.code}: ${u.error.cause}`;
-          } catch (e) {
-            failedWith = String(e);
-          }
-        }
-        if (failedWith !== undefined) {
-          note(ext.nodeId, `範囲を更新できない: ${failedWith}`);
-          appendAtomically(log, deps.clock, `${req.requestId}/update-failed`, { nodeId: caller }, [
-            {
-              type: "inbox.added",
-              payload: {
-                id: deriveId("inbox", caller, req.requestId, "update-failed"),
-                kind: "failure",
-                nodeId: ext.nodeId,
-                summary: summarize(
-                  `範囲の拡張 ${extensionId} を承認したが、アダプタの範囲を更新できなかった`,
-                ),
-              },
-            },
-          ]);
-          return fail(
-            "scopeUpdateFailed",
-            "承認は記録したが、アダプタの範囲を更新できなかった",
-            "同じ判定をもう一度送ると、更新をやり直す",
-          );
-        }
+        const failed = applyToAdapter(ext, extensionId);
+        if (failed) return failed;
       }
-      const st: NodeState | undefined = stateOf(log.state(), ext.nodeId);
-      return { ok: true, value: { state: st as NodeState } };
+      notifyChild(ext, decision, caller, req.requestId);
+      return { ok: true, value: { state: stateOfNode() as NodeState } };
     },
   };
+
+  /** 承認を、動作中の子のアダプタへ反映する（動作中でなければ、次回の起動で有効な範囲が使われるので、何もしない）。 */
+  function applyToAdapter(
+    ext: ExtensionRecord,
+    extensionId: string,
+  ): { ok: false; error: Failure } | undefined {
+    const after = log.state();
+    if (!LIVE.has(stateOf(after, ext.nodeId) ?? "pending")) return undefined;
+    const scope = effectiveScope(after, ext.nodeId);
+    const adapter = deps.adapterFor(ext.nodeId);
+    let failedWith: string | undefined;
+    if (scope === undefined || adapter === undefined) {
+      failedWith = "アダプタまたは範囲が見つからない";
+    } else {
+      try {
+        const u = adapter.updateScope(ext.nodeId, scope);
+        if (!u.ok) failedWith = `${u.error.code}: ${u.error.cause}`;
+      } catch (e) {
+        failedWith = String(e);
+      }
+    }
+    if (failedWith === undefined) return undefined;
+    note(ext.nodeId, `範囲を更新できない: ${failedWith}`);
+    const listed = appendAtomically(
+      log,
+      deps.clock,
+      `update-failed-${extensionId}`,
+      { system: true },
+      [
+        {
+          type: "inbox.added",
+          payload: {
+            id: deriveId("inbox", "system", extensionId, "update-failed"),
+            kind: "failure",
+            nodeId: ext.nodeId,
+            summary: summarize(
+              `範囲の拡張 ${extensionId} を承認したが、アダプタの範囲を更新できなかった`,
+            ),
+          },
+        },
+      ],
+    );
+    if (!listed.ok)
+      note(ext.nodeId, `受信箱に載せられない: ${listed.error.code}: ${listed.error.cause}`);
+    return fail(
+      "scopeUpdateFailed",
+      "承認は記録したが、アダプタの範囲を更新できなかった",
+      "同じ判定をもう一度送ると、更新をやり直す",
+    );
+  }
+
+  /** 判定の結果を、動作中の子に追加指示として記録して届ける（失敗は判定を妨げない）。 */
+  function notifyChild(
+    ext: ExtensionRecord,
+    decision: "approve" | "reject" | "split",
+    caller: string,
+    requestId: string,
+  ): void {
+    if (!LIVE.has(stateOf(log.state(), ext.nodeId) ?? "pending")) return;
+    const what = `${ext.target.kind === "write" ? "書き込み先" : "コマンド"} ${ext.target.value}`;
+    const text =
+      decision === "approve"
+        ? `範囲の拡張の要求（${what}）は承認された。使ってよい`
+        : decision === "reject"
+          ? `範囲の拡張の要求（${what}）は却下された。範囲の内側で進める`
+          : `範囲の拡張の要求（${what}）は、作業を切り出して別に進めることになった。範囲の内側で進める`;
+    const notifyId = `${requestId}/notify`;
+    const before = alreadyApplied(log.state(), { nodeId: caller }, notifyId);
+    const r = appendAtomically(log, deps.clock, notifyId, { nodeId: caller }, [
+      { type: "node.instructed", payload: { nodeId: ext.nodeId, text } },
+    ]);
+    if (!r.ok) {
+      note(ext.nodeId, `判定の通知を記録できない: ${r.error.code}: ${r.error.cause}`);
+      return;
+    }
+    if (before) return;
+    const adapter = deps.adapterFor(ext.nodeId);
+    if (adapter === undefined) return;
+    void adapter.send(ext.nodeId, text).then(
+      (sent) => {
+        if (!sent.ok) note(ext.nodeId, `判定の通知を届けられない: ${sent.error.code}`);
+      },
+      (e: unknown) => note(ext.nodeId, `判定の通知を届けられない: ${String(e)}`),
+    );
+  }
 }
