@@ -183,4 +183,15 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
       }),
     );
   });
+
+  it("requestId は isSafeId の形式（パス区切り・記号・先頭の - などは拒否し、. _ : - は受け付ける）", () => {
+    for (const requestId of ["a/b", "a;b", "-x", "../x", "a*"]) {
+      expect(
+        code(parseEnvelope({ requestId, operation: "tree.list", params: {} })),
+        requestId,
+      ).toBe("invalidRequest");
+    }
+    const ok = parseEnvelope({ requestId: "req:1.a_b-c", operation: "tree.list", params: {} });
+    expect(ok.ok).toBe(true);
+  });
 });

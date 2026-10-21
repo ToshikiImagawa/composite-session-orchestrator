@@ -19,6 +19,7 @@
  */
 
 import { type Failure, failure, ok, type Result } from "./contract.js";
+import { isSafeId } from "./ids.js";
 import { type InboxItem, isValidInboxTime } from "./inbox.js";
 import { INBOX_KINDS, type InboxKind } from "./inbox-kinds.js";
 import type { NodeRole, NodeState } from "./index.js";
@@ -343,7 +344,8 @@ export const stateOf = (state: OrchState, nodeId: string): NodeState | undefined
 
 type Rec = Record<string, unknown>;
 const isRec = (x: unknown): x is Rec => typeof x === "object" && x !== null && !Array.isArray(x);
-const isId = (x: unknown): x is string => typeof x === "string" && x !== "";
+/** 識別子（ノード・判断・報告・受信箱の項目・要求）。書き込み側でも `isSafeId` の形式に限る（読み取り側の検査と同じ規則）。 */
+const isId = isSafeId;
 const isIdArray = (x: unknown): x is string[] => Array.isArray(x) && x.every(isId);
 
 function parseActor(x: unknown): Actor | undefined {
@@ -482,7 +484,8 @@ const toolDenialShape = (r: unknown): boolean =>
   isRec(r) &&
   Number.isInteger(r.seq) &&
   isId(r.nodeId) &&
-  isId(r.tool) &&
+  typeof r.tool === "string" &&
+  r.tool !== "" &&
   parseActor(r.actor) !== undefined;
 const exitShape = (r: unknown): boolean =>
   isRec(r) &&
@@ -648,7 +651,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     return reject(
       seq,
       "invalidRequestId",
-      "requestId が空または文字列でない",
+      "requestId が識別子の形式でない（英数字で始まり、英数字と . _ : - のみ、128 文字以下）",
       "requestId を付ける",
     );
   }
