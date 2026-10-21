@@ -8,7 +8,7 @@
  * 2. 作業ツリーを作る（`provisionWorktree`。同じ nodeId なら同じ結果を返す）
  * 3. 子の範囲を、子の作業ツリーで `validateScope`（必須）し、親の有効な範囲に収まるか `isScopeSubset` で検査する。
  *    相対パスは、親の作業ツリーを基準に、子も親も同じ基準で比べる（作業ツリーは別々なので、絶対パスは収まらない）。
- *    親にブリーフがなければ（根など）、収まるかの検査は行わない。
+ *    親にブリーフがなければ（根など）、daemon の設定の根の範囲（`rootScope`）と比べる。設定がなければ失敗させる（安全側）。
  * 4. ノードを記録する（`node.created`。依存が揃っていれば続けて `start`。1 トランザクション）。依存が揃っていなければ pending
  *    のまま返す（起動は、依存の完了時にスケジューラが行う）。
  * 5. トークンを発行して `adapter.start` に直接渡す（保存に成功してから有効になる）。
@@ -68,6 +68,12 @@ export interface SpawnHandlerDeps {
   readonly credentials: Pick<CredentialStore, "issueNodeToken" | "revokeNode">;
   /** `node.split` の keep が stop のときに、元のノードを止める（`node.stop` のハンドラ）。 */
   readonly stop: (req: HandlerRequest<"node.stop">) => R<"node.stop"> | Promise<R<"node.stop">>;
+  /**
+   * 根（ブリーフを持たない親）の有効な範囲。daemon の設定（プロジェクトの許可リスト）から導く。書き込み可能な場所は根の
+   * 作業ツリーの下（相対パスは根の作業ツリー基準）、`allowedCommands` は設定のリスト。なければ、ブリーフを持たない親の
+   * 下の `spawn` は失敗させる（根の子を経由した権限の昇格を防ぐ）。
+   */
+  readonly rootScope?: Scope;
   /** 応答に出さない原因（後始末の失敗など）の記録先。 */
   readonly onFailure?: (nodeId: string, cause: string) => void;
 }
@@ -253,11 +259,26 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
         ),
       );
     }
-    const parentScope = effectiveScope(state, parentId);
-    if (
-      parentScope !== undefined &&
-      !isScopeSubset(brief.scope, parentScope, { child: parentCwd, parent: parentCwd })
-    ) {
+    const parentScope = effectiveScope(state, parentId) ?? deps.rootScope;
+    if (parentScope === undefined) {
+      return abort(
+        fail(
+          "rootScopeUnconfigured",
+          `親 ${parentId} にブリーフがなく、根の範囲の設定（許可リスト）もない。子の権限を決められない`,
+          "daemon の設定に、根の範囲（許可する場所とコマンド）を書く",
+        ),
+      );
+    }
+    if (deps.rootScope === parentScope && validateScope(parentScope, parentCwd).length > 0) {
+      return abort(
+        fail(
+          "rootScopeInvalid",
+          "daemon の設定の根の範囲が、根の作業ツリーの規則を満たさない",
+          "設定の根の範囲を、根の作業ツリーの内側の場所に直す",
+        ),
+      );
+    }
+    if (!isScopeSubset(brief.scope, parentScope, { child: parentCwd, parent: parentCwd })) {
       return abort(
         fail(
           "scopeNotSubset",

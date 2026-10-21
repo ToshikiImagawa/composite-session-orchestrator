@@ -39,7 +39,12 @@ const brief = (over: Record<string, unknown> = {}) => ({
 });
 
 /** root ─ m1(統合・範囲 PARENT_SCOPE・running) ─ a(running)、root ─ m2(統合)。呼び出し元は既定で m1 */
-const rig = () => {
+const ROOT_SCOPE: Scope = {
+  writableLocations: ["src", "docs"],
+  forbiddenLocations: [".git"],
+  allowedCommands: ["pnpm test"],
+};
+const rig = (opts: { rootScope?: Scope | null } = {}) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
   const log = opened.value;
@@ -158,6 +163,7 @@ const rig = () => {
     adapterFor: () => adapter,
     ports,
     credentials,
+    ...(opts.rootScope === null ? {} : { rootScope: opts.rootScope ?? ROOT_SCOPE }),
     stop: async (req) => {
       calls.stopped.push(req.params.nodeId);
       return ok({ state: "stopping" as const });
@@ -297,6 +303,27 @@ describe("node.spawn（子の生成と起動）", () => {
     expect(r.calls.removed).toEqual([id]);
     expect(r.calls.revoked).toEqual([id]);
     expect(stateOf(r.s(), id)).toBe("stopped");
+  });
+
+  it("ブリーフのない親（根など）は、設定の根の範囲と比べる。範囲を超える子・設定がない場合は失敗する", async () => {
+    const r = rig();
+    const ok1 = await r.call("node.spawn", { parentId: "m2", ...brief() }, "m2");
+    expect(ok1.ok).toBe(true);
+    const wide = await r.call(
+      "node.spawn",
+      { parentId: "m2", ...brief({ scope: { ...CHILD_SCOPE, allowedCommands: ["git push"] } }) },
+      "m2",
+    );
+    expect(wide.error?.code).toBe("scopeNotSubset");
+    const none = rig({ rootScope: null });
+    const res = await none.call("node.spawn", { parentId: "m2", ...brief() }, "m2");
+    expect(res.error?.code).toBe("rootScopeUnconfigured");
+    expect(none.calls.removed).toHaveLength(1);
+    expect(none.calls.started).toEqual([]);
+    const badRoot = rig({ rootScope: { ...ROOT_SCOPE, writableLocations: ["/etc"] } });
+    expect(
+      (await badRoot.call("node.spawn", { parentId: "m2", ...brief() }, "m2")).error?.code,
+    ).toBe("rootScopeInvalid");
   });
 
   it("作業ツリーを作れなければ、何も記録せずに失敗する", async () => {

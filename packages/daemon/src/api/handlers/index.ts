@@ -31,7 +31,7 @@ export function createHandlers(
   runtime?: Pick<RuntimeHandlerDeps, "adapterFor" | "onStopSettled">,
   /** 渡すと、回収の操作（node.reclaimPreview・node.reclaim）も有効になる。 */
   reclaim?: ReclaimPorts,
-  spawn?: Pick<SpawnHandlerDeps, "ports" | "credentials" | "onFailure">,
+  spawn?: Pick<SpawnHandlerDeps, "ports" | "credentials" | "rootScope" | "onFailure">,
 ): Handlers {
   const rt = runtime === undefined ? undefined : createRuntimeHandlers({ ...deps, ...runtime });
   return {
