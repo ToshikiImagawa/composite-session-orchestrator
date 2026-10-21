@@ -11,7 +11,15 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { type DaemonClient, formatFailure, runCommand } from "../src/index.js";
 
-const PREVIEW = { nodeIds: ["n1", "n2"], archivedAt: "2026-01-01T00:00:00Z", elapsedDays: 95 };
+const PREVIEW = {
+  nodeIds: ["n1", "n2"],
+  archivedAt: "2026-01-01T00:00:00Z",
+  elapsedDays: 95,
+  retentionDays: 90,
+  tombstoneTitle: "UI を直す",
+  purgeable: true,
+  blockers: [] as { code: string; cause: string }[],
+};
 
 /** 操作ごとに用意した結果を返し、送られた要求を記録するフェイク。 */
 function fakeClient(results: Record<string, Result<unknown> | (() => never)>) {
@@ -112,6 +120,55 @@ describe("墓標の選択（FR_031）", () => {
     const { client } = happy();
     const r = await runCommand(["purge", "n1", "--dry-run"], deps(client));
     expect(r.stdout).toContain(DEFAULT_PURGE_TOMBSTONE ? "墓標を残す" : "墓標を残さない");
+  });
+});
+
+describe("purge の確認の文面と、実行できない理由（FR_031）", () => {
+  it("墓標に残る内容（目的の 1 行目）と、物理削除の範囲を表示する", async () => {
+    const { client } = happy();
+    const r = await runCommand(["purge", "n1", "--dry-run"], deps(client));
+    expect(r.stdout).toContain("UI を直す");
+    expect(r.stdout).toContain("目的の 1 行目");
+    expect(r.stdout).toContain("物理削除");
+    expect(r.stdout).toContain("バックアップ");
+    expect(r.stdout).toContain("保持期間");
+  });
+
+  it("--no-tombstone なら、墓標のタイトルは残らず、標識だけが残る旨を表示する", async () => {
+    const { client } = happy();
+    const r = await runCommand(["purge", "n1", "--dry-run", "--no-tombstone"], deps(client));
+    expect(r.stdout).not.toContain("目的の 1 行目");
+    expect(r.stdout).toContain("標識");
+  });
+
+  it("実行できない（purgeable でない）ときは、理由を表示し、--yes があっても node.purge を送らない（終了コード 1）", async () => {
+    const { client, sent } = fakeClient({
+      "node.purgePreview": ok({
+        ...PREVIEW,
+        purgeable: false,
+        blockers: [{ code: "retentionNotElapsed", cause: "保持期間が過ぎていない" }],
+      }),
+      "node.purge": ok({ purged: [] }),
+    });
+    const r = await runCommand(["purge", "n1", "--yes"], deps(client));
+    expect(ops(sent)).toEqual(["node.purgePreview"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("retentionNotElapsed");
+    expect(r.stderr).toContain("保持期間が過ぎていない");
+  });
+
+  it("--dry-run は、実行できない理由も表示する（終了コードは 0）", async () => {
+    const { client } = fakeClient({
+      "node.purgePreview": ok({
+        ...PREVIEW,
+        purgeable: false,
+        blockers: [{ code: "purgeUnsafe", cause: "decision.requested（seq 12）" }],
+      }),
+    });
+    const r = await runCommand(["purge", "n1", "--dry-run"], deps(client));
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("purgeUnsafe");
+    expect(r.stdout).toContain("seq 12");
   });
 });
 

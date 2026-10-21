@@ -18,6 +18,8 @@ export interface MainDeps {
   readonly loadWorktreePorts: (config: DaemonConfig) => Promise<Result<WorktreePorts, Failure>>;
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
+  /** 最終削除の後に、追記のみの保証を確かめられなかったとき。呼び出し側は daemon を止める（fail closed）。 */
+  readonly onFatal?: (cause: string) => void;
 }
 
 export interface MainResult {
@@ -61,7 +63,11 @@ export async function main(argv: readonly string[], deps: MainDeps): Promise<Mai
     deps.stderr(formatFailure(worktree.error));
     return { exitCode: 1 };
   }
-  const made = createDaemon(config.value, { launcher: launcher.value, worktree: worktree.value });
+  const made = createDaemon(config.value, {
+    launcher: launcher.value,
+    worktree: worktree.value,
+    ...(deps.onFatal === undefined ? {} : { onFatal: deps.onFatal }),
+  });
   if (!made.ok) {
     deps.stderr(formatFailure(made.error));
     return { exitCode: 1 };

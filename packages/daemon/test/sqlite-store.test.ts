@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type EventBody, stateOf } from "@cso/core";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import type { EventStore } from "../src/event-store.js";
+import { type EventStore, StoreIntegrityError } from "../src/event-store.js";
 import { EventLog } from "../src/eventlog.js";
 import { APPLICATION_ID, openSqliteStore } from "../src/sqlite-store.js";
 import { describeEventStore, row, snap } from "./event-store.contract.js";
@@ -96,6 +96,131 @@ describe("SQLite 実装に固有の性質", () => {
       ).toThrow(/append-only/);
       raw.close();
       expect(t.open().readAll()).toEqual([row(1)]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("purgeRows の後も、追記のみのトリガーは戻っている（UPDATE・DELETE・REPLACE は拒否される）", () => {
+    const t = tmp();
+    try {
+      const s = t.open();
+      for (const n of [1, 2, 3]) s.append(row(n));
+      s.purgeRows([2], row(4, { type: "node.purged" }));
+      t.closeAll();
+      const raw = new Database(t.path);
+      const triggers = raw
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+        .all()
+        .map((r) => (r as { name: string }).name);
+      expect(triggers).toEqual(["events_no_delete", "events_no_replace", "events_no_update"]);
+      expect(() => raw.prepare("DELETE FROM events WHERE seq = 1").run()).toThrow(/append-only/);
+      expect(() => raw.prepare("UPDATE events SET type = 'x' WHERE seq = 1").run()).toThrow(
+        /append-only/,
+      );
+      raw.close();
+      expect(
+        t
+          .open()
+          .readAll()
+          .map((r) => r.seq),
+      ).toEqual([1, 3, 4]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("purgeRows が途中で失敗しても、トリガーは外れたまま残らない（ロールバックされる）", () => {
+    const t = tmp();
+    try {
+      const s = t.open();
+      for (const n of [1, 2]) s.append(row(n));
+      expect(() => s.purgeRows([1, 99], row(3))).toThrow();
+      t.closeAll();
+      const raw = new Database(t.path);
+      expect(() => raw.prepare("DELETE FROM events WHERE seq = 1").run()).toThrow(/append-only/);
+      raw.close();
+      expect(
+        t
+          .open()
+          .readAll()
+          .map((r) => r.seq),
+      ).toEqual([1, 2]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("purgeRows の後、トリガーが戻っていることを確かめられなければ、StoreIntegrityError（fail closed）", () => {
+    const t = tmp();
+    try {
+      const r = openSqliteStore(t.path, {
+        beforeTriggerCheck: (db) => db.exec("DROP TRIGGER events_no_update"),
+      });
+      if (!r.ok) throw new Error(r.error.code);
+      for (const n of [1, 2]) r.value.append(row(n));
+      expect(() => r.value.purgeRows([1], row(3))).toThrow(StoreIntegrityError);
+      r.value.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("purgeRows の後、消した行の本文は、データベースにも WAL にも残らない（secure_delete と checkpoint）", () => {
+    const t = tmp();
+    try {
+      const SECRET = "SECRET-OBJECTIVE-4f3a9c1e";
+      const s = t.open();
+      s.append(row(1, { payload: `{"nodeId":"n","note":"${SECRET}"}` }));
+      s.append(row(2));
+      s.saveSnapshot(snap(2, { state: `{"objective":"${SECRET}"}` }));
+      s.purgeRows([1], row(3, { type: "node.purged" }));
+      t.closeAll();
+      for (const f of [t.path, `${t.path}-wal`]) {
+        if (existsSync(f)) expect(readFileSync(f).includes(SECRET), f).toBe(false);
+      }
+      expect(
+        t
+          .open()
+          .readAll()
+          .map((r) => r.seq),
+      ).toEqual([2, 3]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("secure_delete は、開くときに常に有効（削除した本文のページを 0 で上書きする）", () => {
+    const t = tmp();
+    try {
+      let seen: unknown;
+      const r = openSqliteStore(t.path, {
+        beforeTriggerCheck: (db) => {
+          seen = db.pragma("secure_delete", { simple: true });
+        },
+      });
+      if (!r.ok) throw new Error(r.error.code);
+      r.value.append(row(1));
+      r.value.purgeRows([1], row(2));
+      r.value.close();
+      expect(seen).toBe(1);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("purgeRows のコミットの後の例外（確認を含む）は、すべて StoreIntegrityError", () => {
+    const t = tmp();
+    try {
+      const r = openSqliteStore(t.path, {
+        beforeTriggerCheck: () => {
+          throw new Error("確認中の例外");
+        },
+      });
+      if (!r.ok) throw new Error(r.error.code);
+      for (const n of [1, 2]) r.value.append(row(n));
+      expect(() => r.value.purgeRows([1], row(3))).toThrow(StoreIntegrityError);
+      r.value.close();
     } finally {
       t.cleanup();
     }

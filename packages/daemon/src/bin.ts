@@ -20,7 +20,14 @@ const fatal = (what: string, e: unknown): void => {
 process.on("uncaughtException", (e) => fatal("uncaughtException", e));
 process.on("unhandledRejection", (e) => fatal("unhandledRejection", e));
 
+let fatalStop: (() => void) | undefined;
 const result = await main(process.argv.slice(2), {
+  // 最終削除の後に、追記のみの保証を確かめられなかったら、daemon を止めて、終了コード 1 で終わる（fail closed）。
+  onFatal: (cause) => {
+    process.stderr.write(`失敗 [storeIntegrity]: ${cause}\n`);
+    process.exitCode = 1;
+    fatalStop?.();
+  },
   loadLauncher,
   loadWorktreePorts,
   stdout: (t) => process.stdout.write(t),
@@ -31,7 +38,7 @@ if (result.daemon === undefined) {
 } else {
   const daemon = result.daemon;
   let stopping = false;
-  const shutdown = (): void => {
+  const shutdown = (exitCode = 0): void => {
     if (stopping) return;
     stopping = true;
     const timer = setTimeout(() => {
@@ -40,10 +47,11 @@ if (result.daemon === undefined) {
     }, SHUTDOWN_TIMEOUT_MS);
     timer.unref();
     daemon.stop().then(
-      () => process.exit(0),
+      () => process.exit(exitCode),
       (e: unknown) => fatal("shutdownFailed", e),
     );
   };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  fatalStop = () => shutdown(1);
+  process.once("SIGINT", () => shutdown());
+  process.once("SIGTERM", () => shutdown());
 }

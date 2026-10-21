@@ -43,6 +43,10 @@ export interface DaemonConfig {
    * `node_modules`・`dist`・`.turbo`。これ以外の gitignore の対象（`.env` など）が作業ツリーにあれば、回収は拒否される。
    */
   readonly regenerableIgnored?: readonly string[];
+  /** 最終削除の保持期間（木全体のアーカイブからの日数。0 以上）。省略すると 90。 */
+  readonly retentionDays?: number;
+  /** `node.purge` の `tombstone` を省略したときに、墓標を残すか。省略すると `DEFAULT_PURGE_TOMBSTONE`（残す）。 */
+  readonly purgeTombstone?: boolean;
   /** スケジューラが同時に起動する数の上限（親ごと・全体。1〜64）。省略した項目は既定の 4。 */
   readonly startLimits?: { readonly perParent?: number; readonly total?: number };
   /** 窓口の待ち受けポート（127.0.0.1）。0 なら空いているポート。既定 0。 */
@@ -60,6 +64,8 @@ const KEYS = [
   "port",
   "regenerableIgnored",
   "startLimits",
+  "retentionDays",
+  "purgeTombstone",
 ] as const;
 
 const bad = (cause: string): { ok: false; error: Failure } => ({
@@ -127,6 +133,18 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     return bad("port は 0〜65535 の整数");
   }
 
+  if (
+    raw.retentionDays !== undefined &&
+    (typeof raw.retentionDays !== "number" ||
+      !Number.isInteger(raw.retentionDays) ||
+      raw.retentionDays < 0 ||
+      raw.retentionDays > 36500)
+  ) {
+    return bad("retentionDays は 0〜36500 の整数");
+  }
+  if (raw.purgeTombstone !== undefined && typeof raw.purgeTombstone !== "boolean") {
+    return bad("purgeTombstone は真偽値");
+  }
   let startLimits: { perParent?: number; total?: number } | undefined;
   if (raw.startLimits !== undefined) {
     const v = raw.startLimits as Record<string, unknown>;
@@ -228,6 +246,10 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       port,
       ...(regenerableIgnored === undefined ? {} : { regenerableIgnored }),
       ...(startLimits === undefined ? {} : { startLimits }),
+      ...(raw.retentionDays === undefined ? {} : { retentionDays: raw.retentionDays as number }),
+      ...(raw.purgeTombstone === undefined
+        ? {}
+        : { purgeTombstone: raw.purgeTombstone as boolean }),
     },
   };
 }

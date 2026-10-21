@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Failure, ok, type Result } from "@cso/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { FileTokenRepository } from "../src/api/token-repository.js";
 import {
   createDaemon,
   type Daemon,
@@ -382,5 +383,106 @@ describe("createDaemon（起動時のスケジューラ）", () => {
     const d = await boot(r);
     await vi.waitFor(() => expect(r.launcher.sessions).toHaveLength(1));
     expect(d.daemon.log.state().nodes.find((n) => n.id === "p1")?.state).toBe("running");
+  });
+});
+
+describe("createDaemon（最終削除）", () => {
+  /** 前回の実行から残った、アーカイブ済みの木 t（子 c）を、状態の置き場に用意する。 */
+  const seedArchivedTree = (r: ReturnType<typeof rig>) => {
+    mkdirSync(r.config.stateDir, { mode: 0o700 });
+    const store = openSqliteStore(join(r.config.stateDir, "state.db"));
+    if (!store.ok) throw new Error("store");
+    const log = EventLog.open(store.value, { clock: () => new Date().toISOString() });
+    if (!log.ok) throw new Error("log");
+    let k = 0;
+    const add = (body: Parameters<typeof log.value.append>[0]["body"]) => {
+      const x = log.value.append({ requestId: `seed-${++k}`, actor: { system: true }, body });
+      if (!x.ok) throw new Error(`${x.error.code}: ${x.error.cause}`);
+    };
+    const ev = (nodeId: string, event: { type: string; [k: string]: unknown }) =>
+      add({ type: "node.stateChanged", payload: { nodeId, event } } as never);
+    const node = (nodeId: string, role: "integrator" | "implement", parentId: string | null) =>
+      add({ type: "node.created", payload: { nodeId, role, parentId, dependsOn: [] } });
+    node("root", "integrator", null);
+    ev("root", { type: "start" });
+    node("t", "integrator", "root");
+    ev("t", { type: "start" });
+    node("c", "implement", "t");
+    ev("c", { type: "start" });
+    for (const id of ["c", "t"]) {
+      ev(id, { type: "reportDone" });
+      ev(id, { type: "accept" });
+      ev(id, { type: "markReclaimable", discarded: false });
+      ev(id, { type: "archive" });
+    }
+    store.value.close();
+  };
+
+  it("人間のトークンで、事前確認と最終削除ができる。根（統合）のトークンでは拒否される。墓標が残る", async () => {
+    const r = rig({ retentionDays: 0 });
+    seedArchivedTree(r);
+    const d = await boot(r);
+    const preview = await call(d.url, d.humanToken, "node.purgePreview", { nodeId: "t" });
+    expect(preview.json.ok).toBe(true);
+    expect(preview.json.value.nodeIds).toEqual(["c", "t"]);
+    const denied = await call(d.url, d.rootToken, "node.purge", { nodeId: "t" });
+    expect(denied.json.ok).toBe(false);
+    expect(d.daemon.log.state().nodes.some((n) => n.id === "t")).toBe(true);
+    const done = await call(d.url, d.humanToken, "node.purge", { nodeId: "t" });
+    expect(done.json.ok).toBe(true);
+    expect(done.json.value.purged).toEqual(["c", "t"]);
+    const state = d.daemon.log.state();
+    expect(state.nodes.map((n) => n.id)).toEqual(["root"]);
+    expect(state.tombstones.map((x) => x.rootId)).toEqual(["t"]);
+    expect(r.logs.join("\n")).toContain("purge.purged");
+  });
+
+  it("保持期間（既定 90 日）の前は、拒否される", async () => {
+    const r = rig();
+    seedArchivedTree(r);
+    const d = await boot(r);
+    const res = await call(d.url, d.humanToken, "node.purge", { nodeId: "t" });
+    expect(res.json.ok).toBe(false);
+    expect(res.json.error?.code).toBe("retentionNotElapsed");
+  });
+
+  it("追記のみの保証を確かめられなければ、onFatal を呼び、以降の書き込みを拒否する（fail closed）", async () => {
+    const r = rig({ retentionDays: 0 });
+    seedArchivedTree(r);
+    const fatal: string[] = [];
+    r.deps = {
+      ...r.deps,
+      onFatal: (cause) => fatal.push(cause),
+      storeHooks: { beforeTriggerCheck: (db) => db.exec("DROP TRIGGER events_no_update") },
+    };
+    const d = await boot(r);
+    const res = await call(d.url, d.humanToken, "node.purge", { nodeId: "t" });
+    expect(res.json.ok).toBe(false);
+    expect(res.json.error?.code).toBe("storeIntegrity");
+    expect(fatal).toHaveLength(1);
+    expect(r.logs.join("\n")).toContain('"event":"fatal"');
+    const write = d.daemon.log.append({
+      requestId: "after",
+      actor: { system: true },
+      body: { type: "node.toolDenied", payload: { nodeId: "root", tool: "x" } },
+    });
+    expect(write.ok === false && write.error.code).toBe("logBroken");
+  });
+});
+
+describe("createDaemon（起動時のトークンの掃除）", () => {
+  it("ストアにないノードのトークンは、起動時に失効させる（最終削除の途中で止まったときの残り）", async () => {
+    const r = rig();
+    mkdirSync(r.config.stateDir, { mode: 0o700 });
+    const repo = new FileTokenRepository(join(r.config.stateDir, "node-tokens.json"));
+    repo.put({
+      tokenHash: "a".repeat(64),
+      role: "child",
+      nodeId: "ghost",
+      issuedAt: "2026-01-01T00:00:00Z",
+    });
+    await boot(r);
+    expect(repo.load().map((x) => x.nodeId)).not.toContain("ghost");
+    expect(r.logs.join("\n")).toContain("orphanTokenRevoked");
   });
 });

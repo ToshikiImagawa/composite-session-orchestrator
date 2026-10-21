@@ -21,6 +21,8 @@ export interface CredentialStore {
   /** ノード専用のトークンを発行する（そのノードの既存のトークンは無効になる）。 */
   issueNodeToken(nodeId: string, role: NodeRoleForToken): string;
   revokeNode(nodeId: string): void;
+  /** トークンを持つノードの ID（起動時に、ストアにないノードのトークンを掃除するのに使う）。 */
+  nodeIds(): string[];
 }
 
 export const TOKEN_SHAPE = /^[A-Za-z0-9._~+/=-]{16,512}$/;
@@ -85,6 +87,7 @@ export function createCredentialStore(options: {
       byNode.set(nodeId, h);
       return token;
     },
+    nodeIds: () => [...byNode.keys()],
     revokeNode(nodeId) {
       const h = byNode.get(nodeId);
       if (h === undefined) return;

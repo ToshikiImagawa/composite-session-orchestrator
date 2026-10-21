@@ -20,7 +20,7 @@ import {
   type Result,
   sanitizeText,
 } from "@cso/core";
-import type { AppendOutcome, AppendRequest } from "../../eventlog.js";
+import type { AppendOutcome, AppendRequest, PurgeOutcome, PurgeRequest } from "../../eventlog.js";
 
 /** イベントログの、ハンドラが使う部分（`EventLog` がそのまま満たす）。 */
 export interface LogPort {
@@ -28,6 +28,10 @@ export interface LogPort {
   append(request: AppendRequest): Result<AppendOutcome, Failure>;
   /** 複数のイベントを、1 トランザクションで追記する（1 件でも失敗したら全件を書かない）。 */
   appendAll(requests: readonly AppendRequest[]): Result<AppendOutcome[], Failure>;
+  /** 木の最終削除（`EventLog.purgeTree`）。ないログ（試験用の簡易なもの）では、最終削除の操作を有効にしない。 */
+  purgeTree?(request: PurgeRequest): Result<PurgeOutcome, Failure>;
+  /** 最終削除の事前確認（ドライラン）。何も書かない。 */
+  checkPurge?(request: PurgeRequest): Result<{ deleteCount: number }, Failure>;
 }
 
 /** 呼び出し元・要求 ID・用途から、決定的で `isSafeId` を満たす ID を導く。 */

@@ -127,5 +127,37 @@ export function describeEventStore(name: string, make: () => StoreHarness): void
         expect(again.findByRequestId("req-2")?.seq).toBe(2);
       });
     });
+
+    describe("purgeRows（最終削除専用の物理削除）", () => {
+      it("指定した行を消し、標識の行を追記し、スナップショットを捨てる。消した seq は、再利用されない", () => {
+        withStore((h) => {
+          for (const n of [1, 2, 3, 4]) h.store.append(row(n));
+          h.store.saveSnapshot(snap(4));
+          h.store.purgeRows([2, 4], row(5, { type: "node.purged" }));
+          expect(h.store.readAll().map((r) => r.seq)).toEqual([1, 3, 5]);
+          expect(h.store.lastSeq()).toBe(5);
+          expect(h.store.loadSnapshot()).toBeUndefined();
+          expect(h.store.findByRequestId("req-2")).toBeUndefined();
+          expect(h.store.findBySeq(4)).toBeUndefined();
+          // 消した seq（4）の後ろは、標識の seq 5 から。末尾の行を消しても、seq は戻らない。
+          expect(() => h.store.append(row(5))).toThrow();
+          h.store.append(row(6));
+          const again = h.reopen();
+          expect(again.readAll().map((r) => r.seq)).toEqual([1, 3, 5, 6]);
+        });
+      });
+
+      it("存在しない seq・標識の seq が最大以下・標識の requestId の重複は、何も変えずに失敗する", () => {
+        withStore(({ store }) => {
+          for (const n of [1, 2, 3]) store.append(row(n));
+          store.saveSnapshot(snap(3));
+          expect(() => store.purgeRows([2, 9], row(4))).toThrow();
+          expect(() => store.purgeRows([2], row(3, { requestId: "other" }))).toThrow();
+          expect(() => store.purgeRows([2], row(4, { requestId: "req-1" }))).toThrow();
+          expect(store.readAll().map((r) => r.seq)).toEqual([1, 2, 3]);
+          expect(store.loadSnapshot()).toEqual(snap(3));
+        });
+      });
+    });
   });
 }

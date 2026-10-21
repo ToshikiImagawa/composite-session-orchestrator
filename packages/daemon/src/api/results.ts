@@ -33,7 +33,15 @@ export const RESULT_KEYS: ResultKeys = {
   "decision.answer": ["accepted"],
   "node.reclaimInstruct": ["accepted"],
   "node.purge": ["purged"],
-  "node.purgePreview": ["nodeIds", "archivedAt", "elapsedDays"],
+  "node.purgePreview": [
+    "nodeIds",
+    "archivedAt",
+    "elapsedDays",
+    "retentionDays",
+    "tombstoneTitle",
+    "purgeable",
+    "blockers",
+  ],
 };
 
 /** 結果のキーだけを写す。結果がオブジェクトでなければ `undefined`（ハンドラの不具合として扱う）。 */

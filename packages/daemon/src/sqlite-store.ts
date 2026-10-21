@@ -14,11 +14,22 @@
 
 import { type Failure, failure, ok, type Result } from "@cso/core";
 import Database from "better-sqlite3";
-import type { EventStore, StoredEvent, StoredSnapshot } from "./event-store.js";
+import {
+  type EventStore,
+  type StoredEvent,
+  type StoredSnapshot,
+  StoreIntegrityError,
+} from "./event-store.js";
 
 export const SCHEMA_VERSION = 1;
 /** `application_id` の固有値（ASCII の "CSO1"）。 */
 export const APPLICATION_ID = 0x43534f31;
+
+const TRIGGER_NAMES = ["events_no_delete", "events_no_replace", "events_no_update"] as const;
+const DELETE_TRIGGER = `CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+BEGIN
+  SELECT RAISE(ABORT, 'events are append-only');
+END;`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (
@@ -40,10 +51,7 @@ CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN
   SELECT RAISE(ABORT, 'events are append-only');
 END;
-CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
-BEGIN
-  SELECT RAISE(ABORT, 'events are append-only');
-END;
+${DELETE_TRIGGER}
 CREATE TRIGGER IF NOT EXISTS events_no_replace BEFORE INSERT ON events
 WHEN EXISTS (SELECT 1 FROM events WHERE seq = NEW.seq OR request_id = NEW.request_id)
 BEGIN
@@ -131,7 +139,11 @@ function initialize(db: Database.Database, path: string): Result<never, Failure>
 }
 
 /** ファイルの SQLite を EventStore として開く。同じファイルを二重には開けない。 */
-export function openSqliteStore(path: string): Result<EventStore, Failure> {
+export function openSqliteStore(
+  path: string,
+  /** 試験用: 最終削除の後、トリガーの確認の直前に呼ぶ（確認の失敗を再現する）。 */
+  testHooks?: { readonly beforeTriggerCheck?: (db: Database.Database) => void },
+): Result<EventStore, Failure> {
   let db: Database.Database | undefined;
   try {
     db = new Database(path, { timeout: 0 });
@@ -147,6 +159,8 @@ export function openSqliteStore(path: string): Result<EventStore, Failure> {
       );
     }
     db.pragma("synchronous = FULL");
+    // 削除した行の本文を、解放されたページに残さない（最終削除。FR_031）。接続ごとの設定なので、開くときに常に有効にする。
+    db.pragma("secure_delete = ON");
     const init = initialize(db, path);
     if (init !== undefined) {
       db.close();
@@ -188,6 +202,44 @@ export function openSqliteStore(path: string): Result<EventStore, Failure> {
       },
       append(row) {
         insert.run(row);
+      },
+      purgeRows(deleteSeqs, marker) {
+        conn
+          .transaction(() => {
+            const max = selectMax.get()?.m ?? 0;
+            if (marker.seq <= max)
+              throw new Error(`purge: 標識の seq ${marker.seq} が最大 ${max} 以下`);
+            for (const seq of deleteSeqs) {
+              if (selectBySeq.get(seq) === undefined) throw new Error(`purge: seq ${seq} がない`);
+            }
+            // DDL もトランザクションに入る。途中で失敗すれば、トリガーも含めて全部ロールバックされる。
+            conn.exec("DROP TRIGGER events_no_delete");
+            const del = conn.prepare("DELETE FROM events WHERE seq = ?");
+            for (const seq of deleteSeqs) del.run(seq);
+            insert.run(marker); // events_no_replace は有効なまま（標識の重複は拒否される）
+            conn.exec("DELETE FROM snapshot");
+            conn.exec(DELETE_TRIGGER.replace("IF NOT EXISTS ", ""));
+          })
+          .immediate();
+        // コミットの後の処理（確認を含む）の例外は、すべて、保証を確かめられなかったものとして扱う（fail closed）。
+        try {
+          testHooks?.beforeTriggerCheck?.(conn);
+          const names = conn
+            .prepare<[], { name: string }>("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            .all()
+            .map((r) => r.name);
+          const missing = TRIGGER_NAMES.filter((t) => !names.includes(t));
+          if (missing.length > 0) {
+            throw new StoreIntegrityError(
+              `最終削除の後に、追記のみのトリガーが戻っていない: ${missing.join(", ")}`,
+            );
+          }
+          // WAL に残った削除前の内容を、データベースに反映して切り詰める（本文を WAL に残さない）。
+          conn.pragma("wal_checkpoint(TRUNCATE)");
+        } catch (e) {
+          if (e instanceof StoreIntegrityError) throw e;
+          throw new StoreIntegrityError(`最終削除の後の確認に失敗した: ${String(e)}`);
+        }
       },
       transaction: <T>(fn: () => T): T => conn.transaction(fn)(),
       loadSnapshot(): StoredSnapshot | undefined {

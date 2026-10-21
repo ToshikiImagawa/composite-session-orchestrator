@@ -21,7 +21,14 @@ import {
 } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { type EventBody, type Failure, failure, isPathUnder, type Result } from "@cso/core";
+import {
+  DEFAULT_PURGE_TOMBSTONE,
+  type EventBody,
+  type Failure,
+  failure,
+  isPathUnder,
+  type Result,
+} from "@cso/core";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import {
   type ApiLogger,
@@ -46,6 +53,9 @@ import { nodeFsOps, resolveForWrite } from "./sdk/path-resolve.js";
 import type { Timers } from "./sdk/runtime.js";
 import { SdkRuntimeAdapter } from "./sdk/sdk-adapter.js";
 import { openSqliteStore } from "./sqlite-store.js";
+
+/** 最終削除の保持期間の既定（日。spec 5.8）。 */
+const DEFAULT_RETENTION_DAYS = 90;
 
 /** git の作業ツリーに関わる口（実装は git を呼ぶ。テストはフェイク）。 */
 export interface WorktreePorts {
@@ -72,6 +82,13 @@ export interface DaemonDeps {
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
+  /**
+   * 最終削除の後に、イベントログの追記のみの保証を確かめられなかったとき（以降の書き込みは拒否される）に呼ぶ。
+   * 呼び出し側は daemon を止める（fail closed）。記録（`fatal`）は、これとは別に残す。
+   */
+  readonly onFatal?: (cause: string) => void;
+  /** 試験用: SQLite のストアの試験用フック（最終削除の後のトリガーの確認の失敗を再現する）。 */
+  readonly storeHooks?: Parameters<typeof openSqliteStore>[1];
 }
 
 export interface RunningDaemon {
@@ -186,7 +203,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   const previousUmask = process.umask(0o077);
   let opened: ReturnType<typeof openSqliteStore>;
   try {
-    opened = openSqliteStore(join(config.stateDir, "state.db"));
+    opened = openSqliteStore(join(config.stateDir, "state.db"), deps.storeHooks);
   } finally {
     process.umask(previousUmask);
   }
@@ -196,6 +213,10 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     clock,
     verifySnapshot: true,
     onSnapshotMismatch: () => note("snapshotMismatch"),
+    onFatal: (cause) => {
+      note("fatal", { cause });
+      deps.onFatal?.(cause);
+    },
   });
   if (!logOpened.ok) {
     store.close();
@@ -300,6 +321,18 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     );
   }
 
+  // ストアにないノード（最終削除で消えた木など）のトークンは、無効にする（削除の途中で止まったときの残りを含む）。
+  const known = new Set(log.state().nodes.map((n) => n.id));
+  for (const id of credentials.nodeIds()) {
+    if (known.has(id)) continue;
+    try {
+      credentials.revokeNode(id);
+      note("orphanTokenRevoked", { nodeId: id });
+    } catch (e) {
+      note("orphanTokenRevokeFailed", { nodeId: id, cause: String(e) });
+    }
+  }
+
   const probe = deps.probe ?? createLsofProbe(nodeExec);
   const tracked = trackTimers(deps.timers ?? nodeTimers);
   const timers = tracked.timers;
@@ -354,6 +387,14 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       rootScope: config.rootScope,
       onFailure,
       ...(config.startLimits === undefined ? {} : { startLimits: config.startLimits }),
+    },
+    {
+      nowMs: () => Date.parse(clock()),
+      retentionDays: config.retentionDays ?? DEFAULT_RETENTION_DAYS,
+      defaultTombstone: config.purgeTombstone ?? DEFAULT_PURGE_TOMBSTONE,
+      revokeNode: (id) => credentials.revokeNode(id),
+      audit: (event, data) => note(`purge.${event}`, data),
+      onFailure,
     },
   );
 
