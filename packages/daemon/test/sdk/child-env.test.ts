@@ -2,6 +2,11 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { childEnv, DEFAULT_CHILD_ENV, isForbiddenChildEnvName } from "../../src/sdk/child-env.js";
 
+const withoutNoProxy = (env: Readonly<Record<string, string>>): Record<string, string> => {
+  const { NO_PROXY: _a, no_proxy: _b, ...rest } = env;
+  return rest;
+};
+
 describe("childEnv（許可リスト方式。親の環境変数から、許可した名前だけを子に渡す）", () => {
   it("既定で渡す: PATH・HOME・LANG・TMPDIR など、実行に要る変数", () => {
     const keep = {
@@ -12,7 +17,7 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
       TZ: "UTC",
     };
     const r = childEnv(keep);
-    expect(r.env).toEqual(keep);
+    expect(withoutNoProxy(r.env)).toEqual(keep);
     expect(r.removed).toEqual([]);
   });
 
@@ -28,7 +33,7 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
       NODE_EXTRA_CA_CERTS: "/ca.pem",
       SSL_CERT_FILE: "/ca.pem",
     };
-    expect(childEnv(keep).env).toEqual(keep);
+    expect(withoutNoProxy(childEnv(keep).env)).toEqual(withoutNoProxy(keep));
   });
 
   it("許可していない変数は渡さない（GH_TOKEN・GITHUB_TOKEN・AWS_*・クラウドの認証など、秘密を含む）。除いた名前だけを返し、値は返さない", () => {
@@ -41,7 +46,7 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
       DATABASE_URL: "postgres://u:p@h/db",
     };
     const r = childEnv(input);
-    expect(r.env).toEqual({ PATH: "/usr/bin" });
+    expect(withoutNoProxy(r.env)).toEqual({ PATH: "/usr/bin" });
     expect([...r.removed].sort()).toEqual(
       [
         "AWS_SECRET_ACCESS_KEY",
@@ -59,7 +64,7 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
     const r = childEnv({ PATH: "/bin", MY_TOOL_HOME: "/x", MY_TOOL_HOME2: "y", GH_TOKEN: "t" }, [
       "MY_TOOL_HOME",
     ]);
-    expect(r.env).toEqual({ PATH: "/bin", MY_TOOL_HOME: "/x" });
+    expect(withoutNoProxy(r.env)).toEqual({ PATH: "/bin", MY_TOOL_HOME: "/x" });
     expect([...r.removed].sort()).toEqual(["GH_TOKEN", "MY_TOOL_HOME2"]);
   });
 
@@ -71,7 +76,7 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
       claude_code_session_dir: "z",
     };
     const r = childEnv(parent, ["CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_REMOTE_SESSION_ID"]);
-    expect(r.env).toEqual({ PATH: "/bin" });
+    expect(withoutNoProxy(r.env)).toEqual({ PATH: "/bin" });
     expect(r.removed).toContain("CLAUDE_CODE_SESSION_ID");
     expect(r.removed).toContain("CLAUDE_CODE_REMOTE_SESSION_ID");
   });
@@ -82,7 +87,7 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
       ...Object.keys(keep),
       "CLAUDE_CODE_SESSION_ID",
     ]);
-    expect(r.env).toEqual(keep);
+    expect(withoutNoProxy(r.env)).toEqual(keep);
     expect(r.removed).toEqual(["CLAUDE_CODE_SESSION_ID"]);
   });
 
@@ -110,7 +115,7 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
     }
     const parent = Object.fromEntries(bad.map((n) => [n, "x"]));
     const r = childEnv({ ...parent, PATH: "/bin" }, bad);
-    expect(r.env).toEqual({ PATH: "/bin" });
+    expect(withoutNoProxy(r.env)).toEqual({ PATH: "/bin" });
     expect([...r.removed].sort()).toEqual([...bad].sort());
   });
 
@@ -118,7 +123,7 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
     const input = { PATH: "/bin", B: undefined };
     const before = JSON.stringify(input);
     const r = childEnv(input);
-    expect(r.env).toEqual({ PATH: "/bin" });
+    expect(withoutNoProxy(r.env)).toEqual({ PATH: "/bin" });
     expect(r.removed).toEqual([]);
     expect(JSON.stringify(input)).toBe(before);
   });
@@ -152,7 +157,10 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
         fc.array(key, { maxLength: 4 }),
         (env, extra) => {
           const r = childEnv(env, extra);
-          for (const [k, v] of Object.entries(r.env)) expect(env[k]).toBe(v);
+          for (const [k, v] of Object.entries(r.env)) {
+            if (k === "NO_PROXY" || k === "no_proxy") continue; // loopback を足すので、親と同じとは限らない
+            expect(env[k]).toBe(v);
+          }
           for (const k of Object.keys(env))
             expect(k in r.env || r.removed.includes(k), k).toBe(true);
           expect("CLAUDE_CODE_SESSION_ID" in r.env).toBe(false);
@@ -161,5 +169,18 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
         },
       ),
     );
+  });
+});
+
+describe("childEnv の NO_PROXY（loopback をプロキシに通さない）", () => {
+  it("ない場合は、loopback だけを入れる", () => {
+    const { env } = childEnv({ PATH: "/bin" });
+    expect(env.NO_PROXY).toBe("127.0.0.1,localhost,[::1]");
+    expect(env.no_proxy).toBe("127.0.0.1,localhost,[::1]");
+  });
+  it("既存の値があれば後ろに足し、すでにあるものは重ねない", () => {
+    const { env } = childEnv({ NO_PROXY: "example.com, localhost", no_proxy: "a.b" });
+    expect(env.NO_PROXY).toBe("example.com,localhost,127.0.0.1,[::1]");
+    expect(env.no_proxy).toBe("a.b,127.0.0.1,localhost,[::1]");
   });
 });

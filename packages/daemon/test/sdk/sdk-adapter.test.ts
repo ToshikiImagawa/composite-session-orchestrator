@@ -59,6 +59,11 @@ const startNode = async (r: Rig, nodeId = "a") => {
   return res.value;
 };
 
+const LOOPBACK_NO_PROXY = {
+  NO_PROXY: "127.0.0.1,localhost,[::1]",
+  no_proxy: "127.0.0.1,localhost,[::1]",
+};
+
 describe("capabilities（CLI）", () => {
   it("追加指示は遅延（実行中はツール完了後に届く）、停止は穏当・即時とも可、フックと識別子は可", () => {
     expect(rig().adapter.capabilities("a")).toEqual({
@@ -88,7 +93,7 @@ describe("start", () => {
     const v = await startNode(r);
     const opts = r.launcher.sessions[0]?.options;
     expect(opts?.cwd).toBe(WT);
-    expect(opts?.env).toEqual({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "k" });
+    expect(opts?.env).toEqual({ PATH: "/usr/bin", ANTHROPIC_API_KEY: "k", ...LOOPBACK_NO_PROXY });
     expect(opts?.settingSources).toEqual([]);
     expect(opts?.initialPrompt).toBe("do the task");
     expect(v).toMatchObject({
@@ -918,7 +923,11 @@ describe("予期しない終了（finished の監視）", () => {
     });
     await startNode(r);
     expect(made).toEqual(["a"]);
-    expect(sessionOf(r).options.env).toEqual({ PATH: "/bin", HOME: "/state/homes/a" });
+    expect(sessionOf(r).options.env).toEqual({
+      PATH: "/bin",
+      HOME: "/state/homes/a",
+      ...LOOPBACK_NO_PROXY,
+    });
     const bad = rig({
       homeFor: () => {
         throw new Error("EACCES");

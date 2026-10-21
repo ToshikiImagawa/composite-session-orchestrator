@@ -85,6 +85,16 @@ const FORBIDDEN_NAMES = new Set([
 export const isForbiddenChildEnvName = (name: string): boolean =>
   FORBIDDEN_NAMES.has(name) || FORBIDDEN_PREFIXES.some((p) => name.startsWith(p));
 
+const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"] as const;
+const withLoopback = (current: string | undefined): string => {
+  const have = (current ?? "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter((x) => x !== "");
+  const add = LOOPBACK_HOSTS.filter((h) => !have.includes(h));
+  return [...have, ...add].join(",");
+};
+
 export interface ChildEnv {
   readonly env: Record<string, string>;
   /** 渡さなかった変数の名前（値は含めない）。 */
@@ -109,5 +119,7 @@ export function childEnv(
     if (pass) env[name] = value;
     else removed.push(name);
   }
+  // 子が loopback の MCP へトークンつきでつなぐ通信を、プロキシに通さない（既存の値があれば後ろに足す）。
+  for (const name of ["NO_PROXY", "no_proxy"]) env[name] = withLoopback(env[name]);
   return { env, removed };
 }
