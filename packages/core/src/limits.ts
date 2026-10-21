@@ -32,6 +32,8 @@ export const LIMITS = {
   extensionTarget: 1024,
   extensionReason: 4 * 1024,
   openExtensionsPerNode: 10,
+  /** 未回答（open）の判断要求の、ノードあたりの件数（拡張要求の `openExtensionsPerNode` と同じ考え方）。 */
+  openDecisionsPerNode: 10,
   /** 判断要求（`decision.requested`）で、判断待ちの間に止める子の件数。 */
   pauseNodeCount: 100,
   /** 完了の判定（`node.review`）の差し戻し理由・コメント。 */
