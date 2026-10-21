@@ -63,7 +63,7 @@ export interface SpawnPorts {
   /** 作業ツリーを消す（強制しない。契約は `ReclaimPorts.removeWorktree` と同じ）。 */
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string; force?: boolean },
+    opts: { expectedPath: string },
   ): Promise<Result<undefined, Failure>>;
   /** daemon の作業ツリー置き場。`provisionWorktree` が返すパスは、この配下でなければならない。 */
   readonly worktreeRoot: string;

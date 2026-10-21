@@ -333,6 +333,23 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
       expect(existsSync(join(p, "keep.txt"))).toBe(true);
     });
 
+    it("force: 消す前に、ブランチの先端の SHA を onTip に渡す", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      writeFileSync(join(p, "x.txt"), "x\n");
+      git(p, "add", "-A");
+      git(p, "commit", "-m", "work");
+      const sha = git(p, "rev-parse", "HEAD").trim();
+      const tips: string[] = [];
+      const r = await s.ports.removeWorktree("c1", {
+        expectedPath: p,
+        force: true,
+        onTip: (t) => tips.push(t),
+      });
+      expect(r.ok).toBe(true);
+      expect(tips).toEqual([sha]);
+    });
+
     it("force でも、同じ呼び出しを繰り返せる（冪等。作業ツリーもブランチもなければ成功）", async () => {
       const s = setup();
       const p = await provision(s, "c1");

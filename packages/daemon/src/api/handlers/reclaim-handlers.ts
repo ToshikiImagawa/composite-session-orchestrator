@@ -59,10 +59,12 @@ export interface ReclaimPorts {
   /** 作業ツリーを消す。失敗は `Failure` で返す（例外は、ハンドラが `Failure` に変える）。 */
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string; force?: boolean },
+    opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
   ): Promise<Result<undefined, Failure>>;
   /** daemon の作業ツリー置き場（作業ツリーのパスがこの配下であることを検査する）。 */
   readonly worktreeRoot: string;
+  /** 強制で消す直前の、ブランチの先端（捨てる成果の最後のコミット）の記録先。 */
+  readonly onForced?: (nodeId: string, tip: string) => void;
 }
 
 export interface ReclaimHandlerDeps {
@@ -371,7 +373,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
             (record.state === "stopped" || record.state === "reclaimable");
           removed = await ports.removeWorktree(n.id, {
             expectedPath: again.facts.worktreePath,
-            ...(force ? { force: true } : {}),
+            ...(force ? { force: true, onTip: (tip: string) => ports.onForced?.(n.id, tip) } : {}),
           });
         } catch (e) {
           removed = { ok: false, error: failure("removeFailed", String(e), "原因を取り除く") };
