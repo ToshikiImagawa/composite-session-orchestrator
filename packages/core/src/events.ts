@@ -168,6 +168,14 @@ export type EventBody =
     }
   | {
       /**
+       * ノードの最終コミット（作業ツリーを消す直前の、ブランチの先端）の記録。回収のときに記録する。状態は変えない（記録のみ）。
+       * 後の記録が前の記録を置き換える。最終削除の墓標の `lastCommit` の情報源。
+       */
+      readonly type: "node.lastCommit";
+      readonly payload: { readonly nodeId: string; readonly commit: string };
+    }
+  | {
+      /**
        * 最終削除（FR_031）の標識。木のノードを主語とするイベントの行は、先に物理削除されている（`EventLog.purgeTree`）。
        * 標識は、削除を監査できるようにし、`seq` が戻らないようにするために、墓標を残さないときも残す。
        * 標識に載せたノードが、まだ存在すれば拒否する（行を消さずに標識だけを足した、不整合なログ）。
@@ -270,6 +278,8 @@ export interface NodeRecord {
   readonly scope?: Scope;
   /** 破棄の判断（停止したノードだけ。再開すると消える）。回収の再判定の入力 `facts.discarded` の情報源。 */
   readonly discarded?: { readonly seq: number; readonly at: string; readonly by: Actor };
+  /** 最終コミット（`node.lastCommit` の記録。SHA）。最終削除の墓標に載せる。 */
+  readonly lastCommit?: string;
   /** アーカイブした時刻（`archive` のイベントの `at`）。 */
   readonly archivedAt?: string;
   /** 直近の `start`・`restart` の `seq`。未回答の判断要求の上限（`openDecisionsPerNode`）で、数える範囲の始まり。古いスナップショットにはない（0 とみなす）。 */
@@ -1615,6 +1625,18 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       return commit();
     }
 
+    case "node.lastCommit": {
+      const { nodeId, commit: sha } = p;
+      if (!isId(nodeId)) return invalid(seq, "node.lastCommit の nodeId");
+      if (!isCommitSha(sha)) {
+        return invalid(seq, "node.lastCommit の commit（小文字の 16 進で 40 桁か 64 桁）");
+      }
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({ ...node, lastCommit: sha });
+      return commit();
+    }
+
     case "scope.extensionRequested": {
       const { extensionId, nodeId, reason } = p;
       if (!isId(extensionId) || !isId(nodeId)) {
@@ -1827,6 +1849,10 @@ export function effectiveScope(state: OrchState, nodeId: string): Scope | undefi
     allowedCommands: Object.freeze(commands),
   });
 }
+
+/** git のコミットの識別子（SHA-1 は 40 桁、SHA-256 は 64 桁の、小文字の 16 進）。 */
+export const isCommitSha = (x: unknown): x is string =>
+  typeof x === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(x);
 
 /** 破棄の判断（`node.discardDecided`）を経たノードの識別子。回収の再判定の入力 `facts.discarded` の情報源（二重に持たない）。 */
 export function discardedNodeIds(state: OrchState): string[] {

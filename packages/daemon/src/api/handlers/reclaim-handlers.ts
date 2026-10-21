@@ -38,7 +38,10 @@ import { appendAtomically, fail, type LogPort } from "./context.js";
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
 /** 作業ツリーの事実（`discarded` は、`node.discardDecided` の記録から導く）。 */
-export type WorktreeFacts = Omit<ReclaimNodeFacts, "discarded">;
+export type WorktreeFacts = Omit<ReclaimNodeFacts, "discarded"> & {
+  /** ブランチの先端（最終コミットの SHA）。取れなければ省略する（回収は止めない）。 */
+  readonly headCommit?: string;
+};
 
 /**
  * 回収の実体（git・lsof）への口。実装（T10b）が守る契約:
@@ -362,6 +365,21 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
             },
           ]);
           if (!marked.ok) return { ok: false, error: marked.error };
+        }
+        // 作業ツリーを消す前に、最終コミットを記録する（墓標の `lastCommit` の情報源。FR_031）。記録できなくても、回収は進める。
+        const head = again.facts.headCommit;
+        if (head === undefined) {
+          deps.onFailure?.(n.id, "最終コミットを取得できなかった（記録せずに回収を進める）");
+        } else if (current?.lastCommit !== head) {
+          const rec = appendAtomically(log, deps.clock, `${requestId}/${n.id}/lastCommit`, actor, [
+            { type: "node.lastCommit", payload: { nodeId: n.id, commit: head } },
+          ]);
+          if (!rec.ok) {
+            deps.onFailure?.(
+              n.id,
+              `最終コミットを記録できなかった（回収を進める）: ${rec.error.code}: ${rec.error.cause}`,
+            );
+          }
         }
         let removed: Result<undefined, Failure>;
         try {

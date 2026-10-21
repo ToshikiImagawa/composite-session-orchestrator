@@ -106,8 +106,10 @@ describe("破棄の判断を経た停止ノードの回収（実際の git）", 
     expect(no.ok).toBe(false);
     expect(existsSync(join(s.wt, "src", "new.txt"))).toBe(true);
     expect((await s.call("node.reclaimInstruct", "human", "c1")).ok).toBe(true);
+    const tip = git(s.wt, "rev-parse", "HEAD");
     const done = await s.call("node.reclaim", "integrator", "c1");
     expect(done.ok).toBe(true);
+    expect(s.log.state().nodes.find((x) => x.id === "c1")?.lastCommit).toBe(tip); // 墓標の lastCommit の情報源
     expect(existsSync(s.wt)).toBe(false);
     expect(git(s.repoRoot, "branch", "--list", "cso/*")).toBe("");
     expect(stateOf(s.log.state(), "c1")).toBe("archived");

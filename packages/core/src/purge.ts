@@ -123,6 +123,7 @@ export function purgeEventSeqs(
       case "node.toolDenied":
       case "node.exited":
       case "node.discardDecided":
+      case "node.lastCommit":
         subject = e.payload.nodeId;
         break;
       case "inbox.added":

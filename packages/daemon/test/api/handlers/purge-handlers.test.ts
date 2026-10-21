@@ -14,7 +14,12 @@ const DAY = 86_400_000;
 const ARCHIVED_AT = Date.parse("2026-01-10T00:02:00Z");
 
 const rig = (
-  over: { retentionDays?: number; defaultTombstone?: boolean; discarded?: boolean } = {},
+  over: {
+    retentionDays?: number;
+    defaultTombstone?: boolean;
+    discarded?: boolean;
+    lastCommit?: string;
+  } = {},
 ) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
@@ -64,6 +69,10 @@ const rig = (
     ev("t", { type: "accept" });
     ev("t", { type: "markReclaimable", discarded: false });
     ev("t", { type: "archive" });
+  }
+
+  if (over.lastCommit !== undefined) {
+    add({ type: "node.lastCommit", payload: { nodeId: "t", commit: over.lastCommit } });
   }
 
   const calls = {
@@ -240,6 +249,22 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     expect(audits).toEqual(["purgeStarting", "purgeFailed"]);
     expect(failures[0]).toContain("storeIntegrity");
     expect(revoked).toEqual([]);
+  });
+
+  it("最終コミットの記録（node.lastCommit）があれば、墓標の lastCommit に載せる。なければ載せない", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const a = rig({ lastCommit: sha });
+    a.advance(90);
+    expect(a.call("node.purge", { nodeId: "t" }).ok).toBe(true);
+    expect(a.log.state().tombstones[0]?.tombstone).toEqual({
+      title: "木の目的",
+      outcome: "verified",
+      lastCommit: sha,
+    });
+    const b = rig();
+    b.advance(90);
+    b.call("node.purge", { nodeId: "t" });
+    expect(b.log.state().tombstones[0]?.tombstone?.lastCommit).toBeUndefined();
   });
 
   it("破棄された木（根が破棄の判断を経たもの）は、結果が discarded になる", () => {
