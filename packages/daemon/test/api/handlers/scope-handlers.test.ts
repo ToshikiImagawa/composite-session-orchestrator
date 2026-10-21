@@ -6,7 +6,6 @@ import {
   ok,
   type Result,
   type Scope,
-  stateOf,
 } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { createScopeHandlers } from "../../../src/api/handlers/scope-handlers.js";
@@ -134,8 +133,7 @@ describe("scope.extend（範囲の拡張要求）", () => {
       status: "open",
       target: GIT.target,
     });
-    expect(r.s().inbox.at(-1)).toMatchObject({ kind: "violation", nodeId: "a" });
-    expect(r.s().inbox.at(-1)?.summary).toContain(id);
+    expect(r.s().inbox.at(-1)).toMatchObject({ kind: "violation", nodeId: "a", ref: id });
     const seq = r.s().lastSeq;
     expect(await r.extend(GIT, "a", "e-1")).toEqual(res);
     expect(r.s().lastSeq).toBe(seq);
@@ -238,6 +236,15 @@ describe("scope.decide（拡張の判定。承認でアダプタの範囲を更�
     expect((await r.decideAsHuman({ extensionId: "nope", decision: "approve" })).error?.code).toBe(
       "notFound",
     );
+  });
+
+  it("判定したら、受信箱の拡張要求の項目を解決済みにする（inbox.fetch には出なくなる）", async () => {
+    const r = rig();
+    const id = await ask(r);
+    const item = r.s().inbox.find((i) => i.ref === id);
+    expect(item?.resolved).toBeUndefined();
+    await r.decide({ extensionId: id, decision: "reject" });
+    expect(r.s().inbox.find((i) => i.ref === id)?.resolved).toBeDefined();
   });
 
   it("却下・切り出し: 記録だけ。アダプタは更新しない", async () => {

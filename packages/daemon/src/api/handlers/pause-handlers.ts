@@ -159,6 +159,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       return { kind: "failed", message: `${target}（停止の途中）` };
     }
     if (node === undefined || now !== "stopped") return { kind: "notStopped" }; // 動作中・終了済みなど
+    if (node.discarded !== undefined) return { kind: "skipped" }; // 破棄の判断（人間）を経た子は、再開しない
     if (!pausedOnlyByDecision(before, decision, target)) return { kind: "skipped" }; // 人間などが止めた子
     const episode = before.stopRequests.filter((q) => q.nodeId === target).length;
     const cwd = await ports.cwdOf(target).catch(() => undefined);

@@ -107,7 +107,17 @@ const rig = (
     // biome-ignore lint/suspicious/noExplicitAny: 操作ごとの型は呼び出し側で保証
     return (await (h[op] as any)(req)) as { ok: boolean; value?: any; error?: Failure };
   };
-  return { log, call, ev, removed, expectedPaths, probed, state, s: () => log.state() };
+  return {
+    handlers: h,
+    log,
+    call,
+    ev,
+    removed,
+    expectedPaths,
+    probed,
+    state,
+    s: () => log.state(),
+  };
 };
 
 describe("node.reclaimPreview（回収の事前確認。何も変えない）", () => {
@@ -116,40 +126,39 @@ describe("node.reclaimPreview（回収の事前確認。何も変えない）", 
     const before = r.s().lastSeq;
     expect(await r.call("node.reclaimPreview", { nodeId: "a" })).toEqual({
       ok: true,
-      value: { reclaimable: true },
+      value: { reclaimable: true, unmet: [], blockers: [] },
     });
     expect(r.s().lastSeq).toBe(before);
     expect(r.removed).toEqual([]);
   });
 
-  it("満たしていない条件を、短い理由と原因つきで返す（未統合・未保存の変更・プロセス・事実なし）", async () => {
+  it("満たしていない条件と原因を、構造で返す（未統合・未保存の変更・プロセス・事実なし）", async () => {
     const dirty = rig({ facts: { a: { merged: true, clean: false, worktreePath: `${WT}/a` } } });
     const d = await dirty.call("node.reclaimPreview", { nodeId: "a" });
-    expect(d.ok).toBe(false);
-    expect(d.error?.code).toBe("notReclaimable");
-    expect(d.error?.cause).toContain("未保存の変更");
+    expect(d.ok).toBe(true);
+    expect(d.value).toMatchObject({ reclaimable: false, unmet: ["dirty"] });
     const notMerged = rig({
       facts: { a: { merged: false, clean: true, worktreePath: `${WT}/a` } },
     });
-    expect((await notMerged.call("node.reclaimPreview", { nodeId: "a" })).error?.cause).toContain(
-      "統合",
-    );
+    expect((await notMerged.call("node.reclaimPreview", { nodeId: "a" })).value.unmet).toEqual([
+      "notMerged",
+    ]);
     const running = rig({ processes: [{ pid: 4242, cwd: `${WT}/a`, hasOpenFiles: false }] });
     const p = await running.call("node.reclaimPreview", { nodeId: "a" });
-    expect(p.error?.cause).toContain("4242");
+    expect(p.value.unmet).toEqual(["processesRunning"]);
+    expect(p.value.blockers).toEqual([{ kind: "process", reason: "processesRunning", pid: 4242 }]);
     const missing = rig({ facts: { a: undefined } });
-    expect((await missing.call("node.reclaimPreview", { nodeId: "a" })).error?.cause).toContain(
-      "作業ツリー",
+    expect((await missing.call("node.reclaimPreview", { nodeId: "a" })).value.unmet).toContain(
+      "factsMissing",
     );
     const unknown = rig({ processes: null });
-    expect((await unknown.call("node.reclaimPreview", { nodeId: "a" })).error?.cause).toContain(
-      "プロセス",
+    expect((await unknown.call("node.reclaimPreview", { nodeId: "a" })).value.unmet).toContain(
+      "processesUnknown",
     );
   });
 
-  it("停止したノードは、破棄の判断なしには回収できない（discardRequired。人間に確認する案内つき）", async () => {
+  it("停止したノードは、破棄の判断（node.reclaimInstruct）の記録なしには回収できない（discardRequired）。記録すれば回収できる", async () => {
     const r = rig();
-    // a を停止済みにする（verified からは停止できないため、別に動作中の子 d を作る）
     r.log.append({
       requestId: "d1",
       actor: SYS,
@@ -162,11 +171,44 @@ describe("node.reclaimPreview（回収の事前確認。何も変えない）", 
     r.ev("d", { type: "stop", mode: "immediate" });
     r.ev("d", { type: "confirmStopped" });
     r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d` };
-    const res = await r.call("node.reclaimPreview", { nodeId: "d" });
+    const before = await r.call("node.reclaimPreview", { nodeId: "d" });
+    expect(before.value.reclaimable).toBe(false);
+    expect(before.value.unmet).toContain("discardRequired");
+    const bad = await r.call("node.reclaim", { nodeId: "d" });
+    expect(bad.error?.code).toBe("notReclaimable");
+    expect(bad.error?.nextActions.join(" ")).toContain("人間");
+    // 人間の判断を記録する（冪等）
+    const human = async (rid: string) =>
+      (await (r.handlers["node.reclaimInstruct"] as never as (q: unknown) => unknown)({
+        requestId: rid,
+        operation: "node.reclaimInstruct",
+        role: "human",
+        params: { nodeId: "d" },
+      })) as { ok: boolean };
+    expect((await human("ri-1")).ok).toBe(true);
+    expect((await human("ri-2")).ok).toBe(true);
+    expect(r.s().nodes.find((n) => n.id === "d")?.discarded).toBeDefined();
+    const after = await r.call("node.reclaimPreview", { nodeId: "d" });
+    expect(after.value).toMatchObject({ reclaimable: true });
+    const done = await r.call("node.reclaim", { nodeId: "d" });
+    expect(done.value.reclaimed).toEqual(["d"]);
+    expect(stateOf(r.s(), "d")).toBe("archived");
+    expect(r.s().nodes.find((n) => n.id === "d")?.archivedAt).toBeDefined();
+  });
+
+  it("停止していないノードの破棄の判断は、日本語の理由と次の操作つきで失敗する", async () => {
+    const r = rig();
+    const res = (await (r.handlers["node.reclaimInstruct"] as never as (q: unknown) => unknown)({
+      requestId: "ri-x",
+      operation: "node.reclaimInstruct",
+      role: "human",
+      params: { nodeId: "a" },
+    })) as { ok: boolean; error?: Failure };
     expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("notReclaimable");
-    expect(res.error?.cause).toContain("破棄");
-    expect(res.error?.nextActions.join(" ")).toContain("人間");
+    expect(res.error?.code).toBe("notStopped");
+    expect(res.error?.cause).toContain("停止済み");
+    expect(res.error?.nextActions.length).toBeGreaterThan(0);
+    expect(r.s().nodes.find((n) => n.id === "a")?.discarded).toBeUndefined();
   });
 
   it("統合ノードは、配下の回収可能性を連鎖して見る（配下が回収可能なら、統合ノードも回収可能）。配下に不可があれば名指しする", async () => {
@@ -176,14 +218,16 @@ describe("node.reclaimPreview（回収の事前確認。何も変えない）", 
     r.ev("m2", { type: "accept" });
     expect(await r.call("node.reclaimPreview", { nodeId: "m2" }, "root")).toEqual({
       ok: true,
-      value: { reclaimable: true },
+      value: { reclaimable: true, unmet: [], blockers: [] },
     });
     const bad = rig({ facts: { c: { merged: true, clean: false, worktreePath: `${WT}/c` } } });
     bad.ev("m2", { type: "reportDone" });
     bad.ev("m2", { type: "accept" });
     const res = await bad.call("node.reclaimPreview", { nodeId: "m2" }, "root");
-    expect(res.ok).toBe(false);
-    expect(res.error?.cause).toContain("c");
+    expect(res.ok).toBe(true);
+    expect(res.value.reclaimable).toBe(false);
+    expect(res.value.unmet).toContain("descendantsNotReclaimable");
+    expect(res.value.blockers).toContainEqual({ kind: "node", reason: "dirty", nodeId: "c" });
   });
 
   it("対象が呼び出し元の部分木の外（自分自身・別の部分木）なら forbidden", async () => {
@@ -311,7 +355,8 @@ describe("node.reclaim（回収の実行。実行時に再判定し、配下か�
       },
     });
     const res = await r.call("node.reclaimPreview", { nodeId: "a" });
-    expect(res.error?.code).toBe("notReclaimable");
+    expect(res.value.reclaimable).toBe(false);
+    expect(res.value.unmet).toContain("factsMissing");
   });
 
   it("同じ requestId の再試行は、記録を重複させない", async () => {
@@ -337,7 +382,7 @@ describe("未整備の操作（reclaimInstruct・purge・purgePreview）", () =>
   it("何も書かずに notSupported で失敗する", async () => {
     const r = rig();
     const before = r.s().lastSeq;
-    for (const op of ["node.reclaimInstruct", "node.purge", "node.purgePreview"] as const) {
+    for (const op of ["node.purge", "node.purgePreview"] as const) {
       expect((await r.call(op, { nodeId: "a" })).error?.code, op).toBe("notSupported");
     }
     expect(r.s().lastSeq).toBe(before);

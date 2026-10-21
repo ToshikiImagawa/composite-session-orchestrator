@@ -57,6 +57,8 @@ export interface Appended {
   readonly state: OrchState;
   /** 追記した（または、重複として最初のものを返した）イベント。`bodies` と同じ順。 */
   readonly events: readonly OrchEvent[];
+  /** 全件が追記済みの重複（同じ呼び出し元・同じ requestId・同じ内容）。何も書いていない。 */
+  readonly duplicate: boolean;
 }
 
 /**
@@ -75,7 +77,14 @@ export function appendAtomically(
     bodies.map((body, i) => ({ requestId: derivedRequestId(actor, requestId, i), actor, body })),
   );
   if (!r.ok) return { ok: false, error: toFailure(r.error) };
-  return { ok: true, value: { state: log.state(), events: r.value.map((o) => o.event) } };
+  return {
+    ok: true,
+    value: {
+      state: log.state(),
+      events: r.value.map((o) => o.event),
+      duplicate: r.value.every((o) => !o.applied),
+    },
+  };
 }
 
 /** core の失敗（`seq` つき）を、窓口の失敗にそろえる。 */

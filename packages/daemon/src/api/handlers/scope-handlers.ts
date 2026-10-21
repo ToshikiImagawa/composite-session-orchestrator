@@ -169,8 +169,8 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
             id: deriveId("inbox", caller, req.requestId, "inbox"),
             kind: "violation",
             nodeId: caller,
-            // 受信箱の `ref` は拡張要求を指せない（core の参照先は判断要求・報告だけ）ので、ID は要約に入れる。
-            summary: summarize(`範囲の拡張要求 ${extensionId}（${target.kind}）: ${target.value}`),
+            summary: summarize(`範囲の拡張要求（${target.kind}）: ${target.value}`),
+            ref: extensionId,
           },
         },
       ];
@@ -224,6 +224,12 @@ export function createScopeHandlers(deps: ScopeHandlerDeps) {
             ...(decision === "approve" ? { granted: ext.target } : {}),
           },
         },
+        // 判定したら、親の受信箱の、この拡張要求の項目を解決済みにする（同じ記録で。再送は重複しない）。
+        ...state.inbox
+          .filter(
+            (i) => i.kind === "violation" && i.ref === extensionId && i.resolved === undefined,
+          )
+          .map((i): EventBody => ({ type: "inbox.resolved", payload: { itemId: i.id } })),
       ];
       const decided = appendAtomically(log, deps.clock, req.requestId, actor, bodies);
       if (!decided.ok) return decided;

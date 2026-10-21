@@ -29,6 +29,8 @@ import {
   type LogPort,
   summarize,
 } from "./context.js";
+import { createExclusive } from "./inflight.js";
+import { type InstructionDelivery, isDelivered } from "./instruction-delivery.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
@@ -41,6 +43,10 @@ export interface StateHandlerDeps {
    * が包んで行う。包まないときは false のまま（記録だけして止めない・再開しない、を避けるため notSupported）。
    */
   readonly allowPause?: boolean;
+  /** 差し戻しの理由（追加指示）を子へ届ける。省略すると、記録だけを行う。 */
+  readonly deliver?: InstructionDelivery["deliver"];
+  /** 届ける手段（アダプタ）があるか。`deliver` を渡すときは、差し戻しを記録する前に確かめる。 */
+  readonly canDeliver?: InstructionDelivery["available"];
 }
 
 const ACTIVE: ReadonlySet<NodeState> = new Set(["running", "waiting", "stopping"]);
@@ -49,6 +55,7 @@ const callerOf = (req: HandlerRequest): string => req.caller?.nodeId ?? "";
 
 export function createStateHandlers(deps: StateHandlerDeps) {
   const { log, clock } = deps;
+  const exclusive = createExclusive();
 
   const notActive = (nodeId: string, state: NodeState | undefined) =>
     fail(
@@ -88,6 +95,63 @@ export function createStateHandlers(deps: StateHandlerDeps) {
       return r.ok ? { ok: true, value: { accepted: true } } : r;
     };
 
+  const reviewOnce = async (req: HandlerRequest<"node.review">): Promise<R<"node.review">> => {
+    const caller = callerOf(req);
+    const { nodeId, verdict } = req.params;
+    // 認可（directChild）の二重の備え: 完了の判定は、そのノードの親だけ。
+    if (log.state().nodes.find((n) => n.id === nodeId)?.parentId !== caller) {
+      return fail(
+        "forbidden",
+        "完了の判定は、そのノードの親（統合ノード）だけができる",
+        "親の統合ノードに依頼する",
+      );
+    }
+    // 差し戻しの理由を届ける手段がなければ、記録する前に失敗させる（記録だけが残らないように）。
+    if (
+      req.params.verdict === "reject" &&
+      deps.deliver !== undefined &&
+      deps.canDeliver?.(nodeId) === false
+    ) {
+      return fail(
+        "noRuntime",
+        `ノード ${nodeId} のランタイム（アダプタ）が見つからず、差し戻しの理由を届けられない`,
+        "ノードの状態を確認する",
+      );
+    }
+    const bodies: EventBody[] = [
+      {
+        type: "node.stateChanged",
+        payload: { nodeId, event: { type: verdict === "accept" ? "accept" : "reject" } },
+      },
+    ];
+    // 受理の feedback は、報告（`review`）として記録する。差し戻しの理由は、再開した子への追加指示として記録する。
+    if (req.params.verdict === "accept" && req.params.feedback !== undefined) {
+      bodies.push({
+        type: "report.added",
+        payload: {
+          reportId: deriveId("report", caller, req.requestId, "review"),
+          nodeId,
+          kind: "review",
+          text: req.params.feedback,
+        },
+      });
+    }
+    if (req.params.verdict === "reject") {
+      bodies.push({ type: "node.instructed", payload: { nodeId, text: req.params.feedback } });
+    }
+    const r = appendAtomically(log, clock, req.requestId, { nodeId: caller }, bodies);
+    if (!r.ok) return r;
+    // 差し戻しの理由を、再開した子へ届ける（未配送のときだけ。再送で、送り直せる）。
+    if (req.params.verdict === "reject" && deps.deliver !== undefined) {
+      const seq = r.value.events[1]?.seq;
+      if (seq !== undefined && !isDelivered(r.value.state, seq)) {
+        const sent = await deps.deliver(nodeId, req.params.feedback, seq);
+        if (!sent.ok) return sent;
+      }
+    }
+    return { ok: true, value: { state: stateOf(r.value.state, nodeId) as NodeState } };
+  };
+
   return {
     "tree.list": (req: HandlerRequest<"tree.list">): R<"tree.list"> => {
       const v = visibleState(log.state(), callerOf(req));
@@ -126,14 +190,26 @@ export function createStateHandlers(deps: StateHandlerDeps) {
 
     "report.done": (req: HandlerRequest<"report.done">): R<"report.done"> => {
       const caller = callerOf(req);
-      // 暫定: 根拠は 1 件以上必須（基準ごとの網羅の確認は、契約の拡張〔acceptanceCriteria〕の後）。
-      if (req.params.evidence.length === 0) {
+      // 根拠は 1 件以上必須。ブリーフ（受け入れ基準）を持つノードは、すべての基準に根拠が要る。
+      const criteria = log.state().nodes.find((n) => n.id === caller)?.acceptanceCriteria ?? [];
+      const norm = (t: string): string => t.normalize("NFC").trim();
+      const usable = req.params.evidence.filter((e) => norm(e.evidence) !== "");
+      const covered = new Set(usable.map((e) => norm(e.criterion)));
+      const missing: string[] = criteria.filter((c) => !covered.has(norm(c)));
+      if (
+        req.params.evidence.length === 0 ||
+        usable.length !== req.params.evidence.length ||
+        missing.length > 0
+      ) {
         return fail(
           "evidenceRequired",
-          "完了報告には、受け入れ基準ごとの根拠（テスト名・実行結果・コミットなど）が 1 件以上要る",
-          "根拠を添えて報告し直す",
+          missing.length > 0
+            ? `完了報告には、すべての受け入れ基準の根拠が要る。根拠がない基準: ${missing.join("、")}`
+            : "完了報告には、受け入れ基準ごとの根拠（テスト名・実行結果・コミットなど）が 1 件以上要る",
+          "基準ごとに根拠（criterion に基準の文言そのまま）を添えて報告し直す",
         );
       }
+
       const reportId = deriveId("report", caller, req.requestId, "report");
       const evidence = req.params.evidence.map((e) => ({ ...e }));
       const bodies: EventBody[] = [
@@ -304,25 +380,10 @@ export function createStateHandlers(deps: StateHandlerDeps) {
       return r.ok ? { ok: true, value: { accepted: true } } : r;
     },
 
-    "node.review": (req: HandlerRequest<"node.review">): R<"node.review"> => {
-      const caller = callerOf(req);
-      const { nodeId, verdict } = req.params;
-      // 認可（directChild）の二重の備え: 完了の判定は、そのノードの親だけ。
-      if (log.state().nodes.find((n) => n.id === nodeId)?.parentId !== caller) {
-        return fail(
-          "forbidden",
-          "完了の判定は、そのノードの親（統合ノード）だけができる",
-          "親の統合ノードに依頼する",
-        );
-      }
-      const r = appendAtomically(log, clock, req.requestId, { nodeId: caller }, [
-        {
-          type: "node.stateChanged",
-          payload: { nodeId, event: { type: verdict === "accept" ? "accept" : "reject" } },
-        },
-      ]);
-      if (!r.ok) return r;
-      return { ok: true, value: { state: stateOf(r.value.state, nodeId) as NodeState } };
-    },
+    // 同じ requestId の同時の判定は、1 つにまとめる（配送が 1 回だけになる）。
+    "node.review": (req: HandlerRequest<"node.review">): Promise<R<"node.review">> =>
+      exclusive(`${callerOf(req)}\0${req.requestId}`, JSON.stringify(req.params), () =>
+        reviewOnce(req),
+      ),
   };
 }

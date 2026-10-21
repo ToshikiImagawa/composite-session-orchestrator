@@ -9,17 +9,20 @@
  *   何もしない。実行時にも、事前確認とは独立に再判定する（その間に状況が変わりうる）。
  * - 実行は、ノードごとに「回収可能にする → 作業ツリーを消す → アーカイブする」の順。削除に失敗したら、そこで止めて失敗を返す
  *   （記録は回収可能のまま。作業ツリーが残るのに、アーカイブしない）。再試行は、アーカイブ済みを飛ばして続きから完了する（冪等）。
- * - 破棄の判断（停止したノードの回収）は、記録する経路がまだない。`discarded` は常に false で判定し、停止したノードは
+ * - 破棄の判断（停止したノードの回収）は、`node.discardDecided`（`node.reclaimInstruct`。人間）の記録から導く（`discardedNodeIds`）。
+ *   判断がない停止したノードは、
  *   `discardRequired`（人間の判断が要る）として拒否する。
  */
 
 import {
   assessReclaim,
   type Blocker,
+  discardedNodeIds,
   type Failure,
   failure,
   isStrictDescendant,
   type NodeRecord,
+  type OperationMap,
   type OrchState,
   type ProcessInfo,
   type ReclaimAssessment,
@@ -32,7 +35,9 @@ import type { ProcessProbe } from "../../sdk/lsof-probe.js";
 import type { HandlerRequest } from "../server.js";
 import { appendAtomically, fail, type LogPort } from "./context.js";
 
-/** 作業ツリーの事実（`discarded` は daemon が決める）。 */
+type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
+
+/** 作業ツリーの事実（`discarded` は、`node.discardDecided` の記録から導く）。 */
 export type WorktreeFacts = Omit<ReclaimNodeFacts, "discarded">;
 
 /**
@@ -144,6 +149,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     nodes: readonly ReclaimNode[],
     open: readonly string[],
     nodeId: string,
+    discarded: ReadonlySet<string>,
     shared?: { processes: readonly ProcessInfo[] | null },
   ): Promise<{ result: Result<ReclaimAssessment, Failure>; facts?: WorktreeFacts }> {
     const found = await safely(nodeId, () => ports.factsFor(nodeId), undefined);
@@ -157,7 +163,8 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     const result = assessReclaim(
       {
         nodes,
-        facts: found === undefined ? {} : { [nodeId]: { ...found, discarded: false } },
+        facts:
+          found === undefined ? {} : { [nodeId]: { ...found, discarded: discarded.has(nodeId) } },
         openDecisionNodeIds: open,
         processes,
         worktreeRoot: ports.worktreeRoot,
@@ -178,6 +185,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     const plan = postOrder(state.nodes, targetId);
     const virtual = new Map<string, ReclaimNode>(state.nodes.map((n) => [n.id, n]));
     const open = openDecisionNodes(state);
+    const discarded = new Set(discardedNodeIds(state));
     const unmet: Unmet[] = [];
     const shared = {
       processes: plan.every((n) => n.state === "archived")
@@ -186,7 +194,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     };
     for (const n of plan) {
       if (n.state === "archived") continue;
-      const { result: r } = await assessNode([...virtual.values()], open, n.id, shared);
+      const { result: r } = await assessNode([...virtual.values()], open, n.id, discarded, shared);
       if (!r.ok) {
         unmet.push({ nodeId: n.id, unmet: ["stateNotEligible"], blockers: [] });
         continue;
@@ -219,10 +227,27 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
 
   return {
     // 人間の破棄の判断の記録（core の `node.discardDecided`。T13e）ができるまで、受け付けない。
-    "node.reclaimInstruct": unsupported(
-      "破棄の判断を記録する先（core のイベント）が未整備で、まだ使えない",
-      "停止したノードは、人間が手元で作業ツリーを確認して扱う",
-    ),
+    // 破棄の判断（人間）。停止したノードの成果を捨ててよいという判断を記録する。回収は、別に実行する。
+    "node.reclaimInstruct": (
+      req: HandlerRequest<"node.reclaimInstruct">,
+    ): Result<{ accepted: true }, Failure> => {
+      const { nodeId } = req.params;
+      const node = log.state().nodes.find((n) => n.id === nodeId);
+      if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
+      if (node.discarded !== undefined) return { ok: true, value: { accepted: true } }; // 記録済み（冪等）
+      if (node.state !== "stopped") {
+        return fail(
+          "notStopped",
+          `ノード ${nodeId} は ${node.state} で、破棄を判断できない（停止済み〔stopped〕のノードだけ）`,
+          "先に node.stop で止めて、停止を確認してから判断する",
+          "統合済みで検証済みのノードは、破棄でなく、通常の回収（node.reclaim）を使う",
+        );
+      }
+      const r = appendAtomically(log, deps.clock, req.requestId, { human: true }, [
+        { type: "node.discardDecided", payload: { nodeId } },
+      ]);
+      return r.ok ? { ok: true, value: { accepted: true } } : r;
+    },
     // 最終削除は、アーカイブ日（`archivedAt`）とログの最終削除の経路の設計後に実装する。
     "node.purgePreview": unsupported(
       "最終削除は、アーカイブ日の記録とログの削除経路の設計が済むまで、まだ使えない",
@@ -234,13 +259,26 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     ),
     "node.reclaimPreview": async (
       req: HandlerRequest<"node.reclaimPreview">,
-    ): Promise<Result<{ reclaimable: boolean }, Failure>> => {
+    ): Promise<R<"node.reclaimPreview">> => {
       const { nodeId } = req.params;
       const outside = outsideSubtree(req.caller?.nodeId ?? "", nodeId);
       if (outside) return outside;
       const { unmet } = await assess(log.state(), nodeId);
-      if (unmet.length > 0) return notReclaimable(unmet);
-      return { ok: true, value: { reclaimable: true } };
+      // 満たしていない条件の和と、原因（対象の配下のノードは、そのノードの条件も原因として挙げる）。
+      const reasons = [...new Set(unmet.flatMap((u) => u.unmet))];
+      if (
+        unmet.some((u) => u.nodeId !== nodeId) &&
+        !reasons.includes("descendantsNotReclaimable")
+      ) {
+        reasons.push("descendantsNotReclaimable"); // 配下に回収できないノードがある（対象の条件 5）
+      }
+      const blockers = unmet.flatMap((u) => [
+        ...u.blockers,
+        ...(u.nodeId === nodeId
+          ? []
+          : u.unmet.map((reason) => ({ kind: "node" as const, reason, nodeId: u.nodeId }))),
+      ]);
+      return { ok: true, value: { reclaimable: unmet.length === 0, unmet: reasons, blockers } };
     },
 
     "node.reclaim": async (
@@ -279,7 +317,12 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
       if (current?.state !== "archived") {
         // 各ノードの記録の直前に、そのノードだけ、事実とプロセスを取り直して判定する（判定から時間が経っている）。
         const state = log.state();
-        const again = await assessNode(state.nodes, openDecisionNodes(state), n.id);
+        const again = await assessNode(
+          state.nodes,
+          openDecisionNodes(state),
+          n.id,
+          new Set(discardedNodeIds(state)),
+        );
         if (!again.result.ok || !again.result.value.reclaimable || again.facts === undefined) {
           const list: Unmet[] = again.result.ok
             ? [
@@ -304,7 +347,13 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
           const marked = appendAtomically(log, deps.clock, `${requestId}/${n.id}/mark`, actor, [
             {
               type: "node.stateChanged",
-              payload: { nodeId: n.id, event: { type: "markReclaimable", discarded: false } },
+              payload: {
+                nodeId: n.id,
+                event: {
+                  type: "markReclaimable",
+                  discarded: discardedNodeIds(log.state()).includes(n.id),
+                },
+              },
             },
           ]);
           if (!marked.ok) return { ok: false, error: marked.error };
