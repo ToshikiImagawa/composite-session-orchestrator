@@ -5,4 +5,5 @@
  * PRD: IR_001, NFR_003, NFR_004, NFR_009, NFR_010
  */
 export * from "./inbox-response.js";
+export * from "./schemas.js";
 export * from "./tools.js";
