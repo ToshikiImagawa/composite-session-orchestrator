@@ -151,6 +151,19 @@ export class FakeSink implements EventSink {
   readonly records: { requestId: string; body: EventBody; actor: SinkRequest["actor"] }[] = [];
   /** 次の n 回の記録を失敗させる。 */
   failNext = 0;
+  /** 1 トランザクションで記録した件数の列（`recordAll` の呼び出しごと）。 */
+  readonly groups: number[] = [];
+  recordAll(reqs: readonly SinkRequest[]): Result<unknown, Failure> {
+    if (this.failNext > 0) {
+      this.failNext -= 1;
+      return { ok: false, error: failure("storeError", "disk full", "再試行する") };
+    }
+    for (const req of reqs) {
+      this.records.push({ requestId: req.requestId, body: req.body, actor: req.actor });
+    }
+    this.groups.push(reqs.length);
+    return ok(undefined);
+  }
   record(req: SinkRequest): Result<unknown, Failure> {
     if (this.failNext > 0) {
       this.failNext -= 1;
