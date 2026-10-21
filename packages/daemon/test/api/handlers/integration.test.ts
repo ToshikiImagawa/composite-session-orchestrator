@@ -5,6 +5,7 @@ import { createHandlers } from "../../../src/api/handlers/index.js";
 import { type ApiServer, createApiServer } from "../../../src/api/server.js";
 import { EventLog } from "../../../src/eventlog.js";
 import { createMemoryStore } from "../../../src/memory-store.js";
+import type { RuntimeAdapter } from "../../../src/sdk/runtime.js";
 
 // 応答の本文（値の形は操作ごとに違うため、テストでは緩く扱う）。
 interface Json {
@@ -21,7 +22,7 @@ afterEach(async () => {
   server = undefined;
 });
 
-const boot = async () => {
+const boot = async (adapter?: RuntimeAdapter) => {
   const clock = (): string => "2026-10-20T00:00:00Z";
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
@@ -45,7 +46,7 @@ const boot = async () => {
   server = createApiServer({
     credentials,
     getState: () => log.state(),
-    handlers: createHandlers({ log, clock }),
+    handlers: createHandlers({ log, clock }, adapter ? { adapterFor: () => adapter } : undefined),
   });
   const { url } = await server.listen(0);
   const tokens = {
@@ -107,5 +108,53 @@ describe("窓口の通し（HTTP → 認証 → 認可 → ハンドラ → イ�
     expect(
       (await t.call(t.tokens.a, "decision.answer", { decisionId: "x", choice: "A" })).status,
     ).toBe(403);
+  });
+});
+
+describe("窓口の通し（アダプタを伴う操作）", () => {
+  it("統合ノードが、子へ指示を送り、停止を要求する。停止要求は記録され、アダプタには stopSeq が渡る", async () => {
+    const sent: string[] = [];
+    const stops: { mode: string; stopSeq: number }[] = [];
+    const adapter = {
+      kind: "cli",
+      capabilities: () => ({
+        send: "delayed",
+        stopGraceful: true,
+        stopImmediate: true,
+        hooks: "ok",
+        sessionId: true,
+      }),
+      send: async (_: string, text: string) => {
+        sent.push(text);
+        return { ok: true, value: { status: "queued" } };
+      },
+      stop: async (_: string, r: { mode: string; stopSeq: number }) => {
+        stops.push(r);
+        return { ok: true, value: { state: "stopped", outcome: "aborted", blockers: [] } };
+      },
+    } as unknown as RuntimeAdapter;
+    const t = await boot(adapter);
+    expect(
+      (await t.call(t.tokens.root, "node.send", { nodeId: "a", text: "続けて" })).json,
+    ).toEqual({
+      ok: true,
+      value: { delivered: true },
+    });
+    const stop = await t.call(t.tokens.root, "node.stop", { nodeId: "a", mode: "graceful" });
+    expect(stop.json).toEqual({ ok: true, value: { state: "stopping" } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sent).toEqual(["続けて"]);
+    expect(stops).toEqual([{ mode: "graceful", stopSeq: t.log.state().stopRequests[0]?.seq }]);
+    const caps = await t.call(t.tokens.root, "node.capabilities", { nodeId: "a" });
+    expect(caps.json.value.operations).toContain("node.stop");
+    // 自分自身の停止は、統合ノードにはできない（認可）
+    expect(
+      (await t.call(t.tokens.root, "node.stop", { nodeId: "root", mode: "graceful" })).status,
+    ).toBe(403);
+  });
+
+  it("アダプタを渡さなければ、アダプタを伴う操作は未実装（501）", async () => {
+    const t = await boot();
+    expect((await t.call(t.tokens.root, "node.send", { nodeId: "a", text: "x" })).status).toBe(501);
   });
 });
