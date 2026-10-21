@@ -85,4 +85,6 @@ export interface SinkRequest {
 /** イベントの記録口（daemon では EventLog.append に配線する）。 */
 export interface EventSink {
   record(request: SinkRequest): Result<unknown, Failure>;
+  /** 複数のイベントを、1 トランザクションで記録する（1 件でも失敗したら全件を書かない）。 */
+  recordAll(requests: readonly SinkRequest[]): Result<unknown, Failure>;
 }

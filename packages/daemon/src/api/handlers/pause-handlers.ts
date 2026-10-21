@@ -35,6 +35,7 @@ import {
   fail,
   type LogPort,
   summarize,
+  waitRequestKey,
 } from "./context.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
@@ -118,7 +119,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       target === decision.nodeId &&
       Object.hasOwn(
         state.requests,
-        derivedRequestId({ system: true }, `reconcile-wait-${decision.decisionId}`, 0),
+        derivedRequestId({ system: true }, waitRequestKey(decision.decisionId), 0),
       );
     if (!mine(pauseRequestId(decision.decisionId, target)) && !reconciled) return false;
     const since =

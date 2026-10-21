@@ -57,6 +57,12 @@ export function derivedRequestId(actor: Actor, requestId: string, index: number)
   return `${deriveId("rq", callerKey(actor), requestId, "")}:${index}`;
 }
 
+/**
+ * 判断を待っていた子が、プロセスを失って停止済みになったとき（再起動の整合・予期しない終了）の記録の、要求の鍵。
+ * 判断への回答の側が、この記録（`derivedRequestId({ system: true }, 鍵, 0)`）を見て、人間が止めた子と区別し、回答で再開する。
+ */
+export const waitRequestKey = (decisionId: string): string => `reconcile-wait-${decisionId}`;
+
 export interface Appended {
   readonly state: OrchState;
   /** 追記した（または、重複として最初のものを返した）イベント。`bodies` と同じ順。 */
