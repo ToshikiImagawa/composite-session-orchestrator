@@ -381,6 +381,18 @@ describe("共通の性質", () => {
     for (const id of ids) expect(isSafeId(id), id).toBe(true);
   });
 
+  it("最大長（128 文字）の requestId でも、派生した requestId が長さの上限を超えず、記録できる。再試行は冪等", async () => {
+    const r = rig();
+    const long = `r${"x".repeat(127)}`;
+    expect(long).toHaveLength(128);
+    const a = await r.call("report.progress", r.req("report.progress", { text: "t" }, A, long));
+    expect(a.ok).toBe(true);
+    const b = await r.call("report.progress", r.req("report.progress", { text: "t" }, A, long));
+    expect(b.ok).toBe(true);
+    expect(r.state().reports).toHaveLength(1);
+    for (const id of Object.keys(r.state().requests)) expect(isSafeId(id), id).toBe(true);
+  });
+
   it("途中で失敗する操作は、何も書かない（事前に全体を検査する）", async () => {
     const r = rig();
     await r.call("report.done", r.req("report.done", { evidence: [] }, A)); // a は done
