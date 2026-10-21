@@ -7,6 +7,7 @@
 import {
   type DaemonOperation,
   failure,
+  LIMITS,
   ok,
   type Result,
   ROLE_OPERATIONS,
@@ -40,8 +41,7 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
     "子を停止する。mode は graceful（穏当）か immediate（即時）。graceMs（1〜3600000 ミリ秒の整数）は graceful のときだけ指定でき、省略すると既定の猶予になる",
   "inbox.fetch": "受信箱を取得する。優先度・依存関係・時刻の順。detail と limit で量を絞れる",
   "tree.list": "木の一覧表を取得する",
-  "decision.present":
-    "選択肢と自由入力欄を持つ判断要求を人間に提示する。pauseNodeIds で、判断待ちの間に止める子（自分の子孫）を指定できる。回答は受信箱に届く",
+  "decision.present": `選択肢と自由入力欄を持つ判断要求を人間に提示する。pauseNodeIds で、判断待ちの間に止める子（自分の子孫）を指定できる。未回答の判断要求は 1 ノードにつき ${LIMITS.openDecisionsPerNode} 件まで（再開後の要求を数える。超えると tooManyOpenDecisions）。回答は受信箱に届く`,
   "node.split":
     "脱線部分を新しい子へ移す。引数: nodeId・keep（mainline か stop。元の子を本筋に戻すか停止するか）と、新しい子のブリーフ（objective・acceptanceCriteria・scope・dependsOn）",
   "scope.decide":
@@ -55,7 +55,7 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "decision.get": "受信箱の項目（ref）の判断要求の内容を読む。自分の部分木のものだけ",
   "report.get": "受信箱の項目（ref）の報告の内容を読む。自分の部分木のものだけ",
   "report.progress": "進捗を親へ報告する",
-  "report.decision": "判断要求を親へ出す。人間へは親を経由する",
+  "report.decision": `判断要求を親へ出す。人間へは親を経由する。未回答の判断要求は 1 ノードにつき ${LIMITS.openDecisionsPerNode} 件まで（再開後の要求を数える。超えると tooManyOpenDecisions）`,
   "report.outOfScope": "作業範囲外の課題を親へ申告する",
   "report.done": "完了を親へ報告する。受け入れ基準ごとの根拠を付ける",
   "scope.extend":

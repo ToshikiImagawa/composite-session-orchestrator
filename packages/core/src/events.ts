@@ -236,12 +236,16 @@ export interface NodeRecord {
   readonly discarded?: { readonly seq: number; readonly at: string; readonly by: Actor };
   /** アーカイブした時刻（`archive` のイベントの `at`）。 */
   readonly archivedAt?: string;
+  /** 直近の `start`・`restart` の `seq`。未回答の判断要求の上限（`openDecisionsPerNode`）で、数える範囲の始まり。古いスナップショットにはない（0 とみなす）。 */
+  readonly runStartedSeq?: number;
 }
 
 export interface DecisionRecord {
   readonly decisionId: string;
   readonly nodeId: string;
   readonly status: "open" | "answered";
+  /** 要求を記録したイベントの `seq`。古いスナップショットにはない（0 とみなし、上限の数には入れない）。 */
+  readonly requestedSeq?: number;
   /** 判断を求める内容（記録されていれば）。 */
   readonly question?: string;
   readonly options?: readonly string[];
@@ -414,6 +418,7 @@ export type FoldFailureCode =
   | "unknownInboxItem"
   | "unknownInstruction"
   | "tooManyOpenExtensions"
+  | "tooManyOpenDecisions"
   | "unknownExtension"
   | "extensionAlreadyDecided"
   | "invalidState";
@@ -1017,6 +1022,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
         // 停止したノードの再開（restart）で、破棄の判断は消える。
         ...(event.type === "restart" ? rest : node),
         state: next,
+        ...(event.type === "start" || event.type === "restart" ? { runStartedSeq: seq } : {}),
         ...(next === "archived" ? { archivedAt: raw.at } : {}),
       });
       if (event.type === "stop" && t.value.changed && t.value.effect !== "cancelStart") {
@@ -1299,12 +1305,27 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           "別の ID を使う",
         );
       }
+      // 数えるのは、そのノードの直近の start・restart より後の open の要求だけ。古い要求は回答できるまま残す。
+      const runStartedSeq = nodeAt(d, nodeId)?.runStartedSeq ?? 0;
+      const openDecisions = d.decisions.filter(
+        (x) => x.nodeId === nodeId && x.status === "open" && (x.requestedSeq ?? 0) > runStartedSeq,
+      ).length;
+      if (openDecisions >= LIMITS.openDecisionsPerNode) {
+        return reject(
+          seq,
+          "tooManyOpenDecisions",
+          `ノード ${nodeId} の未回答の判断要求が上限（${LIMITS.openDecisionsPerNode} 件）に達している`,
+          "回答を待つ",
+          "まとめて 1 件で聞き直す",
+        );
+      }
       d.decisionIdx.set(decisionId, d.decisions.length);
       d.decisions.push(
         freezeRecord({
           decisionId,
           nodeId,
           status: "open",
+          requestedSeq: seq,
           ...(question === undefined ? {} : { question: question as string }),
           ...(options === undefined ? {} : { options: Object.freeze([...(options as string[])]) }),
           ...(pauseNodeIds === undefined

@@ -198,10 +198,11 @@ describe("畳み込み（状態はイベント列からのみ導出）", () => {
 
 describe("scope.violation / inbox / 判断", () => {
   it("scope.violation は記録され、状態は変えない", () => {
-    const before = must(foldEvents(base()));
+    const b = base();
+    const before = must(foldEvents(b));
     const s = must(
       foldEvents([
-        ...base(),
+        ...b,
         ev({
           type: "scope.violation",
           payload: { nodeId: "a", reason: "outsideWritable", subject: "/etc/x" },
@@ -1514,5 +1515,85 @@ describe("effectiveScope（有効な範囲 = ブリーフ + 承認済みの拡�
   it("ブリーフのないノード・存在しないノードは undefined", () => {
     expect(effectiveScope(run(), "root")).toBeUndefined();
     expect(effectiveScope(run(), "zzz")).toBeUndefined();
+  });
+});
+
+describe("未回答の判断要求は、ノードごとに上限まで", () => {
+  const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+  /** 土台のイベントを先に作ってから、検査したいイベントを作る（seq が土台より後になるように）。 */
+  const run = (...makers: (() => OrchEvent)[]) => {
+    const b = base();
+    return foldEvents([...b, ...makers.map((m) => m())]);
+  };
+  const requested =
+    (decisionId: string, nodeId = "root") =>
+    () =>
+      ev({ type: "decision.requested", payload: { decisionId, nodeId } });
+  const answered = (decisionId: string) => () =>
+    ev({ type: "decision.answered", payload: { decisionId, answer: "a" } });
+  const many = (n: number, nodeId = "root") =>
+    Array.from({ length: n }, (_, i) => requested(`${nodeId}-d${i}`, nodeId));
+
+  it("上限（LIMITS.openDecisionsPerNode）ちょうどまでは受け付け、超えたら tooManyOpenDecisions", () => {
+    expect(LIMITS.openDecisionsPerNode).toBe(10);
+    expect(codeOf(run(...many(LIMITS.openDecisionsPerNode)))).toBeNull();
+    expect(codeOf(run(...many(LIMITS.openDecisionsPerNode + 1)))).toBe("tooManyOpenDecisions");
+  });
+
+  it("回答済みは数えない。1 件回答すれば、もう 1 件出せる", () => {
+    const r = run(...many(LIMITS.openDecisionsPerNode), answered("root-d0"), requested("extra"));
+    expect(codeOf(r)).toBeNull();
+  });
+
+  it("数えるのは、そのノードの直近の restart より後の要求だけ。古い要求は回答できるまま残る", () => {
+    const stop = () => ev(changed("root", { type: "stop", mode: "immediate" }));
+    const exited = () => ev(changed("root", { type: "confirmStopped" }));
+    const restart = () => ev(changed("root", { type: "restart", dependenciesDone: true }));
+    const r = run(
+      ...many(LIMITS.openDecisionsPerNode),
+      stop,
+      exited,
+      restart,
+      ...Array.from(
+        { length: LIMITS.openDecisionsPerNode },
+        (_, i) => () =>
+          ev({ type: "decision.requested", payload: { decisionId: `new${i}`, nodeId: "root" } }),
+      ),
+      answered("root-d0"),
+    );
+    expect(codeOf(r)).toBeNull();
+    if (r.ok) {
+      expect(r.value.decisions.find((x) => x.decisionId === "root-d0")?.status).toBe("answered");
+      expect(r.value.decisions.filter((x) => x.status === "open")).toHaveLength(
+        LIMITS.openDecisionsPerNode * 2 - 1,
+      );
+    }
+    // 再開後も、新しい要求は上限まで
+    const over = run(
+      ...many(1),
+      stop,
+      exited,
+      restart,
+      ...Array.from(
+        { length: LIMITS.openDecisionsPerNode + 1 },
+        (_, i) => () =>
+          ev({ type: "decision.requested", payload: { decisionId: `n${i}`, nodeId: "root" } }),
+      ),
+    );
+    expect(codeOf(over)).toBe("tooManyOpenDecisions");
+  });
+
+  it("上限はノードごと。別のノードには影響しない", () => {
+    const r = run(...many(LIMITS.openDecisionsPerNode), ...many(1, "a"));
+    expect(codeOf(r)).toBeNull();
+  });
+
+  it("失敗は nextActions を持ち、状態は変わらない", () => {
+    const b = base();
+    const ok = foldEvents([...b, ...many(LIMITS.openDecisionsPerNode).map((m) => m())]);
+    expect(ok.ok).toBe(true);
+    const over = foldEvents([...b, ...many(LIMITS.openDecisionsPerNode + 1).map((m) => m())]);
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.error.nextActions.length).toBeGreaterThan(0);
   });
 });
