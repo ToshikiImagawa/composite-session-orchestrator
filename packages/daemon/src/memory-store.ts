@@ -37,6 +37,20 @@ export function createMemoryStore(): { open(): EventStore } {
             throw e;
           }
         },
+        purgeRows(deleteSeqs, marker) {
+          const max = data.rows.reduce((m, r) => Math.max(m, r.seq), 0);
+          if (marker.seq <= max)
+            throw new Error(`purge: 標識の seq ${marker.seq} が最大 ${max} 以下`);
+          if (data.rows.some((r) => r.requestId === marker.requestId)) {
+            throw new Error(`UNIQUE: requestId ${marker.requestId}`);
+          }
+          const drop = new Set(deleteSeqs);
+          for (const seq of drop) {
+            if (!data.rows.some((r) => r.seq === seq)) throw new Error(`purge: seq ${seq} がない`);
+          }
+          data.rows = [...data.rows.filter((r) => !drop.has(r.seq)), { ...marker }];
+          data.snapshot = undefined;
+        },
         loadSnapshot: () => (data.snapshot === undefined ? undefined : { ...data.snapshot }),
         saveSnapshot(s) {
           data.snapshot = { ...s };
