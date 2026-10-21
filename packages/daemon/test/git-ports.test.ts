@@ -31,7 +31,7 @@ const git = (cwd: string, ...args: string[]): string =>
     },
   }).trim();
 
-const setup = (options: { detached?: boolean } = {}) => {
+const setup = (options: { detached?: boolean; failBranchD?: boolean } = {}) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "cso-git-")));
   const repoRoot = join(base, "repo");
   const worktreeRoot = join(base, "worktrees");
@@ -45,6 +45,9 @@ const setup = (options: { detached?: boolean } = {}) => {
   const calls: string[][] = [];
   const runner: GitRunner = (args, opts) => {
     calls.push([...args]);
+    if (options.failBranchD === true && args[0] === "branch" && args[1] === "-D") {
+      return Promise.resolve({ code: 1, stdout: "", stderr: "error: cannot delete branch" });
+    }
     return nodeGit(args, opts);
   };
   const made = createGitPorts(
@@ -348,6 +351,23 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
       });
       expect(r.ok).toBe(true);
       expect(tips).toEqual([sha]);
+    });
+
+    it("force: -D だけ失敗したら removeFailed（作業ツリーは消えた・ブランチだけ残った）。そのあとの再実行で、残りを消せる", async () => {
+      const s = setup({ failBranchD: true });
+      const p = await provision(s, "c1");
+      const r = await s.ports.removeWorktree("c1", { expectedPath: p, force: true });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error.code).toBe("removeFailed");
+        expect(r.error.cause).toContain("ブランチ");
+        expect(r.error.cause).toContain("残った");
+      }
+      expect(existsSync(p)).toBe(false);
+      expect(git(s.repoRoot, "branch", "--list", "cso/*")).not.toBe("");
+      // 再実行（同じ expectedPath）。ここでは -D を、まだ失敗させる版なので、もう一度 removeFailed。冪等に、同じ失敗を返す
+      const again = await s.ports.removeWorktree("c1", { expectedPath: p, force: true });
+      expect(again.ok).toBe(false);
     });
 
     it("force でも、同じ呼び出しを繰り返せる（冪等。作業ツリーもブランチもなければ成功）", async () => {

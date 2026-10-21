@@ -112,4 +112,29 @@ describe("破棄の判断を経た停止ノードの回収（実際の git）", 
     expect(git(s.repoRoot, "branch", "--list", "cso/*")).toBe("");
     expect(stateOf(s.log.state(), "c1")).toBe("archived");
   });
+
+  it("作業ツリーが消えてブランチだけ残った後（強制の途中の失敗）も、ハンドラ経由でやり直せば、残りのブランチを消して最後まで進む", async () => {
+    const s = await setup();
+    expect((await s.call("node.reclaimInstruct", "human", "c1")).ok).toBe(true);
+    git(s.repoRoot, "worktree", "remove", "--force", s.wt); // 強制の途中で、ブランチの削除だけ失敗した状態
+    expect(git(s.repoRoot, "branch", "--list", "cso/*")).not.toBe("");
+    const done = await s.call("node.reclaim", "integrator", "c1");
+    expect(done.ok).toBe(true);
+    expect(git(s.repoRoot, "branch", "--list", "cso/*")).toBe("");
+    expect(stateOf(s.log.state(), "c1")).toBe("archived");
+  });
+
+  it("作業ツリーもブランチもないノードは、これまでどおり回収できない（消すものがない）", async () => {
+    const s = await setup();
+    expect((await s.call("node.reclaimInstruct", "human", "c1")).ok).toBe(true);
+    git(s.repoRoot, "worktree", "remove", "--force", s.wt);
+    git(
+      s.repoRoot,
+      "branch",
+      "-D",
+      ...git(s.repoRoot, "branch", "--list", "cso/*").replace("*", "").trim().split("\n"),
+    );
+    const r = await s.call("node.reclaim", "integrator", "c1");
+    expect(r.ok).toBe(false);
+  });
 });

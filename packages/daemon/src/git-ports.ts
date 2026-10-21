@@ -285,8 +285,15 @@ export function createGitPorts(
 
     factsFor: (nodeId) =>
       serial(async () => {
-        if ((await isRegistered(nodeId)) !== true) return undefined;
         const path = pathOf(nodeId);
+        if ((await isRegistered(nodeId)) !== true) {
+          // 強制の回収で、作業ツリーは消えたがブランチだけ残った（途中の失敗）ノード: 消すべきものが残っていない作業ツリーとして
+          // 事実を返し、判定を通して、ブランチの削除をやり直せるようにする（破棄の判断は、ハンドラが記録で確かめる）。
+          if (!dirExists(path) && (await branchExists(branchOf(nodeId)))) {
+            return { worktreePath: path, merged: false, clean: true };
+          }
+          return undefined;
+        }
         const real = realOrUndefined(path);
         if (real === undefined) return undefined;
         const clean = await isClean(path);
