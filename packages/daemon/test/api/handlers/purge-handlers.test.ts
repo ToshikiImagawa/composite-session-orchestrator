@@ -266,7 +266,7 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     expect(other.error?.code).toBe("requestIdConflict");
   });
 
-  it("事前確認は、残りのログを畳み込めない理由（pauseNodeIds）を、原因のイベントつきで blockers に入れる。purge も拒否する", () => {
+  it("木の外の判断要求が pauseNodeIds で木のノードを指していても、事前確認の blockers に入れず、purge できる", () => {
     const r = rig();
     r.advance(90);
     const add = r.log.append({
@@ -279,13 +279,10 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     });
     expect(add.ok).toBe(true);
     const preview = r.call("node.purgePreview", { nodeId: "t" });
-    expect(preview.value.purgeable).toBe(false);
-    expect(preview.value.blockers).toEqual([
-      { code: "purgeUnsafe", cause: expect.stringContaining("decision.requested") },
-    ]);
+    expect(preview.value.blockers).toEqual([]);
+    expect(preview.value.purgeable).toBe(true);
     const res = r.call("node.purge", { nodeId: "t" });
-    expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("purgeUnsafe");
-    expect(r.log.state().nodes.some((x) => x.id === "t")).toBe(true);
+    expect(res.ok).toBe(true);
+    expect(r.log.state().nodes.some((x) => x.id === "t")).toBe(false);
   });
 });

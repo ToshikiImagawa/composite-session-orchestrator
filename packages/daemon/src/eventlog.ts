@@ -293,6 +293,17 @@ export class EventLog {
         ),
       };
     }
+    // 標識（node.purged）を書けるのは、最終削除（purgeTree）だけ。追記の入口からは受け付けない。
+    if (request.body.type === "node.purged") {
+      return {
+        ok: false,
+        error: failure(
+          "invalidRequest",
+          "node.purged は、追記の入口からは書けない（最終削除だけが書く）",
+          "最終削除の操作を使う",
+        ),
+      };
+    }
     let at: string;
     try {
       at = this.clock();
