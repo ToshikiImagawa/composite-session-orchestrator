@@ -10,6 +10,9 @@
  * 415 JSON でない、422 操作の失敗、500 内部エラー、501 未実装）。内部の例外の詳細は返さず、`logger` に記録する。
  * 成功の結果は、`OperationMap` の `result` のキーだけに写して返す（`pickResult`）。
  *
+ * `GET /v1/whoami`: Bearer で認証し、ロール（`integrator`・`child`・`human`）だけを返す（`nodeId` は返さない）。MCP の入口が、
+ * 受け取った資格情報のロールを知るのに使う。Host・Origin の検査と、主体の検査（失効・止まったノードは 401）は、操作の入口と同じ。
+ *
  * もう 1 つの入口 `POST /v1/bind`（`bind` を渡したときだけ）は、トークンを持たない子のための専用の経路で、`nodeId` と bind コードだけで
  * 子ロールのノードトークンを返す（そのノードの既存のトークンは無効になる）（失敗が続いたら 429）。
  *
@@ -200,6 +203,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     }
     const path = (req.url ?? "").split("?")[0];
     if (path === "/v1/bind" && deps.bind !== undefined) return handleBind(req, res, deps.bind);
+    if (path === "/v1/whoami") return handleWhoami(req, res);
     if (path !== "/v1/request") {
       return reject(res, failure("notFound", "このパスはない", "POST /v1/request を使う"));
     }
@@ -295,6 +299,31 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       );
     }
     send(res, 200, { ok: true, value });
+  }
+
+  /** 認証したロールだけを返す。トークンはクエリでは受け取らない（Authorization ヘッダだけ）。 */
+  function handleWhoami(req: IncomingMessage, res: ServerResponse): void {
+    if (req.method !== "GET") {
+      return reject(res, failure("methodNotAllowed", "GET だけを受け付ける", "GET で呼び出す"), {
+        allow: "GET",
+      });
+    }
+    const unauthenticated = (): void =>
+      reject(
+        res,
+        failure(
+          "unauthenticated",
+          "資格情報がないか、正しくない",
+          "正しい資格情報で呼び出す",
+          "資格情報を再発行する",
+        ),
+        { "www-authenticate": "Bearer" },
+      );
+    const principal = deps.credentials.authenticate(parseBearer(req.headers.authorization));
+    if (principal === undefined) return unauthenticated();
+    // 失効・止まったノード・ロールの食い違いは、理由を教えずに 401 にする。
+    if (!checkPrincipal(principal, deps.getState()).ok) return unauthenticated();
+    send(res, 200, { ok: true, value: { role: principal.role } });
   }
 
   const now = (): string => (deps.clock ?? (() => new Date().toISOString()))();
