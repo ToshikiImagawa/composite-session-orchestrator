@@ -1,4 +1,4 @@
-import { type EventBody, isSafeId, type NodeEvent, stateOf } from "@cso/core";
+import { type EventBody, failure, isSafeId, type NodeEvent, stateOf } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { createStateHandlers } from "../../../src/api/handlers/state-handlers.js";
 import type { HandlerRequest } from "../../../src/api/server.js";
@@ -357,7 +357,7 @@ describe("report.done の基準ごとの網羅（ブリーフを持つノード�
           dependsOn: [],
           objective: "目的",
           acceptanceCriteria: ["X が通る", "Y が通る"],
-          scope: { writableLocations: ["/wt/c"], forbiddenLocations: [], allowedCommands: [] },
+          scope: { writableLocations: ["src"], forbiddenLocations: [], allowedCommands: [] },
         },
       },
     });
@@ -435,6 +435,65 @@ describe("report.done の基準ごとの網羅（ブリーフを持つノード�
     );
     expect(res.ok).toBe(true);
     expect(stateOf(r.state(), "c")).toBe("done");
+  });
+});
+
+describe("node.review の feedback（記録と配送）", () => {
+  it("受理の feedback は、報告（kind: review）として記録する", async () => {
+    const r = rig();
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A));
+    const res = await r.call(
+      "node.review",
+      r.req("node.review", { nodeId: "a", verdict: "accept", feedback: "よくできた" }, M1),
+    );
+    expect(res.ok).toBe(true);
+    expect(r.state().reports.at(-1)).toMatchObject({
+      nodeId: "a",
+      kind: "review",
+      text: "よくできた",
+    });
+  });
+
+  it("差し戻しの理由を、deliver で子へ届ける。配送に失敗したら失敗を返し、再送で送り直す", async () => {
+    const r = rig();
+    const delivered: [string, string, number][] = [];
+    let fail = true;
+    const h = createStateHandlers({
+      log: r.log,
+      clock,
+      deliver: async (id, text, seq) => {
+        delivered.push([id, text, seq]);
+        if (fail) return { ok: false, error: failure("sendFailed", "x", "y") };
+        r.log.append({
+          requestId: `dl-${seq}`,
+          actor: { system: true },
+          body: { type: "node.instructionDelivered", payload: { instructedSeq: seq } },
+        });
+        return { ok: true, value: undefined };
+      },
+    });
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A));
+    const req = r.req(
+      "node.review",
+      { nodeId: "a", verdict: "reject", feedback: "直して" },
+      M1,
+      "rv-1",
+    );
+    const first = (await h["node.review"](req as never)) as {
+      ok: boolean;
+      error?: { code: string };
+    };
+    expect(first.ok).toBe(false);
+    expect(first.error?.code).toBe("sendFailed");
+    expect(r.state().instructions).toHaveLength(1);
+    fail = false;
+    const retry = (await h["node.review"](req as never)) as { ok: boolean };
+    expect(retry.ok).toBe(true);
+    expect(delivered).toHaveLength(2);
+    expect(r.state().instructions).toHaveLength(1);
+    // 配送済みの再送は、送り直さない
+    await h["node.review"](req as never);
+    expect(delivered).toHaveLength(2);
   });
 });
 

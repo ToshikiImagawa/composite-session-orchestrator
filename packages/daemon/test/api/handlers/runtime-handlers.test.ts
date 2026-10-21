@@ -128,7 +128,7 @@ describe("node.send（稼働中の子への追加指示）", () => {
     expect(r.state().instructions.map((i) => [i.nodeId, i.text])).toEqual([["a", "続けて"]]);
     const seq = r.state().lastSeq;
     const again = await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-1");
-    expect(again).toEqual({ ok: true, value: { status: "queued" } });
+    expect(again).toEqual({ ok: true, value: { status: "queued", duplicate: true } });
     expect(r.state().lastSeq).toBe(seq);
     expect(r.adapter?.sent).toEqual([["a", "続けて"]]);
   });
@@ -140,8 +140,30 @@ describe("node.send（稼働中の子への追加指示）", () => {
     expect(conflict.error?.code).toBe("requestIdConflict");
     r.ev("a", { type: "reportDone" });
     const again = await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-2");
-    expect(again).toEqual({ ok: true, value: { status: "queued" } });
+    expect(again).toEqual({ ok: true, value: { status: "queued", duplicate: true } });
     expect(r.adapter?.sent).toEqual([["a", "続けて"]]);
+  });
+
+  it("配送に成功したら、配送を記録する。失敗したら未配送のまま残り、同じ requestId の再送で送り直す", async () => {
+    const r = rig();
+    await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-9");
+    const rec = r.state().instructions.find((i) => i.nodeId === "a");
+    expect(rec?.deliveredSeq).toBeDefined();
+    // 配送に失敗する
+    const r2 = rig();
+    if (r2.adapter) r2.adapter.sendResult = { ok: false, error: failure("sendFailed", "x", "y") };
+    const failed = await r2.call("node.send", { nodeId: "a", text: "続けて" }, "s-10");
+    expect(failed.error?.code).toBe("sendFailed");
+    expect(r2.state().instructions[0]?.deliveredSeq).toBeUndefined();
+    if (r2.adapter) r2.adapter.sendResult = ok({ status: "queued" as const });
+    const retry = await r2.call("node.send", { nodeId: "a", text: "続けて" }, "s-10");
+    expect(retry).toEqual({ ok: true, value: { status: "queued", duplicate: true } });
+    expect(r2.state().instructions).toHaveLength(1);
+    expect(r2.state().instructions[0]?.deliveredSeq).toBeDefined();
+    expect(r2.adapter?.sent).toHaveLength(2);
+    // 配送済みの再送は、送り直さない
+    await r2.call("node.send", { nodeId: "a", text: "続けて" }, "s-10");
+    expect(r2.adapter?.sent).toHaveLength(2);
   });
 
   it("動作中でないノードには、何も記録しない", async () => {

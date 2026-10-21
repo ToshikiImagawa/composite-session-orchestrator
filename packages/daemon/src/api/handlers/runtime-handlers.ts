@@ -42,6 +42,11 @@ import {
   type LogPort,
   summarize,
 } from "./context.js";
+import {
+  createInstructionDelivery,
+  type InstructionDelivery,
+  isDelivered,
+} from "./instruction-delivery.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
@@ -52,6 +57,10 @@ export interface RuntimeHandlerDeps {
   readonly adapterFor: (nodeId: string) => RuntimeAdapter | undefined;
   /** バックグラウンドの停止が終わったときの通知（結果の記録はアダプタが済ませている。ログ用）。 */
   readonly onStopSettled?: (nodeId: string, result: Result<StopValue, Failure>) => void;
+  /** 追加指示の配送。省略すると、`adapterFor` から組み立てる。 */
+  readonly delivery?: InstructionDelivery;
+  /** 応答に出さない原因（配送の記録の失敗など）の記録先。 */
+  readonly onFailure?: (nodeId: string, cause: string) => void;
 }
 
 const callerOf = (req: HandlerRequest): string => req.caller?.nodeId ?? "";
@@ -123,6 +132,14 @@ export function operationsFor(
 
 export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
   const { log, clock, adapterFor } = deps;
+  const delivery =
+    deps.delivery ??
+    createInstructionDelivery({
+      log,
+      clock,
+      adapterFor,
+      ...(deps.onFailure === undefined ? {} : { onFailure: deps.onFailure }),
+    });
 
   /** 認可（`SUBTREE_RULES`）の二重の備え: 対象は、呼び出した統合ノードの、自分を含まない子孫だけ。 */
   const outsideSubtree = (caller: string, nodeId: string) =>
@@ -198,11 +215,20 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       const actor = { nodeId: callerOf(req) };
       const entry = [{ type: "node.instructed", payload: { nodeId, text } }] as const;
       // 重複の判定は、状態の検査より前に行う（再試行の間にノードが進んでいても成功）。判定は追記が行う
-      // （同じ内容なら重複で何も書かず、内容が違えば `requestIdConflict`）。重複は、送らない。
+      // （同じ内容なら重複で何も書かず、内容が違えば `requestIdConflict`）。重複は、記録しない。
+      // 記録済みでも未配送なら、配送だけをやり直す（送信に成功した記録がないため）。
       if (alreadyApplied(log.state(), actor, req.requestId)) {
         const dup = appendAtomically(log, clock, req.requestId, actor, entry);
         if (!dup.ok) return dup;
-        if (dup.value.duplicate) return { ok: true, value: { status: "queued" } };
+        if (dup.value.duplicate) {
+          const seq = dup.value.events[0]?.seq;
+          const live = SENDABLE.has(stateOf(dup.value.state, nodeId) ?? "pending");
+          if (seq !== undefined && live && !isDelivered(dup.value.state, seq)) {
+            const again = await delivery.deliver(nodeId, text, seq);
+            if (!again.ok) return again;
+          }
+          return { ok: true, value: { status: "queued", duplicate: true } };
+        }
       }
       const state = stateOf(log.state(), nodeId);
       if (state === undefined) {
@@ -216,14 +242,16 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
           "再開してから指示する",
         );
       }
-      const adapter = adapterFor(nodeId);
-      if (adapter === undefined) return noRuntime(nodeId);
-      // 先に記録し、そのあとアダプタへ渡す（新規のときだけ送る）。
+      if (adapterFor(nodeId) === undefined) return noRuntime(nodeId);
+      // 先に記録し、そのあとアダプタへ渡す（配送に成功したら、配送を記録する）。
       const recorded = appendAtomically(log, clock, req.requestId, actor, entry);
       if (!recorded.ok) return recorded;
-      if (recorded.value.duplicate) return { ok: true, value: { status: "queued" } };
-      const r = await adapter.send(nodeId, text);
-      return r.ok ? { ok: true, value: { status: "queued", duplicate: false } } : r;
+      const seq = recorded.value.events[0]?.seq;
+      if (seq === undefined)
+        return fail("internal", "記録した指示の番号を取得できない", "もう一度試す");
+      const r = await delivery.deliver(nodeId, text, seq);
+      if (!r.ok) return r;
+      return { ok: true, value: { status: "queued", duplicate: recorded.value.duplicate } };
     },
 
     "node.stop": (req: HandlerRequest<"node.stop">): R<"node.stop"> => {

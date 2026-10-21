@@ -2,6 +2,7 @@
 
 import { createReadHandlers } from "../read-handlers.js";
 import type { Handlers } from "../server.js";
+import { createInstructionDelivery } from "./instruction-delivery.js";
 import { createPauseHandlers } from "./pause-handlers.js";
 import { createReclaimHandlers, type ReclaimPorts } from "./reclaim-handlers.js";
 import { createRuntimeHandlers, type RuntimeHandlerDeps } from "./runtime-handlers.js";
@@ -37,12 +38,28 @@ export function createHandlers(
   reclaim?: ReclaimPorts,
   spawn?: Pick<SpawnHandlerDeps, "ports" | "credentials" | "rootScope" | "onFailure">,
 ): Handlers {
-  const rt = runtime === undefined ? undefined : createRuntimeHandlers({ ...deps, ...runtime });
+  const onFailure = spawn?.onFailure === undefined ? {} : { onFailure: spawn.onFailure };
+  // 追加指示の配送は、node.send と node.review（差し戻しの理由）で共有する。
+  const delivery =
+    runtime === undefined
+      ? undefined
+      : createInstructionDelivery({ ...deps, adapterFor: runtime.adapterFor, ...onFailure });
+  const rt =
+    runtime === undefined
+      ? undefined
+      : createRuntimeHandlers({
+          ...deps,
+          ...runtime,
+          ...(delivery === undefined ? {} : { delivery }),
+        });
   // 子の生成（spawn）のポートとアダプタがそろうと、判断待ちの子の一時停止・再開（pauseNodeIds）と、範囲の拡張
   // （scope.extend・scope.decide）も有効になる（作業ツリーの取得 `cwdOf`・根の範囲 `rootScope` を共有する）。
   const full = rt !== undefined && runtime !== undefined && spawn !== undefined;
-  const state = createStateHandlers({ ...deps, allowPause: full });
-  const onFailure = spawn?.onFailure === undefined ? {} : { onFailure: spawn.onFailure };
+  const state = createStateHandlers({
+    ...deps,
+    allowPause: full,
+    ...(delivery === undefined ? {} : { deliver: delivery.deliver }),
+  });
   return {
     ...createReadHandlers(() => deps.log.state()),
     ...state,

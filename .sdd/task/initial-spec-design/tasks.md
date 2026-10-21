@@ -46,7 +46,7 @@ depends-on: ["design-initial-spec-design"]
 | T10b-r | daemon（T10b の前提）: 回収の実ポート（`ReclaimPorts`）。`git worktree remove` は `--force` なし、ブランチは `-d`（`-D` は使わない）、`expectedPath` の照合。実ポートが強制削除をしないことを確かめるテストを書く。手動の回収の途中で失敗して `reclaimable` のまま残ったノードを、通常の回収可能（判定済み・未実行）と区別して扱う（FR_030） | なし | T14 ③ | 未 | FR_026, FR_030 |
 | T13e | core: 破棄の判断の記録（`node.discardDecided{nodeId, actor}` イベント。fold で `NodeRecord.discarded` を保持し、回収の再判定でも使う）。完了後に daemon の `node.reclaimInstruct` と、停止したノードの回収の `discarded` を実装する（実装 2。#27 のマージ後） | なし | T13 | 未 | FR_026 |
 | T13f | 設計: 最終削除（`node.purge`・`node.purgePreview`）。`NodeRecord.archivedAt`（木全体のアーカイブ日）の記録と、イベントログの最終削除の経路（追記専用ログと墓標の扱い。#21 の `purgePreview` の型・墓標の既定は使える見込み）。設計後に daemon のハンドラを実装する | なし | T13e | 未 | FR_031 |
-| T14d | daemon（T13e の後）: 失敗した spawn・split の後始末のあと、ノードを自動で `archive` まで進める（`markReclaimable{discarded}` に、破棄の判断〔`discardDecided`〕を記録する。システムによる破棄の判断として記録する形を、T13e で決める） | なし | T13e, T14 | 未 | FR_026 |
+| T14d | daemon（T13e の後）: 失敗した spawn・split の後始末のあと、作業ツリーを消せたら、システムによる破棄の判断（`node.discardDecided`）→ `markReclaimable{discarded}` → `archive` まで自動で進める。消せなかったら停止のまま残す | なし | T13e, T14 | 完了（T13e 追従 PR） | FR_026 |
 | T23 | daemon: HTML 画面、SSE による反映 | なし（能力表の表示値のみ確定待ちだが、画面の骨格は先行可能のためこちらに配置） | T09 | 未 | FR_021, IR_003, NFR_008 |
 | T24 | core/daemon: 中間統合ノードの配下の要約報告（上位の受信箱へ優先度付きで送る） | なし | T04, T07 | 未 | FR_013 |
 | T25 | mcp: MCP 境界の入力検証（zod）。ツール入力と daemon からの応答の形を検査する。依存追加は着手時点の最新版を確認して固定する。**daemon への結線の前提** | なし | T11 | 未 | NFR_010, NFR_004 |

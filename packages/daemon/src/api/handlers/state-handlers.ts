@@ -28,6 +28,7 @@ import {
   type LogPort,
   summarize,
 } from "./context.js";
+import { type InstructionDelivery, isDelivered } from "./instruction-delivery.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
@@ -40,6 +41,8 @@ export interface StateHandlerDeps {
    * が包んで行う。包まないときは false のまま（記録だけして止めない・再開しない、を避けるため notSupported）。
    */
   readonly allowPause?: boolean;
+  /** 差し戻しの理由（追加指示）を子へ届ける。省略すると、記録だけを行う。 */
+  readonly deliver?: InstructionDelivery["deliver"];
 }
 
 const ACTIVE: ReadonlySet<NodeState> = new Set(["running", "waiting", "stopping"]);
@@ -314,7 +317,7 @@ export function createStateHandlers(deps: StateHandlerDeps) {
       return r.ok ? { ok: true, value: { accepted: true } } : r;
     },
 
-    "node.review": (req: HandlerRequest<"node.review">): R<"node.review"> => {
+    "node.review": async (req: HandlerRequest<"node.review">): Promise<R<"node.review">> => {
       const caller = callerOf(req);
       const { nodeId, verdict } = req.params;
       // 認可（directChild）の二重の備え: 完了の判定は、そのノードの親だけ。
@@ -325,31 +328,37 @@ export function createStateHandlers(deps: StateHandlerDeps) {
           "親の統合ノードに依頼する",
         );
       }
-      if (req.params.verdict === "accept" && req.params.feedback !== undefined) {
-        return fail(
-          "notSupported",
-          "受理（accept）の feedback は、記録先がないため、まだ使えない",
-          "feedback を省略して受理する",
-          "伝えたいことは、別に node.send で指示する",
-        );
-      }
       const bodies: EventBody[] = [
         {
           type: "node.stateChanged",
           payload: { nodeId, event: { type: verdict === "accept" ? "accept" : "reject" } },
         },
-        // 差し戻しの理由は、再開した子への追加指示として記録する。
-        ...(req.params.verdict === "reject"
-          ? [
-              {
-                type: "node.instructed",
-                payload: { nodeId, text: req.params.feedback },
-              } satisfies EventBody,
-            ]
-          : []),
       ];
+      // 受理の feedback は、報告（`review`）として記録する。差し戻しの理由は、再開した子への追加指示として記録する。
+      if (req.params.verdict === "accept" && req.params.feedback !== undefined) {
+        bodies.push({
+          type: "report.added",
+          payload: {
+            reportId: deriveId("report", caller, req.requestId, "review"),
+            nodeId,
+            kind: "review",
+            text: req.params.feedback,
+          },
+        });
+      }
+      if (req.params.verdict === "reject") {
+        bodies.push({ type: "node.instructed", payload: { nodeId, text: req.params.feedback } });
+      }
       const r = appendAtomically(log, clock, req.requestId, { nodeId: caller }, bodies);
       if (!r.ok) return r;
+      // 差し戻しの理由を、再開した子へ届ける（未配送のときだけ。再送で、送り直せる）。
+      if (req.params.verdict === "reject" && deps.deliver !== undefined) {
+        const seq = r.value.events[1]?.seq;
+        if (seq !== undefined && !isDelivered(r.value.state, seq)) {
+          const sent = await deps.deliver(nodeId, req.params.feedback, seq);
+          if (!sent.ok) return sent;
+        }
+      }
       return { ok: true, value: { state: stateOf(r.value.state, nodeId) as NodeState } };
     },
   };
