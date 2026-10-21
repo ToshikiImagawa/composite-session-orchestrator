@@ -319,13 +319,19 @@ const commandCovers = (entry: string, command: string): boolean => {
  * - `allowedCommands`: 子の各コマンドを、親の許可の語の並びの前方一致が含む（親より広い許可は不可）
  * - `writableLocations`: 子の各場所が、親の書き込み可能な場所の下にある
  * - `forbiddenLocations`: 親の禁止の各場所を、子が同じか上の場所で禁止している（親の禁止をすべて含む）
- * 相対パスは、それぞれの `cwd`（既定は `/`）を基準に解決して比べる。純粋関数。
+ * 場所は、作業ツリー（`cwd`）を基準にした相対パスだけを使う前提（ブリーフでも絶対パスは拒否する）。それぞれの `cwd`
+ * （既定は `/`）を基準に解決して比べる。絶対パスが混じる範囲は、親子どちらでも収まらないとする（フェイルクローズ）。純粋関数。
  */
 export function isScopeSubset(
   child: Scope,
   parent: Scope,
   cwds: { readonly child: string; readonly parent: string } = { child: "/", parent: "/" },
 ): boolean {
+  const locations = (x: Scope): readonly string[] => [
+    ...x.writableLocations,
+    ...x.forbiddenLocations,
+  ];
+  if ([...locations(child), ...locations(parent)].some((p) => p.startsWith("/"))) return false;
   const c = (p: string) => normalize(cwds.child, p);
   const q = (p: string) => normalize(cwds.parent, p);
   return (

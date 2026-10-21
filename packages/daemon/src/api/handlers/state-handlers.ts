@@ -6,7 +6,7 @@
  * - 受信箱・一覧は、呼び出した統合ノードの部分木に絞る（`visibleState`）。
  * - 複数イベントの操作は、事前に全体を検査してから追記する（`appendAtomically`）。再試行は冪等。
  * - 子の報告は、動作中（running・waiting・stopping）のノードだけ。
- * - `decision.present` の `pauseNodeIds`（子の一時停止）は、再開の記録先が core にないため、まだ使えない。
+ * - `decision.present` の `pauseNodeIds`（子の一時停止）は、`allowPause` のときだけ受け付ける（止める・再開するのは `pause-handlers`）。
  */
 
 import {
@@ -35,6 +35,11 @@ export interface StateHandlerDeps {
   readonly log: LogPort;
   /** イベントの時刻（ISO 8601 UTC）。事前検査にも使う。 */
   readonly clock: () => string;
+  /**
+   * `decision.present` の `pauseNodeIds`（子の一時停止）を受け付ける。止める操作と、回答での再開は、`pause-handlers`
+   * が包んで行う。包まないときは false のまま（記録だけして止めない・再開しない、を避けるため notSupported）。
+   */
+  readonly allowPause?: boolean;
 }
 
 const ACTIVE: ReadonlySet<NodeState> = new Set(["running", "waiting", "stopping"]);
@@ -189,7 +194,8 @@ export function createStateHandlers(deps: StateHandlerDeps) {
     },
 
     "decision.present": (req: HandlerRequest<"decision.present">): R<"decision.present"> => {
-      if ((req.params.pauseNodeIds ?? []).length > 0) {
+      const pauseNodeIds = req.params.pauseNodeIds ?? [];
+      if (pauseNodeIds.length > 0 && deps.allowPause !== true) {
         return fail(
           "notSupported",
           "pauseNodeIds（子の一時停止）は、再開の記録先がないため、まだ使えない",
@@ -207,6 +213,7 @@ export function createStateHandlers(deps: StateHandlerDeps) {
             nodeId: caller,
             question: req.params.question,
             options: [...req.params.options],
+            ...(pauseNodeIds.length > 0 ? { pauseNodeIds: [...pauseNodeIds] } : {}),
           },
         },
         {
