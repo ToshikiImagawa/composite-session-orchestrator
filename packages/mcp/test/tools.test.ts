@@ -24,20 +24,17 @@ const EXPECTED: Record<McpRole, readonly string[]> = {
   ],
   child: ["report_progress", "report_decision", "report_outOfScope", "report_done", "scope_extend"],
 };
-const DESKTOP_ONLY = "node_bind";
 
 describe("ロール別のツール公開（NFR_004）", () => {
   it.each(MCP_ROLES)("%s の公開一覧が固定されている（CLI）", (role) => {
     expect(names(role)).toEqual(EXPECTED[role]);
   });
 
-  it("node_bind は Desktop の子にだけ公開される（FR_032）", () => {
-    expect(toolsFor("child", "desktop").map((t) => t.name)).toEqual([
-      ...EXPECTED.child,
-      DESKTOP_ONLY,
-    ]);
-    expect(names("child")).not.toContain(DESKTOP_ONLY);
-    expect(toolsFor("integrator", "desktop").map((t) => t.name)).toEqual(EXPECTED.integrator);
+  it("node_bind はどのロールにも公開されない（紐付けは POST /v1/bind）", () => {
+    for (const role of MCP_ROLES) {
+      expect(names(role)).not.toContain("node_bind");
+      expect(operationForTool(role, "node_bind").ok).toBe(false);
+    }
   });
 
   it.each(["human", "constructor", "__proto__", "toString", "", "admin"])(
@@ -79,7 +76,7 @@ describe("ロール別のツール公開（NFR_004）", () => {
 
   it("情報源は core の ROLE_OPERATIONS（操作の並びが一致する）", () => {
     for (const role of MCP_ROLES) {
-      expect(toolsFor(role, "desktop").map((t) => t.operation)).toEqual([...ROLE_OPERATIONS[role]]);
+      expect(toolsFor(role).map((t) => t.operation)).toEqual([...ROLE_OPERATIONS[role]]);
     }
     expect(CONTRACT_ROLES).toContain("human");
   });
@@ -120,12 +117,22 @@ describe("operationForTool", () => {
     if (!r.ok) expect(r.error.nextActions.join(" ")).toContain("node_spawn");
   });
 
-  it("Desktop 専用の node_bind は CLI の子では解決できない", () => {
-    expect(operationForTool("child", "node_bind").ok).toBe(false);
-    expect(operationForTool("child", "node_bind", "desktop")).toEqual({
-      ok: true,
-      value: "node.bind",
-    });
+  it("説明が、ブリーフと差し戻しの引数を示す", () => {
+    const d = (n: string) => toolsFor("integrator").find((t) => t.name === n)?.description ?? "";
+    for (const key of [
+      "parentId",
+      "role",
+      "objective",
+      "acceptanceCriteria",
+      "scope",
+      "dependsOn",
+    ]) {
+      expect(d("node_spawn"), key).toContain(key);
+    }
+    expect(d("node_spawn")).toContain("ブランチは指定しない");
+    expect(d("node_split")).toContain("keep");
+    expect(d("node_review")).toContain("feedback");
+    expect(d("decision_present")).toContain("pauseNodeIds");
   });
 
   it("toolName は操作名の . を _ にする", () => {

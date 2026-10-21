@@ -16,9 +16,6 @@ import {
 export const MCP_ROLES = ["integrator", "child"] as const;
 export type McpRole = (typeof MCP_ROLES)[number];
 
-/** 実行環境。`node.bind`（紐付けコード）は Desktop の子だけが使う（FR_032）。 */
-export type McpRuntime = "cli" | "desktop";
-
 /** 接続元のロールが MCP で公開するロールか。境界から来た値は、必ずこれで検査する。 */
 export const isMcpRole = (role: unknown): role is McpRole =>
   typeof role === "string" && (MCP_ROLES as readonly string[]).includes(role);
@@ -36,15 +33,19 @@ type McpOperation = RoleOperation<McpRole>;
 /** 操作ごとの説明。`McpOperation` を網羅しないと型エラーになる。 */
 const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "node.spawn":
-    "ブリーフ（目的・受け入れ基準・作業範囲・依存関係）から子を生成する。受け付け結果を即座に返す",
+    "子を生成する。引数: parentId・role・objective（目的）・acceptanceCriteria（受け入れ基準）・scope（writableLocations・forbiddenLocations・allowedCommands）・dependsOn（省略可）。作業ツリーとブランチは指定しない（システムが親のブランチから決める）。受け付け結果を即座に返す",
   "node.send": "稼働中の子へ追加指示を送る。届いたかどうかは結果で確認する",
   "node.stop": "子を停止する。graceful（穏当）か immediate（即時）を選ぶ",
   "inbox.fetch": "受信箱を取得する。優先度・依存関係・時刻の順。detail と limit で量を絞れる",
   "tree.list": "木の一覧表を取得する",
-  "decision.present": "選択肢と自由入力欄を持つ判断要求を人間に提示する。回答は受信箱に届く",
-  "node.split": "脱線部分を新しい子へ移し、元の子を本筋に戻すか停止する",
-  "scope.decide": "子の範囲の拡張要求を承認・却下・切り出しのいずれかで判定する",
-  "node.review": "子の完了報告を受理するか差し戻す",
+  "decision.present":
+    "選択肢と自由入力欄を持つ判断要求を人間に提示する。pauseNodeIds で、判断待ちの間に止める子（自分の子孫）を指定できる。回答は受信箱に届く",
+  "node.split":
+    "脱線部分を新しい子へ移す。引数: nodeId・keep（mainline か stop。元の子を本筋に戻すか停止するか）と、新しい子のブリーフ（objective・acceptanceCriteria・scope・dependsOn）",
+  "scope.decide":
+    "子の範囲の拡張要求（extensionId）を承認（approve）・却下（reject）・切り出し（split）のいずれかで判定する",
+  "node.review":
+    "子の完了報告を受理（accept）するか差し戻す（reject）。reject には feedback（理由）が必須で、accept では任意",
   "node.reclaimPreview": "回収の事前確認。何が回収されるかを示す",
   "node.reclaim": "事前確認で示した対象を回収する。実行時に条件を再判定する",
   "node.capabilities": "ノードごとに可能な操作を参照する",
@@ -54,21 +55,21 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "report.decision": "判断要求を親へ出す。人間へは親を経由する",
   "report.outOfScope": "作業範囲外の課題を親へ申告する",
   "report.done": "完了を親へ報告する。受け入れ基準ごとの根拠を付ける",
-  "scope.extend": "作業範囲の拡張を親へ要求する。対象と理由を添える",
-  "node.bind": "紐付けコードで自分をノードの子ロールに結ぶ（Desktop のみ）",
+  "scope.extend":
+    "作業範囲の拡張を親へ要求する。対象（target）と理由（reason）を添える。結果の extensionId は、親の判定（scope_decide）の対象になる",
 };
 
 /** 操作名から MCP のツール名への変換（`.` を `_` にする）。ツール名を扱う箇所はすべてこれを使う。 */
 export const toolName = (op: DaemonOperation): string => op.replaceAll(".", "_");
 
-const DESKTOP_ONLY: readonly DaemonOperation[] = ["node.bind"];
-
 /** ロールに公開するツールの一覧。MCP のロールでなければ何も公開しない。 */
-export function toolsFor(role: McpRole, runtime: McpRuntime = "cli"): readonly ToolDefinition[] {
+export function toolsFor(role: McpRole): readonly ToolDefinition[] {
   if (!isMcpRole(role)) return [];
-  return ROLE_OPERATIONS[role]
-    .filter((op) => runtime === "desktop" || !DESKTOP_ONLY.includes(op))
-    .map((op) => ({ name: toolName(op), operation: op, description: DESCRIPTIONS[op] }));
+  return ROLE_OPERATIONS[role].map((op) => ({
+    name: toolName(op),
+    operation: op,
+    description: DESCRIPTIONS[op],
+  }));
 }
 
 /** 編集距離（綴りの近い名前の候補を出すため）。 */
@@ -89,11 +90,7 @@ function distance(a: string, b: string): number {
 }
 
 /** ツール名を、そのロールに公開された操作へ解決する。公開されていなければ失敗にする。 */
-export function operationForTool(
-  role: McpRole,
-  name: string,
-  runtime: McpRuntime = "cli",
-): Result<DaemonOperation> {
+export function operationForTool(role: McpRole, name: string): Result<DaemonOperation> {
   if (!isMcpRole(role)) {
     return {
       ok: false,
@@ -104,7 +101,7 @@ export function operationForTool(
       ),
     };
   }
-  const tools = toolsFor(role, runtime);
+  const tools = toolsFor(role);
   const tool = tools.find((t) => t.name === name);
   if (tool !== undefined) return ok(tool.operation);
   const near = tools

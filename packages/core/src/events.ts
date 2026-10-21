@@ -18,13 +18,14 @@
  * 操作表（NFR_004）が保証し、ここでは検査しない。
  */
 
+import { briefProblem } from "./brief.js";
 import { type Failure, failure, ok, type Result } from "./contract.js";
 import { isSafeId } from "./ids.js";
 import { type InboxItem, isValidInboxTime } from "./inbox.js";
 import { INBOX_KINDS, type InboxKind } from "./inbox-kinds.js";
 import type { NodeRole, NodeState } from "./index.js";
 import { isBoundedText, LIMITS } from "./limits.js";
-import type { ScopeViolationReason } from "./scope.js";
+import type { Scope, ScopeViolationReason } from "./scope.js";
 import {
   COMPLETED_STATES,
   type NodeEvent,
@@ -46,6 +47,10 @@ export type EventBody =
         readonly role: NodeRole;
         readonly parentId: string | null;
         readonly dependsOn: readonly string[];
+        /** ブリーフ（spec 5.2）。子の生成（spawn・split）で付く。根や以前の記録では省略。付けるなら 3 つとも付ける。 */
+        readonly objective?: string;
+        readonly acceptanceCriteria?: readonly string[];
+        readonly scope?: Scope;
       };
     }
   | {
@@ -117,6 +122,26 @@ export type EventBody =
         /** 判断を求める内容。 */
         readonly question?: string;
         readonly options?: readonly string[];
+        /** 判断待ちの間に止める子。要求したノードの子孫（自分を含まない）。止める操作は別のイベントで行う。 */
+        readonly pauseNodeIds?: readonly string[];
+      };
+    }
+  | {
+      /** 子の範囲の拡張要求（FR_015）。対象と理由を添える。範囲そのものは変えない（判定の結果は別のイベントで反映する）。 */
+      readonly type: "scope.extensionRequested";
+      readonly payload: {
+        readonly extensionId: string;
+        readonly nodeId: string;
+        readonly target: string;
+        readonly reason: string;
+      };
+    }
+  | {
+      /** 拡張要求の判定: 承認・却下・切り出し。先に確定した判定だけを残し、再判定は拒否する。 */
+      readonly type: "scope.extensionDecided";
+      readonly payload: {
+        readonly extensionId: string;
+        readonly decision: ExtensionDecision;
       };
     }
   | {
@@ -180,6 +205,10 @@ export interface NodeRecord {
   readonly parentId: string | null;
   readonly dependsOn: readonly string[];
   readonly state: NodeState;
+  /** ブリーフ（子の生成時に記録。根や以前の記録にはない）。完了報告の根拠の確認（FR_022）に使う。 */
+  readonly objective?: string;
+  readonly acceptanceCriteria?: readonly string[];
+  readonly scope?: Scope;
 }
 
 export interface DecisionRecord {
@@ -189,6 +218,8 @@ export interface DecisionRecord {
   /** 判断を求める内容（記録されていれば）。 */
   readonly question?: string;
   readonly options?: readonly string[];
+  /** 判断待ちの間に止める子（要求したノードの子孫）。 */
+  readonly pauseNodeIds?: readonly string[];
   /** 採用された回答（先に確定した回答）。 */
   readonly answer?: string;
   readonly answeredBy?: Actor;
@@ -198,6 +229,31 @@ export interface DecisionRecord {
     readonly answer: string;
     readonly actor: Actor;
   }[];
+}
+
+export const EXTENSION_DECISIONS = ["approve", "reject", "split"] as const;
+export type ExtensionDecision = (typeof EXTENSION_DECISIONS)[number];
+const isExtensionDecision = (x: unknown): x is ExtensionDecision =>
+  typeof x === "string" && (EXTENSION_DECISIONS as readonly string[]).includes(x);
+
+const EXTENSION_STATUS: Readonly<Record<ExtensionDecision, "approved" | "rejected" | "split">> = {
+  approve: "approved",
+  reject: "rejected",
+  split: "split",
+};
+
+/** 範囲の拡張要求（FR_015）。 */
+export interface ExtensionRecord {
+  readonly extensionId: string;
+  readonly nodeId: string;
+  readonly target: string;
+  readonly reason: string;
+  readonly status: "open" | "approved" | "rejected" | "split";
+  /** 要求のイベントの `seq`。 */
+  readonly requestedSeq: number;
+  /** 判定のイベントの `seq` と判定者（判定済みのとき）。 */
+  readonly decidedSeq?: number;
+  readonly decidedBy?: Actor;
 }
 
 export interface ViolationRecord {
@@ -274,6 +330,8 @@ export interface OrchState {
   readonly exits: readonly ExitRecord[];
   /** 保存した報告（受信箱の項目の `ref` で参照する）。 */
   readonly reports: readonly ReportRecord[];
+  /** 範囲の拡張要求と判定。 */
+  readonly extensions: readonly ExtensionRecord[];
   /** 最後に適用したイベントの `seq`。 */
   readonly lastSeq: number;
   /** 適用済みの要求識別子 → 内容の指紋（冪等性の判定用）。 */
@@ -302,6 +360,9 @@ export type FoldFailureCode =
   | "observationAlreadyRecorded"
   | "duplicateReport"
   | "unknownRef"
+  | "duplicateExtension"
+  | "unknownExtension"
+  | "extensionAlreadyDecided"
   | "invalidState";
 
 /** どのイベント（`seq`）で拒否したかを持つ失敗。壊れたイベントで `seq` が分からないときは 0。 */
@@ -333,6 +394,7 @@ export const initialState = (): OrchState => ({
   toolDenials: [],
   exits: [],
   reports: [],
+  extensions: [],
   lastSeq: 0,
   requests: {},
 });
@@ -421,6 +483,8 @@ interface Draft {
   exits: ExitRecord[];
   reports: ReportRecord[];
   reportIdx: Map<string, ReportRecord>;
+  extensions: ExtensionRecord[];
+  extensionIdx: Map<string, number>;
   lastSeq: number;
   requests: Map<string, string>;
   /** 直前の `step` で、イベントの一部が無視されたこと（`ApplyOutcome.ignored` に渡す）。 */
@@ -501,6 +565,17 @@ const reportShape = (r: unknown): boolean =>
   isReportKind(r.kind) &&
   typeof r.text === "string" &&
   parseActor(r.actor) !== undefined;
+const extensionShape = (x: unknown): boolean =>
+  isRec(x) &&
+  isId(x.extensionId) &&
+  isId(x.nodeId) &&
+  typeof x.target === "string" &&
+  typeof x.reason === "string" &&
+  (x.status === "open" ||
+    x.status === "approved" ||
+    x.status === "rejected" ||
+    x.status === "split") &&
+  Number.isInteger(x.requestedSeq);
 const observationShape = (o: unknown): boolean =>
   isRec(o) &&
   Number.isInteger(o.seq) &&
@@ -533,6 +608,7 @@ function toDraft(state: OrchState): Draft | undefined {
   const toolDenials = arrayOf<ToolDenialRecord>(state.toolDenials, toolDenialShape);
   const exits = arrayOf<ExitRecord>(state.exits, exitShape);
   const reports = arrayOf<ReportRecord>(state.reports, reportShape);
+  const extensions = arrayOf<ExtensionRecord>(state.extensions, extensionShape);
   if (
     !nodes ||
     !inbox ||
@@ -542,7 +618,8 @@ function toDraft(state: OrchState): Draft | undefined {
     !stopObservations ||
     !toolDenials ||
     !exits ||
-    !reports
+    !reports ||
+    !extensions
   )
     return undefined;
 
@@ -561,6 +638,8 @@ function toDraft(state: OrchState): Draft | undefined {
     exits: [...exits],
     reports: [...reports],
     reportIdx: new Map(reports.map((r) => [r.reportId, r])),
+    extensions: [...extensions],
+    extensionIdx: new Map(extensions.map((x, i) => [x.extensionId, i])),
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
     note: undefined,
@@ -589,9 +668,28 @@ function toState(d: Draft): OrchState {
     toolDenials: Object.freeze(d.toolDenials),
     exits: Object.freeze(d.exits),
     reports: Object.freeze(d.reports),
+    extensions: Object.freeze(d.extensions),
     lastSeq: d.lastSeq,
     requests: Object.freeze(Object.fromEntries(d.requests)),
   });
+}
+
+/** 検査済みのブリーフを、凍結した写しにして記録に入れる。 */
+function briefRecord(
+  objective: unknown,
+  acceptanceCriteria: unknown,
+  scope: unknown,
+): Pick<NodeRecord, "objective" | "acceptanceCriteria" | "scope"> {
+  const sc = scope as Scope;
+  return {
+    objective: objective as string,
+    acceptanceCriteria: Object.freeze([...(acceptanceCriteria as string[])]),
+    scope: Object.freeze({
+      writableLocations: Object.freeze([...sc.writableLocations]),
+      forbiddenLocations: Object.freeze([...sc.forbiddenLocations]),
+      allowedCommands: Object.freeze([...sc.allowedCommands]),
+    }),
+  };
 }
 
 const reject = (
@@ -745,6 +843,13 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           );
         }
       }
+      const { objective, acceptanceCriteria, scope } = p;
+      const hasBrief =
+        objective !== undefined || acceptanceCriteria !== undefined || scope !== undefined;
+      if (hasBrief) {
+        const problem = briefProblem({ objective, acceptanceCriteria, scope, dependsOn });
+        if (problem !== undefined) return invalid(seq, `node.created のブリーフ（${problem}）`);
+      }
       const ancestors = ancestorIds(d, parentId);
       for (const dep of dependsOn) {
         if (dep === nodeId || !d.nodeIdx.has(dep)) {
@@ -772,6 +877,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           parentId,
           dependsOn: [...dependsOn],
           state: "pending",
+          ...(hasBrief ? briefRecord(objective, acceptanceCriteria, scope) : {}),
         }),
       );
       if (parentId !== null)
@@ -1056,7 +1162,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     }
 
     case "decision.requested": {
-      const { decisionId, nodeId, question, options } = p;
+      const { decisionId, nodeId, question, options, pauseNodeIds } = p;
       if (!isId(decisionId) || !isId(nodeId)) return invalid(seq, "decision.requested の payload");
       if (question !== undefined && !isBoundedText(question, LIMITS.question)) {
         return invalid(seq, `decision.requested の question（${LIMITS.question} 文字以下）`);
@@ -1078,6 +1184,29 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
         }
       }
       if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
+      if (pauseNodeIds !== undefined) {
+        if (
+          !Array.isArray(pauseNodeIds) ||
+          pauseNodeIds.length > LIMITS.pauseNodeCount ||
+          !pauseNodeIds.every(isId) ||
+          new Set(pauseNodeIds).size !== pauseNodeIds.length
+        ) {
+          return invalid(
+            seq,
+            `decision.requested の pauseNodeIds（重複なしの識別子、${LIMITS.pauseNodeCount} 件以下）`,
+          );
+        }
+        const below = new Set(descendantIds(d, nodeId));
+        for (const target of pauseNodeIds as string[]) {
+          if (nodeAt(d, target) === undefined) return unknownNode(seq, target);
+          if (!below.has(target)) {
+            return invalid(
+              seq,
+              `decision.requested の pauseNodeIds（${target} は ${nodeId} の子孫でない）`,
+            );
+          }
+        }
+      }
       if (d.decisionIdx.has(decisionId)) {
         return reject(
           seq,
@@ -1094,6 +1223,9 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           status: "open",
           ...(question === undefined ? {} : { question: question as string }),
           ...(options === undefined ? {} : { options: Object.freeze([...(options as string[])]) }),
+          ...(pauseNodeIds === undefined
+            ? {}
+            : { pauseNodeIds: Object.freeze([...(pauseNodeIds as string[])]) }),
           rejected: Object.freeze([]),
         }),
       );
@@ -1119,6 +1251,86 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           ? { ...cur, status: "answered" as const, answer, answeredBy: actor }
           : { ...cur, rejected: Object.freeze([...cur.rejected, { seq, answer, actor }]) },
       );
+      return commit();
+    }
+
+    case "scope.extensionRequested": {
+      const { extensionId, nodeId, target, reason } = p;
+      if (!isId(extensionId) || !isId(nodeId)) {
+        return invalid(seq, "scope.extensionRequested の payload");
+      }
+      if (
+        !isBoundedText(target, LIMITS.question) ||
+        target.trim() === "" ||
+        !isBoundedText(reason, LIMITS.question) ||
+        reason.trim() === ""
+      ) {
+        return invalid(
+          seq,
+          `scope.extensionRequested の target・reason（空でない ${LIMITS.question} 文字以下）`,
+        );
+      }
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (node.state !== "running" && node.state !== "waiting") {
+        return reject(
+          seq,
+          "invalidTransition",
+          `状態 ${node.state} のノードは範囲の拡張を要求できない（running か waiting のときだけ）`,
+          "ノードの状態を確認する",
+        );
+      }
+      if (d.extensionIdx.has(extensionId)) {
+        return reject(
+          seq,
+          "duplicateExtension",
+          `拡張要求 ${extensionId} は既にある`,
+          "別の ID を使う",
+        );
+      }
+      d.extensionIdx.set(extensionId, d.extensions.length);
+      d.extensions.push(
+        freezeRecord({
+          extensionId,
+          nodeId,
+          target,
+          reason,
+          status: "open" as const,
+          requestedSeq: seq,
+        }),
+      );
+      return commit();
+    }
+
+    case "scope.extensionDecided": {
+      const { extensionId, decision } = p;
+      if (!isId(extensionId) || !isExtensionDecision(decision)) {
+        return invalid(seq, "scope.extensionDecided の payload");
+      }
+      const i = d.extensionIdx.get(extensionId);
+      const cur = i === undefined ? undefined : d.extensions[i];
+      if (i === undefined || cur === undefined) {
+        return reject(
+          seq,
+          "unknownExtension",
+          `拡張要求 ${extensionId} は存在しない`,
+          "拡張要求の ID を確認する",
+        );
+      }
+      if (cur.status !== "open") {
+        return reject(
+          seq,
+          "extensionAlreadyDecided",
+          `拡張要求 ${extensionId} は判定済み（${cur.status}）`,
+          "判定の結果を確認する",
+        );
+      }
+      d.extensions[i] = freezeRecord({
+        ...cur,
+        status: EXTENSION_STATUS[decision],
+        decidedSeq: seq,
+        decidedBy: actor,
+      });
       return commit();
     }
 

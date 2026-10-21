@@ -313,6 +313,14 @@ describe("子が入れる文字列・配列の上限（コードポイントで�
       reason: 1024,
       tool: 1024,
       summary: INBOX_SUMMARY_MAX,
+      objective: 8 * 1024,
+      criteriaCount: 50,
+      criterionLength: 1024,
+      scopeEntryCount: 100,
+      scopeEntryLength: 4096,
+      dependsOnCount: 50,
+      pauseNodeCount: 100,
+      feedback: 8 * 1024,
     });
   });
 

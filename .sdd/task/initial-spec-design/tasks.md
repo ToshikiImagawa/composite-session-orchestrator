@@ -39,7 +39,8 @@ depends-on: ["design-initial-spec-design"]
 | T12 | cli: 人間用コマンド（purge、回収の指示） | なし | T08 | 完了（本 PR）。purge の事前確認・墓標の選択・再実行（requestId）を含む。実行ファイルと HTTP クライアント、人間の認証の結線は daemon の窓口の実装後 | FR_029, FR_031, NFR_006 |
 | T13 | daemon: 窓口（HTTP API・認証・読める範囲の判定）。ハンドラの実体（spawn・send・stop など）は別タスク | なし | T08, T10c | 完了（本 PR。入口・認証・認可〔部分木の規則・主体の検査〕・`decision.get`・`report.get` まで） | NFR_003, NFR_004, DC_003 |
 | T13b | daemon: トークンの永続化（ハッシュ・ロール・nodeId・発行日時。人間のトークンは 0600 のファイル。子は再起動時に再発行）と、`node.bind` 専用の認証経路（紐付けコード。一度きり・短い有効期限） | あり（Desktop の紐付け手順は項目 4 で確定） | T13 | 完了（本 PR。子の紐付けは `POST /v1/bind`。Desktop 側の手順は T21） | NFR_002, NFR_004, FR_032 |
-| T13c | core/mcp: 契約から `node.bind`（`OperationMap`・`ROLE_OPERATIONS` の子）を外す。紐付けは `POST /v1/bind` に移ったため。#23（core・mcp を変更中）の後に、別 PR で行う | なし | T13b, #23 | 未 | FR_032, NFR_004 |
+| T13c | core/mcp: 契約から `node.bind`（`OperationMap`・`ROLE_OPERATIONS` の子）を外す。紐付けは `POST /v1/bind` に移ったため。#23（core・mcp を変更中）の後に、別 PR で行う | なし | T13b, #23 | 完了（本 PR） | FR_032, NFR_004 |
+| T13d | core/mcp/daemon（validate のみ）: 契約の追加。`node.spawn`・`node.split` をブリーフ（spec 5.2）にし、`node.created` に `objective`・`acceptanceCriteria`・`scope` を保持、`node.review` に `feedback`、`decision.requested` に `pauseNodeIds`、`scope.extensionRequested`・`scope.extensionDecided` とその fold。ハンドラの実体（spawn・split など）は別タスク | なし | T13c | 完了（本 PR） | FR_005, FR_015, FR_016, FR_018, FR_022, FR_024 |
 | T23 | daemon: HTML 画面、SSE による反映 | なし（能力表の表示値のみ確定待ちだが、画面の骨格は先行可能のためこちらに配置） | T09 | 未 | FR_021, IR_003, NFR_008 |
 | T24 | core/daemon: 中間統合ノードの配下の要約報告（上位の受信箱へ優先度付きで送る） | なし | T04, T07 | 未 | FR_013 |
 | T25 | mcp: MCP 境界の入力検証（zod）。ツール入力と daemon からの応答の形を検査する。依存追加は着手時点の最新版を確認して固定する。**daemon への結線の前提** | なし | T11 | 未 | NFR_010, NFR_004 |

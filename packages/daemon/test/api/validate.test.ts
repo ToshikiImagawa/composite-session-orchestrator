@@ -57,11 +57,17 @@ describe("parseEnvelope（要求の封筒）", () => {
   });
 });
 
+const BRIEF = {
+  objective: "ログイン画面を作る",
+  acceptanceCriteria: ["表示できる"],
+  scope: { writableLocations: ["/w"], forbiddenLocations: [], allowedCommands: ["git status"] },
+};
+
 describe("validateParams（操作ごとの引数。余計なキーは拒否）", () => {
   const ok = (op: string, params: unknown) => validateParams(op as never, params).ok;
 
   it("代表的な正しい引数を受け付ける", () => {
-    expect(ok("node.spawn", { brief: "やる", parentId: "root" })).toBe(true);
+    expect(ok("node.spawn", { parentId: "root", role: "implement", ...BRIEF })).toBe(true);
     expect(ok("node.send", { nodeId: "a", text: "続けて" })).toBe(true);
     expect(ok("node.stop", { nodeId: "a", mode: "immediate" })).toBe(true);
     expect(ok("inbox.fetch", {})).toBe(true);
@@ -71,9 +77,13 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
     expect(ok("decision.present", { question: "q", options: ["A"], pauseNodeIds: ["a"] })).toBe(
       true,
     );
-    expect(ok("node.split", { nodeId: "a", brief: "b", keep: "stop" })).toBe(true);
+    expect(ok("node.split", { nodeId: "a", keep: "stop", ...BRIEF })).toBe(true);
     expect(ok("scope.decide", { extensionId: "e", decision: "split" })).toBe(true);
     expect(ok("node.review", { nodeId: "a", verdict: "accept" })).toBe(true);
+    expect(ok("node.review", { nodeId: "a", verdict: "accept", feedback: "よい" })).toBe(true);
+    expect(ok("node.review", { nodeId: "a", verdict: "reject", feedback: "基準 2 が未達" })).toBe(
+      true,
+    );
     for (const op of [
       "node.reclaimPreview",
       "node.reclaim",
@@ -90,7 +100,6 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
     expect(ok("report.outOfScope", { text: "別件" })).toBe(true);
     expect(ok("report.done", { evidence: [{ criterion: "c", evidence: "e" }] })).toBe(true);
     expect(ok("scope.extend", { target: "docs", reason: "必要" })).toBe(true);
-    expect(ok("node.bind", { bindCode: "abc123" })).toBe(true);
     expect(ok("decision.answer", { decisionId: "d", choice: "A" })).toBe(true);
     expect(ok("decision.answer", { decisionId: "d", text: "自由入力" })).toBe(true);
     expect(ok("node.purge", { nodeId: "root" })).toBe(true);
@@ -111,7 +120,24 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
       ["decision.present", { question: "q", options: [] }],
       ["decision.present", { question: "q", options: ["A", "A"] }],
       ["decision.present", { question: "q", options: ["A"], pauseNodeIds: [""] }],
-      ["node.split", { nodeId: "a", brief: "b", keep: "both" }],
+      ["node.split", { nodeId: "a", keep: "both", ...BRIEF }],
+      ["node.split", { nodeId: "a", keep: "stop", objective: "o" }],
+      ["node.spawn", { parentId: "root", role: "implement", brief: "旧形式" }],
+      ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, branch: "x" }],
+      ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, worktree: "/w" }],
+      ["node.spawn", { parentId: "root", role: "boss", ...BRIEF }],
+      ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, objective: "" }],
+      ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, acceptanceCriteria: [] }],
+      ["node.spawn", { parentId: "root", role: "implement", ...BRIEF, dependsOn: ["a b"] }],
+      [
+        "node.spawn",
+        { parentId: "root", role: "implement", ...BRIEF, scope: { writableLocations: ["/w"] } },
+      ],
+      ["node.review", { nodeId: "a", verdict: "reject" }],
+      ["node.review", { nodeId: "a", verdict: "reject", feedback: "" }],
+      ["node.review", { nodeId: "a", verdict: "accept", feedback: 5 }],
+      ["node.review", { nodeId: "a", verdict: "maybe" }],
+      ["node.bind", { bindCode: "abc123" }],
       ["scope.decide", { extensionId: "e", decision: "maybe" }],
       ["decision.answer", { decisionId: "d" }],
       ["decision.answer", { decisionId: "d", choice: "A", text: "B" }],

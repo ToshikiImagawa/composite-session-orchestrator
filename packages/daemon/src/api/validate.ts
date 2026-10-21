@@ -7,6 +7,8 @@
  */
 
 import {
+  type Brief,
+  briefProblem,
   DAEMON_OPERATIONS,
   type DaemonOperation,
   failure,
@@ -14,6 +16,7 @@ import {
   isBoundedText,
   isSafeId,
   LIMITS,
+  NODE_ROLES,
   type OperationMap,
   type Result,
 } from "@cso/core";
@@ -132,12 +135,34 @@ const nodeIdOnly = (p: unknown) => {
   return { nodeId: id(o, "nodeId") };
 };
 
+const BRIEF_KEYS = ["objective", "acceptanceCriteria", "scope", "dependsOn"] as const;
+/** ブリーフ（spec 5.2）の検査は core の `briefProblem` を使う（作業ツリー・ブランチは受けない）。 */
+const brief = (o: Rec): Brief => {
+  const problem = briefProblem(o);
+  if (problem !== undefined) fail(problem);
+  const b = o as unknown as Brief;
+  return {
+    objective: b.objective,
+    acceptanceCriteria: [...b.acceptanceCriteria],
+    scope: {
+      writableLocations: [...b.scope.writableLocations],
+      forbiddenLocations: [...b.scope.forbiddenLocations],
+      allowedCommands: [...b.scope.allowedCommands],
+    },
+    ...(b.dependsOn === undefined ? {} : { dependsOn: [...b.dependsOn] }),
+  };
+};
+
 type Validators = { [Op in DaemonOperation]: (p: unknown) => OperationMap[Op]["params"] };
 
 const VALIDATORS: Validators = {
   "node.spawn": (p) => {
-    const o = strict(p, ["brief", "parentId"]);
-    return { brief: text(o, "brief", LIMITS.reportText), parentId: id(o, "parentId") };
+    const o = strict(p, ["parentId", "role", ...BRIEF_KEYS]);
+    return {
+      parentId: id(o, "parentId"),
+      role: oneOf(o, "role", NODE_ROLES),
+      ...brief(o),
+    };
   },
   "node.send": (p) => {
     const o = strict(p, ["nodeId", "text"]);
@@ -164,16 +189,18 @@ const VALIDATORS: Validators = {
     const base = { question: text(o, "question", LIMITS.question), options: options(o, "options") };
     if (o.pauseNodeIds === undefined) return base;
     const v = o.pauseNodeIds;
-    if (!Array.isArray(v) || v.length > 100) fail("pauseNodeIds が不正（100 件以下の配列）");
+    if (!Array.isArray(v) || v.length > LIMITS.pauseNodeCount) {
+      fail(`pauseNodeIds が不正（${LIMITS.pauseNodeCount} 件以下の配列）`);
+    }
     const ids = (v as unknown[]).map((_, i) => id({ x: (v as unknown[])[i] }, "x"));
     return { ...base, pauseNodeIds: ids };
   },
   "node.split": (p) => {
-    const o = strict(p, ["nodeId", "brief", "keep"]);
+    const o = strict(p, ["nodeId", "keep", ...BRIEF_KEYS]);
     return {
       nodeId: id(o, "nodeId"),
-      brief: text(o, "brief", LIMITS.reportText),
       keep: oneOf(o, "keep", ["mainline", "stop"] as const),
+      ...brief(o),
     };
   },
   "scope.decide": (p) => {
@@ -184,8 +211,17 @@ const VALIDATORS: Validators = {
     };
   },
   "node.review": (p) => {
-    const o = strict(p, ["nodeId", "verdict"]);
-    return { nodeId: id(o, "nodeId"), verdict: oneOf(o, "verdict", ["accept", "reject"] as const) };
+    const o = strict(p, ["nodeId", "verdict", "feedback"]);
+    const nodeId = id(o, "nodeId");
+    const verdict = oneOf(o, "verdict", ["accept", "reject"] as const);
+    if (verdict === "reject") {
+      // 差し戻しには理由が要る（子が直す手がかり）。
+      const feedback = text(o, "feedback", LIMITS.feedback);
+      if (feedback.trim() === "") fail("reject には feedback（差し戻しの理由）が必要");
+      return { nodeId, verdict, feedback };
+    }
+    if (o.feedback === undefined) return { nodeId, verdict };
+    return { nodeId, verdict, feedback: text(o, "feedback", LIMITS.feedback) };
   },
   "node.reclaimPreview": nodeIdOnly,
   "node.reclaim": nodeIdOnly,
@@ -230,10 +266,6 @@ const VALIDATORS: Validators = {
       target: text(o, "target", LIMITS.question),
       reason: text(o, "reason", LIMITS.question),
     };
-  },
-  "node.bind": (p) => {
-    const o = strict(p, ["bindCode"]);
-    return { bindCode: id(o, "bindCode") };
   },
   "decision.answer": (p) => {
     const o = strict(p, ["decisionId", "choice", "text"]);
