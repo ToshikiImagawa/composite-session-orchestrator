@@ -54,9 +54,9 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "node.capabilities": "ノードごとに可能な操作を参照する",
   "decision.get": "受信箱の項目（ref）の判断要求の内容を読む。自分の部分木のものだけ",
   "report.get": "受信箱の項目（ref）の報告の内容を読む。自分の部分木のものだけ",
-  "report.progress": "進捗を親へ報告する",
+  "report.progress": `進捗を親へ報告する。進捗・範囲外の報告は 1 ノードにつき ${LIMITS.reportsPerNode} 件まで（再開後の報告を数える。超えると tooManyReports。完了報告は数えない）`,
   "report.decision": `判断要求を親へ出す。人間へは親を経由する。未回答の判断要求は 1 ノードにつき ${LIMITS.openDecisionsPerNode} 件まで（再開後の要求を数える。超えると tooManyOpenDecisions）`,
-  "report.outOfScope": "作業範囲外の課題を親へ申告する",
+  "report.outOfScope": `作業範囲外の課題を親へ申告する。進捗・範囲外の報告は 1 ノードにつき ${LIMITS.reportsPerNode} 件まで（再開後の報告を数える。超えると tooManyReports）`,
   "report.done": "完了を親へ報告する。受け入れ基準ごとの根拠を付ける",
   "scope.extend":
     "作業範囲の拡張を親へ要求する。target は { kind: write（書き込み可能な場所の追加）か command（許可するコマンドの追加）, value } で、理由（reason）を添える。未判定の要求は 10 件まで。結果の extensionId は、親の判定（scope_decide）の対象になる",
