@@ -133,6 +133,9 @@ describe("operationForTool", () => {
     expect(d("node_split")).toContain("keep");
     expect(d("node_review")).toContain("feedback");
     expect(d("decision_present")).toContain("pauseNodeIds");
+    expect(d("node_send")).toContain("queued");
+    expect(d("node_stop")).toContain("graceMs");
+    expect(toolsFor("child").find((t) => t.name === "scope_extend")?.description).toContain("kind");
   });
 
   it("toolName は操作名の . を _ にする", () => {

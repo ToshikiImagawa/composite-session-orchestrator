@@ -16,6 +16,7 @@ import {
   isBoundedText,
   isSafeId,
   LIMITS,
+  MAX_GRACE_MS,
   NODE_ROLES,
   type OperationMap,
   pauseNodeIdsProblem,
@@ -170,8 +171,19 @@ const VALIDATORS: Validators = {
     return { nodeId: id(o, "nodeId"), text: text(o, "text", LIMITS.reportText) };
   },
   "node.stop": (p) => {
-    const o = strict(p, ["nodeId", "mode"]);
-    return { nodeId: id(o, "nodeId"), mode: oneOf(o, "mode", ["graceful", "immediate"] as const) };
+    const o = strict(p, ["nodeId", "mode", "graceMs"]);
+    const nodeId = id(o, "nodeId");
+    const mode = oneOf(o, "mode", ["graceful", "immediate"] as const);
+    if (o.graceMs === undefined) {
+      return mode === "graceful" ? { nodeId, mode: "graceful" } : { nodeId, mode: "immediate" };
+    }
+    // 猶予時間は穏当な停止（graceful）のときだけ。即時停止に猶予はない。
+    if (mode !== "graceful") fail("graceMs は mode が graceful のときだけ指定できる");
+    const g = o.graceMs;
+    if (typeof g !== "number" || !Number.isInteger(g) || g < 1 || g > MAX_GRACE_MS) {
+      fail(`graceMs が不正（1〜${MAX_GRACE_MS} の整数）`);
+    }
+    return { nodeId, mode, graceMs: g as number };
   },
   "inbox.fetch": (p) => {
     const o = strict(p, ["sinceSeq"]);
@@ -261,10 +273,12 @@ const VALIDATORS: Validators = {
   },
   "scope.extend": (p) => {
     const o = strict(p, ["target", "reason"]);
-    return {
-      target: text(o, "target", LIMITS.question),
-      reason: text(o, "reason", LIMITS.question),
-    };
+    const t = strict(o.target, ["kind", "value"]);
+    const value = text(t, "value", LIMITS.extensionTarget);
+    if (value.trim() === "") fail("target.value が空");
+    const reason = text(o, "reason", LIMITS.extensionReason);
+    if (reason.trim() === "") fail("reason が空");
+    return { target: { kind: oneOf(t, "kind", ["write", "command"] as const), value }, reason };
   },
   "decision.answer": (p) => {
     const o = strict(p, ["decisionId", "choice", "text"]);

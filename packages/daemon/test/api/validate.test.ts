@@ -1,4 +1,4 @@
-import { DAEMON_OPERATIONS, LIMITS } from "@cso/core";
+import { DAEMON_OPERATIONS, LIMITS, MAX_GRACE_MS } from "@cso/core";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseEnvelope, validateParams } from "../../src/api/validate.js";
@@ -99,7 +99,14 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
     expect(ok("report.decision", { question: "q", options: ["A", "B"] })).toBe(true);
     expect(ok("report.outOfScope", { text: "別件" })).toBe(true);
     expect(ok("report.done", { evidence: [{ criterion: "c", evidence: "e" }] })).toBe(true);
-    expect(ok("scope.extend", { target: "docs", reason: "必要" })).toBe(true);
+    expect(
+      ok("scope.extend", { target: { kind: "write", value: "/w/docs" }, reason: "必要" }),
+    ).toBe(true);
+    expect(
+      ok("scope.extend", { target: { kind: "command", value: "git status" }, reason: "r" }),
+    ).toBe(true);
+    expect(ok("node.stop", { nodeId: "a", mode: "graceful", graceMs: 5000 })).toBe(true);
+    expect(ok("node.stop", { nodeId: "a", mode: "graceful", graceMs: MAX_GRACE_MS })).toBe(true);
     expect(ok("decision.answer", { decisionId: "d", choice: "A" })).toBe(true);
     expect(ok("decision.answer", { decisionId: "d", text: "自由入力" })).toBe(true);
     expect(ok("node.purge", { nodeId: "root" })).toBe(true);
@@ -139,6 +146,16 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
       ["node.review", { nodeId: "a", verdict: "accept", feedback: 5 }],
       ["node.review", { nodeId: "a", verdict: "maybe" }],
       ["node.bind", { bindCode: "abc123" }],
+      ["scope.extend", { target: "docs", reason: "必要" }],
+      ["scope.extend", { target: { kind: "read", value: "/w" }, reason: "r" }],
+      ["scope.extend", { target: { kind: "write", value: "" }, reason: "r" }],
+      ["scope.extend", { target: { kind: "write", value: "/w", extra: 1 }, reason: "r" }],
+      ["scope.extend", { target: { kind: "write", value: "/w" }, reason: "" }],
+      ["node.stop", { nodeId: "a", mode: "immediate", graceMs: 1000 }],
+      ["node.stop", { nodeId: "a", mode: "graceful", graceMs: 0 }],
+      ["node.stop", { nodeId: "a", mode: "graceful", graceMs: MAX_GRACE_MS + 1 }],
+      ["node.stop", { nodeId: "a", mode: "graceful", graceMs: 1.5 }],
+      ["node.stop", { nodeId: "a", mode: "graceful", graceMs: "5000" }],
       ["scope.decide", { extensionId: "e", decision: "maybe" }],
       ["decision.answer", { decisionId: "d" }],
       ["decision.answer", { decisionId: "d", choice: "A", text: "B" }],

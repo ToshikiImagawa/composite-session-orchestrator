@@ -147,6 +147,11 @@ export type EventBody =
       };
     }
   | {
+      /** 追加指示の記録（`node.send`）。記録のみ。届ける操作はアダプタが別に行う。本文は `LIMITS.reportText` 以下。 */
+      readonly type: "node.instructed";
+      readonly payload: { readonly nodeId: string; readonly text: string };
+    }
+  | {
       readonly type: "decision.answered";
       readonly payload: { readonly decisionId: string; readonly answer: string };
     };
@@ -283,6 +288,15 @@ export interface ToolDenialRecord {
   readonly actor: Actor;
 }
 
+/** 追加指示の記録。 */
+export interface InstructionRecord {
+  readonly seq: number;
+  readonly at: string;
+  readonly nodeId: string;
+  readonly text: string;
+  readonly actor: Actor;
+}
+
 export interface ExitRecord {
   readonly seq: number;
   readonly at: string;
@@ -342,6 +356,8 @@ export interface OrchState {
   readonly reports: readonly ReportRecord[];
   /** 範囲の拡張要求と判定。 */
   readonly extensions: readonly ExtensionRecord[];
+  /** 追加指示の記録（時系列）。 */
+  readonly instructions: readonly InstructionRecord[];
   /** 最後に適用したイベントの `seq`。 */
   readonly lastSeq: number;
   /** 適用済みの要求識別子 → 内容の指紋（冪等性の判定用）。 */
@@ -406,6 +422,7 @@ export const initialState = (): OrchState => ({
   exits: [],
   reports: [],
   extensions: [],
+  instructions: [],
   lastSeq: 0,
   requests: {},
 });
@@ -496,6 +513,7 @@ interface Draft {
   reportIdx: Map<string, ReportRecord>;
   extensions: ExtensionRecord[];
   extensionIdx: Map<string, number>;
+  instructions: InstructionRecord[];
   lastSeq: number;
   requests: Map<string, string>;
   /** 直前の `step` で、イベントの一部が無視されたこと（`ApplyOutcome.ignored` に渡す）。 */
@@ -587,6 +605,13 @@ const extensionShape = (x: unknown): boolean =>
     x.status === "rejected" ||
     x.status === "split") &&
   Number.isInteger(x.requestedSeq);
+const instructionShape = (x: unknown): boolean =>
+  isRec(x) &&
+  Number.isInteger(x.seq) &&
+  typeof x.at === "string" &&
+  isId(x.nodeId) &&
+  typeof x.text === "string" &&
+  parseActor(x.actor) !== undefined;
 const observationShape = (o: unknown): boolean =>
   isRec(o) &&
   Number.isInteger(o.seq) &&
@@ -620,6 +645,7 @@ function toDraft(state: OrchState): Draft | undefined {
   const exits = arrayOf<ExitRecord>(state.exits, exitShape);
   const reports = arrayOf<ReportRecord>(state.reports, reportShape);
   const extensions = arrayOf<ExtensionRecord>(state.extensions, extensionShape);
+  const instructions = arrayOf<InstructionRecord>(state.instructions, instructionShape);
   if (
     !nodes ||
     !inbox ||
@@ -630,7 +656,8 @@ function toDraft(state: OrchState): Draft | undefined {
     !toolDenials ||
     !exits ||
     !reports ||
-    !extensions
+    !extensions ||
+    !instructions
   )
     return undefined;
 
@@ -651,6 +678,7 @@ function toDraft(state: OrchState): Draft | undefined {
     reportIdx: new Map(reports.map((r) => [r.reportId, r])),
     extensions: [...extensions],
     extensionIdx: new Map(extensions.map((x, i) => [x.extensionId, i])),
+    instructions: [...instructions],
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
     note: undefined,
@@ -680,6 +708,7 @@ function toState(d: Draft): OrchState {
     exits: Object.freeze(d.exits),
     reports: Object.freeze(d.reports),
     extensions: Object.freeze(d.extensions),
+    instructions: Object.freeze(d.instructions),
     lastSeq: d.lastSeq,
     requests: Object.freeze(Object.fromEntries(d.requests)),
   });
@@ -1265,6 +1294,19 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           ? { ...cur, status: "answered" as const, answer, answeredBy: actor }
           : { ...cur, rejected: Object.freeze([...cur.rejected, { seq, answer, actor }]) },
       );
+      return commit();
+    }
+
+    case "node.instructed": {
+      const { nodeId, text } = p;
+      if (!isId(nodeId)) return invalid(seq, "node.instructed の nodeId");
+      if (!isBoundedText(text, LIMITS.reportText) || text.trim() === "") {
+        return invalid(seq, `node.instructed の text（空でない ${LIMITS.reportText} 文字以下）`);
+      }
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (!RECORDABLE_STATES.has(node.state)) return notRecordable(seq, node, "追加指示");
+      d.instructions.push(freezeRecord({ seq, at: raw.at as string, nodeId, text, actor }));
       return commit();
     }
 

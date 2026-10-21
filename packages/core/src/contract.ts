@@ -7,7 +7,7 @@
  */
 
 import type { Brief } from "./brief.js";
-import type { ReportEvidence, ReportKind } from "./events.js";
+import type { ExtensionTarget, ReportEvidence, ReportKind } from "./events.js";
 import type { InboxItem } from "./inbox.js";
 import type { NodeRole, NodeState } from "./index.js";
 
@@ -78,9 +78,11 @@ export interface OperationMap {
     params: { parentId: string; role: NodeRole } & Brief;
     result: { nodeId: string };
   };
-  "node.send": { params: { nodeId: string; text: string }; result: { delivered: boolean } };
+  /** 追加指示。届いたかではなく、受け付けて（`node.instructed` を記録して）送る段取りに入ったことを返す。 */
+  "node.send": { params: { nodeId: string; text: string }; result: { status: "queued" } };
   "node.stop": {
-    params: { nodeId: string; mode: "graceful" | "immediate" };
+    /** 停止。猶予時間（`graceMs`。1〜`MAX_GRACE_MS` の整数）は穏当な停止（graceful）のときだけ指定できる。 */
+    params: { nodeId: string } & ({ mode: "graceful"; graceMs?: number } | { mode: "immediate" });
     result: { state: NodeState };
   };
   "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly InboxItem[] } };
@@ -146,7 +148,11 @@ export interface OperationMap {
     params: { evidence: readonly { criterion: string; evidence: string }[] };
     result: { accepted: true };
   };
-  "scope.extend": { params: { target: string; reason: string }; result: { extensionId: string } };
+  /** 範囲の拡張要求。対象は書き込み可能な場所（`write`）かコマンド（`command`）の追加。 */
+  "scope.extend": {
+    params: { target: ExtensionTarget; reason: string };
+    result: { extensionId: string };
+  };
   // 人間（画面・コマンド）
   "decision.answer": {
     params: { decisionId: string } & ({ choice: string } | { text: string });

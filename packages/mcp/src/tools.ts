@@ -34,8 +34,10 @@ type McpOperation = RoleOperation<McpRole>;
 const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "node.spawn":
     "子を生成する。引数: parentId・role・objective（目的）・acceptanceCriteria（受け入れ基準）・scope（writableLocations・forbiddenLocations・allowedCommands）・dependsOn（省略可）。作業ツリーとブランチは指定しない（システムが親のブランチから決める）。受け付け結果を即座に返す",
-  "node.send": "稼働中の子へ追加指示を送る。届いたかどうかは結果で確認する",
-  "node.stop": "子を停止する。graceful（穏当）か immediate（即時）を選ぶ",
+  "node.send":
+    '稼働中の子へ追加指示を送る。結果は { status: "queued" }（受け付けた。届いたかは受信箱・状態で確認する）',
+  "node.stop":
+    "子を停止する。mode は graceful（穏当）か immediate（即時）。graceMs（1〜3600000 ミリ秒の整数）は graceful のときだけ指定でき、省略すると既定の猶予になる",
   "inbox.fetch": "受信箱を取得する。優先度・依存関係・時刻の順。detail と limit で量を絞れる",
   "tree.list": "木の一覧表を取得する",
   "decision.present":
@@ -56,7 +58,7 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "report.outOfScope": "作業範囲外の課題を親へ申告する",
   "report.done": "完了を親へ報告する。受け入れ基準ごとの根拠を付ける",
   "scope.extend":
-    "作業範囲の拡張を親へ要求する。対象（target）と理由（reason）を添える。結果の extensionId は、親の判定（scope_decide）の対象になる",
+    "作業範囲の拡張を親へ要求する。target は { kind: write（書き込み可能な場所の追加）か command（許可するコマンドの追加）, value } で、理由（reason）を添える。未判定の要求は 10 件まで。結果の extensionId は、親の判定（scope_decide）の対象になる",
 };
 
 /** 操作名から MCP のツール名への変換（`.` を `_` にする）。ツール名を扱う箇所はすべてこれを使う。 */

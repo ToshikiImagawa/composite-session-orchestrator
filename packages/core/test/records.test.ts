@@ -486,3 +486,67 @@ describe("node.exited・node.toolDenied を記録できるノードの状態", (
     expect(code(foldEvents([...done, denied("a")]))).toBe("invalidTransition");
   });
 });
+
+describe("追加指示の記録（node.instructed。記録のみ）", () => {
+  const instructed = (nodeId: string, text: unknown) =>
+    ev({ type: "node.instructed", payload: { nodeId, text } } as never);
+
+  it("ノード・本文・seq・at・発行者を記録し、ノードの状態を変えない", () => {
+    const s = must(foldEvents([...base(), instructed("a", "続けて")]));
+    expect(s.instructions).toEqual([
+      expect.objectContaining({ nodeId: "a", text: "続けて", actor: SYS }),
+    ]);
+    expect(s.instructions[0]).toMatchObject({
+      seq: expect.any(Number),
+      at: "2026-10-20T00:00:00Z",
+    });
+    expect(s.nodes.find((n) => n.id === "a")?.state).toBe("running");
+  });
+
+  it("複数の指示は時系列で残る", () => {
+    const s = must(foldEvents([...base(), instructed("a", "1"), instructed("a", "2")]));
+    expect(s.instructions.map((x) => x.text)).toEqual(["1", "2"]);
+  });
+
+  it.each([
+    ["空", ""],
+    ["空白だけ", "  \n"],
+    ["文字列でない", 5],
+    ["制御文字", "a\u0000b"],
+    ["上限超え", "あ".repeat(LIMITS.reportText + 1)],
+  ])("本文が%sなら invalidPayload", (_name, text) => {
+    expect(code(foldEvents([...base(), instructed("a", text)]))).toBe("invalidPayload");
+  });
+
+  it("ちょうど上限までは受け入れる", () => {
+    const text = "あ".repeat(LIMITS.reportText);
+    expect(code(foldEvents([...base(), instructed("a", text)]))).toBeNull();
+  });
+
+  it("存在しないノードは unknownNode、識別子の形式が不正なら invalidPayload", () => {
+    expect(code(foldEvents([...base(), instructed("zz", "x")]))).toBe("unknownNode");
+    expect(code(foldEvents([...base(), instructed("a b", "x")]))).toBe("invalidPayload");
+  });
+
+  it("指示を届けられるのは running・waiting・stopping・stopIncomplete のノードだけ", () => {
+    const pending = foldEvents([
+      ...base(),
+      created(5, "p", "implement", "root"),
+      instructed("p", "x"),
+    ]);
+    expect(code(pending)).toBe("invalidTransition");
+    const done = foldEvents([
+      ...base(),
+      changed(5, "a", { type: "reportDone" }),
+      instructed("a", "x"),
+    ]);
+    expect(code(done)).toBe("invalidTransition");
+  });
+
+  it("古いスナップショット（instructions がない）からも復元できる", () => {
+    const old = { ...initialState() } as Record<string, unknown>;
+    old.instructions = undefined;
+    const r = applyEvent(old as never, created(1, "root", "integrator", null));
+    expect(r.ok).toBe(true);
+  });
+});

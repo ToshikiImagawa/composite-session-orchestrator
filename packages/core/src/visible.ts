@@ -26,6 +26,7 @@ export function visibleState(state: OrchState, callerId: string): OrchState {
       exits: Object.freeze(mine(state.exits)),
       reports: Object.freeze(mine(state.reports)),
       extensions: Object.freeze(mine(state.extensions)),
+      instructions: Object.freeze(mine(state.instructions)),
       lastSeq: state.lastSeq,
       requests: Object.freeze({}),
     });

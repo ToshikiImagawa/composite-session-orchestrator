@@ -5,6 +5,7 @@ import {
   DAEMON_OPERATIONS,
   type DaemonOperation,
   type DaemonRequest,
+  type DaemonResponse,
   DEFAULT_PURGE_TOMBSTONE,
   err,
   type Failure,
@@ -217,5 +218,32 @@ describe("ブリーフを受ける操作（spec 5.2）", () => {
     const noFeedback = { nodeId: "n", verdict: "reject" } as const;
     // @ts-expect-error reject には feedback が要る
     integ({ ...b, params: noFeedback });
+  });
+});
+
+describe("node.send・node.stop・scope.extend の契約", () => {
+  const integ = (r: DaemonRequest<"integrator">) => r;
+  const child = (r: DaemonRequest<"child">) => r;
+
+  it("node.send の結果は { status: 'queued' }（届いたかではなく、受け付けた）", () => {
+    expectTypeOf<DaemonResponse<"node.send">>().toEqualTypeOf<Result<{ status: "queued" }>>();
+  });
+
+  it("node.stop の graceMs は graceful のときだけ指定できる", () => {
+    const b = { requestId: "r", role: "integrator", operation: "node.stop" } as const;
+    integ({ ...b, params: { nodeId: "n", mode: "graceful" } });
+    integ({ ...b, params: { nodeId: "n", mode: "graceful", graceMs: 5000 } });
+    integ({ ...b, params: { nodeId: "n", mode: "immediate" } });
+    // @ts-expect-error immediate には猶予がない
+    integ({ ...b, params: { nodeId: "n", mode: "immediate", graceMs: 1000 } });
+  });
+
+  it("scope.extend の対象は { kind, value } に構造化される", () => {
+    const b = { requestId: "r", role: "child", operation: "scope.extend" } as const;
+    child({ ...b, params: { target: { kind: "write", value: "/w/docs" }, reason: "必要" } });
+    child({ ...b, params: { target: { kind: "command", value: "git status" }, reason: "必要" } });
+    const old = { target: "docs", reason: "必要" } as const;
+    // @ts-expect-error 文字列の対象は受けない
+    child({ ...b, params: old });
   });
 });
