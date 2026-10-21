@@ -113,7 +113,14 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
     const actor = { nodeId: decision.nodeId };
     const mine = (requestId: string) =>
       Object.hasOwn(state.requests, derivedRequestId(actor, requestId, 0));
-    if (!mine(pauseRequestId(decision.decisionId, target))) return false;
+    // 一時停止（この判断が出した）か、判断を待っていた子が、再起動の整合で停止済みにされたもの（システムの記録）。
+    const reconciled =
+      target === decision.nodeId &&
+      Object.hasOwn(
+        state.requests,
+        derivedRequestId({ system: true }, `reconcile-wait-${decision.decisionId}`, 0),
+      );
+    if (!mine(pauseRequestId(decision.decisionId, target)) && !reconciled) return false;
     const since =
       state.inbox.find((i) => i.kind === "decision" && i.ref === decision.decisionId)?.seq ?? 0;
     const stops = state.stopRequests.filter((q) => q.nodeId === target && q.seq > since).length;
@@ -286,7 +293,8 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       if (!r.ok) return r;
       const params = req.params as { decisionId: string; choice?: string; text?: string };
       const d = log.state().decisions.find((x) => x.decisionId === params.decisionId);
-      const targets = d?.pauseNodeIds ?? [];
+      // 止めた子に加えて、判断を出した子自身も対象にする（再起動の整合で、待ちの途中に停止済みにされたかもしれない）。
+      const targets = d === undefined ? [] : [...new Set([...(d.pauseNodeIds ?? []), d.nodeId])];
       if (d === undefined || targets.length === 0) return r;
       const answer = d.answer ?? params.choice ?? params.text ?? "";
       const failed: string[] = [];
