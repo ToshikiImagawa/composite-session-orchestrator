@@ -1583,6 +1583,26 @@ describe("未回答の判断要求は、ノードごとに上限まで", () => {
     expect(codeOf(over)).toBe("tooManyOpenDecisions");
   });
 
+  it("差し戻し（done から running）も、数える範囲の始まりになる。古い要求は回答できる", () => {
+    const done = () => ev(changed("root", { type: "reportDone" }));
+    const reject = () => ev(changed("root", { type: "reject" }));
+    const fresh = Array.from(
+      { length: LIMITS.openDecisionsPerNode },
+      (_, i) => () =>
+        ev({ type: "decision.requested", payload: { decisionId: `new${i}`, nodeId: "root" } }),
+    );
+    const r = run(
+      ...many(LIMITS.openDecisionsPerNode),
+      done,
+      reject,
+      ...fresh,
+      answered("root-d0"),
+    );
+    expect(codeOf(r)).toBeNull();
+    const over = run(...many(1), done, reject, ...fresh, requested("one-more"));
+    expect(codeOf(over)).toBe("tooManyOpenDecisions");
+  });
+
   it("上限はノードごと。別のノードには影響しない", () => {
     const r = run(...many(LIMITS.openDecisionsPerNode), ...many(1, "a"));
     expect(codeOf(r)).toBeNull();
@@ -1595,5 +1615,85 @@ describe("未回答の判断要求は、ノードごとに上限まで", () => {
     const over = foldEvents([...b, ...many(LIMITS.openDecisionsPerNode + 1).map((m) => m())]);
     expect(over.ok).toBe(false);
     if (!over.ok) expect(over.error.nextActions.length).toBeGreaterThan(0);
+  });
+});
+
+describe("子が入れる報告（progress・outOfScope）は、ノードごとに上限まで", () => {
+  const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+  const run = (...makers: (() => OrchEvent)[]) => {
+    const b = base();
+    return foldEvents([...b, ...makers.map((m) => m())]);
+  };
+  const report =
+    (reportId: string, kind: string, nodeId = "root") =>
+    () =>
+      ev({ type: "report.added", payload: { reportId, nodeId, kind, text: "t" } } as EventBody);
+  const many = (n: number, kind = "progress", nodeId = "root") =>
+    Array.from({ length: n }, (_, i) => report(`${nodeId}-${kind}-${i}`, kind, nodeId));
+
+  it("上限（LIMITS.reportsPerNode）ちょうどまでは受け付け、超えたら tooManyReports", () => {
+    expect(codeOf(run(...many(LIMITS.reportsPerNode)))).toBeNull();
+    expect(codeOf(run(...many(LIMITS.reportsPerNode + 1)))).toBe("tooManyReports");
+  });
+
+  it("progress と outOfScope を合わせて数える", () => {
+    const half = Math.floor(LIMITS.reportsPerNode / 2);
+    const r = run(
+      ...many(half, "progress"),
+      ...many(LIMITS.reportsPerNode - half + 1, "outOfScope"),
+    );
+    expect(codeOf(r)).toBe("tooManyReports");
+  });
+
+  it("done・failure・review は数えず、上限に達していても受け付ける", () => {
+    const r = run(
+      ...many(LIMITS.reportsPerNode),
+      report("d", "done"),
+      report("f", "failure"),
+      report("v", "review"),
+    );
+    expect(codeOf(r)).toBeNull();
+  });
+
+  it("上限はノードごと。別のノードには影響しない", () => {
+    expect(codeOf(run(...many(LIMITS.reportsPerNode), ...many(1, "progress", "a")))).toBeNull();
+  });
+
+  it("数えるのは、そのノードの直近の restart より後の報告だけ", () => {
+    const stop = () => ev(changed("root", { type: "stop", mode: "immediate" }));
+    const exited = () => ev(changed("root", { type: "confirmStopped" }));
+    const restart = () => ev(changed("root", { type: "restart", dependenciesDone: true }));
+    const r = run(
+      ...many(LIMITS.reportsPerNode),
+      stop,
+      exited,
+      restart,
+      ...many(LIMITS.reportsPerNode, "outOfScope"),
+    );
+    expect(codeOf(r)).toBeNull();
+    const over = run(
+      ...many(1),
+      stop,
+      exited,
+      restart,
+      ...many(LIMITS.reportsPerNode + 1, "outOfScope"),
+    );
+    expect(codeOf(over)).toBe("tooManyReports");
+  });
+
+  it("差し戻し（done から running）の後は、報告の数え直し", () => {
+    const done = () => ev(changed("root", { type: "reportDone" }));
+    const reject = () => ev(changed("root", { type: "reject" }));
+    expect(
+      codeOf(run(...many(LIMITS.reportsPerNode), done, reject, ...many(1, "outOfScope"))),
+    ).toBeNull();
+    expect(
+      codeOf(run(...many(1), done, reject, ...many(LIMITS.reportsPerNode + 1, "outOfScope"))),
+    ).toBe("tooManyReports");
+  });
+
+  it("失敗は nextActions を持つ", () => {
+    const r = run(...many(LIMITS.reportsPerNode + 1));
+    expect(!r.ok && r.error.nextActions.length).toBeGreaterThan(0);
   });
 });
