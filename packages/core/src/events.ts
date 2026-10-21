@@ -589,8 +589,8 @@ interface Draft {
   tombstones: PurgeRecord[];
   /** ノードごとの、今の実行（直近の start・restart・差し戻しより後）の件数。上限の判定を O(1) にする（状態から導ける写し）。 */
   runCounts: Map<string, { decisions: number; reports: number }>;
-  /** 最終削除で消えた（消える）ノードの識別子。`pauseNodeIds` が指していても、存在しないとして拒否しない。標識（`node.purged`）が後に来るログの再生に備え、畳み込みの前に先読みして足す。 */
-  purgedIds: Set<string>;
+  /** 最終削除で消えた（消える）ノードの識別子と、標識（`node.purged`）の `seq`。`pauseNodeIds` が指していても、存在しないとして拒否しない。標識（`node.purged`）が後に来るログの再生に備え、畳み込みの前に先読みして足す。 */
+  purgedIds: Map<string, number>;
   lastSeq: number;
   requests: Map<string, string>;
   /** 直前の `step` で、イベントの一部が無視されたこと（`ApplyOutcome.ignored` に渡す）。 */
@@ -776,7 +776,11 @@ function toDraft(state: OrchState): Draft | undefined {
     instructions: [...instructions],
     tombstones: [...tombstones],
     runCounts: new Map(),
-    purgedIds: new Set(tombstones.flatMap((t) => (Array.isArray(t.nodeIds) ? t.nodeIds : []))),
+    purgedIds: new Map(
+      tombstones.flatMap((t) =>
+        Array.isArray(t.nodeIds) ? t.nodeIds.map((id): [string, number] => [id, t.seq]) : [],
+      ),
+    ),
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
     note: undefined,
@@ -1392,7 +1396,8 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
         for (const target of pauseNodeIds as string[]) {
           if (nodeAt(d, target) === undefined) {
             // 最終削除で消えたノードは、止める対象から外れたものとして無視する。本当に存在しないノードは拒否する。
-            if (d.purgedIds.has(target)) continue;
+            // 標識より前の要求（再生）だけ。標識より後の新しい参照は、存在しないノードとして拒否する。
+            if ((d.purgedIds.get(target) ?? 0) > seq) continue;
             return unknownNode(seq, target);
           }
           if (!below.has(target)) {
@@ -1787,8 +1792,9 @@ export function foldEvents(
   for (const e of sorted) {
     const rec = e as unknown as Rec;
     const ids = rec.type === "node.purged" && isRec(rec.payload) ? rec.payload.nodeIds : undefined;
-    if (Array.isArray(ids))
-      for (const id of ids) if (typeof id === "string") draft.purgedIds.add(id);
+    if (Array.isArray(ids) && Number.isInteger(rec.seq)) {
+      for (const id of ids) if (typeof id === "string") draft.purgedIds.set(id, rec.seq as number);
+    }
   }
   for (const e of sorted) {
     const r = step(draft, e);

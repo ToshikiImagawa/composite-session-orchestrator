@@ -294,4 +294,18 @@ describe("EventLog.purgeTree（最終削除）", () => {
     expect(store.open().readAll().length).toBe(before);
     expect(log.state().nodes.some((n) => n.id === "t")).toBe(true);
   });
+
+  it("append は node.purged を受け付けない（書けるのは purgeTree だけ）", () => {
+    const store = createMemoryStore();
+    const { log } = setup(store.open());
+    const before = store.open().readAll().length;
+    const r = log.append({
+      requestId: "forged",
+      actor: { human: true },
+      body: marker("t"),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("invalidRequest");
+    expect(store.open().readAll().length).toBe(before);
+  });
 });

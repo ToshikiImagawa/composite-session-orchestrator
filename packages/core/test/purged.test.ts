@@ -132,12 +132,13 @@ describe("最終削除で消えたノードを、判断要求の pauseNodeIds �
     }
   });
 
-  it("標識が状態にあれば（すでに畳み込み済み）、消えたノードは無視して受け付ける", () => {
+  it("標識より後の判断要求が、消えたノードを指すのは拒否する（標識の seq より小さいときだけ受理）", () => {
+    // 同じ畳み込みの中でも、状態に標識がある場合でも、標識より後の新しい参照は unknownNode
+    expect(codeOf(foldEvents([...root(), purged(base), requested(["c"])]))).toBe("unknownNode");
     const s = foldEvents([...root(), purged(base)]);
     expect(s.ok).toBe(true);
     if (!s.ok) return;
-    const r = foldEvents([requested(["c"])], s.value);
-    expect(codeOf(r)).toBeNull();
+    expect(codeOf(foldEvents([requested(["c"])], s.value))).toBe("unknownNode");
   });
 
   it("標識のないノード・本当に存在しないノードは、引き続き unknownNode で拒否する", () => {
