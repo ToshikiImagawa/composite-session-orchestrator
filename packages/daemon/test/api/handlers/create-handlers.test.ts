@@ -1,5 +1,5 @@
-import { ok } from "@cso/core";
-import { describe, expect, it } from "vitest";
+import { type EventBody, type NodeEvent, ok, stateOf } from "@cso/core";
+import { describe, expect, it, vi } from "vitest";
 import { createHandlers } from "../../../src/api/handlers/index.js";
 import { EventLog } from "../../../src/eventlog.js";
 import { createMemoryStore } from "../../../src/memory-store.js";
@@ -49,5 +49,63 @@ describe("createHandlers の組み立て", () => {
     ] as const) {
       expect(h[op], op).toBeTypeOf("function");
     }
+  });
+
+  it("node.review の受理（依存先の完了）で、依存が揃った pending の子が起動する", async () => {
+    const log = open();
+    const add = (body: EventBody): void => {
+      const r = log.append({ requestId: `seed-${Math.random()}`, actor: { system: true }, body });
+      if (!r.ok) throw new Error(r.error.code);
+    };
+    const ev = (nodeId: string, event: NodeEvent) =>
+      add({ type: "node.stateChanged", payload: { nodeId, event } });
+    const scope = {
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: ["pnpm test"],
+    };
+    const node = (
+      nodeId: string,
+      role: "integrator" | "implement",
+      parentId: string | null,
+      dependsOn: string[] = [],
+    ) =>
+      add({
+        type: "node.created",
+        payload: {
+          nodeId,
+          role,
+          parentId,
+          dependsOn,
+          ...(parentId === null ? {} : { objective: nodeId, acceptanceCriteria: ["c"], scope }),
+        },
+      });
+    node("m1", "integrator", null);
+    ev("m1", { type: "start" });
+    node("a", "implement", "m1");
+    ev("a", { type: "start" });
+    ev("a", { type: "reportDone" });
+    node("b", "implement", "m1", ["a"]);
+    const started: string[] = [];
+    const adapter = {
+      start: async (req: { nodeId: string; worktreePath: string }) => {
+        started.push(req.nodeId);
+        return ok({ sessionId: "s", cwd: req.worktreePath, removedEnv: [] });
+      },
+    } as unknown as RuntimeAdapter;
+    const h = createHandlers({ log, clock }, { adapterFor: () => adapter }, undefined, {
+      ...spawnDeps,
+      rootScope: scope,
+    });
+    const r = await h["node.review"]?.({
+      requestId: "rv-1",
+      operation: "node.review",
+      role: "integrator",
+      caller: { nodeId: "m1" },
+      params: { nodeId: "a", verdict: "accept" },
+    } as never);
+    expect(r?.ok).toBe(true);
+    await vi.waitFor(() => expect(started).toEqual(["b"]));
+    expect(stateOf(log.state(), "b")).toBe("running");
   });
 });

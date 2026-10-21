@@ -39,7 +39,14 @@ import {
 import type { RuntimeAdapter } from "../../sdk/runtime.js";
 import type { CredentialStore } from "../credentials.js";
 import type { HandlerRequest } from "../server.js";
-import { alreadyApplied, appendAtomically, deriveId, fail, type LogPort } from "./context.js";
+import {
+  alreadyApplied,
+  appendAtomically,
+  deriveId,
+  fail,
+  type LogPort,
+  summarize,
+} from "./context.js";
 import { createExclusive } from "./inflight.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
@@ -114,7 +121,8 @@ const instructionOf = (b: BriefParams): string =>
       : []),
   ].join("\n");
 
-export function createSpawnHandlers(deps: SpawnHandlerDeps) {
+/** 子の生成の操作に加えて、依存が揃った pending の子を起動するスケジューラ（`tick`）を返す。 */
+export function createSpawner(deps: SpawnHandlerDeps) {
   const { log, ports, credentials } = deps;
   const note = (nodeId: string, cause: string): void => {
     try {
@@ -127,6 +135,9 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     state.nodes.find((n) => n.id === id);
 
   const exclusive = createExclusive();
+  /** 同じノードの起動を、同時に 1 つだけにする（spawn の再試行・スケジューラ・別の tick が重なっても、二重に起動しない）。 */
+  const startExclusive = createExclusive();
+  const schedExclusive = createExclusive();
 
   /**
    * 失敗の後始末。冪等で、例外を外へ出さない。`safe` は、子のプロセスが残っていないと確かめられているか
@@ -279,8 +290,34 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     return { ok: true, value: { nodeId, status: "running" } };
   }
 
+  /** 排他の中で、まだ pending か確かめてから起動する（先に起動した処理があれば、そのまま running として返す）。 */
+  const startGuarded = (
+    ctx: { requestId: string; caller: string; nodeId: string; worktreePath: string },
+    adapter: RuntimeAdapter,
+    brief: BriefParams,
+    role: NodeRecord["role"],
+  ): Promise<Result<Spawned, Failure>> =>
+    startExclusive(ctx.nodeId, "start", async () => {
+      if (nodeOf(log.state(), ctx.nodeId)?.state !== "pending")
+        return { ok: true, value: { nodeId: ctx.nodeId, status: "running" } };
+      return startNode(ctx, adapter, brief, role);
+    });
+
+  /** ポートが返した作業ツリーのパスを信用しない: 絶対パスで、置き場の配下であること。 */
+  const worktreePathOk = (worktreePath: unknown): worktreePath is string =>
+    typeof worktreePath === "string" &&
+    worktreePath.startsWith("/") &&
+    !worktreePath.includes("\0") &&
+    isPathUnder(normalizePath("/", worktreePath), normalizePath("/", ports.worktreeRoot)) &&
+    normalizePath("/", worktreePath) !== normalizePath("/", ports.worktreeRoot);
+
   const waitingOf = (state: OrchState, dependsOn: readonly string[]): string[] =>
-    dependsOn.filter((d) => !COMPLETED_STATES.has(stateOf(state, d) ?? "pending"));
+    // 破棄された（失敗した生成の後始末で、アーカイブまで進んだ）依存先は、完了とみなさない（成果がないので、待ち続ける）。
+    dependsOn.filter(
+      (d) =>
+        !COMPLETED_STATES.has(stateOf(state, d) ?? "pending") ||
+        nodeOf(state, d)?.discarded !== undefined,
+    );
   const dependsDone = (state: OrchState, dependsOn: readonly string[]): boolean =>
     waitingOf(state, dependsOn).length === 0;
 
@@ -333,7 +370,7 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
             "しばらくして、もう一度試す",
           );
         }
-        return startNode(
+        return startGuarded(
           { requestId, caller, nodeId, worktreePath: provisioned.value.worktreePath },
           adapter,
           brief,
@@ -431,13 +468,7 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     }
     const worktreePath = provisioned.value.worktreePath;
     // ポートが返したパスを信用しない: 絶対パスで、置き場の配下であること（外のパスは、消しもしない）。
-    if (
-      typeof worktreePath !== "string" ||
-      !worktreePath.startsWith("/") ||
-      worktreePath.includes("\0") ||
-      !isPathUnder(normalizePath("/", worktreePath), normalizePath("/", ports.worktreeRoot)) ||
-      normalizePath("/", worktreePath) === normalizePath("/", ports.worktreeRoot)
-    ) {
+    if (!worktreePathOk(worktreePath)) {
       note(nodeId, `作業ツリーのパスが置き場の外: ${String(worktreePath)}`);
       return fail("provisionFailed", "作業ツリーを作れなかった", "しばらくして、もう一度試す");
     }
@@ -466,12 +497,94 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
         value: { nodeId, status: "pending", waitingFor: waitingOf(state, dependsOn) },
       };
     }
-    return startNode({ requestId, caller, nodeId, worktreePath }, adapter, brief, role);
+    return startGuarded({ requestId, caller, nodeId, worktreePath }, adapter, brief, role);
+  }
+
+  /**
+   * スケジューラ: 記録済み・未起動（pending）の子を、依存が揃い、親が動作中の統合ノードなら起動する。
+   * 起動の入力は、記録したブリーフから作る。起動に失敗したら spawn と同じ後始末をして、受信箱（failure）に残す
+   * （同じ子を再び起動しない）。起動できない事情（作業ツリー・アダプタ・ブリーフの欠け）は、pending のまま `onFailure` に渡す。
+   */
+  function startPending(nodeId: string): Promise<Result<undefined, Failure>> {
+    return schedExclusive(nodeId, "sched", async () => {
+      try {
+        const state = log.state();
+        const node = nodeOf(state, nodeId);
+        if (node === undefined || node.state !== "pending" || node.parentId === null)
+          return { ok: true, value: undefined };
+        if (!dependsDone(state, node.dependsOn)) return { ok: true, value: undefined };
+        const parentId = node.parentId;
+        const parent = nodeOf(state, parentId);
+        if (parent === undefined || parent.role !== "integrator" || !LIVE.has(parent.state))
+          return { ok: true, value: undefined };
+        if (
+          node.objective === undefined ||
+          node.acceptanceCriteria === undefined ||
+          node.scope === undefined
+        ) {
+          note(nodeId, "ブリーフ（目的・受け入れ基準・範囲）が記録されていないため、起動できない");
+          return { ok: true, value: undefined };
+        }
+        const adapter = deps.adapterFor(parentId);
+        if (adapter === undefined) {
+          note(nodeId, `親 ${parentId} のランタイム（アダプタ）が見つからないため、起動できない`);
+          return { ok: true, value: undefined };
+        }
+        const provisioned = await ports.provisionWorktree({ parentId, nodeId });
+        if (!provisioned.ok || !worktreePathOk(provisioned.value.worktreePath)) {
+          note(nodeId, "作業ツリーを用意できないため、起動できない");
+          return { ok: true, value: undefined };
+        }
+        const brief: BriefParams = {
+          objective: node.objective,
+          acceptanceCriteria: node.acceptanceCriteria,
+          scope: node.scope,
+          dependsOn: node.dependsOn,
+        };
+        const started = await startGuarded(
+          {
+            requestId: `sched-${nodeId}`,
+            caller: parentId,
+            nodeId,
+            worktreePath: provisioned.value.worktreePath,
+          },
+          adapter,
+          brief,
+          node.role,
+        );
+        if (!started.ok) {
+          const key = `sched-${nodeId}`;
+          const r = appendAtomically(log, deps.clock, `${key}/failed`, { system: true }, [
+            {
+              type: "inbox.added",
+              payload: {
+                id: deriveId("inbox", "system", key, "failure"),
+                kind: "failure",
+                nodeId,
+                summary: summarize(
+                  `依存が揃ったので起動しようとしたが、失敗した（${started.error.code}）: ${started.error.cause}`,
+                ),
+              },
+            },
+          ]);
+          if (!r.ok) note(nodeId, `起動の失敗を受信箱に記録できない: ${r.error.code}`);
+        }
+      } catch (e) {
+        note(nodeId, `スケジューラが失敗: ${String(e)}`);
+      }
+      return { ok: true, value: undefined };
+    });
+  }
+
+  /** 起動できる pending の子を、すべて起動する（依存の完了時と、daemon の起動時に呼ぶ）。例外を外へ出さない。 */
+  async function tick(): Promise<void> {
+    const pending = log.state().nodes.filter((n) => n.state === "pending" && n.parentId !== null);
+    await Promise.all(pending.map((n) => startPending(n.id)));
   }
 
   const fingerprintOf = (v: unknown): string => JSON.stringify(v);
 
-  return {
+  const handlers = {
     "node.spawn": (req: HandlerRequest<"node.spawn">): Promise<R<"node.spawn">> => {
       const { parentId, role, ...brief } = req.params;
       const caller = req.caller?.nodeId ?? "";
@@ -580,4 +693,9 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
       });
     },
   };
+  return { handlers, startPending, tick };
+}
+
+export function createSpawnHandlers(deps: SpawnHandlerDeps) {
+  return createSpawner(deps).handlers;
 }

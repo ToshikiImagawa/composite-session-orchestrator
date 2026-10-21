@@ -7,7 +7,7 @@ import { createPauseHandlers } from "./pause-handlers.js";
 import { createReclaimHandlers, type ReclaimPorts } from "./reclaim-handlers.js";
 import { createRuntimeHandlers, type RuntimeHandlerDeps } from "./runtime-handlers.js";
 import { createScopeHandlers } from "./scope-handlers.js";
-import { createSpawnHandlers, type SpawnHandlerDeps } from "./spawn-handlers.js";
+import { createSpawner, type SpawnHandlerDeps } from "./spawn-handlers.js";
 import { createStateHandlers, type StateHandlerDeps } from "./state-handlers.js";
 
 export type { LogPort } from "./context.js";
@@ -24,20 +24,33 @@ export {
   type RuntimeHandlerDeps,
 } from "./runtime-handlers.js";
 export { createScopeHandlers, type ScopeHandlerDeps } from "./scope-handlers.js";
-export { createSpawnHandlers, type SpawnHandlerDeps, type SpawnPorts } from "./spawn-handlers.js";
+export {
+  createSpawner,
+  createSpawnHandlers,
+  type SpawnHandlerDeps,
+  type SpawnPorts,
+} from "./spawn-handlers.js";
 export { createStateHandlers, type StateHandlerDeps } from "./state-handlers.js";
 
 /**
  * `runtime` を渡すと、アダプタを伴う操作（node.send・node.stop・node.capabilities）も有効になる。
  * `spawn` を渡すと（`runtime` も必要）、子の生成（node.spawn・node.split）も有効になる。
  */
-export function createHandlers(
+export function createHandlers(...args: Parameters<typeof createHandlersWithScheduler>): Handlers {
+  return createHandlersWithScheduler(...args).handlers;
+}
+
+/**
+ * `createHandlers` に加えて、スケジューラ（依存が揃った pending の子を起動する `tick`）を返す。`spawn` がなければ
+ * `tick` は何もしない。`report.done`・`node.review` が成功したら、`tick` を（待たずに）呼ぶ。daemon の起動時にも呼ぶ。
+ */
+export function createHandlersWithScheduler(
   deps: StateHandlerDeps,
   runtime?: Pick<RuntimeHandlerDeps, "adapterFor" | "onStopSettled">,
   /** 渡すと、回収の操作（node.reclaimPreview・node.reclaim）も有効になる。 */
   reclaim?: ReclaimPorts,
   spawn?: Pick<SpawnHandlerDeps, "ports" | "credentials" | "rootScope" | "onFailure">,
-): Handlers {
+): { handlers: Handlers; tick: () => Promise<void> } {
   const onFailure = spawn?.onFailure === undefined ? {} : { onFailure: spawn.onFailure };
   // 追加指示の配送は、node.send と node.review（差し戻しの理由）で共有する。
   const delivery =
@@ -62,20 +75,44 @@ export function createHandlers(
       ? {}
       : { deliver: delivery.deliver, canDeliver: delivery.available }),
   });
-  return {
+  const spawner = !full
+    ? undefined
+    : createSpawner({
+        ...deps,
+        ...spawn,
+        adapterFor: runtime.adapterFor,
+        stop: rt["node.stop"],
+      });
+  const tick = async (): Promise<void> => {
+    try {
+      await spawner?.tick();
+    } catch (e) {
+      spawn?.onFailure?.("", `スケジューラが失敗: ${String(e)}`);
+    }
+  };
+  // 依存先の完了（report.done・node.review）の後で、依存が揃った子を起動する（応答は待たせない）。
+  const after =
+    <Q, T extends { ok: boolean }>(run: (req: Q) => T | Promise<T>) =>
+    async (req: Q): Promise<T> => {
+      const r = await run(req);
+      if (r.ok) void tick();
+      return r;
+    };
+  const handlers = {
     ...createReadHandlers(() => deps.log.state()),
     ...state,
+    ...(spawner === undefined
+      ? {}
+      : {
+          "report.done": after(state["report.done"]),
+          "node.review": after(state["node.review"]),
+        }),
     ...(rt === undefined ? {} : rt),
     ...(reclaim === undefined ? {} : createReclaimHandlers({ ...deps, ports: reclaim })),
     ...(!full
       ? {}
       : {
-          ...createSpawnHandlers({
-            ...deps,
-            ...spawn,
-            adapterFor: runtime.adapterFor,
-            stop: rt["node.stop"],
-          }),
+          ...spawner?.handlers,
           ...createPauseHandlers({
             ...deps,
             present: state["decision.present"],
@@ -95,4 +132,5 @@ export function createHandlers(
           }),
         }),
   } as Handlers;
+  return { handlers, tick };
 }
