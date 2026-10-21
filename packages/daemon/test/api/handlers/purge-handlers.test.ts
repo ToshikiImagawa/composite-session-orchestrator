@@ -128,6 +128,10 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
       nodeIds: ["c", "t"],
       archivedAt: expect.any(String),
       elapsedDays: 10,
+      retentionDays: 90,
+      tombstoneTitle: "木の目的",
+      purgeable: false,
+      blockers: [{ code: "retentionNotElapsed", cause: expect.stringContaining("残り 80 日") }],
     });
     expect(r.log.state()).toEqual(before);
   });
@@ -212,6 +216,7 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     const failing = {
       state: () => base.log.state(),
       purgeTree: () => ({ ok: false as const, error: failure("storeIntegrity", "x", "y") }),
+      checkPurge: () => ({ ok: true as const, value: { deleteCount: 0 } }),
     };
     const audits: string[] = [];
     const failures: string[] = [];
@@ -242,5 +247,45 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     r.advance(90);
     expect(r.call("node.purge", { nodeId: "t" }).ok).toBe(true);
     expect(r.log.state().tombstones[0]?.tombstone?.outcome).toBe("discarded");
+  });
+
+  it("事前確認は、保持期間が過ぎていれば purgeable（blockers は空）", () => {
+    const r = rig();
+    r.advance(90);
+    const ok1 = r.call("node.purgePreview", { nodeId: "t" });
+    expect(ok1.value.purgeable).toBe(true);
+    expect(ok1.value.blockers).toEqual([]);
+  });
+
+  it("再送で、標識の木の根が違えば requestIdConflict（同じ requestId を別の対象に使い回せない）", () => {
+    const r = rig();
+    r.advance(90);
+    r.call("node.purge", { nodeId: "t" }, "human", "same");
+    const other = r.call("node.purge", { nodeId: "o" }, "human", "same");
+    expect(other.ok).toBe(false);
+    expect(other.error?.code).toBe("requestIdConflict");
+  });
+
+  it("事前確認は、残りのログを畳み込めない理由（pauseNodeIds）を、原因のイベントつきで blockers に入れる。purge も拒否する", () => {
+    const r = rig();
+    r.advance(90);
+    const add = r.log.append({
+      requestId: "dx",
+      actor: SYS,
+      body: {
+        type: "decision.requested",
+        payload: { decisionId: "dx", nodeId: "root", question: "q", pauseNodeIds: ["c"] },
+      },
+    });
+    expect(add.ok).toBe(true);
+    const preview = r.call("node.purgePreview", { nodeId: "t" });
+    expect(preview.value.purgeable).toBe(false);
+    expect(preview.value.blockers).toEqual([
+      { code: "purgeUnsafe", cause: expect.stringContaining("decision.requested") },
+    ]);
+    const res = r.call("node.purge", { nodeId: "t" });
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("purgeUnsafe");
+    expect(r.log.state().nodes.some((x) => x.id === "t")).toBe(true);
   });
 });

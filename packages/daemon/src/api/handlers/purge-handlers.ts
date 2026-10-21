@@ -39,7 +39,7 @@ export interface PurgeMarkerInfo {
 }
 
 export interface PurgeHandlerDeps {
-  readonly log: Pick<LogPort, "state"> & Required<Pick<LogPort, "purgeTree">>;
+  readonly log: Pick<LogPort, "state"> & Required<Pick<LogPort, "purgeTree" | "checkPurge">>;
   /** 現在時刻（ミリ秒）。 */
   readonly nowMs: () => number;
   /** 保持期間（日）。 */
@@ -69,6 +69,10 @@ const firstLine = (text: string): string => (text.split("\n")[0] ?? "").trim().s
 
 export function createPurgeHandlers(deps: PurgeHandlerDeps) {
   const { log } = deps;
+  const retentionBlocker = (elapsedDays: number): { code: string; cause: string } => ({
+    code: "retentionNotElapsed",
+    cause: `保持期間（${deps.retentionDays} 日）が過ぎていない（アーカイブから ${elapsedDays} 日。残り ${deps.retentionDays - elapsedDays} 日）。保持期間は、システムの時計に依存する`,
+  });
   const audit = (event: string, data: Record<string, unknown>): void => {
     try {
       deps.audit?.(event, data);
@@ -89,10 +93,34 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
     "node.purgePreview": (req: HandlerRequest<"node.purgePreview">): R<"node.purgePreview"> => {
       const denied = humanOnly(req.role);
       if (denied) return denied;
-      const plan = planPurge(log.state(), req.params.nodeId, deps.nowMs());
+      const state = log.state();
+      const plan = planPurge(state, req.params.nodeId, deps.nowMs());
       if (!plan.ok) return plan;
       const { nodeIds, archivedAt, elapsedDays } = plan.value;
-      return { ok: true, value: { nodeIds, archivedAt, elapsedDays } };
+      const target = state.nodes.find((n) => n.id === req.params.nodeId);
+      const title = firstLine(target?.objective ?? "") || req.params.nodeId;
+      // 実行できない理由（構造化）。保持期間と、残りのログを畳み込めるか（ドライラン）。
+      const blockers: { code: string; cause: string }[] = [];
+      if (elapsedDays < deps.retentionDays) blockers.push(retentionBlocker(elapsedDays));
+      const dry = log.checkPurge({
+        requestId: "purge-preview",
+        actor: { human: true },
+        nodeIds,
+        marker: purgeMarker({ rootId: req.params.nodeId, nodeIds, archivedAt }),
+      });
+      if (!dry.ok) blockers.push({ code: dry.error.code, cause: dry.error.cause });
+      return {
+        ok: true,
+        value: {
+          nodeIds,
+          archivedAt,
+          elapsedDays,
+          retentionDays: deps.retentionDays,
+          tombstoneTitle: title,
+          purgeable: blockers.length === 0,
+          blockers,
+        },
+      };
     },
 
     "node.purge": (req: HandlerRequest<"node.purge">): R<"node.purge"> => {
@@ -117,6 +145,16 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
           purgeRequest([], purgeMarker({ rootId: nodeId, nodeIds: [], archivedAt: "" })),
         );
         if (!again.ok) return again;
+        // 同じ requestId を別の対象に使い回していないか（標識の木の根が違えば、別の内容）。
+        const recorded = (again.value.event as OrchEvent & { payload?: { rootId?: unknown } })
+          .payload?.rootId;
+        if (recorded !== nodeId) {
+          return fail(
+            "requestIdConflict",
+            "同じ requestId が、別の対象の最終削除に使われている",
+            "新しい requestId で要求する",
+          );
+        }
         return { ok: true, value: { purged: purgedOf(again.value) } };
       }
       const state = log.state();
@@ -124,9 +162,10 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
       if (!plan.ok) return plan;
       const { nodeIds, archivedAt, elapsedDays } = plan.value;
       if (elapsedDays < deps.retentionDays) {
+        const b = retentionBlocker(elapsedDays);
         return fail(
-          "retentionNotElapsed",
-          `保持期間（${deps.retentionDays} 日）が過ぎていない（アーカイブから ${elapsedDays} 日。残り ${deps.retentionDays - elapsedDays} 日）`,
+          b.code,
+          b.cause,
           "期間が過ぎてから削除する",
           "早く消す必要があるときは、daemon の設定の retentionDays を下げて再起動する",
         );

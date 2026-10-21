@@ -321,6 +321,18 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     );
   }
 
+  // ストアにないノード（最終削除で消えた木など）のトークンは、無効にする（削除の途中で止まったときの残りを含む）。
+  const known = new Set(log.state().nodes.map((n) => n.id));
+  for (const id of credentials.nodeIds()) {
+    if (known.has(id)) continue;
+    try {
+      credentials.revokeNode(id);
+      note("orphanTokenRevoked", { nodeId: id });
+    } catch (e) {
+      note("orphanTokenRevokeFailed", { nodeId: id, cause: String(e) });
+    }
+  }
+
   const probe = deps.probe ?? createLsofProbe(nodeExec);
   const tracked = trackTimers(deps.timers ?? nodeTimers);
   const timers = tracked.timers;

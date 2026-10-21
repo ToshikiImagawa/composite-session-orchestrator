@@ -123,7 +123,11 @@ describe("EventLog.purgeTree（最終削除）", () => {
       marker: marker("t"),
     });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe("purgeUnsafe");
+    if (!r.ok) {
+      expect(r.error.code).toBe("purgeUnsafe");
+      expect(r.error.cause).toContain("node.created"); // 原因のイベントの種類と seq
+      expect(r.error.cause).toMatch(/seq \d+/);
+    }
     expect(store.open().readAll().length).toBe(rowsBefore);
     expect(log.state()).toEqual(stateBefore);
   });
@@ -211,5 +215,87 @@ describe("EventLog.purgeTree（最終削除）", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("コミットの後の確認の例外も、storeIntegrity として扱う（onFatal・書き込みの拒否。状態はコミットした結果）", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cso-purge-"));
+    try {
+      const s = openSqliteStore(join(dir, "e.db"), {
+        beforeTriggerCheck: () => {
+          throw new Error("確認中の例外");
+        },
+      });
+      if (!s.ok) throw new Error(s.error.code);
+      const fatal: string[] = [];
+      const { log } = setup(s.value, (cause) => fatal.push(cause));
+      const r = log.purgeTree({
+        requestId: "purge-post",
+        actor: { human: true },
+        nodeIds: ["c", "t"],
+        marker: marker("t"),
+      });
+      expect(r.ok === false && r.error.code).toBe("storeIntegrity");
+      expect(fatal).toHaveLength(1);
+      expect(
+        log
+          .state()
+          .nodes.map((n) => n.id)
+          .sort(),
+      ).toEqual(["o", "root"]);
+      const w = log.append({
+        requestId: "after",
+        actor: SYS,
+        body: { type: "node.toolDenied", payload: { nodeId: "o", tool: "x" } },
+      });
+      expect(w.ok === false && w.error.code).toBe("logBroken");
+      s.value.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("木の外のノードの判断要求が、木のノードを止める対象にしていれば（pauseNodeIds）、拒否する。理由に判断要求の seq を含める", () => {
+    const store = createMemoryStore();
+    const { log, add } = setup(store.open());
+    // root の判断要求が、子孫の c を止める対象にしている（root は木の外）
+    add({
+      type: "decision.requested",
+      payload: { decisionId: "dx", nodeId: "root", question: "q", pauseNodeIds: ["c"] },
+    });
+    const before = store.open().readAll().length;
+    const r = log.purgeTree({
+      requestId: "purge-p",
+      actor: { human: true },
+      nodeIds: ["c", "t"],
+      marker: marker("t"),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("purgeUnsafe");
+      expect(r.error.cause).toContain("decision.requested");
+    }
+    expect(store.open().readAll().length).toBe(before);
+  });
+
+  it("checkPurge は、何も書かずに、実行と同じ検証をする", () => {
+    const store = createMemoryStore();
+    const { log } = setup(store.open());
+    const before = store.open().readAll().length;
+    const ok1 = log.checkPurge({
+      requestId: "dry",
+      actor: { human: true },
+      nodeIds: ["c", "t"],
+      marker: marker("t"),
+    });
+    expect(ok1.ok && ok1.value.deleteCount).toBeGreaterThan(0);
+    const ng = log.checkPurge({
+      requestId: "dry2",
+      actor: { human: true },
+      nodeIds: ["ghost"],
+      marker: marker("t"),
+    });
+    expect(ng.ok === false && ng.error.code).toBe("purgeUnsafe");
+    expect(store.open().readAll().length).toBe(before);
+    expect(log.state().nodes.some((n) => n.id === "t")).toBe(true);
   });
 });

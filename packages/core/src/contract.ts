@@ -180,10 +180,24 @@ export interface OperationMap {
     params: { nodeId: string; tombstone?: boolean };
     result: { purged: readonly string[] };
   };
-  /** `node.purge` の事前確認。削除される木（ノード ID）、木全体のアーカイブ日、経過日数を返す。何も変えない。 */
+  /**
+   * `node.purge` の事前確認。削除される木（ノード ID）、木全体のアーカイブ日、経過日数、保持期間、墓標に残るタイトルを返す。
+   * 実行できないときは、理由を `blockers`（構造化）に列挙する（保持期間・残りのログを畳み込めない〔pauseNodeIds など〕）。
+   * 最上位の木でない・アーカイブでない・木の外からの依存（`dependedOn`）は、失敗として返す。何も変えない。
+   */
   "node.purgePreview": {
     params: { nodeId: string };
-    result: { nodeIds: readonly string[]; archivedAt: string; elapsedDays: number };
+    result: {
+      nodeIds: readonly string[];
+      archivedAt: string;
+      elapsedDays: number;
+      retentionDays: number;
+      /** 墓標に残るタイトル（目的の先頭行）。 */
+      tombstoneTitle: string;
+      /** `blockers` が空なら `true`。 */
+      purgeable: boolean;
+      blockers: readonly { code: string; cause: string }[];
+    };
   };
 }
 

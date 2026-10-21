@@ -30,6 +30,8 @@ export interface LogPort {
   appendAll(requests: readonly AppendRequest[]): Result<AppendOutcome[], Failure>;
   /** 木の最終削除（`EventLog.purgeTree`）。ないログ（試験用の簡易なもの）では、最終削除の操作を有効にしない。 */
   purgeTree?(request: PurgeRequest): Result<PurgeOutcome, Failure>;
+  /** 最終削除の事前確認（ドライラン）。何も書かない。 */
+  checkPurge?(request: PurgeRequest): Result<{ deleteCount: number }, Failure>;
 }
 
 /** 呼び出し元・要求 ID・用途から、決定的で `isSafeId` を満たす ID を導く。 */

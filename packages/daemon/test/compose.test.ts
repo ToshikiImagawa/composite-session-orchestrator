@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Failure, ok, type Result } from "@cso/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { FileTokenRepository } from "../src/api/token-repository.js";
 import {
   createDaemon,
   type Daemon,
@@ -466,5 +467,22 @@ describe("createDaemon（最終削除）", () => {
       body: { type: "node.toolDenied", payload: { nodeId: "root", tool: "x" } },
     });
     expect(write.ok === false && write.error.code).toBe("logBroken");
+  });
+});
+
+describe("createDaemon（起動時のトークンの掃除）", () => {
+  it("ストアにないノードのトークンは、起動時に失効させる（最終削除の途中で止まったときの残り）", async () => {
+    const r = rig();
+    mkdirSync(r.config.stateDir, { mode: 0o700 });
+    const repo = new FileTokenRepository(join(r.config.stateDir, "node-tokens.json"));
+    repo.put({
+      tokenHash: "a".repeat(64),
+      role: "child",
+      nodeId: "ghost",
+      issuedAt: "2026-01-01T00:00:00Z",
+    });
+    await boot(r);
+    expect(repo.load().map((x) => x.nodeId)).not.toContain("ghost");
+    expect(r.logs.join("\n")).toContain("orphanTokenRevoked");
   });
 });

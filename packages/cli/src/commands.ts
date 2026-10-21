@@ -103,12 +103,21 @@ interface Preview {
   readonly nodeIds: readonly string[];
   readonly archivedAt: string;
   readonly elapsedDays: number;
+  readonly retentionDays: number;
+  readonly tombstoneTitle: string;
+  readonly purgeable: boolean;
+  readonly blockers: readonly { readonly code: string; readonly cause: string }[];
 }
 const isPreview = (v: unknown): v is Preview =>
   isRecord(v) &&
   isStringArray(v.nodeIds) &&
   typeof v.archivedAt === "string" &&
-  typeof v.elapsedDays === "number";
+  typeof v.elapsedDays === "number" &&
+  typeof v.retentionDays === "number" &&
+  typeof v.tombstoneTitle === "string" &&
+  typeof v.purgeable === "boolean" &&
+  Array.isArray(v.blockers) &&
+  v.blockers.every((b) => isRecord(b) && typeof b.code === "string" && typeof b.cause === "string");
 const isPurged = (v: unknown): v is { purged: readonly string[] } =>
   isRecord(v) && isStringArray(v.purged);
 const isAccepted = (v: unknown): v is { accepted: true } => isRecord(v) && v.accepted === true;
@@ -120,13 +129,27 @@ const unconfirmed = (reason: string, rerun: string, requestId: string): CommandR
 });
 
 function describePreview(p: Preview, tombstone: boolean | undefined): string {
+  const keep = tombstone ?? DEFAULT_PURGE_TOMBSTONE;
   const tomb =
     tombstone === undefined
       ? `保持ポリシーの既定に従う（既定: ${DEFAULT_PURGE_TOMBSTONE ? "墓標を残す" : "墓標を残さない"}）`
       : tombstone
         ? "墓標を残す"
         : "墓標を残さない";
-  return `最終削除の対象（${p.nodeIds.length} ノード）: ${p.nodeIds.join(", ")}\n  アーカイブ日: ${p.archivedAt}\n  経過日数: ${p.elapsedDays}\n  墓標: ${tomb}\n`;
+  const remains = keep
+    ? `  墓標に残る内容: タイトル「${p.tombstoneTitle}」（目的の 1 行目）・結果（検証済みか破棄か）・日付\n`
+    : "  墓標は残らない。標識として、削除した日時・木の根・ノード数・人間の操作だけが記録に残る\n";
+  const blockers =
+    p.blockers.length === 0
+      ? ""
+      : `  実行できない理由:\n${p.blockers.map((b) => `    - ${b.code}: ${b.cause}`).join("\n")}\n`;
+  return (
+    `最終削除の対象（${p.nodeIds.length} ノード）: ${p.nodeIds.join(", ")}\n` +
+    `  アーカイブ日: ${p.archivedAt}\n  経過日数: ${p.elapsedDays}（保持期間: ${p.retentionDays} 日）\n  墓標: ${tomb}\n` +
+    remains +
+    "  物理削除の範囲: 対象のノードに関するイベントの行（本文を含む）を、ログのファイルから消す（取り消せない）。バックアップ・OS のコピーには残りうる\n" +
+    blockers
+  );
 }
 
 export async function runCommand(
@@ -201,6 +224,13 @@ export async function runCommand(
 
   if (flags.has("--dry-run"))
     return { exitCode: 0, stdout: `${shown}（--dry-run: 何も削除していない）\n`, stderr: "" };
+  if (!preview.value.purgeable) {
+    return {
+      exitCode: 1,
+      stdout: shown,
+      stderr: `最終削除を実行できない（理由を解消してから、もう一度実行する）:\n${preview.value.blockers.map((b) => `  - ${b.code}: ${b.cause}`).join("\n")}\n`,
+    };
+  }
   if (!flags.has("--yes")) {
     return {
       exitCode: 2,

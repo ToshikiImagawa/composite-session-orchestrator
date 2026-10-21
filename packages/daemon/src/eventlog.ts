@@ -469,14 +469,12 @@ export class EventLog {
   }
 
   /**
-   * 木の最終削除（FR_031）。木のノードを主語とするイベントの行を物理削除し、同じトランザクションで標識 `marker` を追記する
-   * （最大の `seq` + 1。消した `seq` は再利用されない）。実行前に、残りの行 + 標識を畳み込み、成功すること、結果のノードが
-   * 「現在のノードから木を除いたもの」と一致することを確かめる。合わなければ何も消さずに `purgeUnsafe` で拒否する。
-   * 同じ `requestId` の再送は、何も消さずに最初の標識を返す。追記のみの保証を確かめられなければ `storeIntegrity` を返し、
-   * `onFatal` を呼んで、以降の書き込みを拒否する。
+   * 最終削除の準備（書き込まない）: 消す行の特定と、残りの行 + 標識の畳み込みの検証。畳み込めない・結果のノードが想定と
+   * 合わないときは `purgeUnsafe`（原因のイベントの種類と `seq` を含める）。実行（`purgeTree`）と事前確認（`checkPurge`）が共有する。
    */
-  purgeTree(request: PurgeRequest): Result<PurgeOutcome, Failure> {
-    if (this.broken) return { ok: false, error: this.brokenFailure() };
+  private preparePurge(
+    request: PurgeRequest,
+  ): Result<{ event: OrchEvent; seqs: number[]; folded: { value: OrchState } }, Failure> {
     const unsafe = (cause: string): Result<never, Failure> => ({
       ok: false,
       error: failure(
@@ -485,6 +483,70 @@ export class EventLog {
         "削除する木・依存関係を確認する",
       ),
     });
+    const at = this.clock();
+    if (typeof at !== "string" || !isValidInboxTime(at)) {
+      return {
+        ok: false,
+        error: failure("invalidClock", "時計の値が ISO 8601（UTC）でない", "時計の設定を確認する"),
+      };
+    }
+    const set = new Set(request.nodeIds);
+    const current = new Set(this.current.nodes.map((n) => n.id));
+    for (const id of set) {
+      if (!current.has(id)) return unsafe(`ノード ${id} が存在しない`);
+    }
+    const parsed = parseRows(this.store.readAll());
+    if (!parsed.ok) return parsed;
+    const seqs = purgeEventSeqs(parsed.value, set);
+    const dropped = new Set(seqs);
+    const event = {
+      seq: Math.max(this.current.lastSeq, this.store.lastSeq()) + 1,
+      at,
+      requestId: request.requestId,
+      actor: request.actor,
+      ...request.marker,
+    } as OrchEvent;
+    const remaining = [...parsed.value.filter((e) => !dropped.has(e.seq)), event];
+    const folded = foldEvents(remaining, initialState());
+    if (!folded.ok) {
+      const cause = remaining.find((e) => e.seq === folded.error.seq);
+      return unsafe(
+        `残りのログを畳み込めない。原因のイベント: ${cause?.type ?? "不明"}（seq ${folded.error.seq}）: ${folded.error.cause}`,
+      );
+    }
+    const expected = [...current].filter((id) => !set.has(id)).sort();
+    const actual = folded.value.nodes.map((n) => n.id).sort();
+    if (!isDeepStrictEqual(expected, actual)) return unsafe("削除後のノードが、想定と合わない");
+    return ok({ event, seqs, folded: { value: folded.value } });
+  }
+
+  /** 最終削除の事前確認（ドライラン）。何も書かない。実行（`purgeTree`）と同じ検証で、拒否の理由を返す。 */
+  checkPurge(request: PurgeRequest): Result<{ deleteCount: number }, Failure> {
+    if (this.broken) return { ok: false, error: this.brokenFailure() };
+    try {
+      const prepared = this.preparePurge(request);
+      return prepared.ok ? ok({ deleteCount: prepared.value.seqs.length }) : prepared;
+    } catch (e) {
+      return {
+        ok: false,
+        error: failure(
+          "storeError",
+          `最終削除の確認に失敗: ${String(e)}`,
+          "ストアの状態を確認する",
+        ),
+      };
+    }
+  }
+
+  /**
+   * 木の最終削除（FR_031）。木のノードを主語とするイベントの行を物理削除し、同じトランザクションで標識 `marker` を追記する
+   * （最大の `seq` + 1。消した `seq` は再利用されない）。実行前に、残りの行 + 標識を畳み込み、成功すること、結果のノードが
+   * 「現在のノードから木を除いたもの」と一致することを確かめる。合わなければ何も消さずに `purgeUnsafe` で拒否する。
+   * 同じ `requestId` の再送は、何も消さずに最初の標識を返す。追記のみの保証を確かめられなければ `storeIntegrity` を返し、
+   * `onFatal` を呼んで、以降の書き込みを拒否する。
+   */
+  purgeTree(request: PurgeRequest): Result<PurgeOutcome, Failure> {
+    if (this.broken) return { ok: false, error: this.brokenFailure() };
     try {
       const stored = this.store.findByRequestId(request.requestId);
       if (stored !== undefined) {
@@ -492,45 +554,14 @@ export class EventLog {
         if (!first.ok) return first;
         return ok({ event: first.value, applied: false, deleted: 0 });
       }
-      const at = this.clock();
-      if (typeof at !== "string" || !isValidInboxTime(at)) {
-        return {
-          ok: false,
-          error: failure(
-            "invalidClock",
-            "時計の値が ISO 8601（UTC）でない",
-            "時計の設定を確認する",
-          ),
-        };
-      }
-      const set = new Set(request.nodeIds);
-      const current = new Set(this.current.nodes.map((n) => n.id));
-      for (const id of set) {
-        if (!current.has(id)) return unsafe(`ノード ${id} が存在しない`);
-      }
-      const parsed = parseRows(this.store.readAll());
-      if (!parsed.ok) return parsed;
-      const seqs = purgeEventSeqs(parsed.value, set);
-      const dropped = new Set(seqs);
-      const event = {
-        seq: Math.max(this.current.lastSeq, this.store.lastSeq()) + 1,
-        at,
-        requestId: request.requestId,
-        actor: request.actor,
-        ...request.marker,
-      } as OrchEvent;
-      const folded = foldEvents(
-        [...parsed.value.filter((e) => !dropped.has(e.seq)), event],
-        initialState(),
-      );
-      if (!folded.ok) return unsafe(`残りのログを畳み込めない: ${folded.error.cause}`);
-      const expected = [...current].filter((id) => !set.has(id)).sort();
-      const actual = folded.value.nodes.map((n) => n.id).sort();
-      if (!isDeepStrictEqual(expected, actual)) return unsafe("削除後のノードが、想定と合わない");
+      const prepared = this.preparePurge(request);
+      if (!prepared.ok) return prepared;
+      const { event, seqs, folded } = prepared.value;
       try {
         this.store.purgeRows(seqs, toRow(event));
       } catch (e) {
         if (e instanceof StoreIntegrityError) {
+          this.current = folded.value; // 削除はコミット済み（確認だけが失敗した）。状態はコミットした結果にそろえる
           this.broken = true;
           try {
             this.onFatal?.(e.message);

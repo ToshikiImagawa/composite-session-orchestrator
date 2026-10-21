@@ -119,14 +119,18 @@ export function createHandlersWithScheduler(
       return r;
     };
   const purgeTree = deps.log.purgeTree?.bind(deps.log);
+  const checkPurge = deps.log.checkPurge?.bind(deps.log);
   const built = {
     ...createReadHandlers(() => deps.log.state()),
     ...state,
     ...(rt === undefined ? {} : rt),
     ...(reclaim === undefined ? {} : createReclaimHandlers({ ...deps, ports: reclaim })),
-    ...(purgeTree === undefined || purge === undefined
+    ...(purgeTree === undefined || checkPurge === undefined || purge === undefined
       ? {}
-      : createPurgeHandlers({ ...purge, log: { state: () => deps.log.state(), purgeTree } })),
+      : createPurgeHandlers({
+          ...purge,
+          log: { state: () => deps.log.state(), purgeTree, checkPurge },
+        })),
     ...(!full
       ? {}
       : {

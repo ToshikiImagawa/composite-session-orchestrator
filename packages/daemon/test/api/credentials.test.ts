@@ -89,4 +89,13 @@ describe("generateHumanToken（人間のトークンの生成。randomBytes(32).
     expect(a).not.toBe(b);
     expect(createCredentialStore({ humanToken: a }).authenticate(a)).toEqual({ role: "human" });
   });
+
+  it("nodeIds は、トークンを持つノードを返す（失効したら外れる）", () => {
+    const c = createCredentialStore({ humanToken: "h".repeat(32) });
+    c.issueNodeToken("a", "child");
+    c.issueNodeToken("b", "integrator");
+    expect(c.nodeIds().sort()).toEqual(["a", "b"]);
+    c.revokeNode("a");
+    expect(c.nodeIds()).toEqual(["b"]);
+  });
 });

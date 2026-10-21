@@ -53,6 +53,7 @@ depends-on: ["design-initial-spec-design"]
 | T13f | 最終削除（`node.purge`・`node.purgePreview`）。設計は承認済み（統括）。core: `planPurge`・`purgeEventSeqs`（`purge.ts`。済）。daemon: `EventStore.purgeRows`（トリガーの付け外しと復旧の確認〔`StoreIntegrityError`〕。済）・`EventLog.purgeTree`（残りのログの再畳み込みの検証・標識の追記・fail closed。済）・`createPurgeHandlers`（人間のみ・保持期間・墓標・監査・トークン失効。済）・設定（`retentionDays`・`purgeTombstone`。済）。残り: core の `node.purged`（fold・`OrchState.tombstones`・STATE_VERSION。T26 のマージ後に最小の差分で）と、`createDaemon` への配線（標識の組み立て・`onFatal` で daemon を止める） | あり | T13e | 一部済 | FR_031 |
 | T13f-c | core/daemon（T13f の第 2 段階）: 最終コミットの記録。回収のときに `node.lastCommit`（記録のみ）を記録し（`WorktreeFacts` に headCommit を足す）、墓標の `lastCommit` に載せる | あり | T13f | 未 | FR_031 |
 | T13f-a | daemon（T13f の別タスク）: 保持ポリシーによる自動の最終削除。取り返しがつかないので、既定はオフの設定（`autoPurge`）。人間用コマンドと同じ経路・同じ検査を通す | あり | T13f | 未 | FR_031 |
+| T13f-p | core（T13f の別タスク）: `decision.requested` の `pauseNodeIds` に、最終削除で消えたノードが残っていても畳み込めるようにする（今は、木の外の祖先の判断要求が止める対象にしていると、`purgeUnsafe` で最終削除が拒否される）。fold の検証の変更なので、実装 2 と調整する | あり | T13f | 未 | FR_031 |
 | T14d | daemon（T13e の後）: 失敗した spawn・split の後始末のあと、作業ツリーを消せたら、システムによる破棄の判断（`node.discardDecided`）→ `markReclaimable{discarded}` → `archive` まで自動で進める。消せなかったら停止のまま残す | なし | T13e, T14 | 完了（T13e 追従 PR） | FR_026 |
 | T23 | daemon: HTML 画面、SSE による反映 | なし（能力表の表示値のみ確定待ちだが、画面の骨格は先行可能のためこちらに配置） | T09 | 未 | FR_021, IR_003, NFR_008 |
 | T24 | core/daemon: 中間統合ノードの配下の要約報告（上位の受信箱へ優先度付きで送る） | なし | T04, T07 | 未 | FR_013 |

@@ -159,6 +159,8 @@ export function openSqliteStore(
       );
     }
     db.pragma("synchronous = FULL");
+    // 削除した行の本文を、解放されたページに残さない（最終削除。FR_031）。接続ごとの設定なので、開くときに常に有効にする。
+    db.pragma("secure_delete = ON");
     const init = initialize(db, path);
     if (init !== undefined) {
       db.close();
@@ -219,16 +221,24 @@ export function openSqliteStore(
             conn.exec(DELETE_TRIGGER.replace("IF NOT EXISTS ", ""));
           })
           .immediate();
-        testHooks?.beforeTriggerCheck?.(conn);
-        const names = conn
-          .prepare<[], { name: string }>("SELECT name FROM sqlite_master WHERE type = 'trigger'")
-          .all()
-          .map((r) => r.name);
-        const missing = TRIGGER_NAMES.filter((t) => !names.includes(t));
-        if (missing.length > 0) {
-          throw new StoreIntegrityError(
-            `最終削除の後に、追記のみのトリガーが戻っていない: ${missing.join(", ")}`,
-          );
+        // コミットの後の処理（確認を含む）の例外は、すべて、保証を確かめられなかったものとして扱う（fail closed）。
+        try {
+          testHooks?.beforeTriggerCheck?.(conn);
+          const names = conn
+            .prepare<[], { name: string }>("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            .all()
+            .map((r) => r.name);
+          const missing = TRIGGER_NAMES.filter((t) => !names.includes(t));
+          if (missing.length > 0) {
+            throw new StoreIntegrityError(
+              `最終削除の後に、追記のみのトリガーが戻っていない: ${missing.join(", ")}`,
+            );
+          }
+          // WAL に残った削除前の内容を、データベースに反映して切り詰める（本文を WAL に残さない）。
+          conn.pragma("wal_checkpoint(TRUNCATE)");
+        } catch (e) {
+          if (e instanceof StoreIntegrityError) throw e;
+          throw new StoreIntegrityError(`最終削除の後の確認に失敗した: ${String(e)}`);
         }
       },
       transaction: <T>(fn: () => T): T => conn.transaction(fn)(),
