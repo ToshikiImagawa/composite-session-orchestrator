@@ -1,6 +1,7 @@
 export * from "./authorize.js";
 export * from "./bind.js";
 export * from "./credentials.js";
+export * from "./handlers/index.js";
 export * from "./human-token.js";
 export * from "./read-handlers.js";
 export * from "./results.js";
