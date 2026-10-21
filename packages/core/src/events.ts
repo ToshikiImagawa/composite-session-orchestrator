@@ -419,6 +419,7 @@ export type FoldFailureCode =
   | "unknownInstruction"
   | "tooManyOpenExtensions"
   | "tooManyOpenDecisions"
+  | "tooManyReports"
   | "unknownExtension"
   | "extensionAlreadyDecided"
   | "invalidState";
@@ -1240,6 +1241,25 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
       if (d.reportIdx.has(reportId)) {
         return reject(seq, "duplicateReport", `報告 ${reportId} は既にある`, "別の ID を使う");
+      }
+      if (kind === "progress" || kind === "outOfScope") {
+        // 数えるのは、そのノードの直近の start・restart より後の、子が入れる報告だけ。
+        const runStartedSeq = nodeAt(d, nodeId)?.runStartedSeq ?? 0;
+        const counted = d.reports.filter(
+          (x) =>
+            x.nodeId === nodeId &&
+            (x.kind === "progress" || x.kind === "outOfScope") &&
+            x.seq > runStartedSeq,
+        ).length;
+        if (counted >= LIMITS.reportsPerNode) {
+          return reject(
+            seq,
+            "tooManyReports",
+            `ノード ${nodeId} の報告（進捗・範囲外）が上限（${LIMITS.reportsPerNode} 件）に達している`,
+            "まとめて 1 件で報告する",
+            "完了報告で締める",
+          );
+        }
       }
       const record = freezeRecord({
         seq,

@@ -323,6 +323,7 @@ describe("子が入れる文字列・配列の上限（コードポイントで�
       extensionReason: 4 * 1024,
       openExtensionsPerNode: 10,
       openDecisionsPerNode: 10,
+      reportsPerNode: 200,
       pauseNodeCount: 100,
       feedback: 8 * 1024,
     });
