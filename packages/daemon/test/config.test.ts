@@ -102,6 +102,15 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     for (const v of ["yes", 1, null]) bad({ purgeTombstone: v }, "purgeTombstone");
   });
 
+  it("maxTurns・maxBudgetUsd（子ごとの上限）は、正の数（任意）", () => {
+    const ok1 = parseConfig(JSON.stringify({ ...base, maxTurns: 50, maxBudgetUsd: 2.5 }));
+    expect(ok1.ok && [ok1.value.maxTurns, ok1.value.maxBudgetUsd]).toEqual([50, 2.5]);
+    const none = parseConfig(JSON.stringify(base));
+    expect(none.ok && none.value.maxTurns).toBeUndefined();
+    for (const v of [0, -1, 1.5, "9", null, 100001]) bad({ maxTurns: v }, "maxTurns");
+    for (const v of [0, -1, "9", null, 10001, Number.NaN]) bad({ maxBudgetUsd: v }, "maxBudgetUsd");
+  });
+
   it("startLimits（同時に起動する数の上限）は、1〜64 の整数（任意。省略は既定の 4）", () => {
     const ok1 = parseConfig(JSON.stringify({ ...base, startLimits: { perParent: 2, total: 8 } }));
     expect(ok1.ok && ok1.value.startLimits).toEqual({ perParent: 2, total: 8 });
