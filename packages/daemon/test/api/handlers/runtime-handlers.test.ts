@@ -60,7 +60,7 @@ class FakeAdapter implements RuntimeAdapter {
   }
 }
 
-/** root ─ m1 ─ a(running), root ─ p(pending) */
+/** root ─ m1 ─ a(running)・p(pending)、root ─ m2 ─ b(running)。呼び出し元は m1 */
 const rig = (opts: { adapter?: FakeAdapter | null } = {}) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
@@ -79,7 +79,11 @@ const rig = (opts: { adapter?: FakeAdapter | null } = {}) => {
   ev("m1", { type: "start" });
   node("a", "implement", "m1");
   ev("a", { type: "start" });
-  node("p", "implement", "root");
+  node("p", "implement", "m1");
+  node("m2", "integrator", "root");
+  ev("m2", { type: "start" });
+  node("b", "implement", "m2");
+  ev("b", { type: "start" });
   const adapter = opts.adapter === undefined ? new FakeAdapter() : opts.adapter;
   const settled: unknown[] = [];
   const h = createRuntimeHandlers({
@@ -88,7 +92,8 @@ const rig = (opts: { adapter?: FakeAdapter | null } = {}) => {
     adapterFor: () => adapter ?? undefined,
     onStopSettled: (nodeId, result) => settled.push([nodeId, result]),
   });
-  const call = async (
+  const callAs = async (
+    caller: string,
     op: keyof typeof h,
     params: Record<string, unknown>,
     requestId = `q-${++n}`,
@@ -97,13 +102,15 @@ const rig = (opts: { adapter?: FakeAdapter | null } = {}) => {
       requestId,
       operation: op,
       role: "integrator",
-      caller: { nodeId: "m1" },
+      caller: { nodeId: caller },
       params,
     } as unknown as HandlerRequest<never>;
     // biome-ignore lint/suspicious/noExplicitAny: 操作ごとの型は呼び出し側で保証
     return (await (h[op] as any)(req)) as { ok: boolean; value?: any; error?: Failure };
   };
-  return { log, adapter, call, ev, add, settled, state: () => log.state() };
+  const call = (op: keyof typeof h, params: Record<string, unknown>, requestId?: string) =>
+    callAs("m1", op, params, requestId);
+  return { log, adapter, call, callAs, ev, add, settled, state: () => log.state() };
 };
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -256,5 +263,184 @@ describe("node.capabilities（状態とアダプタの能力表から、可能�
     const a = await ops(r, "a");
     expect(a).not.toContain("node.send");
     expect(await ops(r, "a")).toEqual(a);
+  });
+});
+
+describe("ハンドラでも部分木を確かめる（認可の二重の備え）", () => {
+  it("自分自身・別の部分木・祖先への send・stop・capabilities は、何もせず forbidden", async () => {
+    const r = rig();
+    const before = r.state().lastSeq;
+    for (const nodeId of ["m1", "b", "m2", "root"]) {
+      for (const [op, params] of [
+        ["node.send", { nodeId, text: "x" }],
+        ["node.stop", { nodeId, mode: "graceful" }],
+        ["node.capabilities", { nodeId }],
+      ] as const) {
+        const res = await r.call(op, params);
+        expect(res.error?.code, `${op} ${nodeId}`).toBe("forbidden");
+      }
+    }
+    expect(r.state().lastSeq).toBe(before);
+    expect(r.adapter?.sent).toEqual([]);
+    expect(r.adapter?.stops).toEqual([]);
+  });
+});
+
+describe("バックグラウンドの停止の堅牢化（onStopSettled・アダプタの失敗）", () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown) => unhandled.push(e);
+
+  it("onStopSettled が例外を投げても、アダプタの stop が reject しても、unhandledRejection を出さない", async () => {
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const opened = EventLog.open(createMemoryStore().open(), { clock });
+      if (!opened.ok) throw new Error(opened.error.code);
+      const log = opened.value;
+      for (const [id, role, parent] of [
+        ["root", "integrator", null],
+        ["a", "implement", "root"],
+      ] as const) {
+        log.append({
+          requestId: `s-${++n}`,
+          actor: SYS,
+          body: {
+            type: "node.created",
+            payload: { nodeId: id, role, parentId: parent, dependsOn: [] },
+          },
+        });
+        log.append({
+          requestId: `s-${++n}`,
+          actor: SYS,
+          body: { type: "node.stateChanged", payload: { nodeId: id, event: { type: "start" } } },
+        });
+      }
+      for (const variant of ["settledThrows", "stopRejects"] as const) {
+        const adapter = new FakeAdapter();
+        if (variant === "stopRejects") {
+          adapter.stop = async () => {
+            throw new Error("stop exploded");
+          };
+        }
+        const h = createRuntimeHandlers({
+          log,
+          clock,
+          adapterFor: () => adapter,
+          onStopSettled: () => {
+            throw new Error("settled exploded");
+          },
+        });
+        await h["node.stop"]({
+          requestId: `u-${variant}`,
+          operation: "node.stop",
+          role: "integrator",
+          caller: { nodeId: "root" },
+          params: { nodeId: "a", mode: "immediate" },
+        } as never);
+        await flush();
+        await flush();
+        if (variant === "settledThrows") {
+          // 1 回目で stopped になるよう、確認を済ませて次の変種のために状態を戻す必要はない（同じノードの再要求は冪等）
+        }
+      }
+      await flush();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  const inbox = (r: ReturnType<typeof rig>) => r.state().inbox;
+
+  it("アダプタの停止が失敗したら、stopTimeout を記録して stopIncomplete にし、受信箱に stopIncomplete の項目を出す", async () => {
+    const r = rig();
+    if (r.adapter) {
+      r.adapter.stopResult = {
+        ok: false,
+        error: failure("unknownNode", "管理していない", "状態を確認する"),
+      };
+    }
+    await r.call("node.stop", { nodeId: "a", mode: "graceful" });
+    await flush();
+    await flush();
+    expect(stateOf(r.state(), "a")).toBe("stopIncomplete");
+    const item = inbox(r).at(-1);
+    expect(item).toMatchObject({ kind: "stopIncomplete", nodeId: "a" });
+    expect(item?.summary).toContain("管理していない");
+  });
+
+  it("アダプタが停止未完了（プロセスが残る）を返したら、受信箱に stopIncomplete の項目（残っている pid つき）を出す。停止を確認したら info の項目", async () => {
+    const r = rig();
+    if (r.adapter) {
+      r.adapter.stopResult = ok({
+        state: "stopIncomplete",
+        outcome: "aborted",
+        blockers: [101, 102],
+      });
+    }
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" });
+    await flush();
+    await flush();
+    const item = inbox(r).at(-1);
+    expect(item).toMatchObject({ kind: "stopIncomplete", nodeId: "a" });
+    expect(item?.summary).toContain("101");
+    const r2 = rig();
+    await r2.call("node.stop", { nodeId: "a", mode: "immediate" });
+    await flush();
+    await flush();
+    expect(inbox(r2).at(-1)).toMatchObject({ kind: "info", nodeId: "a" });
+  });
+
+  it("受信箱の項目は、停止の試行ごとに 1 件（同じ結果を二重に出さない）", async () => {
+    const r = rig();
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" }, "same");
+    await flush();
+    await flush();
+    const n1 = inbox(r).length;
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" }, "same");
+    await flush();
+    await flush();
+    expect(inbox(r).length).toBe(n1);
+  });
+});
+
+describe("node.capabilities の絞り込み（呼び出し元との関係・アダプタの能力表）", () => {
+  const ops = async (r: ReturnType<typeof rig>, nodeId: string) =>
+    ((await r.call("node.capabilities", { nodeId })).value?.operations ?? []) as string[];
+
+  it("呼び出し元の部分木の規則（SUBTREE_RULES）で絞る。子のノードには、review（直接の子）はあるが、自分自身には何もない", async () => {
+    const r = rig();
+    r.ev("a", { type: "reportDone" });
+    const o = await ops(r, "a");
+    expect(o).toContain("node.review"); // m1 は a の親
+    // root から見ると a は孫: review（directChild）は出ない
+    const asRoot = (await r.callAs("root", "node.capabilities", { nodeId: "a" })).value
+      ?.operations as string[];
+    expect(asRoot).not.toContain("node.review");
+  });
+
+  it("アダプタがなければ、send・stop・split は出さない（動作中のノードでも）", async () => {
+    const r = rig({ adapter: null });
+    const o = await ops(r, "a");
+    for (const op of ["node.send", "node.stop", "node.split"]) expect(o).not.toContain(op);
+    expect(o).toContain("node.capabilities");
+  });
+
+  it("能力表を反映する: 停止の手段がどちらもなければ stop を、指示が unsupported なら send を出さない", async () => {
+    const r = rig();
+    if (r.adapter)
+      r.adapter.caps = { ...r.adapter.caps, stopGraceful: false, stopImmediate: false };
+    expect(await ops(r, "a")).not.toContain("node.stop");
+    const r2 = rig();
+    if (r2.adapter) r2.adapter.caps = { ...r2.adapter.caps, send: "unsupported" };
+    const o2 = await ops(r2, "a");
+    expect(o2).not.toContain("node.send");
+    expect(o2).toContain("node.stop");
+  });
+
+  it("停止未完了からは、停止（再試行＝即時）が出る", async () => {
+    const r = rig();
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" });
+    r.ev("a", { type: "stopTimeout" });
+    expect(await ops(r, "a")).toContain("node.stop");
   });
 });

@@ -14,20 +14,27 @@
 
 import {
   type DaemonOperation,
+  type EventBody,
   type Failure,
   failure,
+  isDirectChild,
+  isInSubtree,
+  isStrictDescendant,
   type NodeEvent,
   type NodeRecord,
   type NodeState,
   type OperationMap,
   type OrchState,
   type Result,
+  SUBTREE_RULES,
+  type SubtreeOperation,
+  type SubtreeRule,
   stateOf,
   transition,
 } from "@cso/core";
 import type { RuntimeAdapter, StopValue } from "../../sdk/runtime.js";
 import type { HandlerRequest } from "../server.js";
-import { appendAtomically, fail, type LogPort } from "./context.js";
+import { appendAtomically, deriveId, fail, type LogPort, summarize } from "./context.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
@@ -54,35 +61,133 @@ const noRuntime = (nodeId: string) =>
     "ノードを起動し直す",
   );
 
-/** ノードの状態とアダプタの能力表から、統合ノードが取れる操作を導く。 */
+const ruleHolds = (
+  rule: SubtreeRule,
+  nodes: OrchState["nodes"],
+  caller: string,
+  target: string,
+): boolean =>
+  rule === "strictDescendant"
+    ? isStrictDescendant(nodes, caller, target)
+    : rule === "directChild"
+      ? isDirectChild(nodes, caller, target)
+      : isInSubtree(nodes, caller, target);
+
+/**
+ * ノードについて、呼び出した統合ノード（`caller`）が取れる操作を導く（FR_034）。次の 3 つで絞る:
+ * (1) ノードの状態（core の遷移表）、(2) アダプタの能力表（アダプタがなければ、指示・停止・切り出し・子の生成は出さない。
+ * 停止は、穏当か即時のどちらかが可能なときだけ。指示は `send` が unsupported でないときだけ）、
+ * (3) 呼び出し元との関係（`SUBTREE_RULES`。例: 完了の判定は直接の親だけ、自分自身には何もない）。
+ * `node.reclaimPreview`・`node.reclaim` は、回収の入口に立てる状態（verified・stopped）で出す。実際に回収できるかは、
+ * `node.reclaimPreview` の判定（回収可能判定。条件 1〜6）で決まる。停止未完了（stopIncomplete）からの `node.stop` は、
+ * 再試行（`retryStop`＝即時停止）として扱う。
+ */
 export function operationsFor(
   node: NodeRecord,
   adapter: RuntimeAdapter | undefined,
+  caller: string,
+  nodes: OrchState["nodes"],
 ): DaemonOperation[] {
-  const ops: DaemonOperation[] = ["node.capabilities"];
   const s = node.state;
-  if (
-    SENDABLE.has(s) &&
-    adapter !== undefined &&
-    adapter.capabilities(node.id).send !== "unsupported"
-  ) {
-    ops.push("node.send");
+  const caps = adapter?.capabilities(node.id);
+  const candidates: DaemonOperation[] = ["node.capabilities"];
+  if (caps !== undefined) {
+    if (SENDABLE.has(s) && caps.send !== "unsupported") candidates.push("node.send");
+    const canStop = caps.stopGraceful || caps.stopImmediate;
+    if (
+      canStop &&
+      (s === "stopIncomplete" ||
+        (s !== "stopped" && transition(s, { type: "stop", mode: "immediate" }).ok))
+    ) {
+      candidates.push("node.stop");
+    }
+    if (s === "running") candidates.push("node.split");
+    if ((s === "running" || s === "waiting") && node.role === "integrator")
+      candidates.push("node.spawn");
   }
-  const stoppable = s === "stopIncomplete" || transition(s, { type: "stop", mode: "immediate" }).ok;
-  if (stoppable && s !== "stopped") ops.push("node.stop");
-  if (s === "running") ops.push("node.split");
-  if ((s === "running" || s === "waiting") && node.role === "integrator") ops.push("node.spawn");
-  if (s === "done") ops.push("node.review");
-  if (s === "verified" || s === "stopped") ops.push("node.reclaimPreview", "node.reclaim");
-  return ops;
+  if (s === "done") candidates.push("node.review");
+  if (s === "verified" || s === "stopped") candidates.push("node.reclaimPreview", "node.reclaim");
+  return candidates.filter((op) => {
+    const rule = SUBTREE_RULES[op as SubtreeOperation];
+    // node.spawn は、親にするノード（この node）が、自分か子孫のときに作れる。
+    return rule === undefined || ruleHolds(rule, nodes, caller, node.id);
+  });
 }
 
 export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
   const { log, clock, adapterFor } = deps;
 
+  /** 認可（`SUBTREE_RULES`）の二重の備え: 対象は、呼び出した統合ノードの、自分を含まない子孫だけ。 */
+  const outsideSubtree = (caller: string, nodeId: string) =>
+    isStrictDescendant(log.state().nodes, caller, nodeId)
+      ? undefined
+      : fail(
+          "forbidden",
+          "対象のノードが、自分の部分木の規則（自分を含まない子孫）を満たさない",
+          "親（統合ノード）に依頼する",
+        );
+
+  /**
+   * 停止の結果を、イベントログへ反映する（アダプタが記録しない分）。停止の試行（`stopSeq`）ごとに 1 回（冪等）。
+   * - 停止を確認した（stopped）: 受信箱に info。
+   * - 停止未完了（stopIncomplete。残っているプロセスの pid つき）: 受信箱に stopIncomplete。
+   * - アダプタの失敗: まだ stopping なら、`stopTimeout` を記録して stopIncomplete にし、受信箱に stopIncomplete。
+   */
+  const settle = (nodeId: string, stopSeq: number, result: Result<StopValue, Failure>): void => {
+    const bodies: EventBody[] = [];
+    const inbox = (kind: "info" | "stopIncomplete", text: string): EventBody => ({
+      type: "inbox.added",
+      payload: {
+        id: deriveId("inbox", "system", `stop-${stopSeq}`, "settled"),
+        kind,
+        nodeId,
+        summary: summarize(text),
+      },
+    });
+    if (result.ok && result.value.state === "stopped") {
+      bodies.push(inbox("info", `停止を確認した（${result.value.outcome}）`));
+    } else if (result.ok) {
+      bodies.push(
+        inbox(
+          "stopIncomplete",
+          `停止未完了: 残っているプロセス pid ${result.value.blockers.join(", ") || "不明"}`,
+        ),
+      );
+    } else {
+      if (stateOf(log.state(), nodeId) === "stopping") {
+        bodies.push({
+          type: "node.stateChanged",
+          payload: { nodeId, event: { type: "stopTimeout" } },
+        });
+      }
+      bodies.push(inbox("stopIncomplete", `停止に失敗: ${result.error.cause}`));
+    }
+    appendAtomically(log, clock, `stop-settled-${stopSeq}`, { system: true }, bodies);
+  };
+
+  /** 停止の結果の通知。どこで例外が出ても、unhandledRejection にしない。 */
+  const notifySettled = (
+    nodeId: string,
+    stopSeq: number,
+    result: Result<StopValue, Failure>,
+  ): void => {
+    try {
+      settle(nodeId, stopSeq, result);
+    } catch {
+      // 反映に失敗しても、次の停止要求（再試行）で整合を取れる。
+    }
+    try {
+      deps.onStopSettled?.(nodeId, result);
+    } catch {
+      // 通知の失敗で、停止の処理を止めない。
+    }
+  };
+
   return {
     "node.send": async (req: HandlerRequest<"node.send">): Promise<R<"node.send">> => {
       const { nodeId, text } = req.params;
+      const outside = outsideSubtree(callerOf(req), nodeId);
+      if (outside) return outside;
       const state = stateOf(log.state(), nodeId);
       if (state === undefined) {
         return fail("notFound", "ノードが見つからない", "ID を確認する");
@@ -103,6 +208,8 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
 
     "node.stop": (req: HandlerRequest<"node.stop">): R<"node.stop"> => {
       const { nodeId, mode } = req.params;
+      const outside = outsideSubtree(callerOf(req), nodeId);
+      if (outside) return outside;
       const before = log.state();
       const node = nodeOf(before, nodeId);
       if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
@@ -136,26 +243,34 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
                 : {}),
             })
             .then(
-              (result) => deps.onStopSettled?.(nodeId, result),
+              (result) => notifySettled(nodeId, attempt.seq, result),
               (error: unknown) =>
-                deps.onStopSettled?.(nodeId, {
-                  ok: false,
-                  error: failure(
+                notifySettled(
+                  nodeId,
+                  attempt.seq,
+                  fail(
                     "stopFailed",
                     `停止の処理が例外: ${String(error)}`,
                     "ノードの状態を確認する",
                   ),
-                }),
-            );
+                ),
+            )
+            .catch(() => undefined);
         }
       }
       return { ok: true, value: { state: stateOf(after, nodeId) as NodeState } };
     },
 
     "node.capabilities": (req: HandlerRequest<"node.capabilities">): R<"node.capabilities"> => {
-      const node = nodeOf(log.state(), req.params.nodeId);
+      const outside = outsideSubtree(callerOf(req), req.params.nodeId);
+      if (outside) return outside;
+      const state = log.state();
+      const node = nodeOf(state, req.params.nodeId);
       if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
-      return { ok: true, value: { operations: operationsFor(node, adapterFor(node.id)) } };
+      return {
+        ok: true,
+        value: { operations: operationsFor(node, adapterFor(node.id), callerOf(req), state.nodes) },
+      };
     },
   };
 }
