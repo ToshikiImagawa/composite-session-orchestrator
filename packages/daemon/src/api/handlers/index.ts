@@ -2,12 +2,15 @@
 
 import { createReadHandlers } from "../read-handlers.js";
 import type { Handlers } from "../server.js";
+import { createPauseHandlers } from "./pause-handlers.js";
 import { createReclaimHandlers, type ReclaimPorts } from "./reclaim-handlers.js";
 import { createRuntimeHandlers, type RuntimeHandlerDeps } from "./runtime-handlers.js";
+import { createScopeHandlers } from "./scope-handlers.js";
 import { createSpawnHandlers, type SpawnHandlerDeps } from "./spawn-handlers.js";
 import { createStateHandlers, type StateHandlerDeps } from "./state-handlers.js";
 
 export type { LogPort } from "./context.js";
+export { createPauseHandlers, type PauseHandlerDeps } from "./pause-handlers.js";
 export {
   createReclaimHandlers,
   type ReclaimHandlerDeps,
@@ -19,6 +22,7 @@ export {
   operationsFor,
   type RuntimeHandlerDeps,
 } from "./runtime-handlers.js";
+export { createScopeHandlers, type ScopeHandlerDeps } from "./scope-handlers.js";
 export { createSpawnHandlers, type SpawnHandlerDeps, type SpawnPorts } from "./spawn-handlers.js";
 export { createStateHandlers, type StateHandlerDeps } from "./state-handlers.js";
 
@@ -34,18 +38,42 @@ export function createHandlers(
   spawn?: Pick<SpawnHandlerDeps, "ports" | "credentials" | "rootScope" | "onFailure">,
 ): Handlers {
   const rt = runtime === undefined ? undefined : createRuntimeHandlers({ ...deps, ...runtime });
+  // 子の生成（spawn）のポートとアダプタがそろうと、判断待ちの子の一時停止・再開（pauseNodeIds）と、範囲の拡張
+  // （scope.extend・scope.decide）も有効になる（作業ツリーの取得 `cwdOf`・根の範囲 `rootScope` を共有する）。
+  const full = rt !== undefined && runtime !== undefined && spawn !== undefined;
+  const state = createStateHandlers({ ...deps, allowPause: full });
+  const onFailure = spawn?.onFailure === undefined ? {} : { onFailure: spawn.onFailure };
   return {
     ...createReadHandlers(() => deps.log.state()),
-    ...createStateHandlers(deps),
+    ...state,
     ...(rt === undefined ? {} : rt),
     ...(reclaim === undefined ? {} : createReclaimHandlers({ ...deps, ports: reclaim })),
-    ...(rt === undefined || runtime === undefined || spawn === undefined
+    ...(!full
       ? {}
-      : createSpawnHandlers({
-          ...deps,
-          ...spawn,
-          adapterFor: runtime.adapterFor,
-          stop: rt["node.stop"],
-        })),
+      : {
+          ...createSpawnHandlers({
+            ...deps,
+            ...spawn,
+            adapterFor: runtime.adapterFor,
+            stop: rt["node.stop"],
+          }),
+          ...createPauseHandlers({
+            ...deps,
+            present: state["decision.present"],
+            answer: state["decision.answer"],
+            stop: rt["node.stop"],
+            adapterFor: runtime.adapterFor,
+            ports: spawn.ports,
+            credentials: spawn.credentials,
+            ...onFailure,
+          }),
+          ...createScopeHandlers({
+            ...deps,
+            adapterFor: runtime.adapterFor,
+            cwdOf: spawn.ports.cwdOf,
+            ...(spawn.rootScope === undefined ? {} : { rootScope: spawn.rootScope }),
+            ...onFailure,
+          }),
+        }),
   } as Handlers;
 }
