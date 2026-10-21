@@ -2,7 +2,7 @@
 
 `cso-daemon` が、実際の Claude（Agent SDK）で子を起動し、追加指示・停止・フック・回収まで動くことを確かめる手順。
 自動テストはフェイクの `query` で行う（`packages/daemon/test/sdk/claude-launcher.test.ts`）。実 SDK の起動は認証情報が要るので、CI には入れない。
-このファイルは手順書で、**実 SDK での確認は、まだ行っていない**（確認した項目は、下の「結果の記録」に日付つきで書く）。
+このファイルは手順書で、実 SDK での確認の結果は、下の「結果の記録」に日付つきで書く。
 
 ## 前提
 
@@ -77,4 +77,26 @@
 
 | 日付 | SDK / CLI | 環境 | 確認した項目 | 結果・問題 |
 |:--|:--|:--|:--|:--|
-| （未実施） | 0.3.292 / — | — | — | — |
+| 2026-10-21 | 0.3.292 / 2.1.x（cloud 環境の `claude`） | Linux（Claude Code Remote）、Node 22.22 | 1, 2, 3（`src/` の外の拒否・`src/` の中は許可）, 5, 8, 9, 11, 12, 10（拒否のみ） | 下の「2026-10-21 の結果」 |
+
+### 2026-10-21 の結果（実 SDK 0.3.292）
+
+使い捨ての git リポジトリと作業ツリーで、`cso-daemon` と実 SDK の子を動かした（`createClaudeLauncher` を直接と、daemon 経由の両方）。
+
+| # | 結果 | 観測 |
+|:--|:--|:--|
+| 1 | 合格 | `node.spawn` で子が起動（`running`）。作業ツリー（`worktrees/node-…`）と `cso/node-…` のブランチができ、子が `src/hello.txt` を作った |
+| 2 | 合格 | 子のセッション ID が、親（この確認を動かした Claude）と別。除いた環境変数（6 件）: `CLAUDE_CODE_CHILD_SESSION`・`CLAUDE_CODE_SESSION_ID`・`CLAUDE_CODE_SESSION_ATTENDED`・`CLAUDE_CODE_REMOTE_SESSION_ID`・`CLAUDE_CODE_SYNC_SESSION_REFS`・`CLAUDE_CODE_POST_FOR_SESSION_INGRESS_V2` |
+| 3 | 合格 | **`permissionMode: "dontAsk"` のもとで、フックが `allow` を返した `src/` の中への `Write` は、確認なしに実行された**。`src/` の外（`outside.txt`・`README.md`）への `Write` は、フックの `deny` で実行されず、daemon 経由では `scope.violation`（`outsideWritable`）が記録された |
+| 4 | **未確認** | 子が使ったツールは `Write` だけ（`LS`・`TodoWrite`・`Glob` を使わせる指示では、子が範囲外を理由に実行しなかった）。許可するツール名の確認は、別の指示で行う |
+| 5 | 合格 | 実行が終わって待っている子に `node.send` した指示が、次のターンで実行された（`src/second.txt`）。`node.instructed` と `node.instructionDelivered` が記録された |
+| 6, 7 | **未実施** | MCP サーバーの起動口がない（T10m）。報告・判断は確認できない |
+| 8 | 合格 | 穏当な停止: `stopping` → 約 15 秒で `stopped`。`stopObserved` は `withinGrace`。受信箱に「停止を確認した」 |
+| 9 | 合格 | 即時の停止（子が 30 個のファイルを作る途中）: 3 ファイルで打ち切られ、`stopped`。受信箱は「停止を確認した（aborted）」。`lsof +D` に残るプロセスなし |
+| 10 | **不合格（要判断）** | 破棄の判断（`node.reclaimInstruct`）の後、`reclaimPreview` は `reclaimable: true` になったが、`node.reclaim` が `removeFailed`。原因は、`git worktree remove`（`--force` なし）が、未追跡のファイル（`src/`）を理由に拒否したこと。仕様（5.8）は「強制的な削除は破棄判断を経た停止ノードに限る」としているが、`createGitPorts` は常に `--force` なし・ブランチは `-d`。破棄判断のあるノードだけ強制する変更が要る（T10r2） |
+| 11 | 合格 | 子のプロセスを `kill -9`: ログに `unexpectedExit`、受信箱に `failure`（子が予期せず終了した）。**ただしノードの状態は `running` のまま**（再起動まで。T10c の「状態への反映」は未決） |
+| 12 | 合格 | daemon を `SIGTERM` で止め、起動し直した: `reconciled running → stopped`（プロセスなし）。受信箱に「daemon の再起動で、子のセッションが失われた」 |
+
+そのほかの発見:
+
+- **範囲違反が受信箱に出ない**: `scope.violation` はログに記録されるが、受信箱の項目（`inbox.added`）が作られず、`inbox.fetch` に出ない（`sdk-adapter.ts` の記述は「受信箱に載る」）。統合ノードが、子の範囲違反に気づけない（T10v）。
