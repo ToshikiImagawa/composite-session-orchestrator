@@ -307,12 +307,31 @@ describe("スナップショット（キャッシュ。ログから再構築で�
     const tampered = { ...log.state(), lastSeq: 9, nodes: log.state().nodes.slice(0, 2) };
     saveSnap(shared, 9, JSON.stringify(tampered));
     expect(openLog(shared.open(), 3).state().nodes).toHaveLength(tampered.nodes.length); // 既定: 信用する（スナップショットの requests にある残りのイベントは重複として無視される）
+    let mismatches = 0;
     const verified = EventLog.open(shared.open(), {
       clock,
       snapshotEvery: 3,
       verifySnapshot: true,
+      onSnapshotMismatch: () => {
+        mismatches++;
+      },
     });
     expect(verified.ok && verified.value.state()).toEqual(log.state());
+    expect(mismatches).toBe(1); // 食い違いを、運用の記録に残せる
+    // 食い違いがなければ、通知しない
+    const clean = createMemoryStore();
+    const cleanLog = openLog(clean.open(), 3);
+    many(cleanLog, 8);
+    let none = 0;
+    EventLog.open(clean.open(), {
+      clock,
+      snapshotEvery: 3,
+      verifySnapshot: true,
+      onSnapshotMismatch: () => {
+        none++;
+      },
+    });
+    expect(none).toBe(0);
   });
 
   it("eventHash は行の内容で決まり（決定的）、内容が変われば変わる", () => {
