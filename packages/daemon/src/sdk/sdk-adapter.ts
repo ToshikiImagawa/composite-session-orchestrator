@@ -132,6 +132,11 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
 
   constructor(private readonly deps: SdkAdapterDeps) {}
 
+  /** このアダプタが、そのノードの子を管理しているか（起動中を含む。停止の確認が済んだものは含まない）。 */
+  has(nodeId: string): boolean {
+    return this.nodes.has(nodeId) || this.starting.has(nodeId);
+  }
+
   capabilities(_nodeId: string): Capabilities {
     return {
       send: "delayed",

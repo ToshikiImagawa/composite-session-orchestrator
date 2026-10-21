@@ -72,6 +72,16 @@ describe("capabilities（CLI）", () => {
   });
 });
 
+describe("has（管理している子か）", () => {
+  it("起動したら true。起動していない・知らないノードは false", async () => {
+    const r = rig();
+    expect(r.adapter.has("a")).toBe(false);
+    await startNode(r);
+    expect(r.adapter.has("a")).toBe(true);
+    expect(r.adapter.has("zzz")).toBe(false);
+  });
+});
+
 describe("start", () => {
   it("作業ツリーを実パスにして cwd に渡し、親のセッション識別子の環境変数を除き、利用者設定を読み込まない", async () => {
     const r = rig();

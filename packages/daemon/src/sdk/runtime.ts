@@ -58,6 +58,8 @@ export interface StopValue {
 
 export interface RuntimeAdapter {
   readonly kind: "cli" | "desktop";
+  /** そのノードの子を、このアダプタが管理しているか（再起動の後の整合で使う。省略すると、管理していないものとして扱う）。 */
+  has?(nodeId: string): boolean;
   capabilities(nodeId: string): Capabilities;
   start(request: StartRequest): Promise<Result<StartValue, Failure>>;
   send(nodeId: string, text: string): Promise<Result<DeliveryValue, Failure>>;
