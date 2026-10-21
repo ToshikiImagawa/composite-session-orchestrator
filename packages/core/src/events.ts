@@ -152,6 +152,11 @@ export type EventBody =
       readonly payload: { readonly nodeId: string; readonly text: string };
     }
   | {
+      /** 受信箱の項目を解決済みにする（記録のみ。項目は消えない）。解決した者は封筒の `actor`。 */
+      readonly type: "inbox.resolved";
+      readonly payload: { readonly itemId: string };
+    }
+  | {
       /** 追加指示の配送の記録（アダプタが子へ届けた）。`instructedSeq` は、対応する `node.instructed` のイベントの `seq`。記録のみ。 */
       readonly type: "node.instructionDelivered";
       readonly payload: { readonly instructedSeq: number };
@@ -406,6 +411,7 @@ export type FoldFailureCode =
   | "unknownRef"
   | "duplicateExtension"
   | "alreadyDiscarded"
+  | "unknownInboxItem"
   | "unknownInstruction"
   | "tooManyOpenExtensions"
   | "unknownExtension"
@@ -1210,13 +1216,14 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
             (x) =>
               isRec(x) &&
               isBoundedText(x.criterion, LIMITS.evidenceLength) &&
+              x.criterion.trim() !== "" &&
               isBoundedText(x.evidence, LIMITS.evidenceLength) &&
               x.evidence.trim() !== "",
           )
         ) {
           return invalid(
             seq,
-            `report.added の evidence（完了報告の { criterion, evidence（空白だけでない） } の ${LIMITS.evidenceCount} 件以下の配列）`,
+            `report.added の evidence（完了報告の { criterion, evidence（どちらも空白だけでない） } の ${LIMITS.evidenceCount} 件以下の配列）`,
           );
         }
         evidenceList = evidence.map((x: Rec) => ({
@@ -1341,6 +1348,29 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (node === undefined) return unknownNode(seq, nodeId);
       if (!RECORDABLE_STATES.has(node.state)) return notRecordable(seq, node, "追加指示");
       d.instructions.push(freezeRecord({ seq, at: raw.at as string, nodeId, text, actor }));
+      return commit();
+    }
+
+    case "inbox.resolved": {
+      const { itemId } = p;
+      if (!isId(itemId)) return invalid(seq, "inbox.resolved の itemId");
+      const i = d.inbox.findIndex((x) => x.id === itemId);
+      const cur = d.inbox[i];
+      if (cur === undefined) {
+        return reject(
+          seq,
+          "unknownInboxItem",
+          `受信箱の項目 ${itemId} は存在しない`,
+          "受信箱の項目の ID を確認する",
+        );
+      }
+      // 二度目の解決は、最初の記録を残す（状態は変えない）。
+      if (cur.resolved === undefined) {
+        d.inbox[i] = freezeRecord({
+          ...cur,
+          resolved: Object.freeze({ seq, at: raw.at as string, by: actor }),
+        });
+      }
       return commit();
     }
 

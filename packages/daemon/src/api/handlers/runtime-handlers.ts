@@ -202,8 +202,24 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       }
       const adapter = adapterFor(nodeId);
       if (adapter === undefined) return noRuntime(nodeId);
+      // 指示を記録してから届ける（同じ requestId の再送は、記録を重複させない）。配送済みなら、重複として返す。
+      const actor = { nodeId: callerOf(req) };
+      const recorded = appendAtomically(log, clock, req.requestId, actor, [
+        { type: "node.instructed", payload: { nodeId, text } },
+      ]);
+      if (!recorded.ok) return recorded;
+      const instructedSeq = recorded.value.events[0]?.seq as number;
+      const current = recorded.value.state.instructions.find((x) => x.seq === instructedSeq);
+      if (current?.deliveredSeq !== undefined) {
+        return { ok: true, value: { status: "queued", duplicate: true } };
+      }
       const r = await adapter.send(nodeId, text);
-      return r.ok ? { ok: true, value: { status: "queued", duplicate: false } } : r;
+      if (!r.ok) return r;
+      // 配送の記録に失敗しても、届けた事実は変わらない（再送で記録をやり直せる）。
+      appendAtomically(log, clock, `${req.requestId}/delivered`, actor, [
+        { type: "node.instructionDelivered", payload: { instructedSeq } },
+      ]);
+      return { ok: true, value: { status: "queued", duplicate: false } };
     },
 
     "node.stop": (req: HandlerRequest<"node.stop">): R<"node.stop"> => {

@@ -106,6 +106,12 @@ const text = (o: Rec, key: string, max: number): string => {
   if (!isBoundedText(v, max)) fail(`${key} が不正（${max} 文字以下の文字列。制御文字なし）`);
   return v as string;
 };
+/** 空白だけの文字列を許さない（core の `report.added` の検査と同じ規則）。 */
+const nonBlank = (o: Rec, key: string, max: number): string => {
+  const v = text(o, key, max);
+  if (v.trim() === "") fail(`${key} が空（空白だけは不可）`);
+  return v;
+};
 const oneOf = <T extends string>(o: Rec, key: string, values: readonly T[]): T => {
   const v = o[key];
   if (typeof v !== "string" || !values.includes(v as T))
@@ -272,8 +278,8 @@ const VALIDATORS: Validators = {
     const evidence = (v as unknown[]).map((x) => {
       const e = strict(x, ["criterion", "evidence"]);
       return {
-        criterion: text(e, "criterion", LIMITS.evidenceLength),
-        evidence: text(e, "evidence", LIMITS.evidenceLength),
+        criterion: nonBlank(e, "criterion", LIMITS.evidenceLength),
+        evidence: nonBlank(e, "evidence", LIMITS.evidenceLength),
       };
     });
     return { evidence };

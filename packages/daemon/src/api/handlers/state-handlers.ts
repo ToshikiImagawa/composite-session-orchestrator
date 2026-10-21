@@ -17,6 +17,7 @@ import {
   type OrchState,
   type Result,
   stateOf,
+  unresolvedInbox,
   visibleState,
 } from "@cso/core";
 import type { HandlerRequest } from "../server.js";
@@ -109,8 +110,9 @@ export function createStateHandlers(deps: StateHandlerDeps) {
 
     "inbox.fetch": (req: HandlerRequest<"inbox.fetch">): R<"inbox.fetch"> => {
       const since = req.params.sinceSeq ?? 0;
-      const items = visibleState(log.state(), callerOf(req))
-        .inbox.filter((i) => i.seq > since)
+      // 解決済み（inbox.resolved）の項目は返さない（記録には残る）。
+      const items = unresolvedInbox(visibleState(log.state(), callerOf(req)).inbox)
+        .filter((i) => i.seq > since)
         .sort((a, b) => a.seq - b.seq);
       return { ok: true, value: { items } };
     },

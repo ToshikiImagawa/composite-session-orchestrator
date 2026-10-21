@@ -13,6 +13,7 @@
  *   現状の件数では十分なため未対応（design 9.2）。
  * - 依存が循環する（相互に先行する）ノードどうしには制約を課さない。
  */
+import type { Actor } from "./events.js";
 import { INBOX_KIND_PRIORITY, type InboxKind, PRIORITIES } from "./inbox-kinds.js";
 
 export interface InboxItem {
@@ -30,7 +31,13 @@ export interface InboxItem {
   readonly summary?: string;
   /** 参照 ID（判断要求の `decisionId`、報告の `reportId` など）。種類（`kind`）が参照先を決める。 */
   readonly ref?: string;
+  /** 解決済み（`inbox.resolved`）。解決した者・時刻・イベントの `seq`。項目そのものは消えない（記録）。 */
+  readonly resolved?: { readonly seq: number; readonly at: string; readonly by: Actor };
 }
+
+/** 解決済みでない項目だけ。`inbox.fetch` は、これで解決済みを除く。 */
+export const unresolvedInbox = (items: readonly InboxItem[]): InboxItem[] =>
+  items.filter((i) => i.resolved === undefined);
 
 /** ノードの依存（ノード → 依存先）。項目を持たない中間ノードを含められる。 */
 export type NodeDeps = ReadonlyMap<string, readonly string[]>;

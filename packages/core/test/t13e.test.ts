@@ -16,6 +16,7 @@ import {
   ROLE_OPERATIONS,
   SUBTREE_RULES,
   type UnmetReason,
+  unresolvedInbox,
 } from "../src/index.js";
 
 const SYS = { system: true } as const;
@@ -261,5 +262,81 @@ describe("契約（node.send・node.spawn・node.reclaimPreview・scope.decide�
     expect(ROLE_OPERATIONS.integrator).toContain("scope.decide");
     expect(INTEGRATOR_OPERATION_CLASS["scope.decide"]).toBe("subtree");
     expect(SUBTREE_RULES["scope.decide"]).toBe("strictDescendant");
+  });
+});
+
+describe("report.added（done）の criterion も、空白だけを拒否する", () => {
+  const done = (criterion: string, evidence = "根拠") =>
+    ev({
+      type: "report.added",
+      payload: {
+        reportId: "rc1",
+        nodeId: "a",
+        kind: "done",
+        text: "t",
+        evidence: [{ criterion, evidence }],
+      },
+    } as never);
+
+  it("criterion が空・空白だけなら invalidPayload。通常の値は受け入れる", () => {
+    for (const bad of ["", " ", "\n\t "]) {
+      expect(code(foldEvents([...base(), done(bad)])), JSON.stringify(bad)).toBe("invalidPayload");
+    }
+    expect(code(foldEvents([...base(), done("基準 1")]))).toBeNull();
+  });
+});
+
+describe("inbox.resolved（受信箱の項目を解決済みにする。記録のみ）", () => {
+  const added = (id: string, over: Record<string, unknown> = {}) =>
+    ev({ type: "inbox.added", payload: { id, kind: "info", nodeId: "a", ...over } } as never);
+  const resolved = (itemId: unknown, over: Parameters<typeof ev>[1] = {}) =>
+    ev({ type: "inbox.resolved", payload: { itemId } } as never, {
+      actor: HUMAN,
+      at: "2026-10-22T04:00:00Z",
+      ...over,
+    });
+
+  it("項目に、解決した者・時刻・seq を記録する（項目そのものは消えない）", () => {
+    const b = base();
+    const i = added("i1");
+    const r = resolved("i1", { seq: 9100 });
+    const s = must(foldEvents([...b, i, r]));
+    expect(s.inbox).toHaveLength(1);
+    expect(s.inbox[0]).toMatchObject({
+      id: "i1",
+      resolved: { seq: 9100, at: "2026-10-22T04:00:00Z", by: HUMAN },
+    });
+  });
+
+  it("存在しない項目は unknownInboxItem、識別子の形式が不正なら invalidPayload", () => {
+    expect(code(foldEvents([...base(), resolved("zz")]))).toBe("unknownInboxItem");
+    for (const bad of ["a b", "", 5, null, undefined]) {
+      expect(code(foldEvents([...base(), resolved(bad)])), String(bad)).toBe("invalidPayload");
+    }
+  });
+
+  it("二度目の解決は、最初の記録を残す（状態は変わらない）", () => {
+    const b = base();
+    const i = added("i1");
+    const first = resolved("i1", { seq: 9200, at: "2026-10-22T04:00:00Z" });
+    const second = resolved("i1", { seq: 9300, at: "2026-10-23T05:00:00Z", actor: SYS });
+    const s = must(foldEvents([...b, i, first, second]));
+    expect(s.inbox[0]?.resolved).toMatchObject({ seq: 9200, by: HUMAN });
+  });
+
+  it("解決していない項目には resolved がなく、unresolvedInbox は解決済みを除く", () => {
+    const b = base();
+    const i1 = added("i1");
+    const i2 = added("i2");
+    const s = must(foldEvents([...b, i1, i2, resolved("i1")]));
+    expect(s.inbox.find((x) => x.id === "i2")).not.toHaveProperty("resolved");
+    expect(unresolvedInbox(s.inbox).map((x) => x.id)).toEqual(["i2"]);
+  });
+
+  it("古いスナップショットの受信箱（resolved がない）からも復元できる", () => {
+    const b = base();
+    const s = must(foldEvents([...b, added("i1")]));
+    const r = applyEvent(s, resolved("i1"));
+    expect(r.ok).toBe(true);
   });
 });

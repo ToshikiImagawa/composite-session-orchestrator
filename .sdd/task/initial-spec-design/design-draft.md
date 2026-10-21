@@ -245,6 +245,11 @@ interface Capabilities {
 | 受信箱の `ref` が指す拡張要求 | 新しい種類を足す／既存の種類の `ref` を広げる | `violation` の `ref` は、同じノードの拡張要求（`extensionId`）を指せる（種類は増やさない。優先度・次の操作の候補は変えない） | 範囲違反から拡張の判定（`scope.decide`）へつなぐ（FR_015） |
 | 拡張要求の判定の権限 | 統合のみ／人間も | `scope.decide` を人間にも開放する（全ノード）。統合ロールは、拡張の発生元のノード（拡張要求の `nodeId`）が自分の子孫（自分を含まない）のときだけ（`SUBTREE_RULES`・`INTEGRATOR_OPERATION_CLASS`。範囲外と未知は区別しない） | 発生元の記録ができたので、フェイルクローズの拒否を外す（NFR_004） |
 | 契約の結果の形（T13e） | 最小限／実装が必要とする形 | `node.send` は `{ status: "queued", duplicate }`、`node.spawn` は `{ nodeId, status: running \| pending, waitingFor? }`、`node.reclaimPreview` は `assessReclaim` の結果の構造（`reclaimable`・`unmet`・`blockers`）。ブリーフの `scope` の場所は、作業ツリー（cwd）を基準にした相対パスだけを使う前提で、絶対パスは `briefProblem` で拒否する（`isScopeSubset` も同じ前提で、絶対パスが混じる範囲は収まらないとする） | 呼び出し側が結果で次の操作を決められるようにする。作業ツリーはアダプタが決めるので、絶対パスは指定できない |
+| fold の検証の強化と replay（T13e） | 検証を緩めたまま／強める | 追加した検査（`markReclaimable` の `discarded` を記録から判定、完了報告の `criterion`・`evidence` の空白だけの拒否、識別子の `isSafeId`、ブリーフの検査）は、イベントログの replay にも効く。強めた検査に反する古い記録があれば、その `seq` で replay が失敗する（フェイルクローズ）。状態の版を上げた（スナップショットは捨てて再構築される）ので、反する古い記録がないかは、版を上げた最初の起動で分かる | 申告や不正な値を、記録に紛れ込ませない（NFR_011）。replay が失敗したら、`seq` と原因で直す |
+| ブリーフの `forbiddenLocations`（T13e） | 絶対パスも許す／相対パスだけ | ブリーフで指定する `forbiddenLocations` も `writableLocations` と同じく、作業ツリー（cwd）基準の相対パスだけ（絶対パスは `briefProblem` で拒否）。親の禁止を子へ引き継ぐ（`isScopeSubset`）ときも、相対パスで比べる | 作業ツリーはアダプタが決めるので、絶対パスでは指定できない。親の禁止の継承は、同じ cwd 基準で比べる |
+| 受信箱の解決済み（`inbox.resolved`） | 項目を消す／記録を残して除く | `inbox.resolved`（`itemId`。解決した者は封筒の `actor`）を記録のみで残し、`InboxItem.resolved`（`seq`・`at`・`by`）を付ける。項目は消えない（二度目は最初の記録を残し、存在しない項目は `unknownInboxItem`）。`inbox.fetch` は、解決済みの項目を返さない（`unresolvedInbox`）。どの項目をいつ解決するか（`scope.decide` の後に拡張要求の `violation` を解決する、など）は、ハンドラの配線（実装 3） | 追記のみのログで、対応済みの項目を受信箱から外す（FR_012, NFR_011） |
+| `node.send` の記録と `duplicate`（T13e） | 記録せず届けるだけ／記録してから届ける | ハンドラは `node.instructed` を記録してからアダプタへ渡し、届けたら `node.instructionDelivered` を記録する。同じ `requestId` の再送は、配送済みなら `duplicate: true`（アダプタへ二度渡さない）、未配送（アダプタが失敗した）なら配送をやり直す（`duplicate: false`） | 指示の履歴と配送の結果を残し、再送を安全にする（FR_009, NFR_003） |
+| `scope.decide` の人間の扱い（T13e） | 人間も部分木の判定 | ハンドラは、ロールが人間なら部分木の判定を外し（全ノードを対象）、判定者を人間（`{ human: true }`）として記録する。統合ロールは、発生元が自分の子孫のときだけ | 人間は全体を見る立場（NFR_004） |
 
 ## 9.2. 未解決の課題
 

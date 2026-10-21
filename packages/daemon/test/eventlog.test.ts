@@ -281,7 +281,7 @@ describe("スナップショット（キャッシュ。ログから再構築で�
   });
 
   it("古い形（状態のスキーマの版 1。停止の試行の記録を持たない）のスナップショットは捨てる", () => {
-    expect(STATE_VERSION).toBe(5);
+    expect(STATE_VERSION).toBe(6);
     const shared = createMemoryStore();
     const log = openLog(shared.open(), 3);
     many(log, 8);
