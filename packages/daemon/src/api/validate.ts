@@ -149,13 +149,6 @@ const brief = (o: Rec): Brief => {
   const problem = briefProblem(o);
   if (problem !== undefined) fail(problem);
   const b = o as unknown as Brief;
-  // 場所は、子の作業ツリーの内側の相対パスに限る（作業ツリーは spawn で作るので、絶対パスは書けない）。
-  const absolute = [...b.scope.writableLocations, ...b.scope.forbiddenLocations].find((p) =>
-    p.startsWith("/"),
-  );
-  if (absolute !== undefined) {
-    fail("scope の場所は、作業ツリーの内側の相対パスで指定する（絶対パスは使えない）");
-  }
   return {
     objective: b.objective,
     acceptanceCriteria: [...b.acceptanceCriteria],
