@@ -304,9 +304,10 @@ export function createApiServer(deps: ApiDeps): ApiServer {
   /** 認証したロールだけを返す。トークンはクエリでは受け取らない（Authorization ヘッダだけ）。 */
   function handleWhoami(req: IncomingMessage, res: ServerResponse): void {
     if (req.method !== "GET") {
-      return reject(res, failure("methodNotAllowed", "GET だけを受け付ける", "GET で呼び出す"), {
+      reject(res, failure("methodNotAllowed", "GET だけを受け付ける", "GET で呼び出す"), {
         allow: "GET",
       });
+      return;
     }
     const unauthenticated = (): void =>
       reject(
@@ -320,9 +321,11 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         { "www-authenticate": "Bearer" },
       );
     const principal = deps.credentials.authenticate(parseBearer(req.headers.authorization));
-    if (principal === undefined) return unauthenticated();
     // 失効・止まったノード・ロールの食い違いは、理由を教えずに 401 にする。
-    if (!checkPrincipal(principal, deps.getState()).ok) return unauthenticated();
+    if (principal === undefined || !checkPrincipal(principal, deps.getState()).ok) {
+      unauthenticated();
+      return;
+    }
     send(res, 200, { ok: true, value: { role: principal.role } });
   }
 
