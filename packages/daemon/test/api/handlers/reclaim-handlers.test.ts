@@ -196,6 +196,21 @@ describe("node.reclaimPreview（回収の事前確認。何も変えない）", 
     expect(r.s().nodes.find((n) => n.id === "d")?.archivedAt).toBeDefined();
   });
 
+  it("停止していないノードの破棄の判断は、日本語の理由と次の操作つきで失敗する", async () => {
+    const r = rig();
+    const res = (await (r.handlers["node.reclaimInstruct"] as never as (q: unknown) => unknown)({
+      requestId: "ri-x",
+      operation: "node.reclaimInstruct",
+      role: "human",
+      params: { nodeId: "a" },
+    })) as { ok: boolean; error?: Failure };
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("notStopped");
+    expect(res.error?.cause).toContain("停止済み");
+    expect(res.error?.nextActions.length).toBeGreaterThan(0);
+    expect(r.s().nodes.find((n) => n.id === "a")?.discarded).toBeUndefined();
+  });
+
   it("統合ノードは、配下の回収可能性を連鎖して見る（配下が回収可能なら、統合ノードも回収可能）。配下に不可があれば名指しする", async () => {
     const r = rig();
     // m2 を verified にする（b・c は verified）

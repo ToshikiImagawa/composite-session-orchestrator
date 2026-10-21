@@ -42,6 +42,7 @@ import {
   type LogPort,
   summarize,
 } from "./context.js";
+import { createExclusive } from "./inflight.js";
 import {
   createInstructionDelivery,
   type InstructionDelivery,
@@ -132,6 +133,7 @@ export function operationsFor(
 
 export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
   const { log, clock, adapterFor } = deps;
+  const exclusive = createExclusive();
   const delivery =
     deps.delivery ??
     createInstructionDelivery({
@@ -207,56 +209,62 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
     }
   };
 
-  return {
-    "node.send": async (req: HandlerRequest<"node.send">): Promise<R<"node.send">> => {
-      const { nodeId, text } = req.params;
-      const outside = outsideSubtree(callerOf(req), nodeId);
-      if (outside) return outside;
-      const actor = { nodeId: callerOf(req) };
-      const entry = [{ type: "node.instructed", payload: { nodeId, text } }] as const;
-      // 重複の判定は、状態の検査より前に行う（再試行の間にノードが進んでいても成功）。判定は追記が行う
-      // （同じ内容なら重複で何も書かず、内容が違えば `requestIdConflict`）。重複は、記録しない。
-      // 記録済みでも未配送なら、配送だけをやり直す（送信に成功した記録がないため）。
-      if (alreadyApplied(log.state(), actor, req.requestId)) {
-        const dup = appendAtomically(log, clock, req.requestId, actor, entry);
-        if (!dup.ok) return dup;
-        if (dup.value.duplicate) {
-          const seq = dup.value.events[0]?.seq;
-          // 配送済みなら重複（duplicate: true）。未配送なら、配送だけをやり直す（duplicate: false）。
-          if (seq === undefined || isDelivered(dup.value.state, seq)) {
-            return { ok: true, value: { status: "queued", duplicate: true } };
-          }
-          if (SENDABLE.has(stateOf(dup.value.state, nodeId) ?? "pending")) {
-            const again = await delivery.deliver(nodeId, text, seq);
-            if (!again.ok) return again;
-            return { ok: true, value: { status: "queued", duplicate: false } };
-          }
+  const sendOnce = async (req: HandlerRequest<"node.send">): Promise<R<"node.send">> => {
+    const { nodeId, text } = req.params;
+    const outside = outsideSubtree(callerOf(req), nodeId);
+    if (outside) return outside;
+    const actor = { nodeId: callerOf(req) };
+    const entry = [{ type: "node.instructed", payload: { nodeId, text } }] as const;
+    // 重複の判定は、状態の検査より前に行う（再試行の間にノードが進んでいても成功）。判定は追記が行う
+    // （同じ内容なら重複で何も書かず、内容が違えば `requestIdConflict`）。重複は、記録しない。
+    // 記録済みでも未配送なら、配送だけをやり直す（送信に成功した記録がないため）。
+    if (alreadyApplied(log.state(), actor, req.requestId)) {
+      const dup = appendAtomically(log, clock, req.requestId, actor, entry);
+      if (!dup.ok) return dup;
+      if (dup.value.duplicate) {
+        const seq = dup.value.events[0]?.seq;
+        // 配送済みなら重複（duplicate: true）。未配送なら、配送だけをやり直す（duplicate: false）。
+        if (seq === undefined || isDelivered(dup.value.state, seq)) {
           return { ok: true, value: { status: "queued", duplicate: true } };
         }
+        if (SENDABLE.has(stateOf(dup.value.state, nodeId) ?? "pending")) {
+          const again = await delivery.deliver(nodeId, text, seq);
+          if (!again.ok) return again;
+          return { ok: true, value: { status: "queued", duplicate: false } };
+        }
+        return { ok: true, value: { status: "queued", duplicate: true } };
       }
-      const state = stateOf(log.state(), nodeId);
-      if (state === undefined) {
-        return fail("notFound", "ノードが見つからない", "ID を確認する");
-      }
-      if (!SENDABLE.has(state)) {
-        return fail(
-          "notActive",
-          `ノード ${nodeId} は ${state} で、指示を送れない（running・waiting のとき）`,
-          "状態を確認する",
-          "再開してから指示する",
-        );
-      }
-      if (adapterFor(nodeId) === undefined) return noRuntime(nodeId);
-      // 先に記録し、そのあとアダプタへ渡す（配送に成功したら、配送を記録する）。
-      const recorded = appendAtomically(log, clock, req.requestId, actor, entry);
-      if (!recorded.ok) return recorded;
-      const seq = recorded.value.events[0]?.seq;
-      if (seq === undefined)
-        return fail("internal", "記録した指示の番号を取得できない", "もう一度試す");
-      const r = await delivery.deliver(nodeId, text, seq);
-      if (!r.ok) return r;
-      return { ok: true, value: { status: "queued", duplicate: false } };
-    },
+    }
+    const state = stateOf(log.state(), nodeId);
+    if (state === undefined) {
+      return fail("notFound", "ノードが見つからない", "ID を確認する");
+    }
+    if (!SENDABLE.has(state)) {
+      return fail(
+        "notActive",
+        `ノード ${nodeId} は ${state} で、指示を送れない（running・waiting のとき）`,
+        "状態を確認する",
+        "再開してから指示する",
+      );
+    }
+    if (adapterFor(nodeId) === undefined) return noRuntime(nodeId);
+    // 先に記録し、そのあとアダプタへ渡す（配送に成功したら、配送を記録する）。
+    const recorded = appendAtomically(log, clock, req.requestId, actor, entry);
+    if (!recorded.ok) return recorded;
+    const seq = recorded.value.events[0]?.seq;
+    if (seq === undefined)
+      return fail("internal", "記録した指示の番号を取得できない", "もう一度試す");
+    const r = await delivery.deliver(nodeId, text, seq);
+    if (!r.ok) return r;
+    return { ok: true, value: { status: "queued", duplicate: false } };
+  };
+
+  return {
+    // 同じ requestId の同時の送信は、1 つにまとめる（配送が 1 回だけになる）。
+    "node.send": (req: HandlerRequest<"node.send">): Promise<R<"node.send">> =>
+      exclusive(`${callerOf(req)}\0${req.requestId}`, JSON.stringify(req.params), () =>
+        sendOnce(req),
+      ),
 
     "node.stop": (req: HandlerRequest<"node.stop">): R<"node.stop"> => {
       const { nodeId, mode } = req.params;

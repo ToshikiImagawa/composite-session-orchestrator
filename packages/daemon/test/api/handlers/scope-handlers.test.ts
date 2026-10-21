@@ -6,7 +6,6 @@ import {
   ok,
   type Result,
   type Scope,
-  stateOf,
 } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { createScopeHandlers } from "../../../src/api/handlers/scope-handlers.js";

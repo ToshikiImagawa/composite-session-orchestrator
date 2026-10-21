@@ -235,6 +235,14 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
       const node = log.state().nodes.find((n) => n.id === nodeId);
       if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
       if (node.discarded !== undefined) return { ok: true, value: { accepted: true } }; // 記録済み（冪等）
+      if (node.state !== "stopped") {
+        return fail(
+          "notStopped",
+          `ノード ${nodeId} は ${node.state} で、破棄を判断できない（停止済み〔stopped〕のノードだけ）`,
+          "先に node.stop で止めて、停止を確認してから判断する",
+          "統合済みで検証済みのノードは、破棄でなく、通常の回収（node.reclaim）を使う",
+        );
+      }
       const r = appendAtomically(log, deps.clock, req.requestId, { human: true }, [
         { type: "node.discardDecided", payload: { nodeId } },
       ]);

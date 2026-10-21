@@ -497,6 +497,59 @@ describe("node.review の feedback（記録と配送）", () => {
   });
 });
 
+describe("node.review の差し戻し（同時実行・届ける手段）", () => {
+  it("同じ requestId の同時の差し戻しは 1 つにまとめる（配送は 1 回）", async () => {
+    const r = rig();
+    let delivered = 0;
+    const h = createStateHandlers({
+      log: r.log,
+      clock,
+      deliver: async (_id, _text, seq) => {
+        delivered++;
+        await new Promise((res) => setTimeout(res, 5));
+        r.log.append({
+          requestId: `dl-${seq}`,
+          actor: { system: true },
+          body: { type: "node.instructionDelivered", payload: { instructedSeq: seq } },
+        });
+        return { ok: true, value: undefined };
+      },
+    });
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A));
+    const req = r.req(
+      "node.review",
+      { nodeId: "a", verdict: "reject", feedback: "直して" },
+      M1,
+      "rv-par",
+    );
+    const [x, y] = await Promise.all([
+      h["node.review"](req as never),
+      h["node.review"](req as never),
+    ]);
+    expect(x).toEqual(y);
+    expect(delivered).toBe(1);
+    expect(r.state().instructions).toHaveLength(1);
+  });
+
+  it("届ける手段がなければ、差し戻しを記録せずに失敗する", async () => {
+    const r = rig();
+    const h = createStateHandlers({
+      log: r.log,
+      clock,
+      deliver: async () => ({ ok: true, value: undefined }),
+      canDeliver: () => false,
+    });
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A));
+    const before = r.state().lastSeq;
+    const res = (await h["node.review"](
+      r.req("node.review", { nodeId: "a", verdict: "reject", feedback: "直して" }, M1) as never,
+    )) as { ok: boolean; error?: { code: string } };
+    expect(res.error?.code).toBe("noRuntime");
+    expect(r.state().lastSeq).toBe(before);
+    expect(stateOf(r.state(), "a")).toBe("done");
+  });
+});
+
 describe("node.review の feedback", () => {
   it("差し戻しの理由は、追加指示（node.instructed）として記録する（再開した子に届く）", async () => {
     const r = rig();

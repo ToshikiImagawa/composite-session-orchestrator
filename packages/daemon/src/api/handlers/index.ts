@@ -58,7 +58,9 @@ export function createHandlers(
   const state = createStateHandlers({
     ...deps,
     allowPause: full,
-    ...(delivery === undefined ? {} : { deliver: delivery.deliver }),
+    ...(delivery === undefined
+      ? {}
+      : { deliver: delivery.deliver, canDeliver: delivery.available }),
   });
   return {
     ...createReadHandlers(() => deps.log.state()),

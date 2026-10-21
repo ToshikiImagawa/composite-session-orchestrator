@@ -24,7 +24,6 @@ import {
   type EventBody,
   effectiveScope,
   type Failure,
-  failure,
   isInSubtree,
   isPathUnder,
   isScopeSubset,
@@ -41,6 +40,7 @@ import type { RuntimeAdapter } from "../../sdk/runtime.js";
 import type { CredentialStore } from "../credentials.js";
 import type { HandlerRequest } from "../server.js";
 import { alreadyApplied, appendAtomically, deriveId, fail, type LogPort } from "./context.js";
+import { createExclusive } from "./inflight.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
@@ -126,43 +126,19 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
   const nodeOf = (state: OrchState, id: string): NodeRecord | undefined =>
     state.nodes.find((n) => n.id === id);
 
-  /**
-   * 同じ呼び出し元・同じ requestId の処理を、同時に 1 つだけ走らせる（同じ Promise を共有する）。内容が違えば
-   * `requestIdConflict`。終わったら外す（以降の再試行は、記録を見て判定する）。
-   */
-  const inflight = new Map<
-    string,
-    { fingerprint: string; promise: Promise<Result<unknown, Failure>> }
-  >();
-  function exclusive<T>(
-    key: string,
-    fingerprint: string,
-    run: () => Promise<Result<T, Failure>>,
-  ): Promise<Result<T, Failure>> {
-    const running = inflight.get(key);
-    if (running !== undefined) {
-      if (running.fingerprint !== fingerprint) {
-        return Promise.resolve(
-          fail(
-            "requestIdConflict",
-            "同じ requestId で、処理中の要求と内容が違う",
-            "別の requestId で要求する",
-          ),
-        );
-      }
-      return running.promise as Promise<Result<T, Failure>>;
-    }
-    const promise = run().finally(() => inflight.delete(key));
-    inflight.set(key, { fingerprint, promise });
-    return promise;
-  }
+  const exclusive = createExclusive();
 
-  /** 失敗の後始末。冪等で、例外を外へ出さない。 */
+  /**
+   * 失敗の後始末。冪等で、例外を外へ出さない。`safe` は、子のプロセスが残っていないと確かめられているか
+   * （起動していないことが明らかか、停止を確認できたか）。そうでなければ、トークンの失効と停止の記録だけを行い、
+   * 作業ツリーを消さず、アーカイブもしない（孤児プロセスと、生きている作業ツリーの削除を防ぐ）。
+   */
   async function cleanup(
     nodeId: string,
     requestId: string,
     caller: string,
     worktreePath: string | undefined,
+    safe = true,
   ): Promise<void> {
     try {
       credentials.revokeNode(nodeId);
@@ -170,7 +146,7 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
       note(nodeId, `トークンを失効できない: ${String(e)}`);
     }
     let removedOk = worktreePath === undefined;
-    if (worktreePath !== undefined) {
+    if (worktreePath !== undefined && safe) {
       try {
         const r = await ports.removeWorktree(nodeId, { expectedPath: worktreePath });
         if (r.ok) removedOk = true;
@@ -211,7 +187,7 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     }
     // 作業ツリーを消せたら、システムによる破棄の判断を記録して、アーカイブまで進める（成果のない失敗した生成）。
     // 消せなかったら、停止のまま残す（作業ツリーが残るので、人間が確認して回収する）。
-    if (!removedOk) return;
+    if (!removedOk || !safe) return;
     const archived = appendAtomically(
       log,
       deps.clock,
@@ -238,10 +214,24 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     role: NodeRecord["role"],
   ): Promise<Result<Spawned, Failure>> {
     const { requestId, caller, nodeId, worktreePath } = ctx;
-    const abort = async (code: string, what: string, cause: string) => {
+    const abort = async (code: string, what: string, cause: string, safe = true) => {
       note(nodeId, cause);
-      await cleanup(nodeId, requestId, caller, worktreePath);
-      return fail(code, `${what}。後始末した`, "しばらくして、別の requestId でもう一度試す");
+      await cleanup(nodeId, requestId, caller, worktreePath, safe);
+      return fail(
+        code,
+        safe ? `${what}。後始末した` : `${what}。子の停止を確認できないため、作業ツリーは残した`,
+        "しばらくして、別の requestId でもう一度試す",
+      );
+    };
+    /** 起動したかもしれない子を止め、停止を確認できたか。確認できなければ、プロセスが残っているとみなす。 */
+    const stoppedForSure = async (): Promise<boolean> => {
+      try {
+        const r = await adapter.stop(nodeId, { mode: "immediate", stopSeq: log.state().lastSeq });
+        return r.ok && r.value.state === "stopped";
+      } catch (e) {
+        note(nodeId, `起動したかもしれない子を止められない: ${String(e)}`);
+        return false;
+      }
     };
     let token: string;
     try {
@@ -269,22 +259,21 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
         );
       }
     } catch (e) {
-      return abort("startFailed", "子を起動できなかった", `起動が例外: ${String(e)}`);
+      // 例外は、起動したかどうかが分からない。停止を確認できたときだけ、作業ツリーを消す。
+      const safe = await stoppedForSure();
+      return abort("startFailed", "子を起動できなかった", `起動が例外: ${String(e)}`, safe);
     }
     // 起動に成功してから start を記録する（記録だけが残る経路をなくす）。記録に失敗したら、起動した子を止めて後始末する。
     const recorded = appendAtomically(log, deps.clock, `${requestId}/start`, { nodeId: caller }, [
       { type: "node.stateChanged", payload: { nodeId, event: { type: "start" } } },
     ]);
     if (!recorded.ok) {
-      try {
-        await adapter.stop(nodeId, { mode: "immediate", stopSeq: log.state().lastSeq });
-      } catch (e) {
-        note(nodeId, `起動した子を止められない: ${String(e)}`);
-      }
+      const safe = await stoppedForSure();
       return abort(
         "startFailed",
         "子を起動できなかった",
         `起動を記録できない: ${recorded.error.code}: ${recorded.error.cause}`,
+        safe,
       );
     }
     return { ok: true, value: { nodeId, status: "running" } };

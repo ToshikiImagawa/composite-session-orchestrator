@@ -100,10 +100,13 @@ const rig = (opts: { rootScope?: Scope | null } = {}) => {
     started: [] as StartRequest[],
     stopped: [] as string[],
     sent: [] as [string, string][],
+    adapterStops: [] as string[],
     failures: [] as string[],
   };
   const flags = {
     startFails: false,
+    startThrows: false,
+    adapterStop: "ok" as "ok" | "throws" | "incomplete",
     stopFails: false,
     issueThrows: false,
     removeFails: false,
@@ -123,6 +126,7 @@ const rig = (opts: { rootScope?: Scope | null } = {}) => {
     }),
     async start(req: StartRequest): Promise<Result<StartValue, Failure>> {
       calls.started.push(req);
+      if (flags.startThrows) throw new Error("起動が例外");
       if (flags.startFails)
         return { ok: false, error: failure("startFailed", "内部の詳細X", "内部の次の操作") };
       return ok({ sessionId: "sess", cwd: req.worktreePath, removedEnv: [] });
@@ -131,8 +135,15 @@ const rig = (opts: { rootScope?: Scope | null } = {}) => {
       calls.sent.push([id, text]);
       return ok({ status: "queued" as const });
     },
-    async stop() {
-      throw new Error("not used");
+    async stop(id: string) {
+      calls.adapterStops.push(id);
+      if (flags.adapterStop === "throws") throw new Error("止められない");
+      return ok({
+        state:
+          flags.adapterStop === "incomplete" ? ("stopIncomplete" as const) : ("stopped" as const),
+        outcome: "aborted" as const,
+        blockers: [],
+      });
     },
     updateScope: () => ok(undefined),
   } as unknown as RuntimeAdapter;
@@ -303,6 +314,29 @@ describe("node.spawn（子の生成と起動）", () => {
     expect(r.calls.removed).toEqual([id]);
     expect(stateOf(r.s(), id)).toBe("stopped");
     expect(r.calls.failures.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("起動が例外なら、停止を確認できたときだけ、作業ツリーを消してアーカイブする。確認できなければ、停止のまま作業ツリーを残す", async () => {
+    const ok1 = rig();
+    ok1.flags.startThrows = true;
+    const a = await ok1.call("node.spawn", { parentId: "m1", ...brief() });
+    expect(a.ok).toBe(false);
+    const id1 = ok1.calls.provisioned[0] as string;
+    expect(ok1.calls.adapterStops).toEqual([id1]);
+    expect(stateOf(ok1.s(), id1)).toBe("archived");
+    expect(ok1.calls.removed).toEqual([id1]);
+    for (const mode of ["throws", "incomplete"] as const) {
+      const r = rig();
+      r.flags.startThrows = true;
+      r.flags.adapterStop = mode;
+      const res = await r.call("node.spawn", { parentId: "m1", ...brief() });
+      expect(res.ok).toBe(false);
+      const id = r.calls.provisioned[0] as string;
+      expect(stateOf(r.s(), id)).toBe("stopped");
+      expect(r.calls.removed).toEqual([]); // 生きているかもしれない作業ツリーは消さない
+      expect(r.calls.revoked).toEqual([id]); // トークンは失効する
+      expect(res.error?.cause).toContain("残した");
+    }
   });
 
   it("トークンを発行できなければ、起動せずに後始末して失敗する", async () => {
