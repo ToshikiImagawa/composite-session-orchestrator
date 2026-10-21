@@ -486,3 +486,120 @@ describe("createDaemon（起動時のトークンの掃除）", () => {
     expect(r.logs.join("\n")).toContain("orphanTokenRevoked");
   });
 });
+
+describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
+  /** 保持期間を過ぎた、アーカイブ済みの木（t ─ tc）を、前回の実行から残す。 */
+  const seedArchivedTree = (r: ReturnType<typeof rig>) => {
+    mkdirSync(r.config.stateDir, { mode: 0o700 });
+    const store = openSqliteStore(join(r.config.stateDir, "state.db"));
+    if (!store.ok) throw new Error("store");
+    let at = "2026-01-01T00:00:00Z";
+    const log = EventLog.open(store.value, { clock: () => at });
+    if (!log.ok) throw new Error("log");
+    let n = 0;
+    const add = (body: Parameters<typeof log.value.append>[0]["body"]) => {
+      const res = log.value.append({ requestId: `seed-${++n}`, actor: { system: true }, body });
+      if (!res.ok) throw new Error(res.error.cause);
+    };
+    const ev = (nodeId: string, event: { type: string; discarded?: boolean }) =>
+      add({ type: "node.stateChanged", payload: { nodeId, event } } as never);
+    const node = (nodeId: string, role: "integrator" | "implement", parentId: string | null) =>
+      add({ type: "node.created", payload: { nodeId, role, parentId, dependsOn: [] } });
+    node("root", "integrator", null);
+    ev("root", { type: "start" });
+    node("t", "integrator", "root");
+    ev("t", { type: "start" });
+    node("tc", "implement", "t");
+    ev("tc", { type: "start" });
+    for (const x of ["tc", "t"]) {
+      ev(x, { type: "reportDone" });
+      ev(x, { type: "accept" });
+      ev(x, { type: "markReclaimable", discarded: false });
+      ev(x, { type: "archive" });
+    }
+    // 直近の記録（時計の異常の検知: ログの最後の記録が、現在に近いこと）
+    at = "2026-05-31T23:30:00Z";
+    add({ type: "node.toolDenied", payload: { nodeId: "root", tool: "x" } });
+    store.value.close();
+  };
+
+  /** 手動で進めるタイマー。`after` の数（取り消されていないもの）も数える。 */
+  const manual = () => {
+    let nowMs = Date.parse("2026-06-01T00:00:00Z");
+    const waiting: { at: number; resolve: () => void; cancelled: boolean }[] = [];
+    const timers = {
+      now: () => nowMs,
+      sleep: async () => undefined,
+      after: (ms: number) => {
+        const w = { at: nowMs + ms, resolve: () => {}, cancelled: false };
+        const promise = new Promise<void>((res) => {
+          w.resolve = res;
+        });
+        waiting.push(w);
+        return { promise, cancel: () => (w.cancelled = true) };
+      },
+    };
+    return {
+      timers,
+      advance: async (ms: number) => {
+        nowMs += ms;
+        for (const w of waiting) {
+          if (!w.cancelled && w.at <= nowMs) {
+            w.cancelled = true;
+            w.resolve();
+          }
+        }
+        await new Promise((res) => setImmediate(res));
+      },
+      clock: () => new Date(nowMs).toISOString(),
+    };
+  };
+
+  const hasTree = (d: Daemon) => d.log.state().nodes.some((n) => n.id === "t");
+
+  it("設定がなければ（既定）、保持期間を過ぎた木があっても、自動では消さない", async () => {
+    const r = rig();
+    seedArchivedTree(r);
+    const m = manual();
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock };
+    const d = await boot(r);
+    await m.advance(24 * 60 * 60_000);
+    expect(hasTree(d.daemon)).toBe(true);
+  });
+
+  it("enabled: false なら、周期を作らず、消さない", async () => {
+    const r = rig({ autoPurge: { enabled: false } });
+    seedArchivedTree(r);
+    const m = manual();
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock };
+    const d = await boot(r);
+    await m.advance(24 * 60 * 60_000);
+    expect(hasTree(d.daemon)).toBe(true);
+  });
+
+  it("有効なら、起動直後は消さず、1 周期後（既定 60 分）に、保持期間を過ぎた木を消す。記録に残る", async () => {
+    const r = rig({ autoPurge: { enabled: true } });
+    seedArchivedTree(r);
+    const m = manual();
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock };
+    const d = await boot(r);
+    expect(hasTree(d.daemon)).toBe(true);
+    await m.advance(30 * 60_000);
+    expect(hasTree(d.daemon)).toBe(true);
+    await m.advance(30 * 60_000);
+    expect(hasTree(d.daemon)).toBe(false);
+    expect(r.logs.some((l) => l.includes("autoPurge.purged"))).toBe(true);
+    expect(d.daemon.log.state().tombstones[0]?.rootId).toBe("t");
+  });
+
+  it("intervalMinutes を指定できる。stop の後は、周期が来ても消さない", async () => {
+    const r = rig({ autoPurge: { enabled: true, intervalMinutes: 5 } });
+    seedArchivedTree(r);
+    const m = manual();
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock };
+    const d = await boot(r);
+    await d.daemon.stop();
+    await m.advance(10 * 60_000);
+    expect(d.daemon.log.state().nodes.some((n) => n.id === "t")).toBe(true);
+  });
+});

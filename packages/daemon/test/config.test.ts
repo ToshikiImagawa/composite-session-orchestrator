@@ -91,6 +91,58 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("autoPurge（自動の最終削除）は、省略するとオフ。enabled（必須）・intervalMinutes（1〜1440）・maxTreesPerRun（1〜100）だけを持つ", () => {
+    const d = parseConfig(JSON.stringify(base));
+    expect(d.ok && d.value.autoPurge).toBeUndefined();
+    const on = parseConfig(
+      JSON.stringify({
+        ...base,
+        autoPurge: { enabled: true, intervalMinutes: 5, maxTreesPerRun: 2 },
+      }),
+    );
+    expect(on.ok && on.value.autoPurge).toEqual({
+      enabled: true,
+      intervalMinutes: 5,
+      maxTreesPerRun: 2,
+    });
+    const min = parseConfig(JSON.stringify({ ...base, autoPurge: { enabled: false } }));
+    expect(min.ok && min.value.autoPurge).toEqual({ enabled: false });
+    for (const v of [
+      true,
+      "on",
+      null,
+      [],
+      {},
+      { enabled: "yes" },
+      { enabled: true, intervalMinutes: 0 },
+      { enabled: true, intervalMinutes: 1441 },
+      { enabled: true, intervalMinutes: 1.5 },
+      { enabled: true, maxTreesPerRun: 0 },
+      { enabled: true, maxTreesPerRun: 101 },
+      { enabled: true, unknown: 1 },
+    ]) {
+      bad({ autoPurge: v }, "autoPurge");
+    }
+  });
+
+  it("autoPurge を有効にするときは、retentionDays が 7 未満なら拒否する（省略した既定の 90 や、7 以上は可。無効なら制限しない）", () => {
+    for (const days of [0, 1, 6]) {
+      bad({ retentionDays: days, autoPurge: { enabled: true } }, "retentionDays を 7 以上");
+    }
+    for (const days of [7, 90]) {
+      const ok1 = parseConfig(
+        JSON.stringify({ ...base, retentionDays: days, autoPurge: { enabled: true } }),
+      );
+      expect(ok1.ok, String(days)).toBe(true);
+    }
+    expect(parseConfig(JSON.stringify({ ...base, autoPurge: { enabled: true } })).ok).toBe(true);
+    const off = parseConfig(
+      JSON.stringify({ ...base, retentionDays: 0, autoPurge: { enabled: false } }),
+    );
+    expect(off.ok).toBe(true);
+    expect(parseConfig(JSON.stringify({ ...base, retentionDays: 0 })).ok).toBe(true);
+  });
+
   it("retentionDays（最終削除の保持期間）は 0 以上の整数（既定は 90）。purgeTombstone は真偽値（任意）", () => {
     const d = parseConfig(JSON.stringify(base));
     expect(d.ok && d.value.retentionDays).toBeUndefined();

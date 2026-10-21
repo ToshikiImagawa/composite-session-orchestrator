@@ -12,6 +12,7 @@
  */
 
 import {
+  type Actor,
   type EventBody,
   type Failure,
   type OperationMap,
@@ -67,7 +68,8 @@ export const purgeMarker = (info: PurgeMarkerInfo): EventBody => ({
 
 const firstLine = (text: string): string => (text.split("\n")[0] ?? "").trim().slice(0, 200);
 
-export function createPurgeHandlers(deps: PurgeHandlerDeps) {
+/** 最終削除の共通の経路（人間のコマンドと自動の最終削除が呼ぶ）。 */
+export function createPurger(deps: PurgeHandlerDeps) {
   const { log } = deps;
   const retentionBlocker = (elapsedDays: number): { code: string; cause: string } => ({
     code: "retentionNotElapsed",
@@ -80,6 +82,108 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
       // 記録先の失敗は、処理を止めない
     }
   };
+  /**
+   * 最終削除の実行（人間のコマンドと、自動の最終削除〔`autoPurge`〕が、同じ経路・同じ検査を通る）。
+   * `actor` と `requestId` は、呼び出し側が決める（人間: 要求の requestId、自動: 木ごとに決定的な requestId）。
+   */
+  function purgeTreeOf(args: {
+    readonly nodeId: string;
+    readonly requestId: string;
+    readonly actor: Actor;
+    readonly tombstone?: boolean;
+    readonly origin: "human" | "auto";
+  }): R<"node.purge"> {
+    const { nodeId, requestId, actor, tombstone, origin } = args;
+    const purgeRequest = (nodeIds: readonly string[], marker: EventBody) => ({
+      requestId: derivedRequestId(actor, requestId, 0),
+      actor,
+      nodeIds,
+      marker,
+    });
+    const purgedOf = (outcome: PurgeOutcome): string[] => {
+      const ids = (outcome.event as OrchEvent & { payload?: { nodeIds?: unknown } }).payload
+        ?.nodeIds;
+      return Array.isArray(ids) ? (ids as string[]) : [];
+    };
+    // 再送: 記録済みなら、何も消さずに最初の結果を返す（木はもう存在しないので、計画より先に判定する）。
+    if (alreadyApplied(log.state(), actor, requestId)) {
+      const again = log.purgeTree(
+        purgeRequest([], purgeMarker({ rootId: nodeId, nodeIds: [], archivedAt: "" })),
+      );
+      if (!again.ok) return again;
+      // 同じ requestId を別の対象に使い回していないか（標識の木の根が違えば、別の内容）。
+      const recorded = (again.value.event as OrchEvent & { payload?: { rootId?: unknown } }).payload
+        ?.rootId;
+      if (recorded !== nodeId) {
+        return fail(
+          "requestIdConflict",
+          "同じ requestId が、別の対象の最終削除に使われている",
+          "新しい requestId で要求する",
+        );
+      }
+      return { ok: true, value: { purged: purgedOf(again.value) } };
+    }
+    const state = log.state();
+    const plan = planPurge(state, nodeId, deps.nowMs());
+    if (!plan.ok) return plan;
+    const { nodeIds, archivedAt, elapsedDays } = plan.value;
+    if (elapsedDays < deps.retentionDays) {
+      const b = retentionBlocker(elapsedDays);
+      return fail(
+        b.code,
+        b.cause,
+        "期間が過ぎてから削除する",
+        "早く消す必要があるときは、daemon の設定の retentionDays を下げて再起動する",
+      );
+    }
+    const target = state.nodes.find((n) => n.id === nodeId);
+    const withTombstone = tombstone ?? deps.defaultTombstone;
+    const info: PurgeMarkerInfo = {
+      rootId: nodeId,
+      nodeIds,
+      archivedAt,
+      ...(withTombstone
+        ? {
+            tombstone: {
+              title: firstLine(target?.objective ?? "") || nodeId,
+              outcome:
+                target?.discarded !== undefined ? ("discarded" as const) : ("verified" as const),
+              ...(target?.lastCommit === undefined ? {} : { lastCommit: target.lastCommit }),
+            },
+          }
+        : {}),
+    };
+    audit("purgeStarting", {
+      nodeId,
+      origin,
+      nodeIds,
+      archivedAt,
+      elapsedDays,
+      tombstone: withTombstone,
+    });
+    const r = log.purgeTree(purgeRequest(nodeIds, purgeMarker(info)));
+    if (!r.ok) {
+      audit("purgeFailed", { nodeId, origin, code: r.error.code, cause: r.error.cause });
+      deps.onFailure?.(nodeId, `最終削除に失敗: ${r.error.code}: ${r.error.cause}`);
+      return r;
+    }
+    for (const id of nodeIds) {
+      try {
+        deps.revokeNode(id);
+      } catch (e) {
+        deps.onFailure?.(id, `トークンを失効できない: ${String(e)}`);
+      }
+    }
+    audit("purged", { nodeId, origin, nodeIds, deleted: r.value.deleted, seq: r.value.event.seq });
+    return { ok: true, value: { purged: nodeIds } };
+  }
+
+  return { purgeTreeOf, retentionBlocker, audit };
+}
+
+export function createPurgeHandlers(deps: PurgeHandlerDeps) {
+  const { log } = deps;
+  const { purgeTreeOf, retentionBlocker } = createPurger(deps);
   const humanOnly = (role: string): Result<never, Failure> | undefined =>
     role === "human"
       ? undefined
@@ -126,89 +230,13 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
     "node.purge": (req: HandlerRequest<"node.purge">): R<"node.purge"> => {
       const denied = humanOnly(req.role);
       if (denied) return denied;
-      const actor = { human: true } as const;
-      const { nodeId } = req.params;
-      const purgeRequest = (nodeIds: readonly string[], marker: EventBody) => ({
-        requestId: derivedRequestId(actor, req.requestId, 0),
-        actor,
-        nodeIds,
-        marker,
+      return purgeTreeOf({
+        nodeId: req.params.nodeId,
+        requestId: req.requestId,
+        actor: { human: true },
+        ...(req.params.tombstone === undefined ? {} : { tombstone: req.params.tombstone }),
+        origin: "human",
       });
-      const purgedOf = (outcome: PurgeOutcome): string[] => {
-        const ids = (outcome.event as OrchEvent & { payload?: { nodeIds?: unknown } }).payload
-          ?.nodeIds;
-        return Array.isArray(ids) ? (ids as string[]) : [];
-      };
-      // 再送: 記録済みなら、何も消さずに最初の結果を返す（木はもう存在しないので、計画より先に判定する）。
-      if (alreadyApplied(log.state(), actor, req.requestId)) {
-        const again = log.purgeTree(
-          purgeRequest([], purgeMarker({ rootId: nodeId, nodeIds: [], archivedAt: "" })),
-        );
-        if (!again.ok) return again;
-        // 同じ requestId を別の対象に使い回していないか（標識の木の根が違えば、別の内容）。
-        const recorded = (again.value.event as OrchEvent & { payload?: { rootId?: unknown } })
-          .payload?.rootId;
-        if (recorded !== nodeId) {
-          return fail(
-            "requestIdConflict",
-            "同じ requestId が、別の対象の最終削除に使われている",
-            "新しい requestId で要求する",
-          );
-        }
-        return { ok: true, value: { purged: purgedOf(again.value) } };
-      }
-      const state = log.state();
-      const plan = planPurge(state, nodeId, deps.nowMs());
-      if (!plan.ok) return plan;
-      const { nodeIds, archivedAt, elapsedDays } = plan.value;
-      if (elapsedDays < deps.retentionDays) {
-        const b = retentionBlocker(elapsedDays);
-        return fail(
-          b.code,
-          b.cause,
-          "期間が過ぎてから削除する",
-          "早く消す必要があるときは、daemon の設定の retentionDays を下げて再起動する",
-        );
-      }
-      const target = state.nodes.find((n) => n.id === nodeId);
-      const withTombstone = req.params.tombstone ?? deps.defaultTombstone;
-      const info: PurgeMarkerInfo = {
-        rootId: nodeId,
-        nodeIds,
-        archivedAt,
-        ...(withTombstone
-          ? {
-              tombstone: {
-                title: firstLine(target?.objective ?? "") || nodeId,
-                outcome:
-                  target?.discarded !== undefined ? ("discarded" as const) : ("verified" as const),
-                ...(target?.lastCommit === undefined ? {} : { lastCommit: target.lastCommit }),
-              },
-            }
-          : {}),
-      };
-      audit("purgeStarting", {
-        nodeId,
-        nodeIds,
-        archivedAt,
-        elapsedDays,
-        tombstone: withTombstone,
-      });
-      const r = log.purgeTree(purgeRequest(nodeIds, purgeMarker(info)));
-      if (!r.ok) {
-        audit("purgeFailed", { nodeId, code: r.error.code, cause: r.error.cause });
-        deps.onFailure?.(nodeId, `最終削除に失敗: ${r.error.code}: ${r.error.cause}`);
-        return r;
-      }
-      for (const id of nodeIds) {
-        try {
-          deps.revokeNode(id);
-        } catch (e) {
-          deps.onFailure?.(id, `トークンを失効できない: ${String(e)}`);
-        }
-      }
-      audit("purged", { nodeId, nodeIds, deleted: r.value.deleted, seq: r.value.event.seq });
-      return { ok: true, value: { purged: nodeIds } };
     },
   };
 }
