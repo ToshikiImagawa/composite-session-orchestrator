@@ -1583,6 +1583,26 @@ describe("未回答の判断要求は、ノードごとに上限まで", () => {
     expect(codeOf(over)).toBe("tooManyOpenDecisions");
   });
 
+  it("差し戻し（done から running）も、数える範囲の始まりになる。古い要求は回答できる", () => {
+    const done = () => ev(changed("root", { type: "reportDone" }));
+    const reject = () => ev(changed("root", { type: "reject" }));
+    const fresh = Array.from(
+      { length: LIMITS.openDecisionsPerNode },
+      (_, i) => () =>
+        ev({ type: "decision.requested", payload: { decisionId: `new${i}`, nodeId: "root" } }),
+    );
+    const r = run(
+      ...many(LIMITS.openDecisionsPerNode),
+      done,
+      reject,
+      ...fresh,
+      answered("root-d0"),
+    );
+    expect(codeOf(r)).toBeNull();
+    const over = run(...many(1), done, reject, ...fresh, requested("one-more"));
+    expect(codeOf(over)).toBe("tooManyOpenDecisions");
+  });
+
   it("上限はノードごと。別のノードには影響しない", () => {
     const r = run(...many(LIMITS.openDecisionsPerNode), ...many(1, "a"));
     expect(codeOf(r)).toBeNull();
@@ -1659,6 +1679,17 @@ describe("子が入れる報告（progress・outOfScope）は、ノードごと�
       ...many(LIMITS.reportsPerNode + 1, "outOfScope"),
     );
     expect(codeOf(over)).toBe("tooManyReports");
+  });
+
+  it("差し戻し（done から running）の後は、報告の数え直し", () => {
+    const done = () => ev(changed("root", { type: "reportDone" }));
+    const reject = () => ev(changed("root", { type: "reject" }));
+    expect(
+      codeOf(run(...many(LIMITS.reportsPerNode), done, reject, ...many(1, "outOfScope"))),
+    ).toBeNull();
+    expect(
+      codeOf(run(...many(1), done, reject, ...many(LIMITS.reportsPerNode + 1, "outOfScope"))),
+    ).toBe("tooManyReports");
   });
 
   it("失敗は nextActions を持つ", () => {

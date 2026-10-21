@@ -587,6 +587,8 @@ interface Draft {
   extensionIdx: Map<string, number>;
   instructions: InstructionRecord[];
   tombstones: PurgeRecord[];
+  /** ノードごとの、今の実行（直近の start・restart・差し戻しより後）の件数。上限の判定を O(1) にする（状態から導ける写し）。 */
+  runCounts: Map<string, { decisions: number; reports: number }>;
   lastSeq: number;
   requests: Map<string, string>;
   /** 直前の `step` で、イベントの一部が無視されたこと（`ApplyOutcome.ignored` に渡す）。 */
@@ -702,6 +704,15 @@ const observationShape = (o: unknown): boolean =>
   (o.graceMs === undefined || isGraceMs(o.graceMs)) &&
   parseActor(o.actor) !== undefined;
 
+const runCountsOf = (d: Draft, nodeId: string): { decisions: number; reports: number } => {
+  let c = d.runCounts.get(nodeId);
+  if (c === undefined) {
+    c = { decisions: 0, reports: 0 };
+    d.runCounts.set(nodeId, c);
+  }
+  return c;
+};
+
 /** 状態から下書きを作る。状態が壊れていれば（スナップショットの破損など）`undefined`。例外は出さない。 */
 function toDraft(state: OrchState): Draft | undefined {
   if (!isRec(state) || !Number.isInteger(state.lastSeq) || !isRec(state.requests)) return undefined;
@@ -762,6 +773,7 @@ function toDraft(state: OrchState): Draft | undefined {
     extensionIdx: new Map(extensions.map((x, i) => [x.extensionId, i])),
     instructions: [...instructions],
     tombstones: [...tombstones],
+    runCounts: new Map(),
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
     note: undefined,
@@ -773,7 +785,21 @@ function toDraft(state: OrchState): Draft | undefined {
   });
   decisions.forEach((x, i) => {
     d.decisionIdx.set(x.decisionId, i);
+    if (
+      x.status === "open" &&
+      (x.requestedSeq ?? 0) > (d.nodes[d.nodeIdx.get(x.nodeId) ?? -1]?.runStartedSeq ?? 0)
+    ) {
+      runCountsOf(d, x.nodeId).decisions += 1;
+    }
   });
+  for (const r of reports) {
+    if (
+      (r.kind === "progress" || r.kind === "outOfScope") &&
+      r.seq > (d.nodes[d.nodeIdx.get(r.nodeId) ?? -1]?.runStartedSeq ?? 0)
+    ) {
+      runCountsOf(d, r.nodeId).reports += 1;
+    }
+  }
   return d;
 }
 
@@ -1070,12 +1096,18 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           );
         }
       }
+      // 実行の始まり（開始・再開・完了の差し戻し）。以後は、ここより後の要求・報告だけを数える。
+      const startsRun =
+        event.type === "start" ||
+        event.type === "restart" ||
+        (event.type === "reject" && node.state === "done");
+      if (startsRun) d.runCounts.set(nodeId, { decisions: 0, reports: 0 });
       const { discarded: _discarded, ...rest } = node;
       d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({
         // 停止したノードの再開（restart）で、破棄の判断は消える。
         ...(event.type === "restart" ? rest : node),
         state: next,
-        ...(event.type === "start" || event.type === "restart" ? { runStartedSeq: seq } : {}),
+        ...(startsRun ? { runStartedSeq: seq } : {}),
         ...(next === "archived" ? { archivedAt: raw.at } : {}),
       });
       if (event.type === "stop" && t.value.changed && t.value.effect !== "cancelStart") {
@@ -1296,14 +1328,8 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       }
       if (kind === "progress" || kind === "outOfScope") {
         // 数えるのは、そのノードの直近の start・restart より後の、子が入れる報告だけ。
-        const runStartedSeq = nodeAt(d, nodeId)?.runStartedSeq ?? 0;
-        const counted = d.reports.filter(
-          (x) =>
-            x.nodeId === nodeId &&
-            (x.kind === "progress" || x.kind === "outOfScope") &&
-            x.seq > runStartedSeq,
-        ).length;
-        if (counted >= LIMITS.reportsPerNode) {
+        const counts = runCountsOf(d, nodeId);
+        if (counts.reports >= LIMITS.reportsPerNode) {
           return reject(
             seq,
             "tooManyReports",
@@ -1313,6 +1339,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           );
         }
       }
+      if (kind === "progress" || kind === "outOfScope") runCountsOf(d, nodeId).reports += 1;
       const record = freezeRecord({
         seq,
         at: raw.at,
@@ -1378,11 +1405,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
         );
       }
       // 数えるのは、そのノードの直近の start・restart より後の open の要求だけ。古い要求は回答できるまま残す。
-      const runStartedSeq = nodeAt(d, nodeId)?.runStartedSeq ?? 0;
-      const openDecisions = d.decisions.filter(
-        (x) => x.nodeId === nodeId && x.status === "open" && (x.requestedSeq ?? 0) > runStartedSeq,
-      ).length;
-      if (openDecisions >= LIMITS.openDecisionsPerNode) {
+      if (runCountsOf(d, nodeId).decisions >= LIMITS.openDecisionsPerNode) {
         return reject(
           seq,
           "tooManyOpenDecisions",
@@ -1391,6 +1414,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           "まとめて 1 件で聞き直す",
         );
       }
+      runCountsOf(d, nodeId).decisions += 1;
       d.decisionIdx.set(decisionId, d.decisions.length);
       d.decisions.push(
         freezeRecord({
@@ -1422,6 +1446,12 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           `判断要求 ${decisionId} は存在しない`,
           "判断要求の一覧を確認する",
         );
+      }
+      if (
+        cur.status === "open" &&
+        (cur.requestedSeq ?? 0) > (nodeAt(d, cur.nodeId)?.runStartedSeq ?? 0)
+      ) {
+        runCountsOf(d, cur.nodeId).decisions -= 1;
       }
       d.decisions[i] = freezeRecord(
         cur.status === "open"
