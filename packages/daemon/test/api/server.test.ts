@@ -716,3 +716,152 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     }
   });
 });
+
+describe("GET /v1/whoami（認証したロールだけを返す）", () => {
+  const get = async (r: Rig, headers: Record<string, string> = {}, path = "/v1/whoami") => {
+    const res = await fetch(`${r.url}${path}`, { method: "GET", headers });
+    return {
+      status: res.status,
+      json: (await res.json()) as {
+        ok: boolean;
+        value?: unknown;
+        error?: { code: string; nextActions: string[] };
+      },
+      headers: res.headers,
+    };
+  };
+
+  it("Bearer で認証し、ロールだけを返す（nodeId は返さない）", async () => {
+    const r = await start();
+    const cases: [string, string][] = [
+      [r.tokens.human, "human"],
+      [r.tokens.m1, "integrator"],
+      [r.tokens.root, "integrator"],
+      [r.tokens.a, "child"],
+    ];
+    for (const [token, role] of cases) {
+      const res = await get(r, bearer(token));
+      expect(res.status).toBe(200);
+      expect(res.json).toEqual({ ok: true, value: { role } });
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    }
+    expect(r.calls).toEqual([]); // 操作のハンドラは呼ばない
+  });
+
+  it("クエリは無視する（トークンをクエリで渡しても認証されない）", async () => {
+    const r = await start();
+    expect((await get(r, bearer(r.tokens.a), "/v1/whoami?x=1")).json.value).toEqual({
+      role: "child",
+    });
+    const res = await get(r, {}, `/v1/whoami?token=${r.tokens.a}`);
+    expect(res.status).toBe(401);
+  });
+
+  it("資格情報がない・正しくないなら 401（www-authenticate つき）", async () => {
+    const r = await start();
+    for (const h of [{}, bearer("wrong-token-wrong-token-1234"), { authorization: "Basic abc" }]) {
+      const res = await get(r, h);
+      expect(res.status).toBe(401);
+      expect(res.json.error?.code).toBe("unauthenticated");
+      expect(res.headers.get("www-authenticate")).toBe("Bearer");
+    }
+  });
+
+  it("止まったノード・木にないノードのトークンは 401（ロールも返さない）", async () => {
+    const stopped = foldEvents([
+      ...[
+        ev({
+          type: "node.created",
+          payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+        }),
+        ev({ type: "node.stateChanged", payload: { nodeId: "root", event: { type: "start" } } }),
+        ev({
+          type: "node.created",
+          payload: { nodeId: "m1", role: "integrator", parentId: "root", dependsOn: [] },
+        }),
+        ev({ type: "node.stateChanged", payload: { nodeId: "m1", event: { type: "start" } } }),
+        ev({
+          type: "node.created",
+          payload: { nodeId: "a", role: "implement", parentId: "m1", dependsOn: [] },
+        }),
+        ev({ type: "node.stateChanged", payload: { nodeId: "a", event: { type: "start" } } }),
+        ev({
+          type: "node.stateChanged",
+          payload: { nodeId: "a", event: { type: "stop", mode: "immediate" } },
+        }),
+        ev({
+          type: "node.stateChanged",
+          payload: { nodeId: "a", event: { type: "confirmStopped" } },
+        }),
+      ],
+    ]);
+    if (!stopped.ok) throw new Error(stopped.error.code);
+    const r = await start(undefined, { state: stopped.value });
+    const res = await get(r, bearer(r.tokens.a));
+    expect(res.status).toBe(401);
+    expect(res.json.value).toBeUndefined();
+    // 人間と、動作中のノードは通る
+    expect((await get(r, bearer(r.tokens.m1))).status).toBe(200);
+    expect((await get(r, bearer(r.tokens.human))).status).toBe(200);
+  });
+
+  it("失効したトークンは 401", async () => {
+    const credentials = createCredentialStore({ humanToken: HUMAN });
+    const server = createApiServer({ credentials, getState: state, handlers: {} });
+    const { url } = await server.listen(0);
+    try {
+      const token = credentials.issueNodeToken("m1", "integrator");
+      const ok1 = await fetch(`${url}/v1/whoami`, { headers: bearer(token) });
+      expect(ok1.status).toBe(200);
+      credentials.revokeNode("m1");
+      const res = await fetch(`${url}/v1/whoami`, { headers: bearer(token) });
+      expect(res.status).toBe(401);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("GET だけ（POST・HEAD などは 405、allow: GET）", async () => {
+    const r = await start();
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      const res = await fetch(`${r.url}/v1/whoami`, {
+        method,
+        headers: { ...bearer(r.tokens.m1), "content-type": "application/json" },
+        ...(method === "POST" || method === "PUT" ? { body: "{}" } : {}),
+      });
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow")).toBe("GET");
+    }
+  });
+
+  it("Host・Origin の検査は、/v1/request と同じ", async () => {
+    const r = await start();
+    const raw = (headers: Record<string, string>) =>
+      new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port: r.port,
+            path: "/v1/whoami",
+            method: "GET",
+            headers: { ...bearer(r.tokens.m1), ...headers },
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    expect(await raw({ host: "evil.example.com" })).toBe(403);
+    expect(await raw({ host: `127.0.0.1:${r.port}`, origin: "https://evil.example.com" })).toBe(
+      403,
+    );
+    expect(await raw({ host: `127.0.0.1:${r.port}`, origin: `http://127.0.0.1:${r.port}` })).toBe(
+      200,
+    );
+    expect(await raw({ host: `localhost:${r.port}` })).toBe(200);
+  });
+});
