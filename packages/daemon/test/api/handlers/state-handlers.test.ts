@@ -330,7 +330,7 @@ describe("decision.answer（人間の回答。一本化）", () => {
   });
 });
 
-describe("report.done の根拠（暫定: 1 件以上必須。基準ごとの網羅の確認は、契約の拡張〔acceptanceCriteria〕の後）", () => {
+describe("report.done の根拠（1 件以上必須）", () => {
   it("根拠が空の完了報告は、何も書かずに失敗する（evidenceRequired）", async () => {
     const r = rig();
     const before = r.state().lastSeq;
@@ -339,6 +339,116 @@ describe("report.done の根拠（暫定: 1 件以上必須。基準ごとの網
     expect(res.error?.code).toBe("evidenceRequired");
     expect(r.state().lastSeq).toBe(before);
     expect(stateOf(r.state(), "a")).toBe("running");
+  });
+});
+
+describe("report.done の基準ごとの網羅（ブリーフを持つノード）", () => {
+  const withBrief = () => {
+    const r = rig();
+    r.log.append({
+      requestId: "seed-brief",
+      actor: { system: true },
+      body: {
+        type: "node.created",
+        payload: {
+          nodeId: "c",
+          role: "implement",
+          parentId: "m1",
+          dependsOn: [],
+          objective: "目的",
+          acceptanceCriteria: ["X が通る", "Y が通る"],
+          scope: { writableLocations: ["/wt/c"], forbiddenLocations: [], allowedCommands: [] },
+        },
+      },
+    });
+    r.log.append({
+      requestId: "seed-brief-start",
+      actor: { system: true },
+      body: { type: "node.stateChanged", payload: { nodeId: "c", event: { type: "start" } } },
+    });
+    return r;
+  };
+  const C = { role: "child", nodeId: "c" } as const;
+  it("受け入れ基準の一部に根拠がなければ、何も書かずに失敗し、足りない基準を示す", async () => {
+    const r = withBrief();
+    const before = r.state().lastSeq;
+    const res = await r.call(
+      "report.done",
+      r.req("report.done", { evidence: [{ criterion: "X が通る", evidence: "t1" }] }, C),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("evidenceRequired");
+    expect(res.error?.cause).toContain("Y が通る");
+    expect(r.state().lastSeq).toBe(before);
+  });
+  it("基準の照合は、NFC 正規化と前後の空白の除去をしてから行う", async () => {
+    const r = withBrief();
+    const res = await r.call(
+      "report.done",
+      r.req(
+        "report.done",
+        {
+          evidence: [
+            { criterion: "  X が通る\n", evidence: "t1" },
+            { criterion: "Y が通る ", evidence: "t2" },
+          ],
+        },
+        C,
+      ),
+    );
+    expect(res.ok).toBe(true);
+  });
+  it("根拠の本文が空白だけのものは、何も書かずに拒否する", async () => {
+    const r = withBrief();
+    const before = r.state().lastSeq;
+    const res = await r.call(
+      "report.done",
+      r.req(
+        "report.done",
+        {
+          evidence: [
+            { criterion: "X が通る", evidence: "t1" },
+            { criterion: "Y が通る", evidence: "   " },
+          ],
+        },
+        C,
+      ),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("evidenceRequired");
+    expect(r.state().lastSeq).toBe(before);
+  });
+  it("すべての基準に根拠があれば受け付ける", async () => {
+    const r = withBrief();
+    const res = await r.call(
+      "report.done",
+      r.req(
+        "report.done",
+        {
+          evidence: [
+            { criterion: "X が通る", evidence: "t1" },
+            { criterion: "Y が通る", evidence: "t2" },
+          ],
+        },
+        C,
+      ),
+    );
+    expect(res.ok).toBe(true);
+    expect(stateOf(r.state(), "c")).toBe("done");
+  });
+});
+
+describe("node.review の feedback", () => {
+  it("差し戻しの理由は、追加指示（node.instructed）として記録する（再開した子に届く）", async () => {
+    const r = rig();
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A));
+    await r.call(
+      "node.review",
+      r.req("node.review", { nodeId: "a", verdict: "reject", feedback: "テストを足して" }, M1),
+    );
+    expect(r.state().instructions.map((i) => [i.nodeId, i.text])).toEqual([
+      ["a", "テストを足して"],
+    ]);
   });
 });
 
@@ -358,7 +468,7 @@ describe("node.review（完了の判定。受理か差し戻し）", () => {
     await done(r2);
     const rej = await r2.call(
       "node.review",
-      r2.req("node.review", { nodeId: "a", verdict: "reject" }, M1),
+      r2.req("node.review", { nodeId: "a", verdict: "reject", feedback: "直して" }, M1),
     );
     expect(rej).toEqual({ ok: true, value: { state: "running" } });
   });

@@ -124,14 +124,26 @@ export function createStateHandlers(deps: StateHandlerDeps) {
 
     "report.done": (req: HandlerRequest<"report.done">): R<"report.done"> => {
       const caller = callerOf(req);
-      // 暫定: 根拠は 1 件以上必須（基準ごとの網羅の確認は、契約の拡張〔acceptanceCriteria〕の後）。
-      if (req.params.evidence.length === 0) {
+      // 根拠は 1 件以上必須。ブリーフ（受け入れ基準）を持つノードは、すべての基準に根拠が要る。
+      const criteria = log.state().nodes.find((n) => n.id === caller)?.acceptanceCriteria ?? [];
+      const norm = (t: string): string => t.normalize("NFC").trim();
+      const usable = req.params.evidence.filter((e) => norm(e.evidence) !== "");
+      const covered = new Set(usable.map((e) => norm(e.criterion)));
+      const missing: string[] = criteria.filter((c) => !covered.has(norm(c)));
+      if (
+        req.params.evidence.length === 0 ||
+        usable.length !== req.params.evidence.length ||
+        missing.length > 0
+      ) {
         return fail(
           "evidenceRequired",
-          "完了報告には、受け入れ基準ごとの根拠（テスト名・実行結果・コミットなど）が 1 件以上要る",
-          "根拠を添えて報告し直す",
+          missing.length > 0
+            ? `完了報告には、すべての受け入れ基準の根拠が要る。根拠がない基準: ${missing.join("、")}`
+            : "完了報告には、受け入れ基準ごとの根拠（テスト名・実行結果・コミットなど）が 1 件以上要る",
+          "基準ごとに根拠（criterion に基準の文言そのまま）を添えて報告し直す",
         );
       }
+
       const reportId = deriveId("report", caller, req.requestId, "report");
       const evidence = req.params.evidence.map((e) => ({ ...e }));
       const bodies: EventBody[] = [
@@ -313,12 +325,30 @@ export function createStateHandlers(deps: StateHandlerDeps) {
           "親の統合ノードに依頼する",
         );
       }
-      const r = appendAtomically(log, clock, req.requestId, { nodeId: caller }, [
+      if (req.params.verdict === "accept" && req.params.feedback !== undefined) {
+        return fail(
+          "notSupported",
+          "受理（accept）の feedback は、記録先がないため、まだ使えない",
+          "feedback を省略して受理する",
+          "伝えたいことは、別に node.send で指示する",
+        );
+      }
+      const bodies: EventBody[] = [
         {
           type: "node.stateChanged",
           payload: { nodeId, event: { type: verdict === "accept" ? "accept" : "reject" } },
         },
-      ]);
+        // 差し戻しの理由は、再開した子への追加指示として記録する。
+        ...(req.params.verdict === "reject"
+          ? [
+              {
+                type: "node.instructed",
+                payload: { nodeId, text: req.params.feedback },
+              } satisfies EventBody,
+            ]
+          : []),
+      ];
+      const r = appendAtomically(log, clock, req.requestId, { nodeId: caller }, bodies);
       if (!r.ok) return r;
       return { ok: true, value: { state: stateOf(r.value.state, nodeId) as NodeState } };
     },

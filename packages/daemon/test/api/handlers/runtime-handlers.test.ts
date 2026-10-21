@@ -122,6 +122,35 @@ describe("node.send（稼働中の子への追加指示）", () => {
     expect(r.adapter?.sent).toEqual([["a", "続けて"]]);
   });
 
+  it("追加指示を node.instructed として記録してから渡す。同じ requestId の再試行は、記録も送信も重複させない", async () => {
+    const r = rig();
+    await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-1");
+    expect(r.state().instructions.map((i) => [i.nodeId, i.text])).toEqual([["a", "続けて"]]);
+    const seq = r.state().lastSeq;
+    const again = await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-1");
+    expect(again).toEqual({ ok: true, value: { status: "queued" } });
+    expect(r.state().lastSeq).toBe(seq);
+    expect(r.adapter?.sent).toEqual([["a", "続けて"]]);
+  });
+
+  it("同じ requestId で内容が違えば requestIdConflict。重複の判定は、状態の検査より前（その後ノードが終わっていても重複は成功）", async () => {
+    const r = rig();
+    await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-2");
+    const conflict = await r.call("node.send", { nodeId: "a", text: "違う内容" }, "s-2");
+    expect(conflict.error?.code).toBe("requestIdConflict");
+    r.ev("a", { type: "reportDone" });
+    const again = await r.call("node.send", { nodeId: "a", text: "続けて" }, "s-2");
+    expect(again).toEqual({ ok: true, value: { status: "queued" } });
+    expect(r.adapter?.sent).toEqual([["a", "続けて"]]);
+  });
+
+  it("動作中でないノードには、何も記録しない", async () => {
+    const r = rig();
+    const seq = r.state().lastSeq;
+    await r.call("node.send", { nodeId: "p", text: "x" });
+    expect(r.state().lastSeq).toBe(seq);
+  });
+
   it("動作中でないノード（pending・done・停止後）は、アダプタを呼ばずに失敗する（notActive）", async () => {
     const r = rig();
     const res = await r.call("node.send", { nodeId: "p", text: "x" });
@@ -152,6 +181,29 @@ describe("node.stop（停止要求の記録 → アダプタの 2 段階停止�
     expect(req).toMatchObject({ nodeId: "a", kind: "stop", mode: "graceful" });
     await flush();
     expect(r.adapter?.stops).toEqual([["a", { mode: "graceful", stopSeq: req?.seq }]]);
+  });
+
+  it("graceMs は停止要求に記録し、アダプタへ渡す。即時停止には付けない", async () => {
+    const r = rig();
+    await r.call("node.stop", { nodeId: "a", mode: "graceful", graceMs: 5000 });
+    const req = r.state().stopRequests.at(-1);
+    expect(req?.graceMs).toBe(5000);
+    await flush();
+    expect(r.adapter?.stops).toEqual([
+      ["a", { mode: "graceful", graceMs: 5000, stopSeq: req?.seq }],
+    ]);
+  });
+
+  it("graceMs が効かない停止（すでに停止中・起動前の取り消し）は、何も書かずに拒否する", async () => {
+    const r = rig();
+    await r.call("node.stop", { nodeId: "a", mode: "graceful" });
+    const seq = r.state().lastSeq;
+    const again = await r.call("node.stop", { nodeId: "a", mode: "graceful", graceMs: 1000 });
+    expect(again.ok).toBe(false);
+    expect(again.error?.code).toBe("graceMsNotApplicable");
+    const pending = await r.call("node.stop", { nodeId: "p", mode: "graceful", graceMs: 1000 });
+    expect(pending.error?.code).toBe("graceMsNotApplicable");
+    expect(r.state().lastSeq).toBe(seq);
   });
 
   it("即時停止は immediate。猶予中の即時の要求は、同じ停止の stopSeq でアダプタへ（切り替え）", async () => {
