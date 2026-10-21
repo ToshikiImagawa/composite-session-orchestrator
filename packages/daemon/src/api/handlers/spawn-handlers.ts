@@ -26,8 +26,10 @@ import {
   type Failure,
   failure,
   isInSubtree,
+  isPathUnder,
   isScopeSubset,
   type NodeRecord,
+  normalizePath,
   type OperationMap,
   type OrchState,
   type Result,
@@ -45,7 +47,7 @@ type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failu
 export interface SpawnPorts {
   /** ノードの作業ツリー（実パス）。アダプタ側を正とする。取得できなければ `undefined`（失敗させる）。 */
   cwdOf(nodeId: string): Promise<string | undefined>;
-  /** 親のブランチから、子の作業ツリーとブランチを作る。同じ `nodeId` なら同じ結果を返す（冪等）。 */
+  /** 親のブランチから、子の作業ツリーとブランチを作る。同じ `nodeId` なら同じ結果を返す（冪等）。絶対パスで、`worktreeRoot` の配下。 */
   provisionWorktree(req: {
     parentId: string;
     nodeId: string;
@@ -55,6 +57,8 @@ export interface SpawnPorts {
     nodeId: string,
     opts: { expectedPath: string },
   ): Promise<Result<undefined, Failure>>;
+  /** daemon の作業ツリー置き場。`provisionWorktree` が返すパスは、この配下でなければならない。 */
+  readonly worktreeRoot: string;
   /** 子に渡す MCP の接続先。 */
   readonly mcpUrl: string;
 }
@@ -74,7 +78,7 @@ export interface SpawnHandlerDeps {
    * 下の `spawn` は失敗させる（根の子を経由した権限の昇格を防ぐ）。
    */
   readonly rootScope?: Scope;
-  /** 応答に出さない原因（後始末の失敗など）の記録先。 */
+  /** 応答に出さない原因（後始末の失敗・アダプタの詳細など）の記録先。 */
   readonly onFailure?: (nodeId: string, cause: string) => void;
 }
 
@@ -86,11 +90,22 @@ interface BriefParams {
 }
 
 const LIVE = new Set(["running", "waiting"]);
+/** 後始末済み・終わった子。同じ requestId の再試行で、成功として返してはならない。 */
+const DEAD = new Set(["stopping", "stopIncomplete", "stopped", "reclaimable", "archived"]);
 
 const instructionOf = (b: BriefParams): string =>
-  [`目的: ${b.objective}`, "受け入れ基準:", ...b.acceptanceCriteria.map((c) => `- ${c}`)].join(
-    "\n",
-  );
+  [
+    `目的: ${b.objective}`,
+    "受け入れ基準:",
+    ...b.acceptanceCriteria.map((c) => `- ${c}`),
+    "範囲:",
+    `- 書き込み可能な場所: ${b.scope.writableLocations.join("、") || "なし"}`,
+    `- 禁止する場所: ${b.scope.forbiddenLocations.join("、") || "なし"}`,
+    `- 許可するコマンド: ${b.scope.allowedCommands.join("、") || "なし"}`,
+    ...(b.dependsOn !== undefined && b.dependsOn.length > 0
+      ? [`依存する先行ノード: ${b.dependsOn.join("、")}`]
+      : []),
+  ].join("\n");
 
 export function createSpawnHandlers(deps: SpawnHandlerDeps) {
   const { log, ports, credentials } = deps;
@@ -103,6 +118,37 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
   };
   const nodeOf = (state: OrchState, id: string): NodeRecord | undefined =>
     state.nodes.find((n) => n.id === id);
+
+  /**
+   * 同じ呼び出し元・同じ requestId の処理を、同時に 1 つだけ走らせる（同じ Promise を共有する）。内容が違えば
+   * `requestIdConflict`。終わったら外す（以降の再試行は、記録を見て判定する）。
+   */
+  const inflight = new Map<
+    string,
+    { fingerprint: string; promise: Promise<Result<unknown, Failure>> }
+  >();
+  function exclusive<T>(
+    key: string,
+    fingerprint: string,
+    run: () => Promise<Result<T, Failure>>,
+  ): Promise<Result<T, Failure>> {
+    const running = inflight.get(key);
+    if (running !== undefined) {
+      if (running.fingerprint !== fingerprint) {
+        return Promise.resolve(
+          fail(
+            "requestIdConflict",
+            "同じ requestId で、処理中の要求と内容が違う",
+            "別の requestId で要求する",
+          ),
+        );
+      }
+      return running.promise as Promise<Result<T, Failure>>;
+    }
+    const promise = run().finally(() => inflight.delete(key));
+    inflight.set(key, { fingerprint, promise });
+    return promise;
+  }
 
   /** 失敗の後始末。冪等で、例外を外へ出さない。 */
   async function cleanup(
@@ -145,6 +191,69 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
     if (!r.ok) note(nodeId, `停止を記録できない: ${r.error.code}: ${r.error.cause}`);
   }
 
+  /** 起動の手順（トークン発行 → adapter.start → start の記録）。失敗したら後始末して、定型の失敗を返す。 */
+  async function startNode(
+    ctx: { requestId: string; caller: string; nodeId: string; worktreePath: string },
+    adapter: RuntimeAdapter,
+    brief: BriefParams,
+    role: NodeRecord["role"],
+  ): Promise<Result<{ nodeId: string }, Failure>> {
+    const { requestId, caller, nodeId, worktreePath } = ctx;
+    const abort = async (code: string, what: string, cause: string) => {
+      note(nodeId, cause);
+      await cleanup(nodeId, requestId, caller, worktreePath);
+      return fail(code, `${what}。後始末した`, "しばらくして、別の requestId でもう一度試す");
+    };
+    let token: string;
+    try {
+      token = credentials.issueNodeToken(nodeId, role === "integrator" ? "integrator" : "child");
+    } catch (e) {
+      return abort(
+        "tokenFailed",
+        "子の認証情報を発行できなかった",
+        `トークンを発行できない: ${String(e)}`,
+      );
+    }
+    try {
+      const started = await adapter.start({
+        nodeId,
+        worktreePath,
+        scope: brief.scope,
+        instruction: instructionOf(brief),
+        mcp: { url: ports.mcpUrl, token },
+      });
+      if (!started.ok) {
+        return abort(
+          "startFailed",
+          "子を起動できなかった",
+          `起動に失敗: ${started.error.code}: ${started.error.cause}`,
+        );
+      }
+    } catch (e) {
+      return abort("startFailed", "子を起動できなかった", `起動が例外: ${String(e)}`);
+    }
+    // 起動に成功してから start を記録する（記録だけが残る経路をなくす）。記録に失敗したら、起動した子を止めて後始末する。
+    const recorded = appendAtomically(log, deps.clock, `${requestId}/start`, { nodeId: caller }, [
+      { type: "node.stateChanged", payload: { nodeId, event: { type: "start" } } },
+    ]);
+    if (!recorded.ok) {
+      try {
+        await adapter.stop(nodeId, { mode: "immediate", stopSeq: log.state().lastSeq });
+      } catch (e) {
+        note(nodeId, `起動した子を止められない: ${String(e)}`);
+      }
+      return abort(
+        "startFailed",
+        "子を起動できなかった",
+        `起動を記録できない: ${recorded.error.code}: ${recorded.error.cause}`,
+      );
+    }
+    return { ok: true, value: { nodeId } };
+  }
+
+  const dependsDone = (state: OrchState, dependsOn: readonly string[]): boolean =>
+    dependsOn.every((d) => COMPLETED_STATES.has(stateOf(state, d) ?? "pending"));
+
   /** spawn・split の共通の本体。 */
   async function create(
     req: { requestId: string; caller: string },
@@ -167,27 +276,43 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
         scope: brief.scope,
       },
     };
-    const startBody: EventBody = {
-      type: "node.stateChanged",
-      payload: { nodeId, event: { type: "start" } },
-    };
 
-    // 再試行: 記録済みなら、同じ内容か（違えば requestIdConflict）だけ確かめて、何もやり直さない。
-    if (alreadyApplied(log.state(), actor, requestId)) {
-      const state = log.state();
-      const depsDone = dependsOn.every((d) => COMPLETED_STATES.has(stateOf(state, d) ?? "pending"));
-      const dup = appendAtomically(
-        log,
-        deps.clock,
-        requestId,
-        actor,
-        depsDone ? [created, startBody] : [created],
-      );
+    const state = log.state();
+    // 再試行: 記録済みなら、同じ内容か（違えば requestIdConflict）を確かめ、ノードの状態で結果を決める。
+    if (alreadyApplied(state, actor, requestId)) {
+      const dup = appendAtomically(log, deps.clock, requestId, actor, [created]);
       if (!dup.ok) return dup;
+      const node = nodeOf(log.state(), nodeId);
+      if (node === undefined || DEAD.has(node.state)) {
+        return fail(
+          "spawnFailedEarlier",
+          "この requestId の生成は、先に失敗して後始末済み（または、すでに停止している）",
+          "別の requestId で作り直す",
+        );
+      }
+      if (node.state === "pending" && dependsDone(log.state(), dependsOn)) {
+        // 記録済み・未起動（起動の前に異常終了した）。起動だけをやり直す。
+        const adapter = deps.adapterFor(parentId);
+        const provisioned = await ports
+          .provisionWorktree({ parentId, nodeId })
+          .catch(() => undefined);
+        if (adapter === undefined || provisioned === undefined || !provisioned.ok) {
+          return fail(
+            "provisionFailed",
+            "作業ツリーを確認できなかった",
+            "しばらくして、もう一度試す",
+          );
+        }
+        return startNode(
+          { requestId, caller, nodeId, worktreePath: provisioned.value.worktreePath },
+          adapter,
+          brief,
+          role,
+        );
+      }
       return { ok: true, value: { nodeId } };
     }
 
-    const state = log.state();
     const parent = nodeOf(state, parentId);
     if (parent === undefined) return fail("notFound", "親のノードが見つからない", "ID を確認する");
     if (!isInSubtree(state.nodes, caller, parentId)) {
@@ -231,6 +356,30 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
       );
     }
 
+    // 親の範囲に収まるか（作業ツリーを作る前に検査する。相対パスは、親の作業ツリー基準で子も親も比べる）。
+    const parentScope = effectiveScope(state, parentId) ?? deps.rootScope;
+    if (parentScope === undefined) {
+      return fail(
+        "rootScopeUnconfigured",
+        `親 ${parentId} にブリーフがなく、根の範囲の設定（許可リスト）もない。子の権限を決められない`,
+        "daemon の設定に、根の範囲（許可する場所とコマンド）を書く",
+      );
+    }
+    if (deps.rootScope === parentScope && validateScope(parentScope, parentCwd).length > 0) {
+      return fail(
+        "rootScopeInvalid",
+        "daemon の設定の根の範囲が、根の作業ツリーの規則を満たさない",
+        "設定の根の範囲を、根の作業ツリーの内側の場所に直す",
+      );
+    }
+    if (!isScopeSubset(brief.scope, parentScope, { child: parentCwd, parent: parentCwd })) {
+      return fail(
+        "scopeNotSubset",
+        "子の範囲が、親の範囲に収まらない（コマンド・書き込み可能な場所・禁止の場所）",
+        "親の範囲の内側に絞って指定し直す",
+      );
+    }
+
     // 作業ツリーを作る（以降の失敗は、片付ける）。
     let provisioned: Result<{ worktreePath: string }, Failure>;
     try {
@@ -244,6 +393,17 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
       return fail("provisionFailed", "作業ツリーを作れなかった", "しばらくして、もう一度試す");
     }
     const worktreePath = provisioned.value.worktreePath;
+    // ポートが返したパスを信用しない: 絶対パスで、置き場の配下であること（外のパスは、消しもしない）。
+    if (
+      typeof worktreePath !== "string" ||
+      !worktreePath.startsWith("/") ||
+      worktreePath.includes("\0") ||
+      !isPathUnder(normalizePath("/", worktreePath), normalizePath("/", ports.worktreeRoot)) ||
+      normalizePath("/", worktreePath) === normalizePath("/", ports.worktreeRoot)
+    ) {
+      note(nodeId, `作業ツリーのパスが置き場の外: ${String(worktreePath)}`);
+      return fail("provisionFailed", "作業ツリーを作れなかった", "しばらくして、もう一度試す");
+    }
     const abort = async (f: { ok: false; error: Failure }) => {
       await cleanup(nodeId, requestId, caller, worktreePath);
       return f;
@@ -259,124 +419,103 @@ export function createSpawnHandlers(deps: SpawnHandlerDeps) {
         ),
       );
     }
-    const parentScope = effectiveScope(state, parentId) ?? deps.rootScope;
-    if (parentScope === undefined) {
-      return abort(
-        fail(
-          "rootScopeUnconfigured",
-          `親 ${parentId} にブリーフがなく、根の範囲の設定（許可リスト）もない。子の権限を決められない`,
-          "daemon の設定に、根の範囲（許可する場所とコマンド）を書く",
-        ),
-      );
-    }
-    if (deps.rootScope === parentScope && validateScope(parentScope, parentCwd).length > 0) {
-      return abort(
-        fail(
-          "rootScopeInvalid",
-          "daemon の設定の根の範囲が、根の作業ツリーの規則を満たさない",
-          "設定の根の範囲を、根の作業ツリーの内側の場所に直す",
-        ),
-      );
-    }
-    if (!isScopeSubset(brief.scope, parentScope, { child: parentCwd, parent: parentCwd })) {
-      return abort(
-        fail(
-          "scopeNotSubset",
-          "子の範囲が、親の範囲に収まらない（コマンド・書き込み可能な場所・禁止の場所）",
-          "親の範囲の内側に絞って指定し直す",
-        ),
-      );
-    }
 
-    // 記録（依存が揃っていれば、続けて start。起動の前に記録するので、再試行で二重に起動しない）。
-    const depsDone = dependsOn.every((d) => COMPLETED_STATES.has(stateOf(state, d) ?? "pending"));
-    const recorded = appendAtomically(
-      log,
-      deps.clock,
-      requestId,
-      actor,
-      depsDone ? [created, startBody] : [created],
-    );
+    // 記録（pending）。起動は、依存が揃っていれば続けて行う。揃っていなければ pending のまま返す。
+    const recorded = appendAtomically(log, deps.clock, requestId, actor, [created]);
     if (!recorded.ok) return abort({ ok: false, error: recorded.error });
-    if (!depsDone) return { ok: true, value: { nodeId } };
-
-    let token: string;
-    try {
-      token = credentials.issueNodeToken(nodeId, role === "integrator" ? "integrator" : "child");
-    } catch (e) {
-      note(nodeId, `トークンを発行できない: ${String(e)}`);
-      return abort(
-        fail("tokenFailed", "子の認証情報を発行できなかった", "しばらくして、もう一度試す"),
-      );
-    }
-    let started: Awaited<ReturnType<RuntimeAdapter["start"]>>;
-    try {
-      started = await adapter.start({
-        nodeId,
-        worktreePath,
-        scope: brief.scope,
-        instruction: instructionOf(brief),
-        mcp: { url: ports.mcpUrl, token },
-      });
-    } catch (e) {
-      note(nodeId, `起動が例外: ${String(e)}`);
-      return abort(fail("startFailed", "子を起動できなかった", "しばらくして、もう一度試す"));
-    }
-    if (!started.ok) return abort({ ok: false, error: started.error });
-    return { ok: true, value: { nodeId } };
+    if (!dependsDone(state, dependsOn)) return { ok: true, value: { nodeId } };
+    return startNode({ requestId, caller, nodeId, worktreePath }, adapter, brief, role);
   }
 
+  const fingerprintOf = (v: unknown): string => JSON.stringify(v);
+
   return {
-    "node.spawn": async (req: HandlerRequest<"node.spawn">): Promise<R<"node.spawn">> => {
+    "node.spawn": (req: HandlerRequest<"node.spawn">): Promise<R<"node.spawn">> => {
       const { parentId, role, ...brief } = req.params;
-      return create(
-        { requestId: req.requestId, caller: req.caller?.nodeId ?? "" },
-        { parentId, role, brief, tag: "spawn" },
+      const caller = req.caller?.nodeId ?? "";
+      return exclusive(`${caller}\0${req.requestId}`, fingerprintOf(req.params), () =>
+        create({ requestId: req.requestId, caller }, { parentId, role, brief, tag: "spawn" }),
       );
     },
 
-    "node.split": async (req: HandlerRequest<"node.split">): Promise<R<"node.split">> => {
+    "node.split": (req: HandlerRequest<"node.split">): Promise<R<"node.split">> => {
       const { nodeId, keep, ...brief } = req.params;
       const caller = req.caller?.nodeId ?? "";
-      const state = log.state();
-      const original = nodeOf(state, nodeId);
-      if (original === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
-      if (
-        nodeId === caller ||
-        !isInSubtree(state.nodes, caller, nodeId) ||
-        original.parentId === null
-      ) {
-        return fail(
-          "forbidden",
-          "対象が、自分の部分木の規則（自分を含まない子孫）を満たさない",
-          "親（統合ノード）に依頼する",
+      return exclusive(`${caller}\0${req.requestId}`, fingerprintOf(req.params), async () => {
+        const state = log.state();
+        const original = nodeOf(state, nodeId);
+        if (original === undefined)
+          return fail("notFound", "ノードが見つからない", "ID を確認する");
+        if (
+          nodeId === caller ||
+          !isInSubtree(state.nodes, caller, nodeId) ||
+          original.parentId === null
+        ) {
+          return fail(
+            "forbidden",
+            "対象が、自分の部分木の規則（自分を含まない子孫）を満たさない",
+            "親（統合ノード）に依頼する",
+          );
+        }
+        // 再試行の判定は、元のノードの状態より前（途中で元が止まっていても、同じ結果を返す）。
+        const retry = alreadyApplied(state, { nodeId: caller }, req.requestId);
+        if (!retry && !LIVE.has(original.state)) {
+          return fail(
+            "notActive",
+            `ノード ${nodeId} は ${original.state} で、切り出せない（running・waiting のとき）`,
+            "状態を確認する",
+          );
+        }
+        const made = await create(
+          { requestId: req.requestId, caller },
+          { parentId: original.parentId, role: original.role, brief, tag: "split" },
         );
-      }
-      // 再試行の判定は、元のノードの状態より前（途中で元が止まっていても、同じ結果を返す）。
-      if (!alreadyApplied(state, { nodeId: caller }, req.requestId) && !LIVE.has(original.state)) {
-        return fail(
-          "notActive",
-          `ノード ${nodeId} は ${original.state} で、切り出せない（running・waiting のとき）`,
-          "状態を確認する",
-        );
-      }
-      const made = await create(
-        { requestId: req.requestId, caller },
-        { parentId: original.parentId, role: original.role, brief, tag: "split" },
-      );
-      if (!made.ok) return made;
-      if (keep === "stop") {
-        // 新しい子を起動したあとで、元を止める（止めるのに失敗しても、切り出しは済んでいる。失敗は返す）。
-        const stopped = await deps.stop({
-          requestId: `${req.requestId}/split-stop`,
-          operation: "node.stop",
-          role: "integrator",
-          caller: { nodeId: caller },
-          params: { nodeId, mode: "graceful" },
-        });
-        if (!stopped.ok) return stopped;
-      }
-      return { ok: true, value: { newNodeId: made.value.nodeId } };
+        if (!made.ok) return made;
+        const newNodeId = made.value.nodeId;
+        if (keep === "stop") {
+          // 新しい子を起動したあとで、元を止める。止められなかったら、新しい子の ID を添えて失敗を返す
+          // （同じ requestId の再送で、切り出しはそのまま・止める操作だけをやり直す）。
+          const stopped = await deps.stop({
+            requestId: `${req.requestId}/split-stop`,
+            operation: "node.stop",
+            role: "integrator",
+            caller: { nodeId: caller },
+            params: { nodeId, mode: "graceful" },
+          });
+          if (!stopped.ok) {
+            note(nodeId, `元のノードを止められない: ${stopped.error.code}: ${stopped.error.cause}`);
+            return fail(
+              "splitStopFailed",
+              `切り出しは済んだ（新しいノード: ${newNodeId}）が、元のノード ${nodeId} を止められなかった`,
+              "同じ要求をもう一度送ると、止める操作だけをやり直す",
+              "node.stop で元のノードを止める",
+            );
+          }
+        } else {
+          // mainline: 元のノードは続ける。切り出した分を外して mainline に戻るよう、指示を記録して届ける。
+          const text = `作業の一部を新しいノード ${newNodeId} に切り出した。あなたは、残りの作業（mainline）に戻って続けてほしい`;
+          const mainlineId = `${req.requestId}/split-mainline`;
+          const sentBefore = alreadyApplied(log.state(), { nodeId: caller }, mainlineId);
+          const sent = appendAtomically(log, deps.clock, mainlineId, { nodeId: caller }, [
+            { type: "node.instructed", payload: { nodeId, text } },
+          ]);
+          if (!sent.ok) {
+            note(
+              nodeId,
+              `mainline への復帰の指示を記録できない: ${sent.error.code}: ${sent.error.cause}`,
+            );
+          } else if (!sentBefore) {
+            try {
+              const a = deps.adapterFor(nodeId);
+              const r = a === undefined ? undefined : await a.send(nodeId, text);
+              if (r === undefined || !r.ok) note(nodeId, "mainline への復帰の指示を届けられない");
+            } catch (e) {
+              note(nodeId, `mainline への復帰の指示を届けられない: ${String(e)}`);
+            }
+          }
+        }
+        return { ok: true, value: { newNodeId } };
+      });
     },
   };
 }

@@ -9,6 +9,7 @@ import {
   stateOf,
 } from "@cso/core";
 import { describe, expect, it } from "vitest";
+import { derivedRequestId, deriveId } from "../../../src/api/handlers/context.js";
 import { createSpawnHandlers, type SpawnPorts } from "../../../src/api/handlers/spawn-handlers.js";
 import type { HandlerRequest } from "../../../src/api/server.js";
 import { EventLog } from "../../../src/eventlog.js";
@@ -98,14 +99,17 @@ const rig = (opts: { rootScope?: Scope | null } = {}) => {
     revoked: [] as string[],
     started: [] as StartRequest[],
     stopped: [] as string[],
+    sent: [] as [string, string][],
     failures: [] as string[],
   };
   const flags = {
     startFails: false,
+    stopFails: false,
     issueThrows: false,
     removeFails: false,
     revokeThrows: false,
     provisionFails: false,
+    worktreePath: undefined as string | undefined,
     cwdOfParent: `${WT}/m1` as string | undefined,
   };
   const adapter = {
@@ -120,10 +124,11 @@ const rig = (opts: { rootScope?: Scope | null } = {}) => {
     async start(req: StartRequest): Promise<Result<StartValue, Failure>> {
       calls.started.push(req);
       if (flags.startFails)
-        return { ok: false, error: failure("startFailed", "起動できない", "もう一度試す") };
+        return { ok: false, error: failure("startFailed", "内部の詳細X", "内部の次の操作") };
       return ok({ sessionId: "sess", cwd: req.worktreePath, removedEnv: [] });
     },
-    async send() {
+    async send(id: string, text: string) {
+      calls.sent.push([id, text]);
       return ok({ status: "queued" as const });
     },
     async stop() {
@@ -137,13 +142,14 @@ const rig = (opts: { rootScope?: Scope | null } = {}) => {
       calls.provisioned.push(nodeId);
       if (flags.provisionFails)
         return { ok: false, error: failure("provisionFailed", "作れない", "確認する") };
-      return ok({ worktreePath: `${WT}/${nodeId}` });
+      return ok({ worktreePath: flags.worktreePath ?? `${WT}/${nodeId}` });
     },
     removeWorktree: async (id) => {
       calls.removed.push(id);
       if (flags.removeFails) throw new Error("rm 失敗");
       return ok(undefined);
     },
+    worktreeRoot: WT,
     mcpUrl: "http://127.0.0.1:1/mcp",
   };
   const credentials = {
@@ -166,6 +172,7 @@ const rig = (opts: { rootScope?: Scope | null } = {}) => {
     ...(opts.rootScope === null ? {} : { rootScope: opts.rootScope ?? ROOT_SCOPE }),
     stop: async (req) => {
       calls.stopped.push(req.params.nodeId);
+      if (flags.stopFails) return { ok: false, error: failure("stopFailed", "x", "y") };
       return ok({ state: "stopping" as const });
     },
     onFailure: (_id, cause) => calls.failures.push(cause),
@@ -225,20 +232,20 @@ describe("node.spawn（子の生成と起動）", () => {
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("scopeNotSubset");
     expect(r.s().nodes.map((x) => x.id)).toEqual(["root", "m1", "a", "m2"]);
-    expect(r.calls.removed).toHaveLength(1);
+    expect(r.calls.provisioned).toEqual([]); // 範囲の検査は、作業ツリーを作る前
     expect(r.calls.issued).toEqual([]);
     expect(r.calls.started).toEqual([]);
   });
 
-  it("作業ツリーの外を指す範囲（validateScope）は、片付けて失敗する", async () => {
-    const r = rig();
-    const res = await r.call("node.spawn", {
-      parentId: "m1",
-      ...brief({ scope: { ...CHILD_SCOPE, writableLocations: ["/etc"] } }),
-    });
-    expect(res.ok).toBe(false);
-    expect(r.calls.removed).toHaveLength(1);
-    expect(r.s().nodes).toHaveLength(4);
+  it("ポートが返す作業ツリーのパスが、置き場の外・相対なら、消さずに失敗する", async () => {
+    for (const bad of ["/elsewhere/x", "relative/x", WT]) {
+      const r = rig();
+      r.flags.worktreePath = bad;
+      const res = await r.call("node.spawn", { parentId: "m1", ...brief() });
+      expect(res.error?.code).toBe("provisionFailed");
+      expect(r.calls.removed).toEqual([]);
+      expect(r.s().nodes).toHaveLength(4);
+    }
   });
 
   it("親の作業ツリーを取得できなければ、何もせずに失敗する（安全側）", async () => {
@@ -286,6 +293,8 @@ describe("node.spawn（子の生成と起動）", () => {
     const res = await r.call("node.spawn", { parentId: "m1", ...brief() });
     expect(res.ok).toBe(false);
     expect(res.error?.code).toBe("startFailed");
+    expect(JSON.stringify(res.error)).not.toContain("内部の詳細X");
+    expect(r.calls.failures.join("")).toContain("内部の詳細X");
     const id = r.calls.provisioned[0] as string;
     expect(r.calls.revoked).toEqual([id]);
     expect(r.calls.removed).toEqual([id]);
@@ -318,7 +327,7 @@ describe("node.spawn（子の生成と起動）", () => {
     const none = rig({ rootScope: null });
     const res = await none.call("node.spawn", { parentId: "m2", ...brief() }, "m2");
     expect(res.error?.code).toBe("rootScopeUnconfigured");
-    expect(none.calls.removed).toHaveLength(1);
+    expect(none.calls.provisioned).toEqual([]);
     expect(none.calls.started).toEqual([]);
     const badRoot = rig({ rootScope: { ...ROOT_SCOPE, writableLocations: ["/etc"] } });
     expect(
@@ -347,6 +356,79 @@ describe("node.spawn（子の生成と起動）", () => {
   });
 });
 
+describe("再試行・同時実行・起動の手順", () => {
+  it("起動の指示に、範囲と依存先を含める", async () => {
+    const r = rig();
+    await r.call("node.spawn", { parentId: "m1", ...brief({ dependsOn: ["a"] }) });
+    expect(r.calls.started).toEqual([]); // a が未完了
+    const r2 = rig();
+    await r2.call("node.spawn", { parentId: "m1", ...brief() });
+    const text = r2.calls.started[0]?.instruction ?? "";
+    expect(text).toContain("src/ui");
+    expect(text).toContain("pnpm test");
+  });
+
+  it("後始末済みの生成を、同じ requestId で再試行しても、成功として返さない（spawnFailedEarlier）", async () => {
+    const r = rig();
+    r.flags.startFails = true;
+    const first = await r.call("node.spawn", { parentId: "m1", ...brief() }, "m1", "sp-f");
+    expect(first.ok).toBe(false);
+    r.flags.startFails = false;
+    const again = await r.call("node.spawn", { parentId: "m1", ...brief() }, "m1", "sp-f");
+    expect(again.ok).toBe(false);
+    expect(again.error?.code).toBe("spawnFailedEarlier");
+    expect(r.calls.started).toHaveLength(1);
+  });
+
+  it("同時に同じ requestId が 2 つ来ても、作業ツリー・トークン・起動は 1 回で、後始末は走らない", async () => {
+    const r = rig();
+    const [a, b] = await Promise.all([
+      r.call("node.spawn", { parentId: "m1", ...brief() }, "m1", "sp-c"),
+      r.call("node.spawn", { parentId: "m1", ...brief() }, "m1", "sp-c"),
+    ]);
+    expect(a).toEqual(b);
+    expect(a.ok).toBe(true);
+    expect(r.calls.provisioned).toHaveLength(1);
+    expect(r.calls.issued).toHaveLength(1);
+    expect(r.calls.started).toHaveLength(1);
+    expect(r.calls.removed).toEqual([]);
+    expect(r.calls.revoked).toEqual([]);
+    expect(stateOf(r.s(), a.value.nodeId)).toBe("running");
+    const [x, y] = await Promise.all([
+      r.call("node.spawn", { parentId: "m1", ...brief() }, "m1", "sp-d"),
+      r.call("node.spawn", { parentId: "m1", ...brief({ objective: "別" }) }, "m1", "sp-d"),
+    ]);
+    expect([x.error?.code, y.error?.code]).toContain("requestIdConflict");
+    expect(r.calls.removed).toEqual([]);
+  });
+
+  it("記録済み・未起動（起動の前に異常終了した）の再試行は、起動だけをやり直す", async () => {
+    const r = rig();
+    const nodeId = deriveId("node", "m1", "sp-r", "spawn");
+    r.log.append({
+      requestId: derivedRequestId({ nodeId: "m1" }, "sp-r", 0),
+      actor: { nodeId: "m1" },
+      body: {
+        type: "node.created",
+        payload: {
+          nodeId,
+          role: "implement",
+          parentId: "m1",
+          dependsOn: [],
+          objective: "UI を直す",
+          acceptanceCriteria: ["テストが通る"],
+          scope: CHILD_SCOPE,
+        },
+      },
+    });
+    expect(stateOf(r.s(), nodeId)).toBe("pending");
+    const res = await r.call("node.spawn", { parentId: "m1", ...brief() }, "m1", "sp-r");
+    expect(res).toEqual({ ok: true, value: { nodeId } });
+    expect(stateOf(r.s(), nodeId)).toBe("running");
+    expect(r.calls.started).toHaveLength(1);
+  });
+});
+
 describe("node.split（切り出し）", () => {
   it("元のノードと同じ役割・親で新しい子を作る。mainline は元を止めない", async () => {
     const r = rig();
@@ -360,6 +442,36 @@ describe("node.split（切り出し）", () => {
     expect(rec).toMatchObject({ parentId: "m1", role: "implement" });
     expect(stateOf(r.s(), res.value.newNodeId)).toBe("running");
     expect(r.calls.stopped).toEqual([]);
+    // 元のノードに、mainline へ復帰する指示を記録して届ける
+    expect(r.s().instructions.at(-1)).toMatchObject({ nodeId: "a" });
+    expect(r.calls.sent).toHaveLength(1);
+    expect(r.calls.sent[0]?.[0]).toBe("a");
+  });
+
+  it("元を止められなかったら、新しいノードの ID を添えて失敗し、再送で止める操作だけをやり直す", async () => {
+    const r = rig();
+    r.flags.stopFails = true;
+    const first = await r.call(
+      "node.split",
+      { nodeId: "a", keep: "stop", ...brief({ role: undefined }) },
+      "m1",
+      "spl-1",
+    );
+    expect(first.ok).toBe(false);
+    expect(first.error?.code).toBe("splitStopFailed");
+    const created = r.s().nodes.filter((x) => x.parentId === "m1" && x.id !== "a");
+    expect(created).toHaveLength(1);
+    expect(first.error?.cause).toContain(created[0]?.id as string);
+    r.flags.stopFails = false;
+    const retry = await r.call(
+      "node.split",
+      { nodeId: "a", keep: "stop", ...brief({ role: undefined }) },
+      "m1",
+      "spl-1",
+    );
+    expect(retry.ok).toBe(true);
+    expect(r.s().nodes.filter((x) => x.parentId === "m1" && x.id !== "a")).toHaveLength(1);
+    expect(r.calls.started).toHaveLength(1);
   });
 
   it("keep が stop なら、新しい子の起動のあとで元のノードを止める", async () => {
