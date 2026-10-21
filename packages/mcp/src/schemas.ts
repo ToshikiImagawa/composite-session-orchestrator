@@ -51,21 +51,7 @@ const briefShape = {
 const withBrief = <T extends z.ZodRawShape>(shape: T) =>
   z.strictObject({ ...shape, ...briefShape }).superRefine((o, ctx) => {
     const problem = briefProblem(o);
-    if (problem !== undefined) {
-      ctx.addIssue({ code: "custom", message: problem });
-      return;
-    }
-    const s = (o as Record<string, unknown>).scope as {
-      writableLocations: string[];
-      forbiddenLocations: string[];
-    };
-    if ([...s.writableLocations, ...s.forbiddenLocations].some((p) => p.startsWith("/"))) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["scope"],
-        message: "場所は作業ツリーの内側の相対パスで指定する（絶対パスは使えない）",
-      });
-    }
+    if (problem !== undefined) ctx.addIssue({ code: "custom", message: problem });
   });
 
 const nodeIdOnly = z.strictObject({ nodeId: id });
@@ -147,9 +133,25 @@ const SCHEMAS: Readonly<Record<McpOperation, z.ZodType>> = {
 
 export interface ParsedToolInput {
   readonly operation: DaemonOperation;
-  /** 検証済みの入力（新しいオブジェクト）。 */
-  readonly params: Readonly<Record<string, unknown>>;
+  /** daemon へ送る検証済みの引数。top レベルは新しいオブジェクトで、入れ子の値（ブリーフの scope など）は入力と共有する。 */
+  readonly forward: Readonly<Record<string, unknown>>;
+  /** daemon へは送らず、mcp の応答の整形だけに使う入力（`inbox_fetch` の detail・limit・offset・asOfSeq）。 */
+  readonly view: Readonly<Record<string, unknown>>;
 }
+
+/** `inbox_fetch` の入力のうち、daemon へ送るのは `sinceSeq` だけ。 */
+const FORWARDED: Readonly<Partial<Record<McpOperation, readonly string[]>>> = {
+  "inbox.fetch": ["sinceSeq"],
+};
+
+const CAUSE_MAX = 300;
+const invalid = (cause: string) =>
+  failure(
+    "invalid_argument",
+    cause.length > CAUSE_MAX ? `${cause.slice(0, CAUSE_MAX)}…` : cause,
+    "ツールの説明を読み、引数を直して再度呼ぶ",
+    "未知のキーは受け付けない。引数名を確認する",
+  );
 
 /** ツール入力を検証する。ツールがロールに公開されていなければ、その失敗を返す。例外は出さない。 */
 export function parseToolInput(
@@ -160,32 +162,29 @@ export function parseToolInput(
   const resolved = operationForTool(role, name);
   if (!resolved.ok) return resolved;
   const operation = resolved.value;
-  const schema = Object.hasOwn(SCHEMAS, operation) ? SCHEMAS[operation as McpOperation] : undefined;
-  if (schema === undefined) {
-    return {
-      ok: false,
-      error: failure(
-        "invalid_argument",
-        `ツール ${name} の入力の定義がない`,
-        "tools/list を確認する",
-      ),
-    };
+  try {
+    const schema = Object.hasOwn(SCHEMAS, operation)
+      ? SCHEMAS[operation as McpOperation]
+      : undefined;
+    if (schema === undefined) {
+      return { ok: false, error: invalid(`ツール ${name} の入力の定義がない`) };
+    }
+    const parsed = schema.safeParse(input);
+    if (!parsed.success) {
+      const cause = parsed.error.issues
+        .slice(0, 5)
+        .map((i) => `${i.path.length > 0 ? i.path.join(".") : "(入力)"}: ${i.message}`)
+        .join("; ");
+      return { ok: false, error: invalid(`${name} の入力が不正: ${cause}`) };
+    }
+    const data = parsed.data as Record<string, unknown>;
+    const keys = FORWARDED[operation as McpOperation];
+    if (keys === undefined) return ok({ operation, forward: data, view: {} });
+    const forward: Record<string, unknown> = {};
+    const view: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(data)) (keys.includes(k) ? forward : view)[k] = v;
+    return ok({ operation, forward, view });
+  } catch {
+    return { ok: false, error: invalid(`${name} の入力を検査できない`) };
   }
-  const parsed = schema.safeParse(input);
-  if (!parsed.success) {
-    const cause = parsed.error.issues
-      .slice(0, 5)
-      .map((i) => `${i.path.length > 0 ? i.path.join(".") : "(入力)"}: ${i.message}`)
-      .join("; ");
-    return {
-      ok: false,
-      error: failure(
-        "invalid_argument",
-        `${name} の入力が不正: ${cause}`,
-        "ツールの説明を読み、引数を直して再度呼ぶ",
-        "未知のキーは受け付けない。引数名を確認する",
-      ),
-    };
-  }
-  return ok({ operation, params: parsed.data as Record<string, unknown> });
 }

@@ -7,6 +7,7 @@ import {
   ROLE_OPERATIONS,
 } from "@cso/core";
 import { describe, expect, it } from "vitest";
+import { validateParams } from "../../daemon/src/api/validate.js";
 import { MCP_ROLES, parseToolInput, toolName } from "../src/index.js";
 
 const brief = {
@@ -107,7 +108,7 @@ describe("ツール入力の検証（zod）", () => {
       expect(ctl.ok).toBe(false);
     });
 
-    it("ブリーフは briefProblem と同じ判定。絶対パスも拒否", () => {
+    it("ブリーフは briefProblem と同じ判定（絶対パスも briefProblem に従う）", () => {
       const cases = [
         { ...brief, objective: "" },
         { ...brief, acceptanceCriteria: [] },
@@ -119,10 +120,6 @@ describe("ツール入力の検証（zod）", () => {
         const r = run("integrator", "node_spawn", { parentId: "root", role: "child", ...b });
         expect(r.ok).toBe(briefProblem(b) === undefined);
       }
-      const abs = { ...brief, scope: { ...brief.scope, writableLocations: ["/etc"] } };
-      expect(run("integrator", "node_spawn", { parentId: "root", role: "child", ...abs }).ok).toBe(
-        false,
-      );
     });
 
     it("pauseNodeIds は pauseNodeIdsProblem と同じ判定", () => {
@@ -211,10 +208,60 @@ describe("ツール入力の検証（zod）", () => {
     });
   });
 
-  it("成功時の値は新しいオブジェクト（入力と別物）", () => {
+  it("疎な配列など、検査中に例外になりうる入力でも例外を出さず invalid_argument を返す", () => {
+    const sparse = new Array(3);
+    const evil = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("boom");
+        },
+        ownKeys() {
+          throw new Error("boom");
+        },
+      },
+    );
+    for (const input of [{ evidence: sparse }, { options: sparse, question: "q" }, evil]) {
+      for (const [role, name] of [
+        ["child", "report_done"],
+        ["child", "report_decision"],
+        ["child", "report_progress"],
+      ] as const) {
+        const r = run(role, name, input);
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.error.code).toBe("invalid_argument");
+      }
+    }
+  });
+
+  it("cause は 300 文字程度に切り詰める", () => {
+    const evidence = Array.from({ length: 5 }, () => ({ criterion: "", evidence: "" }));
+    const r = run("child", "report_done", { evidence });
+    expect(!r.ok && r.error.cause.length).toBeLessThanOrEqual(301);
+  });
+
+  it("inbox_fetch は daemon へ送る分（forward）と表示用（view）に分かれる", () => {
+    const r = run("integrator", "inbox_fetch", VALID.inbox_fetch);
+    expect(r.ok && r.value.forward).toEqual({ sinceSeq: 3 });
+    expect(r.ok && r.value.view).toEqual({ detail: "full", limit: 10, offset: 0, asOfSeq: 9 });
+    const e = run("integrator", "inbox_fetch", {});
+    expect(e.ok && e.value.forward).toEqual({});
+  });
+
+  it("forward は daemon の validateParams を通る（全ツール）", () => {
+    for (const role of MCP_ROLES) {
+      for (const op of ROLE_OPERATIONS[role]) {
+        const r = run(role, toolName(op), VALID[toolName(op)]);
+        if (!r.ok) throw new Error("unreachable");
+        expect(validateParams(op, r.value.forward).ok, op).toBe(true);
+      }
+    }
+  });
+
+  it("成功時の値は新しいオブジェクト（top レベルは入力と別物）", () => {
     const input = { text: "x" };
     const r = run("child", "report_progress", input);
-    expect(r.ok && r.value.params).toEqual(input);
-    expect(r.ok && r.value.params).not.toBe(input);
+    expect(r.ok && r.value.forward).toEqual(input);
+    expect(r.ok && r.value.forward).not.toBe(input);
   });
 });
