@@ -74,8 +74,10 @@ export type FullEntry = InboxItem & WithNext;
 
 export interface InboxPage {
   readonly entries: readonly (BriefEntry | FullEntry)[];
-  /** `asOfSeq` 以下の項目の総数。 */
+  /** `asOfSeq` 以下の項目の総数（除外した項目は含まない）。 */
   readonly total: number;
+  /** 形が不正で除外した項目の数。0 でなければ、保存データの不備として管理者に知らせる。 */
+  readonly excluded: number;
   /** この応答が見ている最後の `seq`。続きの取得（`asOfSeq`）と次回の差分取得（`sinceSeq`）に渡す。 */
   readonly asOfSeq: number;
   /** 続きがあるときだけ入る。次回の `offset` に渡す。 */
@@ -95,30 +97,38 @@ const isRecord = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
 const isNonNegInt = (x: unknown): x is number => Number.isInteger(x) && (x as number) >= 0;
 
-/** daemon から受け取った項目の形を検査する（境界での実行時検査。値の細かい検証は zod の導入時に拡張する）。 */
+/**
+ * daemon から受け取った項目の形を検査する（境界での実行時検査。値の細かい検証は zod の導入時に拡張する）。
+ * `summary`・`at` は検査しない: `summary` は core が書き込み時に長さと文字を保証し、`at` は書き込み時に
+ * ISO 8601 UTC を保証する（不正でも `sortInbox` が時刻の最後に置くので、整列は壊れない）。
+ */
 function itemProblem(x: unknown): string | undefined {
   if (!isRecord(x)) return "項目がオブジェクトでない";
   if (!isSafeId(x.id) || !isSafeId(x.nodeId)) return "id・nodeId が識別子の形式でない";
   if (!isNonNegInt(x.seq)) return `seq が不正: ${String(x.id)}`;
-  if (typeof x.at !== "string") return `at が文字列でない: ${x.id}`;
   if (!(INBOX_KINDS as readonly unknown[]).includes(x.kind)) return `kind が不正: ${x.id}`;
   if (!Array.isArray(x.dependsOn) || !x.dependsOn.every(isSafeId)) {
     return `dependsOn が識別子の配列でない: ${x.id}`;
   }
-  if (x.summary !== undefined && typeof x.summary !== "string") return `summary が不正: ${x.id}`;
   if (x.ref !== undefined && !isSafeId(x.ref)) return `ref が識別子の形式でない: ${x.id}`;
   return undefined;
 }
+
+/** 保存データの不備（受信箱の項目が配列でない）。呼び出し側の誤りではないので `invalid_argument` にしない。 */
+const internalData = (cause: string) => ({
+  ok: false as const,
+  error: failure(
+    "internal_data",
+    cause,
+    "管理者（人間）にこの失敗を知らせる",
+    "daemon のログとイベントログを確認する",
+  ),
+});
 
 export function renderInbox(
   items: readonly InboxItem[],
   opts: RenderOptions = {},
 ): Result<InboxPage> {
-  if (!Array.isArray(items)) return invalid("items が配列でない");
-  for (const it of items) {
-    const problem = itemProblem(it);
-    if (problem !== undefined) return invalid(`受信箱の項目が不正: ${problem}`);
-  }
   if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
     return invalid("opts がオブジェクトでない");
   }
@@ -131,10 +141,14 @@ export function renderInbox(
   if (opts.asOfSeq !== undefined && !isNonNegInt(opts.asOfSeq)) {
     return invalid(`asOfSeq が不正: ${String(opts.asOfSeq)}`);
   }
+  if (!Array.isArray(items)) return internalData("daemon の受信箱の項目が配列でない");
+  // 不正な項目だけを除外し、受信箱全体は失敗にしない。
+  const valid = items.filter((it) => itemProblem(it) === undefined);
+  const excluded = items.length - valid.length;
 
-  const asOfSeq = opts.asOfSeq ?? items.reduce((m, it) => Math.max(m, it.seq), 0);
+  const asOfSeq = opts.asOfSeq ?? valid.reduce((m, it) => Math.max(m, it.seq), 0);
   const sorted = sortInbox(
-    items.filter((it) => it.seq <= asOfSeq),
+    valid.filter((it) => it.seq <= asOfSeq),
     opts.nodeDeps,
   );
   const entries = sorted.slice(offset, offset + limit).map((it) => {
@@ -153,6 +167,7 @@ export function renderInbox(
   return ok({
     entries,
     total: sorted.length,
+    excluded,
     asOfSeq,
     ...(end < sorted.length ? { nextOffset: end } : {}),
   });

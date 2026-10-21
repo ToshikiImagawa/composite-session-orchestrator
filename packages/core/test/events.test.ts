@@ -1125,3 +1125,64 @@ describe("状態の壊れた値（スナップショットなど）で例外に�
     expect(initialState().stopRequests).toEqual([]);
   });
 });
+
+describe("識別子は isSafeId の形式（書き込み側の検査）", () => {
+  const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+  /** 土台のイベントを先に作ってから、検査したいイベントを作る（seq が土台より後になるように）。 */
+  const withBase = (make: () => OrchEvent) => {
+    const b = base();
+    return foldEvents([...b, make()]);
+  };
+
+  it.each([
+    ["nodeId", created("a b", "implement", "root")],
+    ["nodeId（区切り）", created("../x", "implement", "root")],
+    ["parentId", created("c", "implement", "r/x")],
+    ["dependsOn の要素", created("c", "implement", "root", ["a", "x;y"])],
+  ])("node.created の %s が不正なら invalidPayload", (_name, body) => {
+    expect(codeOf(withBase(() => ev(body)))).toBe("invalidPayload");
+  });
+
+  it("node.stateChanged の nodeId が不正なら invalidPayload", () => {
+    expect(codeOf(withBase(() => ev(changed("a b", { type: "start" }))))).toBe("invalidPayload");
+  });
+
+  it.each([
+    ["id", { id: "i d", kind: "info", nodeId: "a" }],
+    ["nodeId", { id: "i1", kind: "info", nodeId: "a b" }],
+    ["ref", { id: "i1", kind: "info", nodeId: "a", ref: "r f" }],
+  ])("inbox.added の %s が不正なら invalidPayload", (_name, payload) => {
+    expect(codeOf(withBase(() => ev({ type: "inbox.added", payload } as EventBody)))).toBe(
+      "invalidPayload",
+    );
+  });
+
+  it("decision.requested の decisionId が不正なら invalidPayload", () => {
+    const body = {
+      type: "decision.requested",
+      payload: { decisionId: "d d", nodeId: "a" },
+    } as EventBody;
+    expect(codeOf(withBase(() => ev(body)))).toBe("invalidPayload");
+  });
+
+  it("report.added の reportId が不正なら invalidPayload", () => {
+    const body = {
+      type: "report.added",
+      payload: { reportId: "r r", nodeId: "a", kind: "progress", text: "t" },
+    } as EventBody;
+    expect(codeOf(withBase(() => ev(body)))).toBe("invalidPayload");
+  });
+
+  it("requestId が isSafeId の形式でなければ invalidRequestId", () => {
+    expect(
+      codeOf(withBase(() => ev(created("c", "implement", "root"), { requestId: "bad id" }))),
+    ).toBe("invalidRequestId");
+  });
+
+  it("isSafeId に合う識別子（. _ : - を含む）は受け付ける", () => {
+    const r = withBase(() =>
+      ev(created("n.1_a:b-c", "implement", "root"), { requestId: "req:1.a" }),
+    );
+    expect(r.ok ? null : `${r.error.code}: ${r.error.cause}`).toBeNull();
+  });
+});

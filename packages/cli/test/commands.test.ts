@@ -277,11 +277,14 @@ describe("formatFailure", () => {
   });
 });
 
+/** -h・--help は使い方の表示になるので、生成から除く（偶然に当たって不安定になるのを防ぐ）。 */
+const notHelp = (a: fc.Arbitrary<string>) => a.filter((x) => x !== "-h" && x !== "--help");
+
 describe("ノード ID の規則は core の isSafeId と一致する（ずれ防止）", () => {
   it("任意の文字列で、reclaim が受け付けるのは isSafeId が真のときだけ", async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.oneof(fc.string(), fc.stringMatching(/^[A-Za-z0-9._:\-/*? ]{0,12}$/)),
+        notHelp(fc.oneof(fc.string(), fc.stringMatching(/^[A-Za-z0-9._:\-/*? ]{0,12}$/))),
         async (id) => {
           const { client, sent } = happy();
           const r = await runCommand(["reclaim", id], deps(client));
@@ -300,7 +303,7 @@ describe("ノード ID の規則は core の isSafeId と一致する（ずれ�
 
   it("--request-id の値にも同じ規則を使う", async () => {
     await fc.assert(
-      fc.asyncProperty(fc.string(), async (rid) => {
+      fc.asyncProperty(notHelp(fc.string()), async (rid) => {
         const { client, sent } = happy();
         const r = await runCommand(["reclaim", "n1", "--request-id", rid], deps(client));
         expect(r.exitCode === 0).toBe(isSafeId(rid));
