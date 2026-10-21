@@ -176,4 +176,39 @@ describe("EventLog.purgeTree（最終削除）", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("実 SQLite でも、木を消し、開き直しても同じ状態になる。消した行はファイルから無くなり、追記は続く", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cso-purge-"));
+    try {
+      const path = join(dir, "e.db");
+      const s = openSqliteStore(path);
+      if (!s.ok) throw new Error(s.error.code);
+      const { log } = setup(s.value);
+      const r = log.purgeTree({
+        requestId: "purge-sql",
+        actor: { human: true },
+        nodeIds: ["c", "t"],
+        marker: marker("root"),
+      });
+      expect(r.ok && r.value.deleted).toBeGreaterThan(0);
+      const state = log.state();
+      s.value.close();
+      const again = openSqliteStore(path);
+      if (!again.ok) throw new Error(again.error.code);
+      const reopened = EventLog.open(again.value, { clock, verifySnapshot: true });
+      expect(reopened.ok && reopened.value.state()).toEqual(state);
+      expect(again.value.readAll().some((row) => row.payload.includes('"nodeId":"c"'))).toBe(false);
+      const next = reopened.ok
+        ? reopened.value.append({
+            requestId: "after",
+            actor: SYS,
+            body: { type: "node.toolDenied", payload: { nodeId: "o", tool: "x" } },
+          })
+        : undefined;
+      expect(next?.ok).toBe(true);
+      again.value.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

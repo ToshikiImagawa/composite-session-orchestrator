@@ -254,4 +254,29 @@ describe("createHandlers の組み立て", () => {
     expect(answered?.ok).toBe(true);
     await vi.waitFor(() => expect(started).toEqual(["p"]));
   });
+
+  it("purge を渡し、ログが purgeTree を持つときだけ、最終削除の操作が有効になる", () => {
+    const purge = {
+      nowMs: () => 0,
+      retentionDays: 90,
+      defaultTombstone: true,
+      buildMarker: () =>
+        ({ type: "node.toolDenied", payload: { nodeId: "x", tool: "t" } }) as never,
+      revokeNode: () => undefined,
+    };
+    const base = open();
+    const simple = {
+      state: () => base.state(),
+      append: base.append.bind(base),
+      appendAll: base.appendAll.bind(base),
+    };
+    const without = createHandlers({ log: simple, clock }, undefined, undefined, undefined, purge);
+    expect(without["node.purge"]).toBeUndefined(); // 簡易なログは purgeTree を持たない
+    const real = open();
+    const withReal = createHandlers({ log: real, clock }, undefined, undefined, undefined, purge);
+    expect(withReal["node.purge"]).toBeTypeOf("function");
+    expect(withReal["node.purgePreview"]).toBeTypeOf("function");
+    const none = createHandlers({ log: real, clock });
+    expect(none["node.purge"]).toBeUndefined();
+  });
 });
