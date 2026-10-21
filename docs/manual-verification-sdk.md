@@ -120,4 +120,6 @@
 
 子の `HOME` は、既定で `<stateDir>/homes/<nodeId>`（0700）に分ける（設定 `childHome: "inherit"` で、daemon の `HOME` を渡す）。
 `childEnvAllow` に、`LD_*`・`NODE_OPTIONS`・`BASH_ENV`・`GIT_SSH_COMMAND` など、子の実行を乗っ取れる名前は指定できない。
-実 SDK で、分けた HOME でも、認証（`ANTHROPIC_*`・`CLAUDE_CODE_OAUTH_TOKEN`）が通り、Write が動くかは、手動確認の項目 16 を、`childHome` の既定のまま再実行して確かめる。
+実 SDK（0.3.292）で、子の `HOME` を空の 0700 のディレクトリに分けて、項目 16 をやり直した（2026-10-21）: 認証は通り（`ready`、約 7 秒で結果）、
+`src/a.txt` への Write は許可されて書けた。範囲の外（`outside.txt`）への Write は、フックが拒否して書かれなかった。分けた HOME には、SDK が
+`.claude`・`.claude.json` を作った（親の設定・資格情報は持ち込まれていない）。`NO_PROXY` に loopback が足されても、接続に影響はなかった。
