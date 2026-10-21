@@ -125,6 +125,24 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("autoPurge を有効にするときは、retentionDays が 7 未満なら拒否する（省略した既定の 90 や、7 以上は可。無効なら制限しない）", () => {
+    for (const days of [0, 1, 6]) {
+      bad({ retentionDays: days, autoPurge: { enabled: true } }, "retentionDays を 7 以上");
+    }
+    for (const days of [7, 90]) {
+      const ok1 = parseConfig(
+        JSON.stringify({ ...base, retentionDays: days, autoPurge: { enabled: true } }),
+      );
+      expect(ok1.ok, String(days)).toBe(true);
+    }
+    expect(parseConfig(JSON.stringify({ ...base, autoPurge: { enabled: true } })).ok).toBe(true);
+    const off = parseConfig(
+      JSON.stringify({ ...base, retentionDays: 0, autoPurge: { enabled: false } }),
+    );
+    expect(off.ok).toBe(true);
+    expect(parseConfig(JSON.stringify({ ...base, retentionDays: 0 })).ok).toBe(true);
+  });
+
   it("retentionDays（最終削除の保持期間）は 0 以上の整数（既定は 90）。purgeTombstone は真偽値（任意）", () => {
     const d = parseConfig(JSON.stringify(base));
     expect(d.ok && d.value.retentionDays).toBeUndefined();

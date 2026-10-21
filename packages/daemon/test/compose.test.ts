@@ -493,7 +493,8 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     mkdirSync(r.config.stateDir, { mode: 0o700 });
     const store = openSqliteStore(join(r.config.stateDir, "state.db"));
     if (!store.ok) throw new Error("store");
-    const log = EventLog.open(store.value, { clock: () => "2026-01-01T00:00:00Z" });
+    let at = "2026-01-01T00:00:00Z";
+    const log = EventLog.open(store.value, { clock: () => at });
     if (!log.ok) throw new Error("log");
     let n = 0;
     const add = (body: Parameters<typeof log.value.append>[0]["body"]) => {
@@ -516,6 +517,9 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
       ev(x, { type: "markReclaimable", discarded: false });
       ev(x, { type: "archive" });
     }
+    // 直近の記録（時計の異常の検知: ログの最後の記録が、現在に近いこと）
+    at = "2026-05-31T23:30:00Z";
+    add({ type: "node.toolDenied", payload: { nodeId: "root", tool: "x" } });
     store.value.close();
   };
 

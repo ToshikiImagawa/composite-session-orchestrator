@@ -51,7 +51,9 @@ export interface DaemonConfig {
   /**
    * 自動の最終削除。省略すると、オフ。**有効にすると、保持期間（`retentionDays`）を過ぎた、アーカイブ済みの最上位の木が、
    * 取り返しのつかない形で（ログの行を物理削除して）自動的に消える。** 人間のコマンド（`cso purge`）と同じ検査を通る。
-   * 最初の実行は 1 周期後。`intervalMinutes` は 1〜1440（既定 60）、`maxTreesPerRun` は 1 回の実行で消す木の数の上限で 1〜100（既定 5）。
+   * 最初の実行は 1 周期後。`intervalMinutes` は 1〜1440（既定 60）、`maxTreesPerRun` は 1 回の実行で消す木の数の上限で 1〜100（既定 2）。
+   * 有効にするときは、`retentionDays` を 7 以上にする（省略した既定の 90 は可）。根のノードは対象にならない（人間の `node.purge` だけ）。
+   * 時計が大きく動いたと疑われるとき（ログの最後の記録より前、または保持期間の半分以上先）は、その回の実行を止める。
    */
   readonly autoPurge?: {
     readonly enabled: boolean;
@@ -165,6 +167,16 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       raw.retentionDays > 36500)
   ) {
     return bad("retentionDays は 0〜36500 の整数");
+  }
+  if (
+    isRec(raw.autoPurge) &&
+    raw.autoPurge.enabled === true &&
+    typeof raw.retentionDays === "number" &&
+    raw.retentionDays < 7
+  ) {
+    return bad(
+      "autoPurge を有効にするときは、retentionDays を 7 以上にする（短い保持期間で、自動の削除が早く進みすぎるのを防ぐ。省略した既定の 90 は可）",
+    );
   }
   if (raw.purgeTombstone !== undefined && typeof raw.purgeTombstone !== "boolean") {
     return bad("purgeTombstone は真偽値");

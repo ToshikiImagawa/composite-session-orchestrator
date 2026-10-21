@@ -60,7 +60,7 @@ import { openSqliteStore } from "./sqlite-store.js";
 /** 最終削除の保持期間の既定（日。spec 5.8）。 */
 const DEFAULT_RETENTION_DAYS = 90;
 const DEFAULT_AUTO_PURGE_INTERVAL_MINUTES = 60;
-const DEFAULT_AUTO_PURGE_MAX_TREES = 5;
+const DEFAULT_AUTO_PURGE_MAX_TREES = 2;
 
 /** git の作業ツリーに関わる口（実装は git を呼ぶ。テストはフェイク）。 */
 export interface WorktreePorts {
@@ -438,6 +438,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           timers,
           note,
           isStopped: () => fatalSeen,
+          lastEventAt: () => log.lastEventAt(),
         })
       : undefined;
 
