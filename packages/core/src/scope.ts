@@ -306,3 +306,37 @@ export function evaluateScope(scope: Scope, cwd: string, op: ScopeOperation): Sc
 
 /** 場所の判定（`normalize` と `isUnder`）を、他の判定（回収可能など）が同じ規則で使うための公開。 */
 export { isUnder as isPathUnder, normalize as normalizePath };
+
+/** 語の並びの前方一致: `entry` の語がすべて `command` の先頭の語に一致する（`checkCommand` と同じ規則）。 */
+const commandCovers = (entry: string, command: string): boolean => {
+  const want = entry.trim().split(/\s+/);
+  const have = command.trim().split(/\s+/);
+  return want[0] !== "" && want.every((w, i) => have[i] === w);
+};
+
+/**
+ * 子の範囲が親の範囲に収まるか（spawn・split の検査。FR_005）。
+ * - `allowedCommands`: 子の各コマンドを、親の許可の語の並びの前方一致が含む（親より広い許可は不可）
+ * - `writableLocations`: 子の各場所が、親の書き込み可能な場所の下にある
+ * - `forbiddenLocations`: 親の禁止の各場所を、子が同じか上の場所で禁止している（親の禁止をすべて含む）
+ * 相対パスは、それぞれの `cwd`（既定は `/`）を基準に解決して比べる。純粋関数。
+ */
+export function isScopeSubset(
+  child: Scope,
+  parent: Scope,
+  cwds: { readonly child: string; readonly parent: string } = { child: "/", parent: "/" },
+): boolean {
+  const c = (p: string) => normalize(cwds.child, p);
+  const q = (p: string) => normalize(cwds.parent, p);
+  return (
+    child.allowedCommands.every((cmd) =>
+      parent.allowedCommands.some((e) => commandCovers(e, cmd)),
+    ) &&
+    child.writableLocations.every((w) =>
+      parent.writableLocations.some((pw) => isUnder(c(w), q(pw))),
+    ) &&
+    parent.forbiddenLocations.every((f) =>
+      child.forbiddenLocations.some((cf) => isUnder(q(f), c(cf))),
+    )
+  );
+}

@@ -2,7 +2,8 @@
  * ブリーフ（spec 5.2）: 子へ渡す作業指示。目的・受け入れ基準・作業範囲・依存関係。
  * 作業ツリーとブランチは含めない（アダプタが親ブランチから決める。spec 5.2）。
  * 作業範囲の中身（パスが絶対か、作業ツリーの内側か）は、作業ツリーが決まってから `validateScope(scope, cwd)` で検査する。
- * ここでは形・件数・長さ・文字だけを検査する。
+ * ここでは形・件数・長さ・文字・重複と、場所の `..`・`/` だけを検査する。**作業ツリー（cwd）が決まった後の `validateScope` は必須**
+ * （この検査は、パスが作業ツリーの内側か・絶対か・書き込み可能な場所が根でないかを保証しない）。
  */
 
 import { isSafeId } from "./ids.js";
@@ -22,6 +23,10 @@ const SCOPE_KEYS = ["writableLocations", "forbiddenLocations", "allowedCommands"
 const isRec = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
 const nonBlank = (x: unknown, max: number): x is string => isBoundedText(x, max) && x.trim() !== "";
+const hasDuplicate = (xs: readonly string[]): boolean => new Set(xs).size !== xs.length;
+/** 場所として使えない値: `..` の区切りを含む（範囲の外へ抜けられる）、または `/` だけ（全体を指す）。 */
+const badPath = (p: string): boolean =>
+  p.split("/").some((seg) => seg === "..") || p.replace(/\/+/g, "/").trim() === "/";
 
 /** ブリーフの最初の問題を、短い説明で返す。問題がなければ `undefined`。例外は出さない。 */
 export function briefProblem(b: {
@@ -39,9 +44,10 @@ export function briefProblem(b: {
     !Array.isArray(c) ||
     c.length < 1 ||
     c.length > LIMITS.criteriaCount ||
-    !c.every((x) => nonBlank(x, LIMITS.criterionLength))
+    !c.every((x) => nonBlank(x, LIMITS.criterionLength)) ||
+    hasDuplicate(c as string[])
   ) {
-    return `acceptanceCriteria が不正（1〜${LIMITS.criteriaCount} 件、各 ${LIMITS.criterionLength} 文字以下の空でない文字列）`;
+    return `acceptanceCriteria が不正（1〜${LIMITS.criteriaCount} 件、重複なし、各 ${LIMITS.criterionLength} 文字以下の空でない文字列）`;
   }
   const s = b.scope;
   if (!isRec(s)) return "scope がオブジェクトでない";
@@ -56,6 +62,10 @@ export function briefProblem(b: {
       !list.every((x) => nonBlank(x, LIMITS.scopeEntryLength))
     ) {
       return `scope.${key} が不正（${LIMITS.scopeEntryCount} 件以下、各 ${LIMITS.scopeEntryLength} 文字以下の空でない文字列）`;
+    }
+    if (hasDuplicate(list as string[])) return `scope.${key} に重複がある`;
+    if (key !== "allowedCommands" && (list as string[]).some(badPath)) {
+      return `scope.${key} に使えない場所がある（.. を含む、または / だけ）`;
     }
   }
   const d = b.dependsOn;

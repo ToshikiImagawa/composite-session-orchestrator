@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { evaluateScope, type Scope, validateScope } from "../src/index.js";
+import { evaluateScope, isScopeSubset, type Scope, validateScope } from "../src/index.js";
 
 const CWD = "/work/node-a";
 const scope: Scope = {
@@ -386,6 +386,74 @@ describe("性質（fast-check）", () => {
     fc.assert(
       fc.property(cmdArb, joiner, cmdArb, (a, j, b) => {
         expect(cmd(`${a}${j}rm -rf x${j}${b}`).allowed).toBe(false);
+      }),
+    );
+  });
+});
+
+describe("isScopeSubset（子の範囲は親の範囲に収まる）", () => {
+  const parent: Scope = {
+    writableLocations: ["/p/src", "/p/docs"],
+    forbiddenLocations: ["/p/src/secret", "/p/.git"],
+    allowedCommands: ["pnpm test", "git status", "ls"],
+  };
+  const child = (over: Partial<Scope> = {}): Scope => ({
+    writableLocations: ["/p/src/ui"],
+    forbiddenLocations: ["/p/src/secret", "/p/.git"],
+    allowedCommands: ["pnpm test"],
+    ...over,
+  });
+
+  it("親と同じ、またはより狭い範囲は収まる", () => {
+    expect(isScopeSubset(parent, parent)).toBe(true);
+    expect(isScopeSubset(child(), parent)).toBe(true);
+    expect(isScopeSubset(child({ writableLocations: [], allowedCommands: [] }), parent)).toBe(true);
+  });
+
+  it("allowedCommands: 親が許さないコマンドは収まらない。語の並びの前方一致で、親の部分命令を許す", () => {
+    expect(isScopeSubset(child({ allowedCommands: ["git push"] }), parent)).toBe(false);
+    expect(isScopeSubset(child({ allowedCommands: ["pnpm test", "rm"] }), parent)).toBe(false);
+    expect(isScopeSubset(child({ allowedCommands: ["git status -s"] }), parent)).toBe(true);
+    expect(isScopeSubset(child({ allowedCommands: ["pnpm"] }), parent)).toBe(false); // 親の "pnpm test" より広い
+    expect(isScopeSubset(child({ allowedCommands: [""] }), parent)).toBe(false);
+  });
+
+  it("writableLocations: 親の書き込み可能な場所の下だけ。外・親ディレクトリ・兄弟は収まらない", () => {
+    expect(isScopeSubset(child({ writableLocations: ["/p/src"] }), parent)).toBe(true);
+    expect(isScopeSubset(child({ writableLocations: ["/p"] }), parent)).toBe(false);
+    expect(isScopeSubset(child({ writableLocations: ["/p/srcx"] }), parent)).toBe(false);
+    expect(isScopeSubset(child({ writableLocations: ["/other"] }), parent)).toBe(false);
+    expect(isScopeSubset(child({ writableLocations: ["/p/src/../.git"] }), parent)).toBe(false);
+    expect(isScopeSubset(child({ writableLocations: ["/p/SRC/ui"] }), parent)).toBe(true); // 大文字小文字は畳み込む
+  });
+
+  it("forbiddenLocations: 親の禁止をすべて含む（同じか、その上の場所で禁止）", () => {
+    expect(isScopeSubset(child({ forbiddenLocations: ["/p/.git"] }), parent)).toBe(false);
+    expect(isScopeSubset(child({ forbiddenLocations: [] }), parent)).toBe(false);
+    expect(
+      isScopeSubset(child({ forbiddenLocations: ["/p/src", "/p/.git", "/extra"] }), parent),
+    ).toBe(true);
+  });
+
+  it("相対パスは、それぞれの cwd を基準に解決して比べる", () => {
+    const p: Scope = { writableLocations: ["src"], forbiddenLocations: [], allowedCommands: [] };
+    const c: Scope = { writableLocations: ["src/ui"], forbiddenLocations: [], allowedCommands: [] };
+    expect(isScopeSubset(c, p, { child: "/wt/p", parent: "/wt/p" })).toBe(true);
+    expect(isScopeSubset(c, p, { child: "/wt/c", parent: "/wt/p" })).toBe(false);
+  });
+
+  it("性質: 反射的で、推移的（a ⊆ b かつ b ⊆ c なら a ⊆ c）", () => {
+    const dirs = ["/p", "/p/a", "/p/a/b", "/q"];
+    const cmds = ["ls", "git", "git status", "pnpm test"];
+    const scopeArb = fc.record({
+      writableLocations: fc.subarray(dirs),
+      forbiddenLocations: fc.subarray(dirs),
+      allowedCommands: fc.subarray(cmds),
+    });
+    fc.assert(
+      fc.property(scopeArb, scopeArb, scopeArb, (a, b, c) => {
+        expect(isScopeSubset(a, a)).toBe(true);
+        if (isScopeSubset(a, b) && isScopeSubset(b, c)) expect(isScopeSubset(a, c)).toBe(true);
       }),
     );
   });

@@ -18,6 +18,7 @@ import {
   LIMITS,
   NODE_ROLES,
   type OperationMap,
+  pauseNodeIdsProblem,
   type Result,
 } from "@cso/core";
 
@@ -188,11 +189,9 @@ const VALIDATORS: Validators = {
     const o = strict(p, ["question", "options", "pauseNodeIds"]);
     const base = { question: text(o, "question", LIMITS.question), options: options(o, "options") };
     if (o.pauseNodeIds === undefined) return base;
-    const v = o.pauseNodeIds;
-    if (!Array.isArray(v) || v.length > LIMITS.pauseNodeCount) {
-      fail(`pauseNodeIds が不正（${LIMITS.pauseNodeCount} 件以下の配列）`);
-    }
-    const ids = (v as unknown[]).map((_, i) => id({ x: (v as unknown[])[i] }, "x"));
+    const problem = pauseNodeIdsProblem(o.pauseNodeIds);
+    if (problem !== undefined) fail(problem);
+    const ids = [...(o.pauseNodeIds as string[])];
     return { ...base, pauseNodeIds: ids };
   },
   "node.split": (p) => {

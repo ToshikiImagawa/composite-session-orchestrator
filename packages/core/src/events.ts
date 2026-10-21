@@ -20,7 +20,7 @@
 
 import { briefProblem } from "./brief.js";
 import { type Failure, failure, ok, type Result } from "./contract.js";
-import { isSafeId } from "./ids.js";
+import { isSafeId, pauseNodeIdsProblem } from "./ids.js";
 import { type InboxItem, isValidInboxTime } from "./inbox.js";
 import { INBOX_KINDS, type InboxKind } from "./inbox-kinds.js";
 import type { NodeRole, NodeState } from "./index.js";
@@ -1185,12 +1185,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       }
       if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
       if (pauseNodeIds !== undefined) {
-        if (
-          !Array.isArray(pauseNodeIds) ||
-          pauseNodeIds.length > LIMITS.pauseNodeCount ||
-          !pauseNodeIds.every(isId) ||
-          new Set(pauseNodeIds).size !== pauseNodeIds.length
-        ) {
+        if (pauseNodeIdsProblem(pauseNodeIds) !== undefined) {
           return invalid(
             seq,
             `decision.requested の pauseNodeIds（重複なしの識別子、${LIMITS.pauseNodeCount} 件以下）`,

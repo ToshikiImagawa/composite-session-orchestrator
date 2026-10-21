@@ -58,6 +58,18 @@ describe("briefProblem（spec 5.2 のブリーフの検査）", () => {
         },
       }),
     ],
+    ["acceptanceCriteria に重複", ok({ acceptanceCriteria: ["a", "b", "a"] })],
+    ["writableLocations に .. を含む", ok({ scope: { ...scope, writableLocations: ["/w/../x"] } })],
+    ["writableLocations が .. だけ", ok({ scope: { ...scope, writableLocations: [".."] } })],
+    [
+      "forbiddenLocations に .. を含む",
+      ok({ scope: { ...scope, forbiddenLocations: ["a/../b"] } }),
+    ],
+    ["writableLocations が / だけ", ok({ scope: { ...scope, writableLocations: ["/"] } })],
+    ["forbiddenLocations が / だけ", ok({ scope: { ...scope, forbiddenLocations: ["/"] } })],
+    ["writableLocations に重複", ok({ scope: { ...scope, writableLocations: ["/w", "/w"] } })],
+    ["forbiddenLocations に重複", ok({ scope: { ...scope, forbiddenLocations: ["/a", "/a"] } })],
+    ["allowedCommands に重複", ok({ scope: { ...scope, allowedCommands: ["ls", "ls"] } })],
     ["dependsOn に不正な ID", ok({ dependsOn: ["a b"] })],
     ["dependsOn に重複", ok({ dependsOn: ["a", "a"] })],
     ["dependsOn が配列でない", ok({ dependsOn: "a" })],
@@ -71,13 +83,21 @@ describe("briefProblem（spec 5.2 のブリーフの検査）", () => {
     expect((problem as string).length).toBeGreaterThan(0);
   });
 
+  it("..・/ を含まない通常の場所と、.. を名前に含むだけのものは受け入れる", () => {
+    expect(
+      briefProblem(
+        ok({ scope: { ...scope, writableLocations: ["/w/a..b", "src/..hidden", "/w/..."] } }),
+      ),
+    ).toBeUndefined();
+  });
+
   it("上限ちょうどは受け入れる", () => {
     expect(
       briefProblem(
         ok({
           objective: "あ".repeat(LIMITS.objective),
-          acceptanceCriteria: Array.from({ length: LIMITS.criteriaCount }, () =>
-            "c".repeat(LIMITS.criterionLength),
+          acceptanceCriteria: Array.from({ length: LIMITS.criteriaCount }, (_, i) =>
+            `${i}`.padEnd(LIMITS.criterionLength, "c"),
           ),
         }),
       ),
