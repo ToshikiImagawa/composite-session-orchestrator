@@ -24,7 +24,13 @@ import {
   type ProcessInfo,
   stateOf,
 } from "@cso/core";
-import { appendAtomically, deriveId, type LogPort, summarize } from "./api/handlers/context.js";
+import {
+  appendAtomically,
+  deriveId,
+  type LogPort,
+  summarize,
+  waitRequestKey,
+} from "./api/handlers/context.js";
 import type { ProcessProbe } from "./sdk/lsof-probe.js";
 
 export interface ReconcileDeps {
@@ -124,7 +130,7 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
     if (openDecision !== undefined && gone) {
       // 判断を待っていた子: プロセスが失われた。どの判断を待っていたかを記録に残し、回答が来たら再開できるようにする
       // （停止の要求の requestId を、判断から決める。回答の側が、これを見て、人間が止めた子と区別する）。
-      const waitKey = `reconcile-wait-${openDecision.decisionId}`;
+      const waitKey = waitRequestKey(openDecision.decisionId);
       const reportId = deriveId("report", "system", waitKey, "report");
       bodies.push(
         stopImmediate,
@@ -166,9 +172,21 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
         );
       } else {
         // プロセスが残っている（または分からない）ときは、終了とは言えないので、node.exited は記録しない。
+        // 失敗の報告と、受信箱の failure の項目は、アダプタの予期しない終了と同じく出す。
+        const reportId = deriveId("report", "system", key, "report");
         bodies.push(
           stopImmediate,
           ev("stopTimeout"),
+          {
+            type: "report.added",
+            payload: {
+              reportId,
+              nodeId: n.id,
+              kind: "failure",
+              text: "daemon の再起動で、子のセッションが失われた（プロセスが残っている、または調べられない）。",
+            },
+          },
+          inbox("failure", "daemon の再起動で、子のセッションが失われた", reportId),
           inbox("stopIncomplete", `再起動後、停止を確認できない。残っているプロセス pid ${pids}`),
         );
       }

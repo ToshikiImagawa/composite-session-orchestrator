@@ -22,6 +22,7 @@ import {
   type Scope,
   validateScope,
 } from "@cso/core";
+import { isForbiddenChildEnvName } from "./sdk/child-env.js";
 
 export interface DaemonConfig {
   /** 状態（SQLite・トークン）の置き場。0700 のディレクトリにする。 */
@@ -49,6 +50,8 @@ export interface DaemonConfig {
   readonly purgeTombstone?: boolean;
   /** 子に渡す環境変数の、既定（PATH・HOME・認証・プロキシなど）に加える名前（完全一致）。 */
   readonly childEnvAllow?: readonly string[];
+  /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
+  readonly childHome?: "isolated" | "inherit";
   /** 子ごとの、エージェントのターン数の上限（API の往復）。省略すると 100。 */
   readonly maxTurns?: number;
   /** 子ごとの、費用の上限（USD）。省略すると 5。 */
@@ -75,6 +78,7 @@ const KEYS = [
   "maxTurns",
   "maxBudgetUsd",
   "childEnvAllow",
+  "childHome",
 ] as const;
 
 const bad = (cause: string): { ok: false; error: Failure } => ({
@@ -183,7 +187,16 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     ) {
       return bad("childEnvAllow は、環境変数の名前（英数字と _。重複なし、100 件以下）の配列");
     }
+    const forbidden = (v as string[]).filter(isForbiddenChildEnvName);
+    if (forbidden.length > 0) {
+      return bad(
+        `childEnvAllow に、子の実行を乗っ取れる名前は指定できない: ${forbidden.join("、")}`,
+      );
+    }
     childEnvAllow = [...(v as string[])];
+  }
+  if (raw.childHome !== undefined && raw.childHome !== "isolated" && raw.childHome !== "inherit") {
+    return bad('childHome は "isolated" か "inherit"');
   }
   let startLimits: { perParent?: number; total?: number } | undefined;
   if (raw.startLimits !== undefined) {
@@ -287,6 +300,9 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(regenerableIgnored === undefined ? {} : { regenerableIgnored }),
       ...(startLimits === undefined ? {} : { startLimits }),
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
+      ...(raw.childHome === undefined
+        ? {}
+        : { childHome: raw.childHome as "isolated" | "inherit" }),
       ...(raw.maxTurns === undefined ? {} : { maxTurns: raw.maxTurns as number }),
       ...(raw.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: raw.maxBudgetUsd as number }),
       ...(raw.retentionDays === undefined ? {} : { retentionDays: raw.retentionDays as number }),

@@ -52,6 +52,39 @@ const KEEP_VARIABLE = /token|_url$/i;
 const isSessionIdentifier = (name: string): boolean =>
   SESSION_VARIABLE.test(name) && !KEEP_VARIABLE.test(name);
 
+/**
+ * 追加の許可（`childEnvAllow`）でも渡さない名前。子の実行を乗っ取れる（ライブラリ・スクリプトの読み込み、
+ * シェルの起動時の実行、Git の外部コマンド）変数。
+ */
+const FORBIDDEN_PREFIXES = ["LD_", "DYLD_", "GIT_CONFIG"] as const;
+const FORBIDDEN_NAMES = new Set([
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "BASH_ENV",
+  "ENV",
+  "PYTHONSTARTUP",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PERL5OPT",
+  "PERL5LIB",
+  "RUBYOPT",
+  "RUBYLIB",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+  "GIT_SSH_COMMAND",
+  "GIT_SSH",
+  "GIT_ASKPASS",
+  "GIT_EXEC_PATH",
+  "PROMPT_COMMAND",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "PS4",
+  "IFS",
+]);
+export const isForbiddenChildEnvName = (name: string): boolean =>
+  FORBIDDEN_NAMES.has(name) || FORBIDDEN_PREFIXES.some((p) => name.startsWith(p));
+
 export interface ChildEnv {
   readonly env: Record<string, string>;
   /** 渡さなかった変数の名前（値は含めない）。 */
@@ -62,7 +95,10 @@ export function childEnv(
   parent: Readonly<Record<string, string | undefined>>,
   extraAllow: readonly string[] = [],
 ): ChildEnv {
-  const allowed = new Set<string>([...DEFAULT_CHILD_ENV.names, ...extraAllow]);
+  const allowed = new Set<string>([
+    ...DEFAULT_CHILD_ENV.names,
+    ...extraAllow.filter((n) => !isForbiddenChildEnvName(n)),
+  ]);
   const env: Record<string, string> = {};
   const removed: string[] = [];
   for (const [name, value] of Object.entries(parent)) {

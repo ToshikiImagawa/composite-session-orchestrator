@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { childEnv, DEFAULT_CHILD_ENV } from "../../src/sdk/child-env.js";
+import { childEnv, DEFAULT_CHILD_ENV, isForbiddenChildEnvName } from "../../src/sdk/child-env.js";
 
 describe("childEnv（許可リスト方式。親の環境変数から、許可した名前だけを子に渡す）", () => {
   it("既定で渡す: PATH・HOME・LANG・TMPDIR など、実行に要る変数", () => {
@@ -84,6 +84,34 @@ describe("childEnv（許可リスト方式。親の環境変数から、許可�
     ]);
     expect(r.env).toEqual(keep);
     expect(r.removed).toEqual(["CLAUDE_CODE_SESSION_ID"]);
+  });
+
+  it("読み込みや実行に影響する名前（LD_*・DYLD_*・NODE_OPTIONS・BASH_ENV・ENV・PYTHONSTARTUP・GIT_SSH_COMMAND など）は、追加の指定でも渡さない", () => {
+    const bad = [
+      "LD_PRELOAD",
+      "LD_LIBRARY_PATH",
+      "DYLD_INSERT_LIBRARIES",
+      "NODE_OPTIONS",
+      "BASH_ENV",
+      "ENV",
+      "PYTHONSTARTUP",
+      "PYTHONPATH",
+      "GIT_SSH_COMMAND",
+      "GIT_ASKPASS",
+      "PERL5OPT",
+      "RUBYOPT",
+      "JAVA_TOOL_OPTIONS",
+      "PROMPT_COMMAND",
+      "SHELLOPTS",
+    ];
+    for (const name of bad) expect(isForbiddenChildEnvName(name), name).toBe(true);
+    for (const name of ["PATH", "HOME", "AWS_PROFILE", "MY_VAR", "ANTHROPIC_API_KEY"]) {
+      expect(isForbiddenChildEnvName(name), name).toBe(false);
+    }
+    const parent = Object.fromEntries(bad.map((n) => [n, "x"]));
+    const r = childEnv({ ...parent, PATH: "/bin" }, bad);
+    expect(r.env).toEqual({ PATH: "/bin" });
+    expect([...r.removed].sort()).toEqual([...bad].sort());
   });
 
   it("値が undefined の項目は捨てる（env は文字列だけ）。入力を変更しない", () => {

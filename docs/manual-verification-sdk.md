@@ -115,3 +115,9 @@
 ### 2026-10-21 の結果（追加の項目）
 
 項目 13〜15 は、**未実施**。項目 16 は、許可リスト方式（T10e）に変えたあと、実 SDK で、許可リストの環境でも子が認証でき（`ANTHROPIC_*` とプロキシが既定に入っている）、`GH_TOKEN` などの秘密は子に渡らない（`removed` に名前だけが出る）ことを確かめた。
+
+### HOME の分離（#45 のレビュー対応）
+
+子の `HOME` は、既定で `<stateDir>/homes/<nodeId>`（0700）に分ける（設定 `childHome: "inherit"` で、daemon の `HOME` を渡す）。
+`childEnvAllow` に、`LD_*`・`NODE_OPTIONS`・`BASH_ENV`・`GIT_SSH_COMMAND` など、子の実行を乗っ取れる名前は指定できない。
+実 SDK で、分けた HOME でも、認証（`ANTHROPIC_*`・`CLAUDE_CODE_OAUTH_TOKEN`）が通り、Write が動くかは、手動確認の項目 16 を、`childHome` の既定のまま再実行して確かめる。

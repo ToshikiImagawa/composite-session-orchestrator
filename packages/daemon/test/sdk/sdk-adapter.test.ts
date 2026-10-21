@@ -847,8 +847,101 @@ describe("予期しない終了（finished の監視）", () => {
     for (let i = 0; i < 40; i++) await write(`f${i}.txt`);
     const items = r.sink.types.filter((t) => t === "inbox.added").length;
     const violations = r.sink.types.filter((t) => t === "scope.violation").length;
-    expect(items).toBe(20);
+    // 受信箱は 20 件まで。超えたら「ほかにも違反がある」を 1 件だけ出す（21 件目）。違反の記録は、毎回残る。
+    expect(items).toBe(21);
     expect(violations).toBe(42);
+    const last = [...r.sink.records].reverse().find((x) => x.body.type === "inbox.added")?.body;
+    expect(last).toMatchObject({ type: "inbox.added", payload: { kind: "violation" } });
+    expect(last?.type === "inbox.added" ? (last.payload.summary ?? "") : "").toContain("ほかにも");
+  });
+
+  it("範囲違反の記録にも上限がある: 同じ対象は 50 件、ノード全体で 1000 件まで。超えた分は、件数だけ数える（記録しない）", async () => {
+    const r = rig();
+    await startNode(r);
+    const h = sessionOf(r).options.hooks.preToolUse;
+    for (let i = 0; i < 70; i++) {
+      await h({ toolName: "Write", toolInput: { file_path: "same.txt" }, cwd: WT });
+    }
+    expect(r.sink.types.filter((t) => t === "scope.violation")).toHaveLength(50);
+    expect(r.sink.types.filter((t) => t === "inbox.added")).toHaveLength(1);
+    for (let i = 0; i < 1100; i++) {
+      await h({ toolName: "Write", toolInput: { file_path: `d${i}.txt` }, cwd: WT });
+    }
+    expect(r.sink.types.filter((t) => t === "scope.violation")).toHaveLength(1000);
+    // 拒否は、記録の上限を超えても、変わらない
+    const denied = await h({ toolName: "Write", toolInput: { file_path: "z.txt" }, cwd: WT });
+    expect(denied.allow).toBe(false);
+  });
+
+  it("終了の記録（1 トランザクション）に失敗したら、onFailure に出し、停止を除いた最小の記録（終了・失敗の報告・受信箱）で記録し直す", async () => {
+    const failures: string[] = [];
+    const seen: string[] = [];
+    const r = rig({
+      onFailure: (id, cause) => void failures.push(`${id}: ${cause}`),
+      onUnexpectedExit: (n) => void seen.push(n),
+    });
+    await startNode(r);
+    r.sink.failNext = 1;
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("a");
+    expect(r.sink.types).toEqual(["node.exited", "report.added", "inbox.added"]);
+    expect(r.sink.groups).toEqual([3]);
+    expect(seen).toEqual(["a"]);
+  });
+
+  it("最小の記録にも失敗したら、onFailure に出して、通知と掃除は行う", async () => {
+    const failures: string[] = [];
+    const seen: string[] = [];
+    const r = rig({
+      onFailure: (id, cause) => void failures.push(`${id}: ${cause}`),
+      onUnexpectedExit: (n) => void seen.push(n),
+    });
+    await startNode(r);
+    r.sink.failNext = 2;
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    expect(failures).toHaveLength(2);
+    expect(seen).toEqual(["a"]);
+    expect(r.adapter.has("a")).toBe(false);
+  });
+
+  it("子の HOME を、ノードごとのディレクトリに分ける（homeFor を渡したとき）。作れなければ、起動しない（フェイルクローズ）", async () => {
+    const made: string[] = [];
+    const r = rig({
+      parentEnv: { PATH: "/bin", HOME: "/root" },
+      homeFor: (id) => {
+        made.push(id);
+        return `/state/homes/${id}`;
+      },
+    });
+    await startNode(r);
+    expect(made).toEqual(["a"]);
+    expect(sessionOf(r).options.env).toEqual({ PATH: "/bin", HOME: "/state/homes/a" });
+    const bad = rig({
+      homeFor: () => {
+        throw new Error("EACCES");
+      },
+    });
+    const res = await bad.adapter.start({
+      nodeId: "a",
+      worktreePath: "/link/a",
+      scope: SCOPE,
+      instruction: "x",
+    });
+    expect(res.ok ? null : res.error.code).toBe("startFailed");
+    expect(bad.launcher.sessions).toHaveLength(0);
+  });
+
+  it("除いた環境変数の名前は、50 件で打ち切り、残りは「ほか N 件」と 1 つにまとめる", async () => {
+    const parentEnv: Record<string, string> = { PATH: "/bin" };
+    for (let i = 0; i < 120; i++) parentEnv[`SECRET_${String(i).padStart(3, "0")}`] = "v";
+    const r = rig({ parentEnv });
+    const v = await startNode(r);
+    expect(v.removedEnv).toHaveLength(51);
+    expect(v.removedEnv[50]).toBe("ほか 70 件");
+    expect(JSON.stringify(v.removedEnv)).not.toContain('"v"');
   });
 
   it("停止の最中の終了は、予期しない終了にしない", async () => {

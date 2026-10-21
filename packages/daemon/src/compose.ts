@@ -30,6 +30,7 @@ import {
   type Result,
 } from "@cso/core";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
+import { waitRequestKey } from "./api/handlers/context.js";
 import {
   type ApiLogger,
   type BindCodes,
@@ -347,6 +348,22 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     parentEnv: deps.parentEnv ?? process.env,
     ...(config.childEnvAllow === undefined ? {} : { childEnvAllow: config.childEnvAllow }),
     onUnexpectedExit: (nodeId, reason) => note("unexpectedExit", { nodeId, reason }),
+    onFailure: (nodeId, cause) => note("handlerFailure", { nodeId, cause }),
+    waitKeyOf: (nodeId) => {
+      const st = log.state();
+      if (st.nodes.find((n) => n.id === nodeId)?.state !== "waiting") return undefined;
+      const open = st.decisions.find((d) => d.nodeId === nodeId && d.status === "open");
+      return open === undefined ? undefined : waitRequestKey(open.decisionId);
+    },
+    ...(config.childHome === "inherit"
+      ? {}
+      : {
+          homeFor: (nodeId: string): string => {
+            const dir = join(config.stateDir, "homes", nodeId);
+            mkdirSync(dir, { recursive: true, mode: 0o700 });
+            return dir;
+          },
+        }),
   });
 
   const cwdOf = async (nodeId: string): Promise<string | undefined> =>

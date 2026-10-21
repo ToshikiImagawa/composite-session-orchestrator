@@ -112,6 +112,28 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("childEnvAllow は、読み込みや実行に影響する名前（LD_*・NODE_OPTIONS など）を拒否する", () => {
+    for (const v of [
+      "LD_PRELOAD",
+      "DYLD_INSERT_LIBRARIES",
+      "NODE_OPTIONS",
+      "BASH_ENV",
+      "GIT_SSH_COMMAND",
+    ]) {
+      bad({ childEnvAllow: [v] }, "childEnvAllow");
+    }
+  });
+
+  it("childHome は、isolated（既定）か inherit", () => {
+    const none = parseConfig(JSON.stringify(base));
+    expect(none.ok && none.value.childHome).toBeUndefined();
+    const inh = parseConfig(JSON.stringify({ ...base, childHome: "inherit" }));
+    expect(inh.ok && inh.value.childHome).toBe("inherit");
+    const iso = parseConfig(JSON.stringify({ ...base, childHome: "isolated" }));
+    expect(iso.ok && iso.value.childHome).toBe("isolated");
+    for (const v of ["x", true, 1, null]) bad({ childHome: v }, "childHome");
+  });
+
   it("maxTurns・maxBudgetUsd（子ごとの上限）は、正の数（任意）", () => {
     const ok1 = parseConfig(JSON.stringify({ ...base, maxTurns: 50, maxBudgetUsd: 2.5 }));
     expect(ok1.ok && [ok1.value.maxTurns, ok1.value.maxBudgetUsd]).toEqual([50, 2.5]);
