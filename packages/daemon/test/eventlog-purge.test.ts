@@ -254,7 +254,7 @@ describe("EventLog.purgeTree（最終削除）", () => {
     }
   });
 
-  it("木の外のノードの判断要求が、木のノードを止める対象にしていれば（pauseNodeIds）、拒否する。理由に判断要求の seq を含める", () => {
+  it("木の外のノードの判断要求が、木のノードを止める対象にしていても（pauseNodeIds）、最終削除できる。再生しても畳み込める", () => {
     const store = createMemoryStore();
     const { log, add } = setup(store.open());
     // root の判断要求が、子孫の c を止める対象にしている（root は木の外）
@@ -262,19 +262,15 @@ describe("EventLog.purgeTree（最終削除）", () => {
       type: "decision.requested",
       payload: { decisionId: "dx", nodeId: "root", question: "q", pauseNodeIds: ["c"] },
     });
-    const before = store.open().readAll().length;
     const r = log.purgeTree({
       requestId: "purge-p",
       actor: { human: true },
       nodeIds: ["c", "t"],
       marker: marker("t"),
     });
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.error.code).toBe("purgeUnsafe");
-      expect(r.error.cause).toContain("decision.requested");
-    }
-    expect(store.open().readAll().length).toBe(before);
+    expect(r.ok).toBe(true);
+    expect(log.state().decisions.some((d) => d.decisionId === "dx")).toBe(true);
+    expect(log.state().nodes.some((n) => n.id === "c")).toBe(false);
   });
 
   it("checkPurge は、何も書かずに、実行と同じ検証をする", () => {
