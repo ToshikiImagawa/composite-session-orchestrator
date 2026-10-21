@@ -1516,3 +1516,45 @@ describe("effectiveScope（有効な範囲 = ブリーフ + 承認済みの拡�
     expect(effectiveScope(run(), "zzz")).toBeUndefined();
   });
 });
+
+describe("未回答の判断要求は、ノードごとに上限まで", () => {
+  const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+  /** 土台のイベントを先に作ってから、検査したいイベントを作る（seq が土台より後になるように）。 */
+  const run = (...makers: (() => OrchEvent)[]) => {
+    const b = base();
+    return foldEvents([...b, ...makers.map((m) => m())]);
+  };
+  const requested =
+    (decisionId: string, nodeId = "root") =>
+    () =>
+      ev({ type: "decision.requested", payload: { decisionId, nodeId } });
+  const answered = (decisionId: string) => () =>
+    ev({ type: "decision.answered", payload: { decisionId, answer: "a" } });
+  const many = (n: number, nodeId = "root") =>
+    Array.from({ length: n }, (_, i) => requested(`${nodeId}-d${i}`, nodeId));
+
+  it("上限（LIMITS.openDecisionsPerNode）ちょうどまでは受け付け、超えたら tooManyOpenDecisions", () => {
+    expect(LIMITS.openDecisionsPerNode).toBe(10);
+    expect(codeOf(run(...many(LIMITS.openDecisionsPerNode)))).toBeNull();
+    expect(codeOf(run(...many(LIMITS.openDecisionsPerNode + 1)))).toBe("tooManyOpenDecisions");
+  });
+
+  it("回答済みは数えない。1 件回答すれば、もう 1 件出せる", () => {
+    const r = run(...many(LIMITS.openDecisionsPerNode), answered("root-d0"), requested("extra"));
+    expect(codeOf(r)).toBeNull();
+  });
+
+  it("上限はノードごと。別のノードには影響しない", () => {
+    const r = run(...many(LIMITS.openDecisionsPerNode), ...many(1, "a"));
+    expect(codeOf(r)).toBeNull();
+  });
+
+  it("失敗は nextActions を持ち、状態は変わらない", () => {
+    const b = base();
+    const ok = foldEvents([...b, ...many(LIMITS.openDecisionsPerNode).map((m) => m())]);
+    expect(ok.ok).toBe(true);
+    const over = foldEvents([...b, ...many(LIMITS.openDecisionsPerNode + 1).map((m) => m())]);
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.error.nextActions.length).toBeGreaterThan(0);
+  });
+});

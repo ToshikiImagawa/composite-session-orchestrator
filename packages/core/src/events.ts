@@ -414,6 +414,7 @@ export type FoldFailureCode =
   | "unknownInboxItem"
   | "unknownInstruction"
   | "tooManyOpenExtensions"
+  | "tooManyOpenDecisions"
   | "unknownExtension"
   | "extensionAlreadyDecided"
   | "invalidState";
@@ -1297,6 +1298,18 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           "duplicateDecision",
           `判断要求 ${decisionId} は既にある`,
           "別の ID を使う",
+        );
+      }
+      const openDecisions = d.decisions.filter(
+        (x) => x.nodeId === nodeId && x.status === "open",
+      ).length;
+      if (openDecisions >= LIMITS.openDecisionsPerNode) {
+        return reject(
+          seq,
+          "tooManyOpenDecisions",
+          `ノード ${nodeId} の未回答の判断要求が上限（${LIMITS.openDecisionsPerNode} 件）に達している`,
+          "回答を待つ",
+          "まとめて 1 件で聞き直す",
         );
       }
       d.decisionIdx.set(decisionId, d.decisions.length);

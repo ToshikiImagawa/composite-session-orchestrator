@@ -55,7 +55,7 @@ depends-on: ["design-initial-spec-design"]
 | T23 | daemon: HTML 画面、SSE による反映 | なし（能力表の表示値のみ確定待ちだが、画面の骨格は先行可能のためこちらに配置） | T09 | 未 | FR_021, IR_003, NFR_008 |
 | T24 | core/daemon: 中間統合ノードの配下の要約報告（上位の受信箱へ優先度付きで送る） | なし | T04, T07 | 未 | FR_013 |
 | T25 | mcp: MCP 境界の入力検証（zod）。ツール入力と daemon からの応答の形を検査する。依存追加は着手時点の最新版を確認して固定する。**daemon への結線の前提**（ツール入力を zod 4.6.5 で検証。`parseToolInput`。daemon 応答の検査は結線時） | なし | T11 | 済 | NFR_010, NFR_004 |
-| T26 | core/daemon: 未回答の判断（`decision.requested` の open）にも、ノードごとの上限を設ける（拡張要求の未判定の上限〔10 件〕と同じ考え方。上限・超えたときの失敗コードは着手時に決める） | なし | T13d | 未 | FR_018, NFR_011 |
+| T26 | core/daemon: 未回答の判断（`decision.requested` の open）にも、ノードごとの上限を設ける（拡張要求の未判定の上限〔10 件〕と同じ考え方。上限は 10 件（`LIMITS.openDecisionsPerNode`）、超えたら `tooManyOpenDecisions`。受信箱の未解決の件数には上限を設けない〔項目は daemon・core が生成し、上限で落とすと信号を失うため。子が入れる分は判断・拡張・報告の各上限で抑える〕） | なし | T13d | 済 | FR_018, NFR_011 |
 
 ## 手動確認の結果に依存（仮置きで進め、結果で確定）
 
