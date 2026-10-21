@@ -332,7 +332,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   };
   const onFailure = (nodeId: string, cause: string): void =>
     note("handlerFailure", { nodeId, cause });
-  const { handlers, tick: schedule } = createHandlersWithScheduler(
+  const {
+    handlers,
+    tick: schedule,
+    close: closeScheduler,
+  } = createHandlersWithScheduler(
     { log, clock },
     {
       adapterFor: () => adapter,
@@ -344,7 +348,13 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         }),
     },
     reclaim,
-    { ports: spawn, credentials, rootScope: config.rootScope, onFailure },
+    {
+      ports: spawn,
+      credentials,
+      rootScope: config.rootScope,
+      onFailure,
+      ...(config.startLimits === undefined ? {} : { startLimits: config.startLimits }),
+    },
   );
 
   const logger: ApiLogger = (e) => {
@@ -394,6 +404,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       },
       async stop() {
         await server.close();
+        await closeScheduler(); // 起動の途中の tick が終わるのを待つ（終わる前に、タイマー・DB を閉じない）
         tracked.cancelAll(); // アダプタが作った、残りのタイマーを止める
         running = undefined;
         closeAll();

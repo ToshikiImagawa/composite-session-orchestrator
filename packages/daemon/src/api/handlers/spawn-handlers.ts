@@ -20,6 +20,7 @@
  */
 
 import {
+  type Actor,
   COMPLETED_STATES,
   type EventBody,
   effectiveScope,
@@ -85,6 +86,8 @@ export interface SpawnHandlerDeps {
    * 下の `spawn` は失敗させる（根の子を経由した権限の昇格を防ぐ）。
    */
   readonly rootScope?: Scope;
+  /** スケジューラが同時に起動する数の上限（親ごと・全体）。既定は `DEFAULT_START_LIMITS`。 */
+  readonly startLimits?: { readonly perParent?: number; readonly total?: number };
   /** 応答に出さない原因（後始末の失敗・アダプタの詳細など）の記録先。 */
   readonly onFailure?: (nodeId: string, cause: string) => void;
 }
@@ -103,6 +106,9 @@ interface Spawned {
   readonly waitingFor?: string[];
 }
 
+/** スケジューラが同時に起動する数の既定の上限。 */
+export const DEFAULT_START_LIMITS = { perParent: 4, total: 4 } as const;
+const SYSTEM: Actor = { system: true };
 const LIVE = new Set(["running", "waiting"]);
 /** 後始末済み・終わった子。同じ requestId の再試行で、成功として返してはならない。 */
 const DEAD = new Set(["stopping", "stopIncomplete", "stopped", "reclaimable", "archived"]);
@@ -147,7 +153,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
   async function cleanup(
     nodeId: string,
     requestId: string,
-    caller: string,
+    actor: Actor,
     worktreePath: string | undefined,
     safe = true,
   ): Promise<void> {
@@ -184,13 +190,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
                 payload: { nodeId, event: { type: "stop", mode: "immediate" } },
               },
             ];
-      const r = appendAtomically(
-        log,
-        deps.clock,
-        `${requestId}/cleanup`,
-        { nodeId: caller },
-        bodies,
-      );
+      const r = appendAtomically(log, deps.clock, `${requestId}/cleanup`, actor, bodies);
       if (!r.ok) {
         note(nodeId, `停止を記録できない: ${r.error.code}: ${r.error.cause}`);
         return;
@@ -219,15 +219,15 @@ export function createSpawner(deps: SpawnHandlerDeps) {
 
   /** 起動の手順（トークン発行 → adapter.start → start の記録）。失敗したら後始末して、定型の失敗を返す。 */
   async function startNode(
-    ctx: { requestId: string; caller: string; nodeId: string; worktreePath: string },
+    ctx: { requestId: string; actor: Actor; nodeId: string; worktreePath: string },
     adapter: RuntimeAdapter,
     brief: BriefParams,
     role: NodeRecord["role"],
   ): Promise<Result<Spawned, Failure>> {
-    const { requestId, caller, nodeId, worktreePath } = ctx;
+    const { requestId, actor, nodeId, worktreePath } = ctx;
     const abort = async (code: string, what: string, cause: string, safe = true) => {
       note(nodeId, cause);
-      await cleanup(nodeId, requestId, caller, worktreePath, safe);
+      await cleanup(nodeId, requestId, actor, worktreePath, safe);
       return fail(
         code,
         safe ? `${what}。後始末した` : `${what}。子の停止を確認できないため、作業ツリーは残した`,
@@ -275,7 +275,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
       return abort("startFailed", "子を起動できなかった", `起動が例外: ${String(e)}`, safe);
     }
     // 起動に成功してから start を記録する（記録だけが残る経路をなくす）。記録に失敗したら、起動した子を止めて後始末する。
-    const recorded = appendAtomically(log, deps.clock, `${requestId}/start`, { nodeId: caller }, [
+    const recorded = appendAtomically(log, deps.clock, `${requestId}/start`, actor, [
       { type: "node.stateChanged", payload: { nodeId, event: { type: "start" } } },
     ]);
     if (!recorded.ok) {
@@ -292,7 +292,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
 
   /** 排他の中で、まだ pending か確かめてから起動する（先に起動した処理があれば、そのまま running として返す）。 */
   const startGuarded = (
-    ctx: { requestId: string; caller: string; nodeId: string; worktreePath: string },
+    ctx: { requestId: string; actor: Actor; nodeId: string; worktreePath: string },
     adapter: RuntimeAdapter,
     brief: BriefParams,
     role: NodeRecord["role"],
@@ -371,7 +371,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
           );
         }
         return startGuarded(
-          { requestId, caller, nodeId, worktreePath: provisioned.value.worktreePath },
+          { requestId, actor, nodeId, worktreePath: provisioned.value.worktreePath },
           adapter,
           brief,
           role,
@@ -400,6 +400,13 @@ export function createSpawner(deps: SpawnHandlerDeps) {
       );
     }
     for (const d of dependsOn) {
+      if (isDiscarded(state, d)) {
+        return fail(
+          "dependencyDiscarded",
+          `依存先 ${d} は破棄されていて、完了しない（依存する子は、起動できない）`,
+          "別の依存先を指定する",
+        );
+      }
       if (nodeOf(state, d) === undefined || !isInSubtree(state.nodes, caller, d)) {
         return fail(
           "notFound",
@@ -473,7 +480,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
       return fail("provisionFailed", "作業ツリーを作れなかった", "しばらくして、もう一度試す");
     }
     const abort = async (f: { ok: false; error: Failure }) => {
-      await cleanup(nodeId, requestId, caller, worktreePath);
+      await cleanup(nodeId, requestId, actor, worktreePath);
       return f;
     };
 
@@ -497,42 +504,98 @@ export function createSpawner(deps: SpawnHandlerDeps) {
         value: { nodeId, status: "pending", waitingFor: waitingOf(state, dependsOn) },
       };
     }
-    return startGuarded({ requestId, caller, nodeId, worktreePath }, adapter, brief, role);
+    return startGuarded({ requestId, actor, nodeId, worktreePath }, adapter, brief, role);
   }
 
+  /** 破棄された（失敗した生成の後始末などで、アーカイブまで進んだ）ノードか。完了とはみなさない。 */
+  const isDiscarded = (state: OrchState, id: string): boolean =>
+    nodeOf(state, id)?.discarded !== undefined;
+
   /**
-   * スケジューラ: 記録済み・未起動（pending）の子を、依存が揃い、親が動作中の統合ノードなら起動する。
-   * 起動の入力は、記録したブリーフから作る。起動に失敗したら spawn と同じ後始末をして、受信箱（failure）に残す
-   * （同じ子を再び起動しない）。起動できない事情（作業ツリー・アダプタ・ブリーフの欠け）は、pending のまま `onFailure` に渡す。
+   * 待っている先から、永久に完了しない根本の依存先（破棄されたノード）を探す。pending の依存先は、その先も辿る
+   * （連鎖: c が b を待ち、b が破棄された a を待つ）。見つからなければ undefined。
    */
+  const deadDependency = (
+    state: OrchState,
+    dependsOn: readonly string[],
+    seen = new Set<string>(),
+  ): string | undefined => {
+    for (const d of dependsOn) {
+      if (seen.has(d)) continue;
+      seen.add(d);
+      if (isDiscarded(state, d)) return d;
+      const dn = nodeOf(state, d);
+      if (dn?.state === "pending") {
+        const root = deadDependency(state, dn.dependsOn, seen);
+        if (root !== undefined) return root;
+      }
+    }
+    return undefined;
+  };
+
+  /** 親の受信箱に、失敗を 1 度だけ出す（`key` で決定的。再び呼んでも重複しない）。 */
+  function reportOnce(nodeId: string, key: string, text: string): void {
+    if (alreadyApplied(log.state(), SYSTEM, key)) return;
+    const r = appendAtomically(log, deps.clock, key, SYSTEM, [
+      {
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", key, "failure"),
+          kind: "failure",
+          nodeId,
+          summary: summarize(text),
+        },
+      },
+    ]);
+    if (!r.ok) note(nodeId, `受信箱に記録できない: ${r.error.code}: ${r.error.cause}`);
+  }
+
+  const startLimits = {
+    perParent: deps.startLimits?.perParent ?? DEFAULT_START_LIMITS.perParent,
+    total: deps.startLimits?.total ?? DEFAULT_START_LIMITS.total,
+  };
+  const startingByParent = new Map<string, number>();
+  const startingNodes = new Set<string>();
+  const startSettled = new Set<Promise<unknown>>();
+
+  /** 起動の入口の条件（状態だけで決まる部分）。満たせば、起動を試みる。 */
+  const startable = (state: OrchState, node: NodeRecord): boolean => {
+    if (node.state !== "pending" || node.parentId === null) return false;
+    if (!dependsDone(state, node.dependsOn)) return false;
+    const parent = nodeOf(state, node.parentId);
+    return parent !== undefined && parent.role === "integrator" && LIVE.has(parent.state);
+  };
+
+  /** 起動できない事情を、pending のまま、最初の 1 度だけ受信箱に出す（以降の tick では、同じ事情を繰り返さない）。 */
+  const unstartable = (nodeId: string, why: string): void => {
+    note(nodeId, why);
+    reportOnce(nodeId, `sched-${nodeId}/unstartable`, `依存が揃ったが、起動できない: ${why}`);
+  };
+
   function startPending(nodeId: string): Promise<Result<undefined, Failure>> {
     return schedExclusive(nodeId, "sched", async () => {
       try {
         const state = log.state();
         const node = nodeOf(state, nodeId);
-        if (node === undefined || node.state !== "pending" || node.parentId === null)
+        if (node === undefined || !startable(state, node) || node.parentId === null)
           return { ok: true, value: undefined };
-        if (!dependsDone(state, node.dependsOn)) return { ok: true, value: undefined };
         const parentId = node.parentId;
-        const parent = nodeOf(state, parentId);
-        if (parent === undefined || parent.role !== "integrator" || !LIVE.has(parent.state))
-          return { ok: true, value: undefined };
         if (
           node.objective === undefined ||
           node.acceptanceCriteria === undefined ||
           node.scope === undefined
         ) {
-          note(nodeId, "ブリーフ（目的・受け入れ基準・範囲）が記録されていないため、起動できない");
+          unstartable(nodeId, "ブリーフ（目的・受け入れ基準・範囲）が記録されていない");
           return { ok: true, value: undefined };
         }
         const adapter = deps.adapterFor(parentId);
         if (adapter === undefined) {
-          note(nodeId, `親 ${parentId} のランタイム（アダプタ）が見つからないため、起動できない`);
+          unstartable(nodeId, `親 ${parentId} のランタイム（アダプタ）が見つからない`);
           return { ok: true, value: undefined };
         }
         const provisioned = await ports.provisionWorktree({ parentId, nodeId });
         if (!provisioned.ok || !worktreePathOk(provisioned.value.worktreePath)) {
-          note(nodeId, "作業ツリーを用意できないため、起動できない");
+          unstartable(nodeId, "作業ツリーを用意できない");
           return { ok: true, value: undefined };
         }
         const brief: BriefParams = {
@@ -544,7 +607,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
         const started = await startGuarded(
           {
             requestId: `sched-${nodeId}`,
-            caller: parentId,
+            actor: SYSTEM,
             nodeId,
             worktreePath: provisioned.value.worktreePath,
           },
@@ -553,21 +616,11 @@ export function createSpawner(deps: SpawnHandlerDeps) {
           node.role,
         );
         if (!started.ok) {
-          const key = `sched-${nodeId}`;
-          const r = appendAtomically(log, deps.clock, `${key}/failed`, { system: true }, [
-            {
-              type: "inbox.added",
-              payload: {
-                id: deriveId("inbox", "system", key, "failure"),
-                kind: "failure",
-                nodeId,
-                summary: summarize(
-                  `依存が揃ったので起動しようとしたが、失敗した（${started.error.code}）: ${started.error.cause}`,
-                ),
-              },
-            },
-          ]);
-          if (!r.ok) note(nodeId, `起動の失敗を受信箱に記録できない: ${r.error.code}`);
+          reportOnce(
+            nodeId,
+            `sched-${nodeId}/failed`,
+            `依存が揃ったので起動しようとしたが、失敗した（${started.error.code}）: ${started.error.cause}`,
+          );
         }
       } catch (e) {
         note(nodeId, `スケジューラが失敗: ${String(e)}`);
@@ -576,10 +629,66 @@ export function createSpawner(deps: SpawnHandlerDeps) {
     });
   }
 
-  /** 起動できる pending の子を、すべて起動する（依存の完了時と、daemon の起動時に呼ぶ）。例外を外へ出さない。 */
+  /** 依存先が破棄されたまま完了しない pending の子について、親の受信箱に、1 度だけ失敗を出す。 */
+  function reportBlocked(): void {
+    const state = log.state();
+    for (const n of state.nodes) {
+      if (n.state !== "pending" || n.parentId === null) continue;
+      const dead = deadDependency(state, n.dependsOn);
+      if (dead === undefined) continue;
+      reportOnce(
+        n.id,
+        `sched-${n.id}/blocked-${dead}`,
+        `依存先 ${dead} が破棄されたため、このノードは起動できない。node.stop で取り消すか、別の依存先で作り直す`,
+      );
+    }
+  }
+
+  /**
+   * 起動できる pending の子を起動する（依存の完了時・親の再開時・daemon の起動時に呼ぶ）。例外を外へ出さない。
+   * 同時に起動する数は、親ごと・全体で上限（`startLimits`。既定 4）まで。上限を超える分は、空きができてから起動する。
+   */
   async function tick(): Promise<void> {
-    const pending = log.state().nodes.filter((n) => n.state === "pending" && n.parentId !== null);
-    await Promise.all(pending.map((n) => startPending(n.id)));
+    reportBlocked();
+    const attempted = new Set<string>();
+    for (;;) {
+      const state = log.state();
+      const ready = state.nodes.filter(
+        (n) => !attempted.has(n.id) && !startingNodes.has(n.id) && startable(state, n),
+      );
+      if (ready.length === 0) return;
+      const batch: NodeRecord[] = [];
+      for (const n of ready) {
+        const parentId = n.parentId as string;
+        const perParent =
+          (startingByParent.get(parentId) ?? 0) +
+          batch.filter((b) => b.parentId === parentId).length;
+        if (startingNodes.size + batch.length >= startLimits.total) break;
+        if (perParent >= startLimits.perParent) continue;
+        batch.push(n);
+      }
+      if (batch.length === 0) {
+        // 空きがない: 起動中のどれかが終わるのを待って、やり直す（起動中がなければ、待つものはない）。
+        if (startSettled.size === 0) return;
+        await Promise.race([...startSettled]);
+        continue;
+      }
+      const running: Promise<unknown>[] = [];
+      for (const n of batch) {
+        attempted.add(n.id);
+        const parentId = n.parentId as string;
+        startingNodes.add(n.id);
+        startingByParent.set(parentId, (startingByParent.get(parentId) ?? 0) + 1);
+        const p: Promise<unknown> = startPending(n.id).finally(() => {
+          startingNodes.delete(n.id);
+          startingByParent.set(parentId, (startingByParent.get(parentId) ?? 1) - 1);
+          startSettled.delete(p);
+        });
+        startSettled.add(p);
+        running.push(p);
+      }
+      await Promise.all(running);
+    }
   }
 
   const fingerprintOf = (v: unknown): string => JSON.stringify(v);

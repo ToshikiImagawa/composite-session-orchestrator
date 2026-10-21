@@ -49,8 +49,11 @@ export function createHandlersWithScheduler(
   runtime?: Pick<RuntimeHandlerDeps, "adapterFor" | "onStopSettled">,
   /** 渡すと、回収の操作（node.reclaimPreview・node.reclaim）も有効になる。 */
   reclaim?: ReclaimPorts,
-  spawn?: Pick<SpawnHandlerDeps, "ports" | "credentials" | "rootScope" | "onFailure">,
-): { handlers: Handlers; tick: () => Promise<void> } {
+  spawn?: Pick<
+    SpawnHandlerDeps,
+    "ports" | "credentials" | "rootScope" | "onFailure" | "startLimits"
+  >,
+): { handlers: Handlers; tick: () => Promise<void>; close: () => Promise<void> } {
   const onFailure = spawn?.onFailure === undefined ? {} : { onFailure: spawn.onFailure };
   // 追加指示の配送は、node.send と node.review（差し戻しの理由）で共有する。
   const delivery =
@@ -83,12 +86,21 @@ export function createHandlersWithScheduler(
         adapterFor: runtime.adapterFor,
         stop: rt["node.stop"],
       });
-  const tick = async (): Promise<void> => {
-    try {
-      await spawner?.tick();
-    } catch (e) {
-      spawn?.onFailure?.("", `スケジューラが失敗: ${String(e)}`);
-    }
+  const running = new Set<Promise<void>>();
+  let closed = false;
+  const tick = (): Promise<void> => {
+    if (closed || spawner === undefined) return Promise.resolve();
+    const p: Promise<void> = spawner
+      .tick()
+      .catch((e) => spawn?.onFailure?.("", `スケジューラが失敗: ${String(e)}`))
+      .finally(() => running.delete(p));
+    running.add(p);
+    return p;
+  };
+  /** 新しい tick を受け付けなくし、実行中の tick が終わるのを待つ（daemon の停止で使う）。 */
+  const close = async (): Promise<void> => {
+    closed = true;
+    while (running.size > 0) await Promise.all([...running]);
   };
   // 依存先の完了（report.done・node.review）の後で、依存が揃った子を起動する（応答は待たせない）。
   const after =
@@ -98,15 +110,9 @@ export function createHandlersWithScheduler(
       if (r.ok) void tick();
       return r;
     };
-  const handlers = {
+  const built = {
     ...createReadHandlers(() => deps.log.state()),
     ...state,
-    ...(spawner === undefined
-      ? {}
-      : {
-          "report.done": after(state["report.done"]),
-          "node.review": after(state["node.review"]),
-        }),
     ...(rt === undefined ? {} : rt),
     ...(reclaim === undefined ? {} : createReclaimHandlers({ ...deps, ports: reclaim })),
     ...(!full
@@ -132,5 +138,13 @@ export function createHandlersWithScheduler(
           }),
         }),
   } as Handlers;
-  return { handlers, tick };
+  // 依存先の完了（report.done・node.review）と、判断への回答による再開（decision.answer）の後で、起動できる子を起動する。
+  const handlers: Handlers = { ...built };
+  if (spawner !== undefined) {
+    for (const op of ["report.done", "node.review", "decision.answer"] as const) {
+      const run = built[op] as ((req: never) => unknown) | undefined;
+      if (run !== undefined) (handlers as Record<string, unknown>)[op] = after(run as never);
+    }
+  }
+  return { handlers, tick, close };
 }

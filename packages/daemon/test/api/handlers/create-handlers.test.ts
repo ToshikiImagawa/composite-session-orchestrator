@@ -1,6 +1,6 @@
 import { type EventBody, type NodeEvent, ok, stateOf } from "@cso/core";
 import { describe, expect, it, vi } from "vitest";
-import { createHandlers } from "../../../src/api/handlers/index.js";
+import { createHandlers, createHandlersWithScheduler } from "../../../src/api/handlers/index.js";
 import { EventLog } from "../../../src/eventlog.js";
 import { createMemoryStore } from "../../../src/memory-store.js";
 import type { RuntimeAdapter } from "../../../src/sdk/runtime.js";
@@ -107,5 +107,92 @@ describe("createHandlers の組み立て", () => {
     expect(r?.ok).toBe(true);
     await vi.waitFor(() => expect(started).toEqual(["b"]));
     expect(stateOf(log.state(), "b")).toBe("running");
+  });
+
+  it("close は、実行中の tick が終わるのを待つ。close の後は、起動しない。tree.list は、破棄済みの依存先を示す", async () => {
+    const log = open();
+    const add = (body: EventBody): void => {
+      const r = log.append({ requestId: `seed-${Math.random()}`, actor: { system: true }, body });
+      if (!r.ok) throw new Error(r.error.code);
+    };
+    const ev = (nodeId: string, event: NodeEvent) =>
+      add({ type: "node.stateChanged", payload: { nodeId, event } });
+    const scope = {
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: ["pnpm test"],
+    };
+    const node = (
+      nodeId: string,
+      role: "integrator" | "implement",
+      parentId: string | null,
+      dependsOn: string[] = [],
+    ) =>
+      add({
+        type: "node.created",
+        payload: {
+          nodeId,
+          role,
+          parentId,
+          dependsOn,
+          ...(parentId === null ? {} : { objective: nodeId, acceptanceCriteria: ["c"], scope }),
+        },
+      });
+    node("m1", "integrator", null);
+    ev("m1", { type: "start" });
+    node("a", "implement", "m1");
+    ev("a", { type: "start" });
+    ev("a", { type: "stop", mode: "immediate" });
+    ev("a", { type: "confirmStopped" });
+    add({ type: "node.discardDecided", payload: { nodeId: "a" } });
+    ev("a", { type: "markReclaimable", discarded: true });
+    ev("a", { type: "archive" });
+    node("b", "implement", "m1", ["a"]);
+    node("p", "implement", "m1"); // 依存なし。起動できる
+    let release!: () => void;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const started: string[] = [];
+    const adapter = {
+      start: async (req: { nodeId: string; worktreePath: string }) => {
+        started.push(req.nodeId);
+        await gate;
+        return ok({ sessionId: "s", cwd: req.worktreePath, removedEnv: [] });
+      },
+    } as unknown as RuntimeAdapter;
+    const made = createHandlersWithScheduler(
+      { log, clock },
+      { adapterFor: () => adapter },
+      undefined,
+      {
+        ...spawnDeps,
+        rootScope: scope,
+      },
+    );
+    const listed = made.handlers["tree.list"]?.({
+      requestId: "tl",
+      operation: "tree.list",
+      role: "integrator",
+      caller: { nodeId: "m1" },
+      params: {},
+    } as never);
+    expect(JSON.stringify(listed)).toContain("a(破棄済み)");
+
+    const t = made.tick();
+    await vi.waitFor(() => expect(started).toEqual(["p"]));
+    let closed = false;
+    const c = made.close().then(() => {
+      closed = true;
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(closed).toBe(false); // 起動の途中なので、まだ待つ
+    release();
+    await c;
+    await t;
+    expect(closed).toBe(true);
+    expect(stateOf(log.state(), "p")).toBe("running");
+    await made.tick(); // close の後は、何もしない
+    expect(started).toEqual(["p"]);
   });
 });

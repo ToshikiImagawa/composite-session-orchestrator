@@ -26,7 +26,7 @@ const SCOPE: Scope = {
 };
 
 /** root ─ m1(統合・running) ─ a(running)、b（a に依存・pending）、c（a・b に依存・pending）。 */
-const rig = () => {
+const rig = (opts: { startLimits?: { perParent?: number; total?: number } } = {}) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
   const log = opened.value;
@@ -69,7 +69,11 @@ const rig = () => {
     started: [] as StartRequest[],
     failures: [] as string[],
   };
-  const flags = { startFails: false, startGate: undefined as Promise<void> | undefined };
+  const flags = {
+    startFails: false,
+    startGate: undefined as Promise<void> | undefined,
+    noAdapter: false,
+  };
   const adapter = {
     kind: "cli" as const,
     async start(req: StartRequest): Promise<Result<StartValue, Failure>> {
@@ -98,7 +102,8 @@ const rig = () => {
   const spawner = createSpawner({
     log,
     clock,
-    adapterFor: () => adapter,
+    adapterFor: () => (flags.noAdapter ? undefined : adapter),
+    ...(opts.startLimits === undefined ? {} : { startLimits: opts.startLimits }),
     ports,
     credentials: { issueNodeToken: (id) => `tok-${id}`, revokeNode: () => undefined },
     rootScope: SCOPE,
@@ -109,7 +114,37 @@ const rig = () => {
     ev(id, { type: "reportDone" });
     ev(id, { type: "accept" });
   };
-  return { log, calls, flags, spawner, ev, verify };
+  const discard = (id: string) => {
+    ev(id, { type: "stop", mode: "immediate" });
+    ev(id, { type: "confirmStopped" });
+    log.append({
+      requestId: `seed-discard-${id}`,
+      actor: SYS,
+      body: { type: "node.discardDecided", payload: { nodeId: id } },
+    });
+    ev(id, { type: "markReclaimable", discarded: true });
+    ev(id, { type: "archive" });
+  };
+  const node2 = (nodeId: string, dependsOn: string[]) =>
+    log.append({
+      requestId: `seed-node2-${nodeId}`,
+      actor: SYS,
+      body: {
+        type: "node.created",
+        payload: {
+          nodeId,
+          role: "implement",
+          parentId: "m1",
+          dependsOn,
+          objective: `目的 ${nodeId}`,
+          acceptanceCriteria: ["完了"],
+          scope: SCOPE,
+        },
+      },
+    });
+  const failures = (id: string) =>
+    log.state().inbox.filter((i) => i.nodeId === id && i.kind === "failure");
+  return { log, calls, flags, spawner, ev, verify, discard, node2, failures };
 };
 
 describe("スケジューラ（依存が揃った pending の子を起動する）", () => {
@@ -200,5 +235,72 @@ describe("スケジューラ（依存が揃った pending の子を起動する�
     expect(r.calls.started).toEqual([]);
     expect(stateOf(r.log.state(), "x")).toBe("pending");
     expect(r.calls.failures.join("\n")).toContain("ブリーフ");
+  });
+
+  it("依存先が破棄されたら、依存する子について、受信箱に失敗を 1 度だけ出す（案内つき）。連鎖でも出る", async () => {
+    const r = rig();
+    r.discard("a");
+    r.node2("d", ["b"]); // d は b を待つ。b は、破棄された a を待つ（連鎖）
+    await r.spawner.tick();
+    await r.spawner.tick();
+    for (const id of ["b", "c", "d"]) {
+      const f = r.failures(id);
+      expect(f, id).toHaveLength(1);
+      expect(f[0]?.summary).toContain("node.stop");
+      expect(f[0]?.summary).toContain("a");
+    }
+    expect(r.calls.started).toEqual([]);
+    expect(stateOf(r.log.state(), "b")).toBe("pending");
+  });
+
+  it("破棄済みの依存先を指定した spawn は、失敗させる。tree.list のような一覧では、破棄済みと分かる", async () => {
+    const r = rig();
+    r.discard("a");
+    const res = await r.spawner.handlers["node.spawn"]({
+      requestId: "sp-1",
+      operation: "node.spawn",
+      role: "integrator",
+      caller: { nodeId: "m1" },
+      params: {
+        parentId: "m1",
+        role: "implement",
+        objective: "x",
+        acceptanceCriteria: ["y"],
+        scope: SCOPE,
+        dependsOn: ["a"],
+      },
+    } as never);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("dependencyDiscarded");
+  });
+
+  it("同時に起動する数は、親ごとの上限まで。残りは、空きができてから起動する", async () => {
+    const r = rig({ startLimits: { perParent: 1 } });
+    r.node2("e", ["a"]);
+    r.verify("a");
+    let release!: () => void;
+    r.flags.startGate = new Promise<void>((res) => {
+      release = res;
+    });
+    const t = r.spawner.tick();
+    await new Promise((res) => setTimeout(res, 10));
+    expect(r.calls.started).toHaveLength(1); // b か e の 1 つだけ
+    release();
+    await t;
+    expect(r.calls.started.map((s) => s.nodeId).sort()).toEqual(["b", "e"]);
+  });
+
+  it("起動できない理由は、最初の 1 度だけ受信箱に出す（作業を続けられるよう、pending のまま）", async () => {
+    const r = rig();
+    r.verify("a");
+    r.flags.noAdapter = true;
+    await r.spawner.tick();
+    await r.spawner.tick();
+    expect(r.failures("b")).toHaveLength(1);
+    expect(stateOf(r.log.state(), "b")).toBe("pending");
+    // 直ったら起動する
+    r.flags.noAdapter = false;
+    await r.spawner.tick();
+    expect(stateOf(r.log.state(), "b")).toBe("running");
   });
 });
