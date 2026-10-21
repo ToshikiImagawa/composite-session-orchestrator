@@ -14,7 +14,6 @@ import {
   type EventBody,
   type Failure,
   failure,
-  ID_MAX_LENGTH,
   LIMITS,
   type OrchEvent,
   type OrchState,

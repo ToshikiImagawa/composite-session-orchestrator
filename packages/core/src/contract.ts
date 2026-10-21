@@ -6,9 +6,10 @@
  * （識別子と主要な項目のみ）。各操作の実装タスクで確定する。境界での値の検証（zod など）は将来課題。
  */
 
-import type { ReportEvidence, ReportKind } from "./events.js";
+import type { Brief } from "./brief.js";
+import type { ExtensionTarget, ReportEvidence, ReportKind } from "./events.js";
 import type { InboxItem } from "./inbox.js";
-import type { NodeState } from "./index.js";
+import type { NodeRole, NodeState } from "./index.js";
 
 /** 失敗。原因と次に取るべき操作を必ず持つ（NFR_010）。 */
 export interface Failure {
@@ -72,10 +73,16 @@ export const DEFAULT_PURGE_TOMBSTONE = true;
 /** 操作の引数と結果（spec 4.1。仮置き、最小限）。 */
 export interface OperationMap {
   // 統合
-  "node.spawn": { params: { brief: string; parentId: string }; result: { nodeId: string } };
-  "node.send": { params: { nodeId: string; text: string }; result: { delivered: boolean } };
+  /** 子の生成。ブリーフ（spec 5.2）を受ける。作業ツリー・ブランチは params に含めず、アダプタが親ブランチから決める。 */
+  "node.spawn": {
+    params: { parentId: string; role: NodeRole } & Brief;
+    result: { nodeId: string };
+  };
+  /** 追加指示。届いたかではなく、受け付けて（`node.instructed` を記録して）送る段取りに入ったことを返す。 */
+  "node.send": { params: { nodeId: string; text: string }; result: { status: "queued" } };
   "node.stop": {
-    params: { nodeId: string; mode: "graceful" | "immediate" };
+    /** 停止。猶予時間（`graceMs`。1〜`MAX_GRACE_MS` の整数）は穏当な停止（graceful）のときだけ指定できる。 */
+    params: { nodeId: string } & ({ mode: "graceful"; graceMs?: number } | { mode: "immediate" });
     result: { state: NodeState };
   };
   "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly InboxItem[] } };
@@ -85,7 +92,8 @@ export interface OperationMap {
     result: { decisionId: string };
   };
   "node.split": {
-    params: { nodeId: string; brief: string; keep: "mainline" | "stop" };
+    /** 切り出し。新しい子のブリーフを受ける（役割は元のノードと同じ。作業ツリー・ブランチはアダプタが決める）。 */
+    params: { nodeId: string; keep: "mainline" | "stop" } & Brief;
     result: { newNodeId: string };
   };
   "scope.decide": {
@@ -93,7 +101,11 @@ export interface OperationMap {
     result: { state: NodeState };
   };
   "node.review": {
-    params: { nodeId: string; verdict: "accept" | "reject" };
+    /** 完了の判定。差し戻し（reject）には理由（feedback）が必須で、受理（accept）では任意。 */
+    params: { nodeId: string } & (
+      | { verdict: "accept"; feedback?: string }
+      | { verdict: "reject"; feedback: string }
+    );
     result: { state: NodeState };
   };
   "node.reclaimPreview": { params: { nodeId: string }; result: { reclaimable: boolean } };
@@ -136,8 +148,11 @@ export interface OperationMap {
     params: { evidence: readonly { criterion: string; evidence: string }[] };
     result: { accepted: true };
   };
-  "scope.extend": { params: { target: string; reason: string }; result: { extensionId: string } };
-  "node.bind": { params: { bindCode: string }; result: { nodeId: string } };
+  /** 範囲の拡張要求。対象は書き込み可能な場所（`write`）かコマンド（`command`）の追加。 */
+  "scope.extend": {
+    params: { target: ExtensionTarget; reason: string };
+    result: { extensionId: string };
+  };
   // 人間（画面・コマンド）
   "decision.answer": {
     params: { decisionId: string } & ({ choice: string } | { text: string });
@@ -179,14 +194,7 @@ export const ROLE_OPERATIONS = {
     "decision.get",
     "report.get",
   ],
-  child: [
-    "report.progress",
-    "report.decision",
-    "report.outOfScope",
-    "report.done",
-    "scope.extend",
-    "node.bind",
-  ],
+  child: ["report.progress", "report.decision", "report.outOfScope", "report.done", "scope.extend"],
   human: ["decision.answer", "node.reclaimInstruct", "node.purge", "node.purgePreview"],
 } as const satisfies Record<ContractRole, readonly DaemonOperation[]>;
 

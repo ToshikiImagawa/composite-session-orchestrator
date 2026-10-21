@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   applyEvent,
   type EventBody,
+  effectiveScope,
   foldEvents,
   INBOX_KINDS,
   initialState,
   isStopOutcome,
+  LIMITS,
   type NodeEvent,
   type OrchEvent,
   type OrchState,
@@ -1184,5 +1186,333 @@ describe("識別子は isSafeId の形式（書き込み側の検査）", () => 
       ev(created("n.1_a:b-c", "implement", "root"), { requestId: "req:1.a" }),
     );
     expect(r.ok ? null : `${r.error.code}: ${r.error.cause}`).toBeNull();
+  });
+});
+
+describe("node.created のブリーフ（目的・受け入れ基準・作業範囲）の保持", () => {
+  const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+  const scope = {
+    writableLocations: ["/w"],
+    forbiddenLocations: ["/w/.git"],
+    allowedCommands: ["git status"],
+  };
+  const withBrief = (extra: Record<string, unknown>): EventBody =>
+    ({
+      type: "node.created",
+      payload: { nodeId: "c", role: "implement", parentId: "root", dependsOn: [], ...extra },
+    }) as EventBody;
+  const fold = (extra: Record<string, unknown>) => {
+    const b = base();
+    return foldEvents([...b, ev(withBrief(extra))]);
+  };
+
+  it("objective・acceptanceCriteria・scope を NodeRecord に保持する", () => {
+    const s = must(fold({ objective: "目的", acceptanceCriteria: ["基準 1", "基準 2"], scope }));
+    const c = s.nodes.find((n) => n.id === "c");
+    expect(c).toMatchObject({ objective: "目的", acceptanceCriteria: ["基準 1", "基準 2"], scope });
+  });
+
+  it("省略できる（根や、以前のイベント列との互換）。省略したノードにはこれらの項目がない", () => {
+    const s = must(fold({}));
+    const c = s.nodes.find((n) => n.id === "c");
+    expect(c).toBeDefined();
+    expect(c).not.toHaveProperty("objective");
+    expect(c).not.toHaveProperty("acceptanceCriteria");
+    expect(c).not.toHaveProperty("scope");
+  });
+
+  it.each([
+    [{ objective: "" }],
+    [{ objective: "o", acceptanceCriteria: [] }],
+    [{ objective: "o", acceptanceCriteria: ["a"], scope: { ...scope, extra: [] } }],
+    [{ acceptanceCriteria: ["a"] }], // 一部だけ（objective・scope がない）
+    [{ objective: "o", acceptanceCriteria: ["a"], scope: { ...scope, allowedCommands: [""] } }],
+  ])("不正なブリーフ %j は invalidPayload", (extra) => {
+    expect(codeOf(fold(extra))).toBe("invalidPayload");
+  });
+
+  it("保持した値は凍結され、同じ入力から同じ状態になる（決定性）", () => {
+    const x = { objective: "目的", acceptanceCriteria: ["a"], scope };
+    const a = must(fold(x));
+    expect(Object.isFrozen(a.nodes.find((n) => n.id === "c")?.acceptanceCriteria)).toBe(true);
+  });
+});
+
+describe("decision.requested の pauseNodeIds（判断待ちの間に止める子）", () => {
+  const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+  const request = (nodeId: string, pauseNodeIds: unknown) =>
+    ev({
+      type: "decision.requested",
+      payload: {
+        decisionId: "d1",
+        nodeId,
+        question: "どうする？",
+        options: ["A", "B"],
+        pauseNodeIds,
+      },
+    } as EventBody);
+  const fold = (nodeId: string, pauseNodeIds: unknown) => {
+    const b = base();
+    return foldEvents([...b, request(nodeId, pauseNodeIds)]);
+  };
+
+  it("要求したノードの子孫（自分を含まない）を指定でき、記録に残る", () => {
+    const s = must(fold("root", ["a", "b"]));
+    expect(s.decisions[0]?.pauseNodeIds).toEqual(["a", "b"]);
+  });
+
+  it("省略時は記録に項目がない。空配列は空として残す", () => {
+    const s0 = must(
+      foldEvents([
+        ...base(),
+        ev({ type: "decision.requested", payload: { decisionId: "d1", nodeId: "root" } }),
+      ]),
+    );
+    expect(s0.decisions[0]).not.toHaveProperty("pauseNodeIds");
+    expect(must(fold("root", [])).decisions[0]?.pauseNodeIds).toEqual([]);
+  });
+
+  it.each([
+    ["自分自身", "root", ["root"]],
+    ["兄弟", "a", ["b"]],
+    ["祖先", "a", ["root"]],
+    ["存在しないノード", "root", ["zzz"]],
+    ["重複", "root", ["a", "a"]],
+    ["識別子の形式が不正", "root", ["a b"]],
+    ["配列でない", "root", "a"],
+    ["要素が文字列でない", "root", [1]],
+  ])("%s は拒否する", (_name, nodeId, pause) => {
+    const code = codeOf(fold(nodeId, pause));
+    expect(["invalidPayload", "unknownNode"]).toContain(code);
+  });
+
+  it("件数の上限を超えたら invalidPayload", () => {
+    const many = Array.from({ length: LIMITS.pauseNodeCount + 1 }, (_, i) => `n${i}`);
+    expect(codeOf(fold("root", many))).toBe("invalidPayload");
+  });
+});
+
+describe("範囲の拡張要求（scope.extensionRequested・scope.extensionDecided）", () => {
+  const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+  const target = { kind: "write", value: "/w/docs" } as const;
+  const requested = (over: Record<string, unknown> = {}) =>
+    ev({
+      type: "scope.extensionRequested",
+      payload: { extensionId: "x1", nodeId: "a", target, reason: "仕様書も直す", ...over },
+    } as EventBody);
+  const decided = (over: Record<string, unknown> = {}) =>
+    ev({
+      type: "scope.extensionDecided",
+      payload: { extensionId: "x1", decision: "approve", granted: target, ...over },
+    } as EventBody);
+  /** a を running にしてから、続きのイベントを適用する。 */
+  const run = (...make: (() => OrchEvent)[]) => {
+    const b = [...base(), ev(changed("a", { type: "start" }))];
+    return foldEvents([...b, ...make.map((m) => m())]);
+  };
+
+  it("要求は open で記録され、判定で状態が変わる。承認には granted が残る", () => {
+    const s = must(run(() => requested()));
+    expect(s.extensions).toEqual([
+      expect.objectContaining({
+        extensionId: "x1",
+        nodeId: "a",
+        target,
+        reason: "仕様書も直す",
+        status: "open",
+      }),
+    ]);
+    const approved = must(
+      run(
+        () => requested(),
+        () => decided(),
+      ),
+    ).extensions[0];
+    expect(approved).toMatchObject({ status: "approved", granted: target });
+    expect(approved?.decidedBy).toEqual({ system: true });
+    for (const [decision, status] of [
+      ["reject", "rejected"],
+      ["split", "split"],
+    ] as const) {
+      const r = must(
+        run(
+          () => requested(),
+          () => decided({ decision, granted: undefined }),
+        ),
+      ).extensions[0];
+      expect(r?.status).toBe(status);
+      expect(r).not.toHaveProperty("granted");
+    }
+  });
+
+  it("approve には granted が必須（種類は要求と同じ）。reject・split に granted は付けられない", () => {
+    const code = (over: Record<string, unknown>) =>
+      codeOf(
+        run(
+          () => requested(),
+          () => decided(over),
+        ),
+      );
+    expect(code({ granted: undefined })).toBe("invalidPayload");
+    expect(code({ granted: { kind: "command", value: "ls" } })).toBe("invalidPayload");
+    expect(code({ granted: { kind: "write", value: "" } })).toBe("invalidPayload");
+    expect(code({ decision: "reject" })).toBe("invalidPayload");
+    expect(code({ decision: "split" })).toBe("invalidPayload");
+  });
+
+  it("running・waiting 以外のノードからの要求は拒否する", () => {
+    const b = base(); // a は pending
+    expect(codeOf(foldEvents([...b, requested()]))).toBe("invalidTransition");
+  });
+
+  it("存在しないノード・重複した extensionId・不正な値は拒否する", () => {
+    expect(codeOf(run(() => requested({ nodeId: "zzz" })))).toBe("unknownNode");
+    expect(
+      codeOf(
+        run(
+          () => requested(),
+          () => requested(),
+        ),
+      ),
+    ).toBe("duplicateExtension");
+    for (const bad of [
+      { extensionId: "x 1" },
+      { nodeId: "a b" },
+      { target: "docs" }, // 構造化されていない
+      { target: { kind: "read", value: "/w" } },
+      { target: { kind: "write", value: "" } },
+      { target: { kind: "write", value: "a".repeat(LIMITS.extensionTarget + 1) } },
+      { target: { kind: "write", value: "a\u0000" } },
+      { target: { kind: "write", value: "/w", extra: 1 } },
+      { reason: "" },
+      { reason: "a".repeat(LIMITS.extensionReason + 1) },
+    ]) {
+      expect(codeOf(run(() => requested(bad))), JSON.stringify(bad)).toBe("invalidPayload");
+    }
+  });
+
+  it("open の拡張要求は、ノードごとに上限まで。超えたら tooManyOpenExtensions、判定済みは数えない", () => {
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => () => requested({ extensionId: `x${i}` }));
+    expect(codeOf(run(...many(LIMITS.openExtensionsPerNode)))).toBeNull();
+    expect(codeOf(run(...many(LIMITS.openExtensionsPerNode + 1)))).toBe("tooManyOpenExtensions");
+    // 1 件を判定すれば、もう 1 件出せる
+    const afterDecide = run(
+      ...many(LIMITS.openExtensionsPerNode),
+      () => decided({ extensionId: "x0", decision: "reject", granted: undefined }),
+      () => requested({ extensionId: "extra" }),
+    );
+    expect(codeOf(afterDecide)).toBeNull();
+  });
+
+  it("判定: 未知の要求は unknownExtension、判定済みへの再判定は extensionAlreadyDecided、不正な decision は invalidPayload", () => {
+    expect(codeOf(run(() => decided()))).toBe("unknownExtension");
+    expect(
+      codeOf(
+        run(
+          () => requested(),
+          () => decided(),
+          () => decided({ decision: "reject", granted: undefined }),
+        ),
+      ),
+    ).toBe("extensionAlreadyDecided");
+    expect(
+      codeOf(
+        run(
+          () => requested(),
+          () => decided({ decision: "maybe" }),
+        ),
+      ),
+    ).toBe("invalidPayload");
+    expect(
+      codeOf(
+        run(
+          () => requested(),
+          () => decided({ extensionId: "x 1" }),
+        ),
+      ),
+    ).toBe("invalidPayload");
+  });
+
+  it("同じ requestId の同一内容は重複として無視される（冪等）", () => {
+    const b = [...base(), ev(changed("a", { type: "start" }))];
+    const first = requested();
+    const r = foldEvents([...b, first, { ...first, seq: first.seq + 1 }]);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.extensions).toHaveLength(1);
+  });
+
+  it("古いスナップショット（extensions がない）からも復元できる", () => {
+    const old = { ...initialState() } as Record<string, unknown>;
+    old.extensions = undefined;
+    const r = applyEvent(old as never, ev(created("root", "integrator", null)));
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("effectiveScope（有効な範囲 = ブリーフ + 承認済みの拡張）", () => {
+  const scope = {
+    writableLocations: ["/w"],
+    forbiddenLocations: ["/w/.git"],
+    allowedCommands: ["ls"],
+  };
+  const run = (...bodies: EventBody[]) => {
+    const b = base();
+    const c = ev({
+      type: "node.created",
+      payload: {
+        nodeId: "c",
+        role: "implement",
+        parentId: "root",
+        dependsOn: [],
+        objective: "o",
+        acceptanceCriteria: ["a"],
+        scope,
+      },
+    } as EventBody);
+    const start = ev(changed("c", { type: "start" }));
+    return must(foldEvents([...b, c, start, ...bodies.map((x) => ev(x))]));
+  };
+  const request = (extensionId: string, kind: "write" | "command", value: string): EventBody =>
+    ({
+      type: "scope.extensionRequested",
+      payload: { extensionId, nodeId: "c", target: { kind, value }, reason: "r" },
+    }) as EventBody;
+  const approve = (extensionId: string, kind: "write" | "command", value: string): EventBody =>
+    ({
+      type: "scope.extensionDecided",
+      payload: { extensionId, decision: "approve", granted: { kind, value } },
+    }) as EventBody;
+  const reject = (extensionId: string): EventBody =>
+    ({
+      type: "scope.extensionDecided",
+      payload: { extensionId, decision: "reject" },
+    }) as EventBody;
+
+  it("拡張がなければブリーフの範囲のまま", () => {
+    expect(effectiveScope(run(), "c")).toEqual(scope);
+  });
+
+  it("承認済みの拡張だけを加える（open・却下は加えない）。順序は判定の順で、重複は加えない", () => {
+    const s = run(
+      request("x1", "write", "/w/docs"),
+      request("x2", "command", "git status"),
+      request("x3", "write", "/etc"),
+      request("x4", "write", "/w/docs"),
+      approve("x1", "write", "/w/docs"),
+      approve("x2", "command", "git status"),
+      reject("x3"),
+      approve("x4", "write", "/w/docs"),
+    );
+    expect(effectiveScope(s, "c")).toEqual({
+      writableLocations: ["/w", "/w/docs"],
+      forbiddenLocations: ["/w/.git"],
+      allowedCommands: ["ls", "git status"],
+    });
+  });
+
+  it("ブリーフのないノード・存在しないノードは undefined", () => {
+    expect(effectiveScope(run(), "root")).toBeUndefined();
+    expect(effectiveScope(run(), "zzz")).toBeUndefined();
   });
 });

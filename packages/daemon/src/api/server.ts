@@ -65,7 +65,8 @@ export type ApiLogEvent =
   | {
       readonly event: "internalError";
       readonly requestId: string;
-      readonly operation: DaemonOperation;
+      /** `bind` は紐付けの入口（`POST /v1/bind`。契約の操作ではない）。 */
+      readonly operation: DaemonOperation | "bind";
       readonly error: unknown;
       readonly at: string;
     }
@@ -407,7 +408,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     try {
       token = deps.credentials.issueNodeToken(redeemed.nodeId, "child");
     } catch (error) {
-      return internalError(res, "bind", "node.bind", error);
+      return internalError(res, "bind", "bind", error);
     }
     log({ event: "bindSucceeded", nodeId: redeemed.nodeId, at: now() });
     send(res, 200, { ok: true, value: { nodeId: redeemed.nodeId, token } });
@@ -416,7 +417,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
   function internalError(
     res: ServerResponse,
     requestId: string,
-    operation: DaemonOperation,
+    operation: DaemonOperation | "bind",
     error: unknown,
   ): void {
     log({ event: "internalError", requestId, operation, error, at: now() });

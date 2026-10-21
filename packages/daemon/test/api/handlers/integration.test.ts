@@ -138,7 +138,7 @@ describe("窓口の通し（アダプタを伴う操作）", () => {
       (await t.call(t.tokens.root, "node.send", { nodeId: "a", text: "続けて" })).json,
     ).toEqual({
       ok: true,
-      value: { delivered: true },
+      value: { status: "queued" },
     });
     const stop = await t.call(t.tokens.root, "node.stop", { nodeId: "a", mode: "graceful" });
     expect(stop.json).toEqual({ ok: true, value: { state: "stopping" } });

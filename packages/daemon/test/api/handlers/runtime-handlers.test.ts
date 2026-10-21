@@ -118,7 +118,7 @@ describe("node.send（稼働中の子への追加指示）", () => {
   it("動作中のノードの指示をアダプタへ渡し、受け付けた結果を返す", async () => {
     const r = rig();
     const res = await r.call("node.send", { nodeId: "a", text: "続けて" });
-    expect(res).toEqual({ ok: true, value: { delivered: true } });
+    expect(res).toEqual({ ok: true, value: { status: "queued" } });
     expect(r.adapter?.sent).toEqual([["a", "続けて"]]);
   });
 
