@@ -33,7 +33,6 @@ export interface Envelope {
 
 const isRec = (x: unknown): x is Rec => typeof x === "object" && x !== null && !Array.isArray(x);
 const OPERATIONS: ReadonlySet<string> = new Set(DAEMON_OPERATIONS);
-const MAX_REQUEST_ID = 128;
 
 const bad = (cause: string): Failure =>
   failure("invalidRequest", cause, "要求の形を確認する", "操作の引数の仕様を確認する");
@@ -48,8 +47,13 @@ export function parseEnvelope(body: unknown): Result<Envelope, Failure> {
     return { ok: false, error: bad("封筒に未知のキーがある") };
   }
   const { requestId, operation, params, role, caller } = body;
-  if (!isBoundedText(requestId, MAX_REQUEST_ID) || requestId === "" || /\s/.test(requestId)) {
-    return { ok: false, error: bad(`requestId が不正（空でない ${MAX_REQUEST_ID} 文字以下）`) };
+  if (!isSafeId(requestId)) {
+    return {
+      ok: false,
+      error: bad(
+        `requestId が不正（英数字で始まり、英数字と . _ : - のみ、${ID_MAX_LENGTH} 文字以下）`,
+      ),
+    };
   }
   if (typeof operation !== "string" || !OPERATIONS.has(operation)) {
     return {

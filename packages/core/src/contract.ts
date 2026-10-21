@@ -253,7 +253,11 @@ export const INTEGRATOR_OPERATION_CLASS: Readonly<
   "report.get": "subtree",
 };
 
-/** 窓口への要求の封筒。`requestId` で冪等にする（NFR_003）。ロールが持たない操作は型で表せない。 */
+/**
+ * 窓口への要求の封筒。`requestId` で冪等にする（NFR_003）。`requestId` は `isSafeId` の形式（英数字で始まり、
+ * 英数字と `.` `_` `:` `-` のみ、128 文字以下）。窓口（daemon）と cli が同じ規則で検査する。
+ * ロールが持たない操作は型で表せない。
+ */
 export type DaemonRequest<R extends ContractRole = ContractRole> = {
   [Role in R]: {
     [Op in RoleOperation<Role>]: {
