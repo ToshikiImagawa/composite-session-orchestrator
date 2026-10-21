@@ -112,3 +112,37 @@ describe("node.purged（最終削除の標識）", () => {
     expect(again.ok && again.value.tombstones.length).toBe(2);
   });
 });
+
+describe("最終削除で消えたノードを、判断要求の pauseNodeIds が指しているとき", () => {
+  const requested = (pauseNodeIds: string[]): OrchEvent =>
+    ev({
+      type: "decision.requested",
+      payload: { decisionId: "dx", nodeId: "root", question: "q", pauseNodeIds },
+    });
+  const codeOf = (r: ReturnType<typeof foldEvents>) => (r.ok ? null : r.error.code);
+
+  it("標識（node.purged）が後にあれば、消えたノードは無視して畳み込める（ログの再生）", () => {
+    // 木のノード c・t の作成イベントは消えている。判断要求は残り、標識がその後に来る
+    const log = [...root(), requested(["c"]), purged(base)];
+    const r = foldEvents(log);
+    expect(codeOf(r)).toBeNull();
+    if (r.ok) {
+      expect(r.value.decisions[0]?.decisionId).toBe("dx");
+      expect(r.value.nodes.map((x) => x.id)).toEqual(["root"]);
+    }
+  });
+
+  it("標識より後の判断要求が、消えたノードを指すのは拒否する（標識の seq より小さいときだけ受理）", () => {
+    // 同じ畳み込みの中でも、状態に標識がある場合でも、標識より後の新しい参照は unknownNode
+    expect(codeOf(foldEvents([...root(), purged(base), requested(["c"])]))).toBe("unknownNode");
+    const s = foldEvents([...root(), purged(base)]);
+    expect(s.ok).toBe(true);
+    if (!s.ok) return;
+    expect(codeOf(foldEvents([requested(["c"])], s.value))).toBe("unknownNode");
+  });
+
+  it("標識のないノード・本当に存在しないノードは、引き続き unknownNode で拒否する", () => {
+    expect(codeOf(foldEvents([...root(), requested(["ghost"]), purged(base)]))).toBe("unknownNode");
+    expect(codeOf(foldEvents([...root(), requested(["c"])]))).toBe("unknownNode");
+  });
+});
