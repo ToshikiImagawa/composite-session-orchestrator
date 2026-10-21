@@ -34,7 +34,14 @@ import {
 } from "@cso/core";
 import type { RuntimeAdapter, StopValue } from "../../sdk/runtime.js";
 import type { HandlerRequest } from "../server.js";
-import { appendAtomically, deriveId, fail, type LogPort, summarize } from "./context.js";
+import {
+  alreadyApplied,
+  appendAtomically,
+  deriveId,
+  fail,
+  type LogPort,
+  summarize,
+} from "./context.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 
@@ -202,12 +209,22 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       }
       const adapter = adapterFor(nodeId);
       if (adapter === undefined) return noRuntime(nodeId);
+      // 先に記録し（同じ requestId の再試行は、記録も送信も重複させない）、そのあとアダプタへ渡す。
+      const actor = { nodeId: callerOf(req) };
+      if (alreadyApplied(log.state(), actor, req.requestId)) {
+        return { ok: true, value: { status: "queued" } };
+      }
+      const recorded = appendAtomically(log, clock, req.requestId, actor, [
+        { type: "node.instructed", payload: { nodeId, text } },
+      ]);
+      if (!recorded.ok) return recorded;
       const r = await adapter.send(nodeId, text);
       return r.ok ? { ok: true, value: { status: "queued" } } : r;
     },
 
     "node.stop": (req: HandlerRequest<"node.stop">): R<"node.stop"> => {
       const { nodeId, mode } = req.params;
+      const graceMs = req.params.mode === "graceful" ? req.params.graceMs : undefined;
       const outside = outsideSubtree(callerOf(req), nodeId);
       if (outside) return outside;
       const before = log.state();
@@ -215,7 +232,9 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
       // 停止未完了からの要求は、再試行（即時停止）として記録する。
       const event: NodeEvent =
-        node.state === "stopIncomplete" ? { type: "retryStop" } : { type: "stop", mode };
+        node.state === "stopIncomplete"
+          ? { type: "retryStop" }
+          : { type: "stop", mode, ...(graceMs === undefined ? {} : { graceMs }) };
       const t = transition(node.state, event);
       if (!t.ok)
         return { ok: false, error: failure(t.error.code, t.error.cause, ...t.error.nextActions) };
