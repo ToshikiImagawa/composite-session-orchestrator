@@ -38,6 +38,11 @@ export interface DaemonConfig {
   readonly rootScope: Scope;
   /** 子に渡す MCP の接続先（ループバックだけ）。 */
   readonly mcpUrl: string;
+  /**
+   * 再生成できるので、残っていても未保存の変更とみなさない gitignore の対象（パスの先頭のディレクトリ名）。省略すると
+   * `node_modules`・`dist`・`.turbo`。これ以外の gitignore の対象（`.env` など）が作業ツリーにあれば、回収は拒否される。
+   */
+  readonly regenerableIgnored?: readonly string[];
   /** 窓口の待ち受けポート（127.0.0.1）。0 なら空いているポート。既定 0。 */
   readonly port: number;
 }
@@ -51,6 +56,7 @@ const KEYS = [
   "rootScope",
   "mcpUrl",
   "port",
+  "regenerableIgnored",
 ] as const;
 
 const bad = (cause: string): { ok: false; error: Failure } => ({
@@ -118,6 +124,31 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     return bad("port は 0〜65535 の整数");
   }
 
+  let regenerableIgnored: string[] | undefined;
+  if (raw.regenerableIgnored !== undefined) {
+    const v = raw.regenerableIgnored;
+    if (
+      !Array.isArray(v) ||
+      v.length > 50 ||
+      !v.every(
+        (x) =>
+          typeof x === "string" &&
+          x !== "" &&
+          x !== "." &&
+          x !== ".." &&
+          !x.includes("/") &&
+          !x.includes("\0") &&
+          x === x.trim(),
+      ) ||
+      new Set(v).size !== v.length
+    ) {
+      return bad(
+        "regenerableIgnored は、ディレクトリ名（/ を含まない・空でない・重複なし、50 件以下）の配列",
+      );
+    }
+    regenerableIgnored = [...(v as string[])];
+  }
+
   const rs = raw.rootScope;
   if (!isRec(rs))
     return bad(
@@ -169,6 +200,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       },
       mcpUrl,
       port,
+      ...(regenerableIgnored === undefined ? {} : { regenerableIgnored }),
     },
   };
 }

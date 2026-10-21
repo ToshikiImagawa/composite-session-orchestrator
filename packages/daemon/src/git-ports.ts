@@ -19,7 +19,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { type Failure, failure, type Result } from "@cso/core";
+import { type Failure, failure, isPathUnder, type Result } from "@cso/core";
 
 export interface GitResult {
   readonly code: number | null;
@@ -30,6 +30,16 @@ export type GitRunner = (
   args: readonly string[],
   opts: { readonly cwd: string },
 ) => Promise<GitResult>;
+
+/**
+ * git に渡す環境変数: `GIT_` で始まるものをすべて外し（`GIT_DIR`・`GIT_WORK_TREE`・`GIT_CONFIG_*` などで、別のリポジトリ・設定を
+ * 指されないように）、システムの設定を読まず、対話を求めず、出力の言語を固定する。
+ */
+export function gitEnv(parent: Readonly<Record<string, string | undefined>>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(parent)) if (!k.startsWith("GIT_")) env[k] = v;
+  return { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
+}
 
 /** `git` の実行。例外を出さず、結果（終了コード・出力）を返す。起動できない・時間切れは `code: null`。 */
 export const nodeGit: GitRunner = (args, { cwd }) =>
@@ -42,7 +52,7 @@ export const nodeGit: GitRunner = (args, { cwd }) =>
         timeout: 60_000,
         maxBuffer: 16 * 1024 * 1024,
         encoding: "utf8",
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
+        env: gitEnv(process.env),
       },
       (err, stdout, stderr) => {
         if (err === null) return resolve({ code: 0, stdout, stderr });
@@ -61,7 +71,15 @@ export interface GitPortsOptions {
   readonly worktreeRoot: string;
   readonly rootCwd: string;
   readonly rootNodeId: string;
+  /**
+   * 再生成できるので、残っていても未保存の変更とみなさない、gitignore の対象（パスの先頭のディレクトリ名）。
+   * これ以外の gitignore の対象（`.env` など）が作業ツリーにあれば、きれいでない（回収は拒否される）。既定は
+   * `node_modules`・`dist`・`.turbo`。
+   */
+  readonly regenerableIgnored?: readonly string[];
 }
+
+export const DEFAULT_REGENERABLE_IGNORED: readonly string[] = ["node_modules", "dist", ".turbo"];
 
 export interface GitPorts {
   factsFor(
@@ -114,6 +132,15 @@ export function createGitPorts(
     }
   }
   const { repoRoot, worktreeRoot, rootCwd, rootNodeId } = options;
+  const realRootCwd = realOrUndefined(rootCwd);
+  if (realRootCwd === undefined || !isPathUnder(realRootCwd, repoRoot)) {
+    return fail(
+      "invalidConfig",
+      `rootCwd ${rootCwd} が、repoRoot の配下の実在するパスでない`,
+      "rootCwd を、repoRoot 自身かその配下にする",
+    );
+  }
+  const regenerable = new Set(options.regenerableIgnored ?? DEFAULT_REGENERABLE_IGNORED);
 
   // git の操作は直列に行う（作業ツリーの追加・削除は、リポジトリの内部で競合しうる）。
   let tail: Promise<unknown> = Promise.resolve();
@@ -160,6 +187,31 @@ export function createGitPorts(
     }
   };
 
+  /** きれいか: 未保存の変更・未追跡のファイルがなく、gitignore の対象は、再生成できるもの（許可リスト）だけ。調べられなければ false。 */
+  const isClean = async (path: string): Promise<boolean> => {
+    // fsmonitor・フックは使わない（作業ツリーの設定に、コマンドを走らせない）。
+    const status = await git(
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignored=matching",
+      ],
+      path,
+    );
+    return (
+      status.code === 0 &&
+      status.stdout
+        .split("\n")
+        .filter((l) => l !== "")
+        .every((l) => l.startsWith("!! ") && regenerable.has(l.slice(3).split("/")[0] ?? ""))
+    );
+  };
+
   const ports: GitPorts = {
     provisionWorktree: ({ parentId, nodeId }) =>
       serial(async () => {
@@ -200,7 +252,19 @@ export function createGitPorts(
             );
           }
         }
-        const args = (await branchExists(branch))
+        const exists = await branchExists(branch);
+        if (exists) {
+          // 残っていたブランチを使うときは、上流が親のブランチのままか確かめる（違えば、統合の判定が狂う）。
+          const up = await git(["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
+          if (up.code !== 0 || up.stdout.trim() !== parentBranch) {
+            return fail(
+              "branchConflict",
+              `ブランチ ${branch} が残っていて、上流が親のブランチ（${parentBranch}）と違う`,
+              "残っているブランチの中身を確認して、人間が片付ける",
+            );
+          }
+        }
+        const args = exists
           ? ["worktree", "add", path, branch]
           : ["worktree", "add", "--track", "-b", branch, path, parentBranch];
         const r = await git(args);
@@ -225,8 +289,7 @@ export function createGitPorts(
         const path = pathOf(nodeId);
         const real = realOrUndefined(path);
         if (real === undefined) return undefined;
-        const status = await git(["status", "--porcelain", "--untracked-files=all"], path);
-        const clean = status.code === 0 && status.stdout.trim() === "";
+        const clean = await isClean(path);
         let merged = false;
         const up = await git(["rev-parse", "--abbrev-ref", `${branchOf(nodeId)}@{upstream}`]);
         if (up.code === 0 && up.stdout.trim() !== "") {
@@ -256,6 +319,30 @@ export function createGitPorts(
         if (registered === undefined) {
           return fail("gitFailed", "作業ツリーの一覧を取得できなかった", "git の状態を確認する");
         }
+        const branch = branchOf(nodeId);
+        // 削除の前に、ブランチが統合済みか確かめる。統合されていなければ、作業ツリーも消さずに失敗する（成果を失わない）。
+        if (registered || (await branchExists(branch))) {
+          const up = await git(["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
+          const anc =
+            up.code === 0 && up.stdout.trim() !== ""
+              ? await git(["merge-base", "--is-ancestor", branch, up.stdout.trim()])
+              : undefined;
+          if (anc === undefined || anc.code !== 0) {
+            return fail(
+              "branchNotMerged",
+              `ブランチ ${branch} が、上流に統合済みと確認できない（作業ツリーもブランチも残した）`,
+              "成果を統合してから、もう一度回収する",
+            );
+          }
+        }
+        // `git worktree remove` は、gitignore の対象（`.env` など）を黙って消すので、消す前に、同じ規則できれいか確かめる。
+        if (registered && !(await isClean(path))) {
+          return fail(
+            "removeFailed",
+            "作業ツリーに、未保存の変更・未追跡のファイル・再生成できない gitignore の対象がある（消さなかった）",
+            "作業ツリーの中身を確認する（強制は削除しない）",
+          );
+        }
         if (registered) {
           const r = await git(["worktree", "remove", path]); // --force は使わない
           if (r.code !== 0) {
@@ -272,7 +359,6 @@ export function createGitPorts(
             "場所の中身を確認して、人間が片付ける",
           );
         }
-        const branch = branchOf(nodeId);
         if (await branchExists(branch)) {
           const r = await git(["branch", "-d", branch]); // 統合済みだけ。-D は使わない
           if (r.code !== 0) {

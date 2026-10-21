@@ -79,6 +79,18 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     bad({ rootScope: { ...base.rootScope, allowedCommands: [""] } }, "rootScope");
   });
 
+  it("regenerableIgnored は、ディレクトリ名の配列（任意）", () => {
+    const ok1 = parseConfig(
+      JSON.stringify({ ...base, regenerableIgnored: ["node_modules", "build"] }),
+    );
+    expect(ok1.ok && ok1.value.regenerableIgnored).toEqual(["node_modules", "build"]);
+    const none = parseConfig(JSON.stringify(base));
+    expect(none.ok && none.value.regenerableIgnored).toBeUndefined();
+    for (const v of ["x", [""], ["a/b"], ["."], [".."], ["a", "a"], [1], [" a"]]) {
+      bad({ regenerableIgnored: v }, "regenerableIgnored");
+    }
+  });
+
   it("mcpUrl は、ループバックの http(s) だけ（トークンを外へ送らない）", () => {
     for (const url of [
       "http://example.com/mcp",
