@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Failure, ok, type Result } from "@cso/core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDaemon,
   type Daemon,
@@ -344,5 +344,43 @@ describe("createDaemon（起動時の整合。待ち受けの前に reconcileOnS
     const d = await boot(r);
     const c1 = d.daemon.log.state().nodes.find((n) => n.id === "c1");
     expect(c1?.state).not.toBe("running");
+  });
+});
+
+describe("createDaemon（起動時のスケジューラ）", () => {
+  it("前回から残った、依存の揃った pending の子を、start の後に起動する", async () => {
+    const r = rig();
+    mkdirSync(r.config.stateDir, { mode: 0o700 });
+    const store = openSqliteStore(join(r.config.stateDir, "state.db"));
+    if (!store.ok) throw new Error("store");
+    const log = EventLog.open(store.value, { clock: () => "2026-10-20T00:00:00Z" });
+    if (!log.ok) throw new Error("log");
+    const add = (requestId: string, body: Parameters<typeof log.value.append>[0]["body"]) =>
+      log.value.append({ requestId, actor: { system: true }, body });
+    add("seed-root", {
+      type: "node.created",
+      payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+    });
+    add("seed-root-start", {
+      type: "node.stateChanged",
+      payload: { nodeId: "root", event: { type: "start" } },
+    });
+    add("seed-p1", {
+      type: "node.created",
+      payload: {
+        nodeId: "p1",
+        role: "implement",
+        parentId: "root",
+        dependsOn: [],
+        objective: "目的",
+        acceptanceCriteria: ["完了"],
+        scope: r.config.rootScope,
+      },
+    });
+    store.value.close();
+
+    const d = await boot(r);
+    await vi.waitFor(() => expect(r.launcher.sessions).toHaveLength(1));
+    expect(d.daemon.log.state().nodes.find((n) => n.id === "p1")?.state).toBe("running");
   });
 });

@@ -7,7 +7,7 @@ import { createPauseHandlers } from "./pause-handlers.js";
 import { createReclaimHandlers, type ReclaimPorts } from "./reclaim-handlers.js";
 import { createRuntimeHandlers, type RuntimeHandlerDeps } from "./runtime-handlers.js";
 import { createScopeHandlers } from "./scope-handlers.js";
-import { createSpawnHandlers, type SpawnHandlerDeps } from "./spawn-handlers.js";
+import { createSpawner, type SpawnHandlerDeps } from "./spawn-handlers.js";
 import { createStateHandlers, type StateHandlerDeps } from "./state-handlers.js";
 
 export type { LogPort } from "./context.js";
@@ -24,20 +24,36 @@ export {
   type RuntimeHandlerDeps,
 } from "./runtime-handlers.js";
 export { createScopeHandlers, type ScopeHandlerDeps } from "./scope-handlers.js";
-export { createSpawnHandlers, type SpawnHandlerDeps, type SpawnPorts } from "./spawn-handlers.js";
+export {
+  createSpawner,
+  createSpawnHandlers,
+  type SpawnHandlerDeps,
+  type SpawnPorts,
+} from "./spawn-handlers.js";
 export { createStateHandlers, type StateHandlerDeps } from "./state-handlers.js";
 
 /**
  * `runtime` を渡すと、アダプタを伴う操作（node.send・node.stop・node.capabilities）も有効になる。
  * `spawn` を渡すと（`runtime` も必要）、子の生成（node.spawn・node.split）も有効になる。
  */
-export function createHandlers(
+export function createHandlers(...args: Parameters<typeof createHandlersWithScheduler>): Handlers {
+  return createHandlersWithScheduler(...args).handlers;
+}
+
+/**
+ * `createHandlers` に加えて、スケジューラ（依存が揃った pending の子を起動する `tick`）を返す。`spawn` がなければ
+ * `tick` は何もしない。`report.done`・`node.review` が成功したら、`tick` を（待たずに）呼ぶ。daemon の起動時にも呼ぶ。
+ */
+export function createHandlersWithScheduler(
   deps: StateHandlerDeps,
   runtime?: Pick<RuntimeHandlerDeps, "adapterFor" | "onStopSettled">,
   /** 渡すと、回収の操作（node.reclaimPreview・node.reclaim）も有効になる。 */
   reclaim?: ReclaimPorts,
-  spawn?: Pick<SpawnHandlerDeps, "ports" | "credentials" | "rootScope" | "onFailure">,
-): Handlers {
+  spawn?: Pick<
+    SpawnHandlerDeps,
+    "ports" | "credentials" | "rootScope" | "onFailure" | "startLimits"
+  >,
+): { handlers: Handlers; tick: () => Promise<void>; close: () => Promise<void> } {
   const onFailure = spawn?.onFailure === undefined ? {} : { onFailure: spawn.onFailure };
   // 追加指示の配送は、node.send と node.review（差し戻しの理由）で共有する。
   const delivery =
@@ -62,7 +78,39 @@ export function createHandlers(
       ? {}
       : { deliver: delivery.deliver, canDeliver: delivery.available }),
   });
-  return {
+  const spawner = !full
+    ? undefined
+    : createSpawner({
+        ...deps,
+        ...spawn,
+        adapterFor: runtime.adapterFor,
+        stop: rt["node.stop"],
+      });
+  const running = new Set<Promise<void>>();
+  let closed = false;
+  const tick = (): Promise<void> => {
+    if (closed || spawner === undefined) return Promise.resolve();
+    const p: Promise<void> = spawner
+      .tick()
+      .catch((e) => spawn?.onFailure?.("", `スケジューラが失敗: ${String(e)}`))
+      .finally(() => running.delete(p));
+    running.add(p);
+    return p;
+  };
+  /** 新しい tick を受け付けなくし、実行中の tick が終わるのを待つ（daemon の停止で使う）。 */
+  const close = async (): Promise<void> => {
+    closed = true;
+    while (running.size > 0) await Promise.all([...running]);
+  };
+  // 依存先の完了（report.done・node.review）の後で、依存が揃った子を起動する（応答は待たせない）。
+  const after =
+    <Q, T extends { ok: boolean }>(run: (req: Q) => T | Promise<T>) =>
+    async (req: Q): Promise<T> => {
+      const r = await run(req);
+      if (r.ok) void tick();
+      return r;
+    };
+  const built = {
     ...createReadHandlers(() => deps.log.state()),
     ...state,
     ...(rt === undefined ? {} : rt),
@@ -70,12 +118,7 @@ export function createHandlers(
     ...(!full
       ? {}
       : {
-          ...createSpawnHandlers({
-            ...deps,
-            ...spawn,
-            adapterFor: runtime.adapterFor,
-            stop: rt["node.stop"],
-          }),
+          ...spawner?.handlers,
           ...createPauseHandlers({
             ...deps,
             present: state["decision.present"],
@@ -95,4 +138,13 @@ export function createHandlers(
           }),
         }),
   } as Handlers;
+  // 依存先の完了（report.done・node.review）と、判断への回答による再開（decision.answer）の後で、起動できる子を起動する。
+  const handlers: Handlers = { ...built };
+  if (spawner !== undefined) {
+    for (const op of ["report.done", "node.review", "decision.answer"] as const) {
+      const run = built[op] as ((req: never) => unknown) | undefined;
+      if (run !== undefined) (handlers as Record<string, unknown>)[op] = after(run as never);
+    }
+  }
+  return { handlers, tick, close };
 }

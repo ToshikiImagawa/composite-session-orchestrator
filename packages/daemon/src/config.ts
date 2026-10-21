@@ -43,6 +43,8 @@ export interface DaemonConfig {
    * `node_modules`・`dist`・`.turbo`。これ以外の gitignore の対象（`.env` など）が作業ツリーにあれば、回収は拒否される。
    */
   readonly regenerableIgnored?: readonly string[];
+  /** スケジューラが同時に起動する数の上限（親ごと・全体。1〜64）。省略した項目は既定の 4。 */
+  readonly startLimits?: { readonly perParent?: number; readonly total?: number };
   /** 窓口の待ち受けポート（127.0.0.1）。0 なら空いているポート。既定 0。 */
   readonly port: number;
 }
@@ -57,6 +59,7 @@ const KEYS = [
   "mcpUrl",
   "port",
   "regenerableIgnored",
+  "startLimits",
 ] as const;
 
 const bad = (cause: string): { ok: false; error: Failure } => ({
@@ -122,6 +125,29 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
   const port = raw.port === undefined ? 0 : raw.port;
   if (typeof port !== "number" || !Number.isInteger(port) || port < 0 || port > 65535) {
     return bad("port は 0〜65535 の整数");
+  }
+
+  let startLimits: { perParent?: number; total?: number } | undefined;
+  if (raw.startLimits !== undefined) {
+    const v = raw.startLimits as Record<string, unknown>;
+    const okLimit = (x: unknown): boolean =>
+      x === undefined || (typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= 64);
+    if (
+      typeof v !== "object" ||
+      v === null ||
+      Array.isArray(v) ||
+      Object.keys(v).some((k) => k !== "perParent" && k !== "total") ||
+      !okLimit(v.perParent) ||
+      !okLimit(v.total)
+    ) {
+      return bad(
+        "startLimits は、perParent・total（どちらも 1〜64 の整数。任意）だけを持つオブジェクト",
+      );
+    }
+    startLimits = {
+      ...(v.perParent === undefined ? {} : { perParent: v.perParent as number }),
+      ...(v.total === undefined ? {} : { total: v.total as number }),
+    };
   }
 
   let regenerableIgnored: string[] | undefined;
@@ -201,6 +227,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       mcpUrl,
       port,
       ...(regenerableIgnored === undefined ? {} : { regenerableIgnored }),
+      ...(startLimits === undefined ? {} : { startLimits }),
     },
   };
 }

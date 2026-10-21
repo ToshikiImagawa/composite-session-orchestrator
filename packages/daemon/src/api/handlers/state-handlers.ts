@@ -155,12 +155,19 @@ export function createStateHandlers(deps: StateHandlerDeps) {
   return {
     "tree.list": (req: HandlerRequest<"tree.list">): R<"tree.list"> => {
       const v = visibleState(log.state(), callerOf(req));
+      const all = log.state().nodes;
       const rows = v.nodes.map((n) => [
         n.id,
         n.role,
         n.state,
         n.parentId ?? "-",
-        n.dependsOn.length === 0 ? "-" : n.dependsOn.join(","),
+        n.dependsOn.length === 0
+          ? "-"
+          : n.dependsOn
+              .map((d) =>
+                all.find((x) => x.id === d)?.discarded === undefined ? d : `${d}(破棄済み)`,
+              )
+              .join(","),
       ]);
       const header = ["id", "role", "state", "parent", "dependsOn"];
       const widths = header.map((h, i) =>

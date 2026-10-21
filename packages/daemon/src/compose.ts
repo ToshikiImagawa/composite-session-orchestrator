@@ -29,7 +29,7 @@ import {
   createApiServer,
   createBindCodes,
   createCredentialStore,
-  createHandlers,
+  createHandlersWithScheduler,
   FileTokenRepository,
   loadOrCreateHumanToken,
   type ReclaimPorts,
@@ -332,7 +332,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   };
   const onFailure = (nodeId: string, cause: string): void =>
     note("handlerFailure", { nodeId, cause });
-  const handlers = createHandlers(
+  const {
+    handlers,
+    tick: schedule,
+    close: closeScheduler,
+  } = createHandlersWithScheduler(
     { log, clock },
     {
       adapterFor: () => adapter,
@@ -344,7 +348,13 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         }),
     },
     reclaim,
-    { ports: spawn, credentials, rootScope: config.rootScope, onFailure },
+    {
+      ports: spawn,
+      credentials,
+      rootScope: config.rootScope,
+      onFailure,
+      ...(config.startLimits === undefined ? {} : { startLimits: config.startLimits }),
+    },
   );
 
   const logger: ApiLogger = (e) => {
@@ -387,11 +397,14 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         for (const o of outcomes) note("reconciled", { ...o });
         const { port, url } = await server.listen(config.port);
         running = { port, url, humanTokenPath, rootTokenPath };
+        // 待ち受けの後で、前回から残った、依存の揃った pending の子を起動する（子が窓口へ接続できるように）。
+        void schedule();
         note("started", { port, rootNodeId: config.rootNodeId });
         return running;
       },
       async stop() {
         await server.close();
+        await closeScheduler(); // 起動の途中の tick が終わるのを待つ（終わる前に、タイマー・DB を閉じない）
         tracked.cancelAll(); // アダプタが作った、残りのタイマーを止める
         running = undefined;
         closeAll();

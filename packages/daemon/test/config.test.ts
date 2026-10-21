@@ -91,6 +91,18 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("startLimits（同時に起動する数の上限）は、1〜64 の整数（任意。省略は既定の 4）", () => {
+    const ok1 = parseConfig(JSON.stringify({ ...base, startLimits: { perParent: 2, total: 8 } }));
+    expect(ok1.ok && ok1.value.startLimits).toEqual({ perParent: 2, total: 8 });
+    const part = parseConfig(JSON.stringify({ ...base, startLimits: { total: 3 } }));
+    expect(part.ok && part.value.startLimits).toEqual({ total: 3 });
+    const none = parseConfig(JSON.stringify(base));
+    expect(none.ok && none.value.startLimits).toBeUndefined();
+    for (const v of [1, "x", [], { perParent: 0 }, { total: 65 }, { perParent: 1.5 }, { x: 1 }]) {
+      bad({ startLimits: v }, "startLimits");
+    }
+  });
+
   it("mcpUrl は、ループバックの http(s) だけ（トークンを外へ送らない）", () => {
     for (const url of [
       "http://example.com/mcp",
