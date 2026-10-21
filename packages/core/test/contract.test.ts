@@ -95,6 +95,10 @@ describe("操作の契約（NFR_004, DC_003）", () => {
       nodeIds: ["root", "a"],
       archivedAt: "2026-07-01T00:00:00Z",
       elapsedDays: 111,
+      retentionDays: 90,
+      tombstoneTitle: "目的",
+      purgeable: true,
+      blockers: [],
     };
     expect(preview.nodeIds).toHaveLength(2);
   });

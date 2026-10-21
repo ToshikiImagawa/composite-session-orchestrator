@@ -38,6 +38,9 @@ export const LIMITS = {
   reportsPerNode: 200,
   /** 判断要求（`decision.requested`）で、判断待ちの間に止める子の件数。 */
   pauseNodeCount: 100,
+  /** 最終削除の標識（`node.purged`）: 木のノードの件数と、最終コミットの長さ。 */
+  purgeNodeCount: 10_000,
+  commit: 128,
   /** 完了の判定（`node.review`）の差し戻し理由・コメント。 */
   feedback: 8 * 1024,
 } as const;

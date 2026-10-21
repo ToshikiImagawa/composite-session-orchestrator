@@ -167,9 +167,45 @@ export type EventBody =
       readonly payload: { readonly nodeId: string };
     }
   | {
+      /**
+       * 最終削除（FR_031）の標識。木のノードを主語とするイベントの行は、先に物理削除されている（`EventLog.purgeTree`）。
+       * 標識は、削除を監査できるようにし、`seq` が戻らないようにするために、墓標を残さないときも残す。
+       * 標識に載せたノードが、まだ存在すれば拒否する（行を消さずに標識だけを足した、不整合なログ）。
+       */
+      readonly type: "node.purged";
+      readonly payload: {
+        /** 削除した木の根（最上位のノード）。 */
+        readonly rootId: string;
+        /** 削除した木のノード（配下から先）。 */
+        readonly nodeIds: readonly string[];
+        /** 木全体のアーカイブ日（ISO 8601 UTC）。 */
+        readonly archivedAt: string;
+        /** 墓標（残すとき）: タイトル・結果・最終コミット（記録があるときだけ）。日付は標識の `at`。 */
+        readonly tombstone?: PurgeTombstone;
+      };
+    }
+  | {
       readonly type: "decision.answered";
       readonly payload: { readonly decisionId: string; readonly answer: string };
     };
+
+/** 最終削除の墓標（1 行の要約）。 */
+export interface PurgeTombstone {
+  readonly title: string;
+  readonly outcome: "verified" | "discarded";
+  readonly lastCommit?: string;
+}
+
+/** 最終削除の標識の記録。 */
+export interface PurgeRecord {
+  readonly seq: number;
+  readonly at: string;
+  readonly actor: Actor;
+  readonly rootId: string;
+  readonly nodeIds: readonly string[];
+  readonly archivedAt: string;
+  readonly tombstone?: PurgeTombstone;
+}
 
 /** 報告の種類。`review`: 完了の判定（受理）のコメント（`node.review` の `feedback`）。 */
 export const REPORT_KINDS = ["progress", "done", "outOfScope", "failure", "review"] as const;
@@ -385,6 +421,8 @@ export interface OrchState {
   readonly extensions: readonly ExtensionRecord[];
   /** 追加指示の記録（時系列）。 */
   readonly instructions: readonly InstructionRecord[];
+  /** 最終削除の標識（時系列。削除したノードの記録は、ログから消えている）。 */
+  readonly tombstones: readonly PurgeRecord[];
   /** 最後に適用したイベントの `seq`。 */
   readonly lastSeq: number;
   /** 適用済みの要求識別子 → 内容の指紋（冪等性の判定用）。 */
@@ -394,6 +432,7 @@ export interface OrchState {
 export type FoldFailureCode =
   | TransitionFailureCode
   | "invalidRequestId"
+  | "purgeInconsistent"
   | "seqNotIncreasing"
   | "duplicateSeq"
   | "requestIdConflict"
@@ -455,6 +494,7 @@ export const initialState = (): OrchState => ({
   reports: [],
   extensions: [],
   instructions: [],
+  tombstones: [],
   lastSeq: 0,
   requests: {},
 });
@@ -546,6 +586,7 @@ interface Draft {
   extensions: ExtensionRecord[];
   extensionIdx: Map<string, number>;
   instructions: InstructionRecord[];
+  tombstones: PurgeRecord[];
   lastSeq: number;
   requests: Map<string, string>;
   /** 直前の `step` で、イベントの一部が無視されたこと（`ApplyOutcome.ignored` に渡す）。 */
@@ -618,6 +659,13 @@ const exitShape = (r: unknown): boolean =>
   isId(r.nodeId) &&
   typeof r.reason === "string" &&
   parseActor(r.actor) !== undefined;
+const purgeShape = (r: unknown): boolean =>
+  isRec(r) &&
+  Number.isInteger(r.seq) &&
+  isId(r.rootId) &&
+  isIdArray(r.nodeIds) &&
+  typeof r.archivedAt === "string" &&
+  parseActor(r.actor) !== undefined;
 const reportShape = (r: unknown): boolean =>
   isRec(r) &&
   Number.isInteger(r.seq) &&
@@ -678,6 +726,7 @@ function toDraft(state: OrchState): Draft | undefined {
   const reports = arrayOf<ReportRecord>(state.reports, reportShape);
   const extensions = arrayOf<ExtensionRecord>(state.extensions, extensionShape);
   const instructions = arrayOf<InstructionRecord>(state.instructions, instructionShape);
+  const tombstones = arrayOf<PurgeRecord>(state.tombstones, purgeShape);
   if (
     !nodes ||
     !inbox ||
@@ -689,7 +738,8 @@ function toDraft(state: OrchState): Draft | undefined {
     !exits ||
     !reports ||
     !extensions ||
-    !instructions
+    !instructions ||
+    !tombstones
   )
     return undefined;
 
@@ -711,6 +761,7 @@ function toDraft(state: OrchState): Draft | undefined {
     extensions: [...extensions],
     extensionIdx: new Map(extensions.map((x, i) => [x.extensionId, i])),
     instructions: [...instructions],
+    tombstones: [...tombstones],
     lastSeq: state.lastSeq,
     requests: new Map(Object.entries(state.requests)),
     note: undefined,
@@ -741,6 +792,7 @@ function toState(d: Draft): OrchState {
     reports: Object.freeze(d.reports),
     extensions: Object.freeze(d.extensions),
     instructions: Object.freeze(d.instructions),
+    tombstones: Object.freeze(d.tombstones),
     lastSeq: d.lastSeq,
     requests: Object.freeze(Object.fromEntries(d.requests)),
   });
@@ -1438,6 +1490,58 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           deliveredAt: raw.at as string,
         });
       }
+      return commit();
+    }
+
+    case "node.purged": {
+      const { rootId, nodeIds, archivedAt, tombstone } = p;
+      if (
+        !isId(rootId) ||
+        !isIdArray(nodeIds) ||
+        nodeIds.length > LIMITS.purgeNodeCount ||
+        typeof archivedAt !== "string" ||
+        !isValidInboxTime(archivedAt)
+      ) {
+        return invalid(seq, "node.purged の payload（rootId・nodeIds・archivedAt）");
+      }
+      let record: PurgeTombstone | undefined;
+      if (tombstone !== undefined) {
+        const t = tombstone as Record<string, unknown>;
+        if (
+          !isRec(t) ||
+          !isBoundedText(t.title, LIMITS.summary) ||
+          t.title === "" ||
+          (t.outcome !== "verified" && t.outcome !== "discarded") ||
+          (t.lastCommit !== undefined && !isBoundedText(t.lastCommit, LIMITS.commit))
+        ) {
+          return invalid(seq, "node.purged の tombstone（title・outcome・lastCommit）");
+        }
+        record = {
+          title: t.title as string,
+          outcome: t.outcome as "verified" | "discarded",
+          ...(t.lastCommit === undefined ? {} : { lastCommit: t.lastCommit as string }),
+        };
+      }
+      const alive = nodeIds.find((id) => d.nodeIdx.has(id));
+      if (alive !== undefined) {
+        return reject(
+          seq,
+          "purgeInconsistent",
+          `標識に載せたノード ${alive} が、まだ存在する（行の削除と標識が食い違っている）`,
+          "イベントログを確認する",
+        );
+      }
+      d.tombstones.push(
+        freezeRecord({
+          seq,
+          at: raw.at as string,
+          actor,
+          rootId,
+          nodeIds: Object.freeze([...nodeIds]),
+          archivedAt,
+          ...(record === undefined ? {} : { tombstone: freezeRecord(record) }),
+        }),
+      );
       return commit();
     }
 

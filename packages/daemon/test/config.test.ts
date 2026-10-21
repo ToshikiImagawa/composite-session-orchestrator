@@ -91,6 +91,17 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("retentionDays（最終削除の保持期間）は 0 以上の整数（既定は 90）。purgeTombstone は真偽値（任意）", () => {
+    const d = parseConfig(JSON.stringify(base));
+    expect(d.ok && d.value.retentionDays).toBeUndefined();
+    expect(d.ok && d.value.purgeTombstone).toBeUndefined();
+    const ok1 = parseConfig(JSON.stringify({ ...base, retentionDays: 0, purgeTombstone: false }));
+    expect(ok1.ok && ok1.value.retentionDays).toBe(0);
+    expect(ok1.ok && ok1.value.purgeTombstone).toBe(false);
+    for (const v of [-1, 1.5, "90", null, 100000]) bad({ retentionDays: v }, "retentionDays");
+    for (const v of ["yes", 1, null]) bad({ purgeTombstone: v }, "purgeTombstone");
+  });
+
   it("startLimits（同時に起動する数の上限）は、1〜64 の整数（任意。省略は既定の 4）", () => {
     const ok1 = parseConfig(JSON.stringify({ ...base, startLimits: { perParent: 2, total: 8 } }));
     expect(ok1.ok && ok1.value.startLimits).toEqual({ perParent: 2, total: 8 });

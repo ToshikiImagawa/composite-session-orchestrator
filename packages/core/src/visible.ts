@@ -24,6 +24,8 @@ export function visibleState(state: OrchState, callerId: string): OrchState {
       stopObservations: Object.freeze(mine(state.stopObservations)),
       toolDenials: Object.freeze(mine(state.toolDenials)),
       exits: Object.freeze(mine(state.exits)),
+      // 最終削除の標識は、人間（daemon）が直接読む。呼び出し元には見せない。
+      tombstones: Object.freeze([]),
       reports: Object.freeze(mine(state.reports)),
       extensions: Object.freeze(mine(state.extensions)),
       instructions: Object.freeze(mine(state.instructions)),

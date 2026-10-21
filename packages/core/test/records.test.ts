@@ -325,6 +325,8 @@ describe("子が入れる文字列・配列の上限（コードポイントで�
       openDecisionsPerNode: 10,
       reportsPerNode: 200,
       pauseNodeCount: 100,
+      purgeNodeCount: 10_000,
+      commit: 128,
       feedback: 8 * 1024,
     });
   });
