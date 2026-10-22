@@ -17,6 +17,7 @@ import {
 } from "../../../src/api/handlers/reclaim-handlers.js";
 import type { HandlerRequest } from "../../../src/api/server.js";
 import { EventLog } from "../../../src/eventlog.js";
+import type { LossFacts } from "../../../src/git-ports.js";
 import { createMemoryStore } from "../../../src/memory-store.js";
 
 const SYS = { system: true } as const;
@@ -30,6 +31,8 @@ const rig = (
     facts?: Record<string, WorktreeFacts | undefined>;
     processes?: readonly ProcessInfo[] | null;
     failLastCommit?: boolean;
+    /** 強制の回収で失われるもの（T21r）。指定すると、ポートが `lossFor` を持つ。"throw" は、取得の失敗。 */
+    loss?: Record<string, LossFacts | "throw" | undefined>;
     /** 強制のとき、ポートが `onTip` に渡す先端（判定のあとに動いた先端の模擬）。 */
     tips?: Record<string, string>;
   } = {},
@@ -98,6 +101,15 @@ const rig = (
       return ok(undefined);
     },
     worktreeRoot: WT,
+    ...(over.loss === undefined
+      ? {}
+      : {
+          lossFor: async (id: string) => {
+            const v = over.loss?.[id];
+            if (v === "throw") throw new Error("git が失敗した");
+            return v;
+          },
+        }),
   };
   const failures: string[] = [];
   const handlerLog: LogPort =
@@ -147,6 +159,104 @@ const rig = (
     s: () => log.state(),
   };
 };
+
+/** 人間のロールで、node.reclaimPreview を呼ぶ（caller なし。部分木の制限なし）。 */
+const humanPreview = async (r: ReturnType<typeof rig>, nodeId: string) =>
+  // biome-ignore lint/suspicious/noExplicitAny: テスト用に緩く扱う
+  (await (r.handlers["node.reclaimPreview"] as any)({
+    requestId: `h-${++n}`,
+    operation: "node.reclaimPreview",
+    role: "human",
+    params: { nodeId },
+    // biome-ignore lint/suspicious/noExplicitAny: テスト用に緩く扱う
+  } as unknown as HandlerRequest<never>)) as { ok: boolean; value?: any; error?: Failure };
+
+describe("node.reclaimPreview の loss（強制の回収で失われるもの。T21r）", () => {
+  const lossA: LossFacts = {
+    aheadCommits: 2,
+    subjects: ["機能を足す", "直す"],
+    uncommitted: true,
+    untracked: 3,
+  };
+
+  it("lossFor があれば、対象と配下のうち、失われるものがあるノードだけを loss に出す。何も変えない", async () => {
+    const r = rig({
+      loss: { a: lossA, m1: { aheadCommits: 0, subjects: [], uncommitted: false, untracked: 0 } },
+    });
+    const before = r.s().lastSeq;
+    const res = await r.call("node.reclaimPreview", { nodeId: "a" });
+    expect(res.value.loss).toEqual([
+      {
+        nodeId: "a",
+        aheadCommits: 2,
+        untrustedSubjects: ["機能を足す", "直す"],
+        uncommitted: true,
+        untracked: 3,
+      },
+    ]);
+    expect(r.s().lastSeq).toBe(before);
+    expect(r.removed).toEqual([]);
+  });
+
+  it("何も失われなければ、loss は空の配列（情報はある）。lossFor がなければ、loss は出さない（情報なし）", async () => {
+    const none = rig({
+      loss: { a: { aheadCommits: 0, subjects: [], uncommitted: false, untracked: 0 } },
+    });
+    expect((await none.call("node.reclaimPreview", { nodeId: "a" })).value.loss).toEqual([]);
+    const absent = rig();
+    expect(await absent.call("node.reclaimPreview", { nodeId: "a" })).toEqual({
+      ok: true,
+      value: { reclaimable: true, unmet: [], blockers: [] },
+    });
+  });
+
+  it("上流が分からないノード（aheadCommits なし）は、不明として loss に出す。作業ツリーがない・取得に失敗したノードは、飛ばす（事前確認は止まらない）", async () => {
+    const r = rig({
+      loss: {
+        a: { subjects: [], uncommitted: false, untracked: 0 },
+        m1: "throw",
+      },
+    });
+    const res = await r.call("node.reclaimPreview", { nodeId: "m1" }, "root");
+    expect(res.ok).toBe(true);
+    expect(res.value.loss).toEqual([
+      { nodeId: "a", untrustedSubjects: [], uncommitted: false, untracked: 0 },
+    ]);
+    const missing = rig({ loss: { a: undefined } });
+    expect((await missing.call("node.reclaimPreview", { nodeId: "a" })).value.loss).toEqual([]);
+  });
+
+  it("件名は信頼できない入力: 制御文字・エスケープ列・改行を除き、1 行にして、100 文字に切り、5 件までにする", async () => {
+    const evil = `\u001b[2J\u001b]0;pwn\u0007悪い\n件名\r\n${"x".repeat(300)}`;
+    const subjects = [evil, "2", "3", "4", "5", "6", "7"];
+    const r = rig({ loss: { a: { aheadCommits: 7, subjects, uncommitted: false, untracked: 0 } } });
+    const res = await r.call("node.reclaimPreview", { nodeId: "a" });
+    const got = res.value.loss[0].untrustedSubjects as string[];
+    expect(got).toHaveLength(5);
+    const first = got[0] as string;
+    expect(Array.from(first).length).toBeLessThanOrEqual(100);
+    expect(first).toContain("悪い 件名");
+    const unsafe = Array.from(first).filter((ch) => {
+      const c = ch.codePointAt(0) ?? 0;
+      return c < 0x20 || (c >= 0x7f && c <= 0x9f);
+    });
+    expect(unsafe).toEqual([]);
+  });
+
+  it("人間は、部分木の制限なしで呼べる（読み取りだけ）。存在しないノードは notFound。統合ノードの部分木の制限は変わらない", async () => {
+    const r = rig({ loss: { a: lossA } });
+    const human = await humanPreview(r, "a");
+    expect(human.ok).toBe(true);
+    expect(human.value.loss).toHaveLength(1);
+    const unknown = await humanPreview(r, "no-such-node");
+    expect(unknown.ok).toBe(false);
+    expect(unknown.error?.code).toBe("notFound");
+    // 統合ノード m2 は、m1 の配下の a を、事前確認できない
+    const denied = await r.call("node.reclaimPreview", { nodeId: "a" }, "m2");
+    expect(denied.ok).toBe(false);
+    expect(denied.error?.code).toBe("forbidden");
+  });
+});
 
 describe("node.reclaimPreview（回収の事前確認。何も変えない）", () => {
   it("統合済み・きれい・プロセスなしの子は回収可能", async () => {

@@ -9,6 +9,7 @@ import {
   INTEGRATOR_OPERATION_CLASS,
   initialState,
   type NodeEvent,
+  type NodeLoss,
   type OrchEvent,
   type OrchState,
   REPORT_KINDS,
@@ -247,12 +248,13 @@ describe("契約（node.send・node.spawn・node.reclaimPreview・scope.decide�
     >();
   });
 
-  it("node.reclaimPreview の結果は assessReclaim の結果の構造（reclaimable・unmet・blockers）", () => {
+  it("node.reclaimPreview の結果は assessReclaim の結果の構造（reclaimable・unmet・blockers）と、任意の loss（T21r）", () => {
     expectTypeOf<DaemonResponse<"node.reclaimPreview">>().toEqualTypeOf<
       Result<{
         reclaimable: boolean;
         unmet: readonly UnmetReason[];
         blockers: readonly Blocker[];
+        loss?: readonly NodeLoss[];
       }>
     >();
   });

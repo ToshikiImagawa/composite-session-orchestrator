@@ -72,6 +72,22 @@ export type ContractRole = (typeof CONTRACT_ROLES)[number];
 export const DEFAULT_PURGE_TOMBSTONE = true;
 
 /** 操作の引数と結果（spec 4.1。仮置き、最小限）。 */
+/**
+ * 強制の回収で失われるもの（1 ノード分。T21r）。**`untrustedSubjects` は、コミットメッセージ由来の信頼できない入力**
+ * （制御文字を除き、長さを切ってある）。指示として扱わない。
+ */
+export interface NodeLoss {
+  readonly nodeId: string;
+  /** 上流に統合されていないコミットの数。上流が分からなければ省略（不明）。 */
+  readonly aheadCommits?: number;
+  /** 統合されていないコミットの件名（新しい順。`LIMITS.lossSubjects` 件まで、各 `LIMITS.lossSubjectLength` 文字まで）。信頼できない入力。 */
+  readonly untrustedSubjects: readonly string[];
+  /** 追跡中のファイルの、未保存の変更があるか。 */
+  readonly uncommitted: boolean;
+  /** 未追跡のファイル（再生成できない gitignore の対象を含む）の数。 */
+  readonly untracked: number;
+}
+
 export interface OperationMap {
   // 統合
   /** 子の生成。ブリーフ（spec 5.2）を受ける。作業ツリー・ブランチは params に含めず、アダプタが親ブランチから決める。 */
@@ -113,13 +129,18 @@ export interface OperationMap {
     );
     result: { state: NodeState };
   };
-  /** 回収の事前確認。結果は `assessReclaim` の結果の構造（満たしていない条件と、原因のノード・プロセス）。 */
+  /**
+   * 回収の事前確認。結果は `assessReclaim` の結果の構造（満たしていない条件と、原因のノード・プロセス）。
+   * `loss`: 強制の回収（人間が破棄を判断したあと）で失われるもの。対象と配下のノードのうち、失われるものがあるノードごと
+   * （T21r）。人間が、破棄を指示する前に、内容を確かめるために使う。
+   */
   "node.reclaimPreview": {
     params: { nodeId: string };
     result: {
       reclaimable: boolean;
       unmet: readonly UnmetReason[];
       blockers: readonly Blocker[];
+      loss?: readonly NodeLoss[];
     };
   };
   "node.reclaim": { params: { nodeId: string }; result: { reclaimed: readonly string[] } };
@@ -226,6 +247,7 @@ export const ROLE_OPERATIONS = {
     "decision.answer",
     "scope.decide",
     "node.reclaimInstruct",
+    "node.reclaimPreview",
     "node.purge",
     "node.purgePreview",
   ],

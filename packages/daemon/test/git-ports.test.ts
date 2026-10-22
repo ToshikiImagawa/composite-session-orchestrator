@@ -423,4 +423,64 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
     });
     expect(made.ok).toBe(false);
   });
+
+  describe("lossFor（強制の回収で失われるもの。T21r）", () => {
+    it("作ったばかり（統合済み・きれい）なら、何も失われない", async () => {
+      const s = setup();
+      await provision(s, "c1");
+      expect(await s.ports.lossFor("c1")).toEqual({
+        aheadCommits: 0,
+        subjects: [],
+        uncommitted: false,
+        untracked: 0,
+      });
+    });
+
+    it("統合されていないコミットの数と件名（新しい順。5 件まで）、追跡中の変更、未追跡のファイルの数を返す", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      for (let i = 1; i <= 7; i++) {
+        writeFileSync(join(p, `f${i}.txt`), `${i}\n`);
+        git(p, "add", "-A");
+        git(p, "commit", "-q", "-m", `件名 ${i}`);
+      }
+      writeFileSync(join(p, "a.txt"), "変更\n"); // 追跡中のファイルの変更
+      writeFileSync(join(p, "new1.txt"), "x\n");
+      writeFileSync(join(p, "new2.txt"), "x\n"); // 未追跡 2 つ
+      const loss = await s.ports.lossFor("c1");
+      expect(loss).toEqual({
+        aheadCommits: 7,
+        subjects: ["件名 7", "件名 6", "件名 5", "件名 4", "件名 3"],
+        uncommitted: true,
+        untracked: 2,
+      });
+    });
+
+    it("再生成できる gitignore の対象（node_modules）は数えない。それ以外（.env）は、未追跡として数える", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      writeFileSync(join(p, ".gitignore"), "node_modules\n.env\n");
+      git(p, "add", ".gitignore");
+      git(p, "commit", "-q", "-m", "gitignore");
+      mkdirSync(join(p, "node_modules"));
+      writeFileSync(join(p, "node_modules", "x.js"), "x\n");
+      writeFileSync(join(p, ".env"), "SECRET=1\n");
+      const loss = await s.ports.lossFor("c1");
+      expect(loss?.untracked).toBe(1);
+      expect(loss?.uncommitted).toBe(false);
+      expect(loss?.aheadCommits).toBe(1);
+    });
+
+    it("上流が分からなければ、aheadCommits を省略する（不明）。作業ツリーが登録されていなければ undefined", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      const branch = git(p, "rev-parse", "--abbrev-ref", "HEAD");
+      git(p, "branch", "--unset-upstream", branch);
+      const loss = await s.ports.lossFor("c1");
+      expect(loss).toBeDefined();
+      expect(loss?.aheadCommits).toBeUndefined();
+      expect(loss?.subjects).toEqual([]);
+      expect(await s.ports.lossFor("no-such")).toBeUndefined();
+    });
+  });
 });

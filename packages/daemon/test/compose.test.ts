@@ -743,3 +743,47 @@ describe("createDaemon（窓口の回数の制限。T10l）", () => {
     expect((await call(d.url, d.rootToken, "tree.list", {})).status).toBe(200); // 有効なトークンは通る
   });
 });
+
+describe("createDaemon（回収の事前確認の loss。T21r）", () => {
+  it("人間のトークンで、実 HTTP から node.reclaimPreview を呼べて、失われるものが返る。ワーカーの lossFor が配線されている", async () => {
+    const r = rig();
+    r.deps = {
+      ...r.deps,
+      worktree: {
+        ...r.deps.worktree,
+        lossFor: async () => ({
+          aheadCommits: 3,
+          subjects: ["一つ目", "二つ目\u001b[2J"],
+          uncommitted: true,
+          untracked: 2,
+        }),
+      },
+    };
+    const d = await boot(r);
+    const res = await call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "root" });
+    expect(res.status).toBe(200);
+    expect(res.json.value.loss).toEqual([
+      {
+        nodeId: "root",
+        aheadCommits: 3,
+        untrustedSubjects: ["一つ目", "二つ目�[2J"],
+        uncommitted: true,
+        untracked: 2,
+      },
+    ]);
+    // 統合ノード（根）は、自分自身を事前確認できない（部分木の制限は変わらない）
+    const own = await call(d.url, d.rootToken, "node.reclaimPreview", { nodeId: "root" });
+    expect(own.status).toBe(403);
+    // 存在しないノード（人間）は notFound
+    const none = await call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "no-such" });
+    expect(none.json.error?.code).toBe("notFound");
+  });
+
+  it("worktree に lossFor がなければ、loss を出さない（情報なし）", async () => {
+    const r = rig();
+    const d = await boot(r);
+    const res = await call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "root" });
+    expect(res.status).toBe(200);
+    expect(res.json.value.loss).toBeUndefined();
+  });
+});

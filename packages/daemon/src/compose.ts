@@ -51,6 +51,7 @@ import {
 import { createAutoPurger } from "./auto-purge.js";
 import type { DaemonConfig } from "./config.js";
 import { EventLog } from "./eventlog.js";
+import type { LossFacts } from "./git-ports.js";
 import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
 import { createLsofProbe, nodeExec, type ProcessProbe } from "./sdk/lsof-probe.js";
@@ -69,6 +70,8 @@ const DEFAULT_AUTO_PURGE_NOTICE_DAYS = 7;
 /** git の作業ツリーに関わる口（実装は git を呼ぶ。テストはフェイク）。 */
 export interface WorktreePorts {
   factsFor(nodeId: string): Promise<WorktreeFacts | undefined>;
+  /** 強制の回収で失われるもの（T21r。省略すると、回収の事前確認に `loss` を出さない）。 */
+  lossFor?(nodeId: string): Promise<LossFacts | undefined>;
   removeWorktree(
     nodeId: string,
     opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
@@ -384,6 +387,12 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     nodeId === config.rootNodeId ? config.rootCwd : deps.worktree.cwdOf(nodeId);
   const reclaim: ReclaimPorts = {
     factsFor: (id) => deps.worktree.factsFor(id),
+    ...(deps.worktree.lossFor === undefined
+      ? {}
+      : {
+          lossFor: (id: string) =>
+            (deps.worktree.lossFor as NonNullable<WorktreePorts["lossFor"]>)(id),
+        }),
     probe,
     removeWorktree: (id, opts) => deps.worktree.removeWorktree(id, opts),
     worktreeRoot: config.worktreeRoot,

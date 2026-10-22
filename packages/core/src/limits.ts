@@ -34,6 +34,9 @@ export const LIMITS = {
   openExtensionsPerNode: 10,
   /** 未回答（open）の判断要求の、ノードあたりの件数（拡張要求の `openExtensionsPerNode` と同じ考え方）。 */
   openDecisionsPerNode: 10,
+  /** 強制の回収で失われるコミットの件名（T21r）: 1 ノードあたりの件数と、1 件の長さ。 */
+  lossSubjects: 5,
+  lossSubjectLength: 100,
   /** 子が入れる報告（`progress`・`outOfScope`）の、ノードあたりの件数。直近の start・restart より後だけを数える。完了・失敗・差し戻しの報告は数えない。 */
   reportsPerNode: 200,
   /** 判断要求（`decision.requested`）で、判断待ちの間に止める子の件数。 */

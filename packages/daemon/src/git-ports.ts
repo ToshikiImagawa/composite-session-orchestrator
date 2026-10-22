@@ -19,7 +19,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { type Failure, failure, isCommitSha, isPathUnder, type Result } from "@cso/core";
+import { type Failure, failure, isCommitSha, isPathUnder, LIMITS, type Result } from "@cso/core";
 
 export interface GitResult {
   readonly code: number | null;
@@ -81,7 +81,19 @@ export interface GitPortsOptions {
 
 export const DEFAULT_REGENERABLE_IGNORED: readonly string[] = ["node_modules", "dist", ".turbo"];
 
+/** 強制の回収で失われるもの（生の事実。件名は信頼できない入力で、呼び出し側が整える）。 */
+export interface LossFacts {
+  /** 上流に統合されていないコミットの数。上流が分からなければ省略。 */
+  aheadCommits?: number;
+  /** 統合されていないコミットの件名（新しい順。最大 `LIMITS.lossSubjects` 件）。 */
+  subjects: string[];
+  uncommitted: boolean;
+  untracked: number;
+}
+
 export interface GitPorts {
+  /** 強制の回収で失われるもの。作業ツリーが登録されていなければ（調べられなければ）`undefined`。 */
+  lossFor(nodeId: string): Promise<LossFacts | undefined>;
   factsFor(
     nodeId: string,
   ): Promise<
@@ -221,7 +233,58 @@ export function createGitPorts(
     return r.code === 0 && isCommitSha(sha) ? { headCommit: sha } : {};
   };
 
+  /** 失われるもの: 統合されていないコミット（数と件名）、追跡中の変更、未追跡のファイルの数。 */
+  const lossOf = async (nodeId: string): Promise<LossFacts | undefined> => {
+    if ((await isRegistered(nodeId)) !== true) return undefined;
+    const path = pathOf(nodeId);
+    const branch = branchOf(nodeId);
+    const out: LossFacts = { subjects: [], uncommitted: false, untracked: 0 };
+    const up = await git(["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
+    const upstream = up.code === 0 ? up.stdout.trim() : "";
+    if (upstream !== "") {
+      const count = await git(["rev-list", "--count", `${upstream}..${branch}`]);
+      const n = Number(count.stdout.trim());
+      if (count.code === 0 && Number.isInteger(n) && n >= 0) out.aheadCommits = n;
+      if (out.aheadCommits !== undefined && out.aheadCommits > 0) {
+        const log = await git([
+          "log",
+          "-n",
+          String(LIMITS.lossSubjects),
+          "--format=%s",
+          `${upstream}..${branch}`,
+        ]);
+        if (log.code === 0) out.subjects = log.stdout.split("\n").filter((l) => l !== "");
+      }
+    }
+    // fsmonitor・フックは使わない（作業ツリーの設定に、コマンドを走らせない）。
+    const status = await git(
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignored=matching",
+      ],
+      path,
+    );
+    if (status.code === 0) {
+      for (const line of status.stdout.split("\n")) {
+        if (line === "") continue;
+        if (line.startsWith("?? ")) out.untracked += 1;
+        else if (line.startsWith("!! ")) {
+          // 再生成できる gitignore の対象（許可リスト）は、失われるものに数えない。
+          if (!regenerable.has(line.slice(3).split("/")[0] ?? "")) out.untracked += 1;
+        } else out.uncommitted = true;
+      }
+    }
+    return out;
+  };
+
   const ports: GitPorts = {
+    lossFor: (nodeId) => serial(() => lossOf(nodeId)),
     provisionWorktree: ({ parentId, nodeId }) =>
       serial(async () => {
         const path = pathOf(nodeId);
