@@ -41,7 +41,10 @@ export const RESULT_KEYS: ResultKeys = {
     "tombstoneTitle",
     "purgeable",
     "blockers",
+    "hold",
   ],
+  "node.purgeHold": ["held", "until"],
+  "node.purgeRelease": ["released"],
 };
 
 /** 結果のキーだけを写す。結果がオブジェクトでなければ `undefined`（ハンドラの不具合として扱う）。 */

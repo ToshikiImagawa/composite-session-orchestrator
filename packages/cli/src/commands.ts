@@ -4,6 +4,8 @@
  *
  *   cso purge <nodeId> [--dry-run] [--yes] [--tombstone|--no-tombstone] [--request-id <id>]
  *   cso reclaim <nodeId> [--yes] [--request-id <id>]
+ *   cso purge-hold <nodeId> [--until <ISO 8601 UTC>] [--reason <文>] [--request-id <id>]
+ *   cso purge-release <nodeId> [--request-id <id>]
  *
  * 結果が確認できないとき（接続不可・不正な応答）は、同じ requestId で再実行できる（冪等、NFR_003）。
  */
@@ -39,6 +41,13 @@ const USAGE = `使い方:
       作業ツリーとブランチを強制して消す。
       まず、失われるもの（統合されていないコミット・未保存の変更・未追跡のファイル）を表示する。
       --yes      表示したうえで、破棄を指示する（なければ、表示だけで止まる）
+  cso purge-hold <nodeId> [--until <日時>] [--reason <理由>] [--request-id <id>]
+      自動の最終削除（autoPurge）を、この木について保留する。nodeId は、予告に出ている木の根（アーカイブ済みで、親がアーカイブされていないノード）。
+      有効な予告は、その場で取り下げる。人間の cso purge は、保留に関係なく実行できる（保留を無視したことは監査に残る）。
+      --until   保留の期限（ISO 8601 UTC。例: 2026-12-01T00:00:00Z。現在より後、365 日先まで）。省略すると無期限
+      --reason  理由（200 文字まで）
+  cso purge-release <nodeId> [--request-id <id>]
+      保留を解除する。解除のあとは、予告から出し直し、そこから noticeDays 日たつまで消えない
   --request-id <id>  結果が確認できなかった要求を、同じ識別子で再実行する
   -h, --help         この使い方を表示する（終了コード 0）
 終了コード: 0 成功 / 1 失敗・結果が確認できない / 2 引数の誤り`;
@@ -46,7 +55,11 @@ const USAGE = `使い方:
 const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   purge: ["--dry-run", "--yes", "--tombstone", "--no-tombstone"],
   reclaim: ["--yes"],
+  "purge-hold": ["--until", "--reason"],
+  "purge-release": [],
 };
+/** 値を取るオプション。 */
+const VALUE_FLAGS: ReadonlySet<string> = new Set(["--until", "--reason"]);
 
 export function formatFailure(f: Failure): string {
   return `失敗 [${f.code}]: ${f.cause}\n次の操作:\n${f.nextActions.map((a) => `  - ${a}`).join("\n")}\n`;
@@ -110,6 +123,8 @@ interface Preview {
   readonly tombstoneTitle: string;
   readonly purgeable: boolean;
   readonly blockers: readonly { readonly code: string; readonly cause: string }[];
+  /** 自動の最終削除の保留（有効なもの）。 */
+  readonly hold?: { readonly until?: string; readonly reason?: string };
 }
 const isPreview = (v: unknown): v is Preview =>
   isRecord(v) &&
@@ -120,7 +135,13 @@ const isPreview = (v: unknown): v is Preview =>
   typeof v.tombstoneTitle === "string" &&
   typeof v.purgeable === "boolean" &&
   Array.isArray(v.blockers) &&
-  v.blockers.every((b) => isRecord(b) && typeof b.code === "string" && typeof b.cause === "string");
+  v.blockers.every(
+    (b) => isRecord(b) && typeof b.code === "string" && typeof b.cause === "string",
+  ) &&
+  (v.hold === undefined ||
+    (isRecord(v.hold) &&
+      (v.hold.until === undefined || typeof v.hold.until === "string") &&
+      (v.hold.reason === undefined || typeof v.hold.reason === "string")));
 interface LossView {
   readonly nodeId: string;
   readonly aheadCommits?: number;
@@ -156,6 +177,9 @@ const isReclaimPreview = (v: unknown): v is ReclaimPreview =>
   isStringArray(v.unmet) &&
   Array.isArray(v.blockers) &&
   (v.loss === undefined || (Array.isArray(v.loss) && v.loss.every(isLossView)));
+const isHeld = (v: unknown): v is { held: true; until?: string } =>
+  isRecord(v) && v.held === true && (v.until === undefined || typeof v.until === "string");
+const isReleased = (v: unknown): v is { released: true } => isRecord(v) && v.released === true;
 const isPurged = (v: unknown): v is { purged: readonly string[] } =>
   isRecord(v) && isStringArray(v.purged);
 const isAccepted = (v: unknown): v is { accepted: true } => isRecord(v) && v.accepted === true;
@@ -233,6 +257,9 @@ function describePreview(p: Preview, tombstone: boolean | undefined): string {
     `最終削除の対象（${p.nodeIds.length} ノード）: ${p.nodeIds.join(", ")}\n` +
     `  アーカイブ日: ${p.archivedAt}\n  経過日数: ${p.elapsedDays}（保持期間: ${p.retentionDays} 日）\n  墓標: ${tomb}\n` +
     remains +
+    (p.hold === undefined
+      ? ""
+      : `  自動の最終削除は保留中（${p.hold.until === undefined ? "無期限" : `${terminalSafe(p.hold.until, 40)} まで`}${p.hold.reason === undefined ? "" : `。理由: 「${terminalSafe(p.hold.reason, 200)}」`}）。人間のこのコマンドは、保留を無視して削除する（無視したことは監査に残る）\n`) +
     "  物理削除の範囲: 対象のノードに関するイベントの行（本文を含む）を、ログのファイルから消す（取り消せない）。バックアップ・OS のコピーには残りうる\n" +
     blockers
   );
@@ -251,6 +278,7 @@ export async function runCommand(
   if (allowed === undefined) return usageError(`不明なコマンド: ${command}`);
 
   const flags = new Set<string>();
+  const values = new Map<string, string>();
   const positional: string[] = [];
   let requestId: string | undefined;
   const rerunArgs: string[] = [];
@@ -265,6 +293,14 @@ export async function runCommand(
       i++;
     } else if (a.startsWith("-")) {
       if (!allowed.includes(a)) return usageError(`不明なオプション: ${a}`);
+      if (VALUE_FLAGS.has(a)) {
+        const v = rest[i + 1];
+        if (v === undefined || v.startsWith("--")) return usageError(`${a} には値を指定する`);
+        values.set(a, v);
+        rerunArgs.push(a, JSON.stringify(v));
+        i++;
+        continue;
+      }
       flags.add(a);
       rerunArgs.push(a);
     } else {
@@ -291,6 +327,37 @@ export async function runCommand(
     o.kind === "failure"
       ? failed(o.failure)
       : unconfirmed((o as { reason: string }).reason, rerun, id);
+
+  if (command === "purge-hold") {
+    const until = values.get("--until");
+    const reason = values.get("--reason");
+    const res = await invoke(
+      deps.client,
+      id,
+      "node.purgeHold",
+      {
+        nodeId,
+        ...(until === undefined ? {} : { until }),
+        ...(reason === undefined ? {} : { reason }),
+      },
+      isHeld,
+    );
+    if (res.kind !== "ok") return fail(res);
+    return {
+      exitCode: 0,
+      stdout: `自動の最終削除を保留した: ${nodeId}（${res.value.until === undefined ? "無期限" : `${res.value.until} まで`}）\n有効な予告は取り下げた。人間の cso purge は、保留に関係なく実行できる\nrequestId: ${id}\n`,
+      stderr: "",
+    };
+  }
+  if (command === "purge-release") {
+    const res = await invoke(deps.client, id, "node.purgeRelease", { nodeId }, isReleased);
+    if (res.kind !== "ok") return fail(res);
+    return {
+      exitCode: 0,
+      stdout: `保留を解除した: ${nodeId}（保持期間を過ぎていれば、予告から出し直し、noticeDays 日後に消える）\nrequestId: ${id}\n`,
+      stderr: "",
+    };
+  }
 
   if (command === "reclaim") {
     // まず、失われるものを表示する。破棄の指示は、--yes があるときだけ。

@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { type EventBody, failure, type NodeEvent, planPurge } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { deriveId } from "../src/api/handlers/context.js";
-import { createPurger, type PurgeHandlerDeps } from "../src/api/handlers/purge-handlers.js";
+import {
+  createPurgeHandlers,
+  createPurger,
+  type PurgeHandlerDeps,
+} from "../src/api/handlers/purge-handlers.js";
 import { createAutoPurger } from "../src/auto-purge.js";
 import { EventLog } from "../src/eventlog.js";
 import { createMemoryStore } from "../src/memory-store.js";
@@ -716,5 +720,143 @@ describe("自動の最終削除（T13f-a・T13f-n）", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("自動の最終削除の保留（T13f-h）", () => {
+  /** 人間の node.purgeHold・node.purgeRelease（同じログ）。 */
+  const handlersOf = (r: ReturnType<typeof rig>, days: () => number) => {
+    const h = createPurgeHandlers({
+      log: r.log,
+      nowMs: () => T0 + days() * DAY,
+      retentionDays: 90,
+      defaultTombstone: true,
+      revokeNode: () => {},
+    });
+    let n = 0;
+    return {
+      hold: (nodeId: string, until?: string) =>
+        h["node.purgeHold"]({
+          requestId: `hold-${++n}`,
+          operation: "node.purgeHold",
+          role: "human",
+          params: { nodeId, ...(until === undefined ? {} : { until }) },
+        } as never),
+      release: (nodeId: string) =>
+        h["node.purgeRelease"]({
+          requestId: `rel-${++n}`,
+          operation: "node.purgeRelease",
+          role: "human",
+          params: { nodeId },
+        } as never),
+    };
+  };
+  const isoAt = (days: number): string => new Date(T0 + days * DAY).toISOString();
+
+  it("保留中の木は、保持期間・予告の期間を過ぎても消えず、予告も出さない。解除すると、予告から出し直す", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100 });
+    const hs = handlersOf(r, m.days);
+    expect(hs.hold("t").ok).toBe(true);
+    await m.auto.runOnce();
+    expect(noticesOf(r)).toHaveLength(0);
+    m.setDays(200);
+    expect((await m.auto.runOnce()).purged).toEqual([]);
+    expect(ids(r)).toContain("t");
+    expect(hs.release("t").ok).toBe(true);
+    expect((await m.auto.runOnce()).purged).toEqual([]); // 解除の直後は、予告だけ
+    expect(noticesOf(r)).toHaveLength(1);
+    m.setDays(208);
+    expect((await m.auto.runOnce()).purged).toEqual(["tc", "t"]);
+  });
+
+  it("保留をかけると、有効な予告は、その場で取り下げる（次の周期を待たない）。予告済みでも消えない", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100, noticeDays: 7 });
+    const hs = handlersOf(r, m.days);
+    await m.auto.runOnce();
+    expect(noticesOf(r).filter((i) => i.resolved === undefined)).toHaveLength(1);
+    expect(hs.hold("t", isoAt(300)).ok).toBe(true);
+    // 実行（周期）を待たずに、取り下げ済み
+    const items = noticesOf(r);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.resolved?.by).toEqual({ system: true });
+    m.setDays(110);
+    expect((await m.auto.runOnce()).purged).toEqual([]);
+  });
+
+  it("期限つきの保留は、期限が過ぎると対象に戻る。予告は出し直し、そこから noticeDays 日待つ（期限の直後に、予告なしで消えない）", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100, noticeDays: 7 });
+    const hs = handlersOf(r, m.days);
+    await m.auto.runOnce(); // 予告 1 件目
+    hs.hold("t", isoAt(120)); // 20 日の保留
+    m.setDays(119);
+    expect((await m.auto.runOnce()).purged).toEqual([]);
+    m.setDays(121); // 期限が過ぎた
+    expect((await m.auto.runOnce()).purged).toEqual([]); // 予告を出し直すだけ
+    expect(noticesOf(r)).toHaveLength(2);
+    m.setDays(127);
+    expect((await m.auto.runOnce()).purged).toEqual([]); // 出し直しから 6 日
+    m.setDays(128);
+    expect((await m.auto.runOnce()).purged).toEqual(["tc", "t"]);
+  });
+
+  it("保留は、他の木に影響しない", async () => {
+    const r = rig();
+    r.tree("a", 1);
+    r.tree("b", 2);
+    const m = make(r, { nowDays: 100 });
+    handlersOf(r, m.days).hold("a");
+    const out = await m.settle();
+    expect(out.purged.sort()).toEqual(["b", "bc"]);
+    expect(ids(r)).toEqual(["a", "ac", "root"]);
+  });
+
+  it("時計が飛んだ回は止まる（保留の期限の判定にも、同じ時計を使う）: 期限の前後で、予告なしに消えない", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100, noticeDays: 7 });
+    handlersOf(r, m.days).hold("t", isoAt(105));
+    await m.auto.runOnce();
+    m.jumpClock(30); // 壁時計だけが 30 日進む（期限は過ぎたように見える）
+    const out = await m.auto.runOnce();
+    expect(out.skipped).toBe(true);
+    expect(out.purged).toEqual([]);
+    expect(ids(r)).toContain("t");
+  });
+
+  it("autoPurge の予告の要約に、保留の止め方（cso purge-hold）が出る", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100 });
+    await m.auto.runOnce();
+    expect(noticesOf(r)[0]?.summary).toContain("cso purge-hold t");
+  });
+
+  it("purgeTreeOf（origin: auto）は、保留中の木を、最後の砦として拒否する", () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100 });
+    handlersOf(r, m.days).hold("t");
+    const purger = createPurger({
+      log: r.log,
+      nowMs: () => T0 + 100 * DAY,
+      retentionDays: 90,
+      defaultTombstone: true,
+      revokeNode: () => {},
+    });
+    const res = purger.purgeTreeOf({
+      nodeId: "t",
+      requestId: "x",
+      actor: SYS,
+      origin: "auto",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("purgeHeld");
+    expect(ids(r)).toContain("t");
   });
 });

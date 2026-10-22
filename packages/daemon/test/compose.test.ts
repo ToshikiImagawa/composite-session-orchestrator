@@ -787,3 +787,28 @@ describe("createDaemon（回収の事前確認の loss。T21r）", () => {
     expect(res.json.value.loss).toBeUndefined();
   });
 });
+
+describe("createDaemon（自動の最終削除の保留。T13f-h）", () => {
+  it("実 HTTP: 人間だけが node.purgeHold・node.purgeRelease を呼べる（配線され、統合ノードは 403）。木の根でなければ失敗する", async () => {
+    const r = rig();
+    const d = await boot(r);
+    const human = await call(d.url, d.humanToken, "node.purgeHold", { nodeId: "root" });
+    expect(human.status).toBe(422);
+    expect(human.json.error?.code).toBe("notPurgeRoot"); // 操作は配線されている（notSupported でない）
+    const none = await call(d.url, d.humanToken, "node.purgeHold", { nodeId: "no-such" });
+    expect(none.json.error?.code).toBe("notFound");
+    expect(
+      (await call(d.url, d.humanToken, "node.purgeRelease", { nodeId: "no-such" })).json.error
+        ?.code,
+    ).toBe("notFound");
+    expect((await call(d.url, d.rootToken, "node.purgeHold", { nodeId: "root" })).status).toBe(403);
+    expect((await call(d.url, d.rootToken, "node.purgeRelease", { nodeId: "root" })).status).toBe(
+      403,
+    );
+    const bad = await call(d.url, d.humanToken, "node.purgeHold", {
+      nodeId: "root",
+      until: "明日",
+    });
+    expect(bad.status).toBe(400);
+  });
+});

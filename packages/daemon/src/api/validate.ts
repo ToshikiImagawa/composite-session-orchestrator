@@ -15,6 +15,7 @@ import {
   ID_MAX_LENGTH,
   isBoundedText,
   isSafeId,
+  isValidInboxTime,
   LIMITS,
   MAX_GRACE_MS,
   NODE_ROLES,
@@ -111,6 +112,13 @@ const nonBlank = (o: Rec, key: string, max: number): string => {
   const v = text(o, key, max);
   if (v.trim() === "") fail(`${key} が空（空白だけは不可）`);
   return v;
+};
+/** ISO 8601 UTC（`...Z`）の日時。範囲（現在より後・上限）は、core の fold が検査する。 */
+const isoUtc = (o: Rec, key: string): string => {
+  const v = o[key];
+  if (typeof v !== "string" || !isValidInboxTime(v))
+    fail(`${key} が不正（ISO 8601 UTC。例: 2026-12-01T00:00:00Z）`);
+  return v as string;
 };
 const oneOf = <T extends string>(o: Rec, key: string, values: readonly T[]): T => {
   const v = o[key];
@@ -305,6 +313,19 @@ const VALIDATORS: Validators = {
     return { nodeId, tombstone: o.tombstone as boolean };
   },
   "node.purgePreview": nodeIdOnly,
+  "node.purgeHold": (p) => {
+    const o = strict(p, ["nodeId", "until", "reason"]);
+    const nodeId = id(o, "nodeId");
+    const until = o.until === undefined ? undefined : isoUtc(o, "until");
+    const reason =
+      o.reason === undefined ? undefined : nonBlank(o, "reason", LIMITS.purgeHoldReason);
+    return {
+      nodeId,
+      ...(until === undefined ? {} : { until }),
+      ...(reason === undefined ? {} : { reason }),
+    };
+  },
+  "node.purgeRelease": nodeIdOnly,
 };
 
 /** 操作ごとの引数を検査し、新しいオブジェクトに写して返す。 */

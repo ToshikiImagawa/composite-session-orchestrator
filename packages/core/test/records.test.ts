@@ -325,6 +325,8 @@ describe("子が入れる文字列・配列の上限（コードポイントで�
       openDecisionsPerNode: 10,
       lossSubjects: 5,
       lossSubjectLength: 100,
+      purgeHoldReason: 200,
+      purgeHoldMaxDays: 365,
       reportsPerNode: 200,
       pauseNodeCount: 100,
       purgeNodeCount: 10_000,

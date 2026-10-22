@@ -18,8 +18,10 @@ import {
   type OperationMap,
   type OrchEvent,
   planPurge,
+  purgeHoldActive,
   type Result,
 } from "@cso/core";
+import { purgeNoticeItems } from "../../auto-purge.js";
 import type { PurgeOutcome } from "../../eventlog.js";
 import type { HandlerRequest } from "../server.js";
 import { alreadyApplied, derivedRequestId, fail, type LogPort } from "./context.js";
@@ -40,7 +42,8 @@ export interface PurgeMarkerInfo {
 }
 
 export interface PurgeHandlerDeps {
-  readonly log: Pick<LogPort, "state"> & Required<Pick<LogPort, "purgeTree" | "checkPurge">>;
+  readonly log: Pick<LogPort, "state"> &
+    Required<Pick<LogPort, "purgeTree" | "checkPurge" | "appendAll">>;
   /** 現在時刻（ミリ秒）。 */
   readonly nowMs: () => number;
   /** 保持期間（日）。 */
@@ -137,6 +140,22 @@ export function createPurger(deps: PurgeHandlerDeps) {
       );
     }
     const target = state.nodes.find((n) => n.id === nodeId);
+    // 保留（T13f-h）は、自動の最終削除だけを止める。人間の明示のコマンドは、保留を無視して消せる（無視したことを監査に残す）。
+    const held = target !== undefined && purgeHoldActive(target, deps.nowMs());
+    if (held && origin === "auto") {
+      return fail(
+        "purgeHeld",
+        `木 ${nodeId} は、自動の最終削除が保留されている`,
+        "保留を解除するか、期限が過ぎるのを待つ",
+      );
+    }
+    if (held) {
+      audit("purgeHoldIgnored", {
+        nodeId,
+        origin,
+        ...(target?.purgeHold?.until === undefined ? {} : { until: target.purgeHold.until }),
+      });
+    }
     const withTombstone = tombstone ?? deps.defaultTombstone;
     const info: PurgeMarkerInfo = {
       rootId: nodeId,
@@ -183,7 +202,7 @@ export function createPurger(deps: PurgeHandlerDeps) {
 
 export function createPurgeHandlers(deps: PurgeHandlerDeps) {
   const { log } = deps;
-  const { purgeTreeOf, retentionBlocker } = createPurger(deps);
+  const { purgeTreeOf, retentionBlocker, audit } = createPurger(deps);
   const humanOnly = (role: string): Result<never, Failure> | undefined =>
     role === "human"
       ? undefined
@@ -223,8 +242,82 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
           tombstoneTitle: title,
           purgeable: blockers.length === 0,
           blockers,
+          ...(target !== undefined && purgeHoldActive(target, deps.nowMs())
+            ? {
+                hold: {
+                  ...(target.purgeHold?.until === undefined
+                    ? {}
+                    : { until: target.purgeHold.until }),
+                  ...(target.purgeHold?.reason === undefined
+                    ? {}
+                    : { reason: target.purgeHold.reason }),
+                },
+              }
+            : {}),
         },
       };
+    },
+
+    // 自動の最終削除の保留（T13f-h）。有効な予告は、同じトランザクションで取り下げる（次の周期を待たない）。
+    "node.purgeHold": (req: HandlerRequest<"node.purgeHold">): R<"node.purgeHold"> => {
+      const denied = humanOnly(req.role);
+      if (denied) return denied;
+      const { nodeId, until, reason } = req.params;
+      const state = log.state();
+      const node = state.nodes.find((n) => n.id === nodeId);
+      if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
+      const human: Actor = { human: true };
+      const system: Actor = { system: true };
+      const withdraw =
+        node.archivedAt === undefined
+          ? []
+          : purgeNoticeItems(state, nodeId, node.archivedAt).filter((n) => !n.resolved);
+      const r = log.appendAll([
+        {
+          requestId: derivedRequestId(human, req.requestId, 0),
+          actor: human,
+          body: {
+            type: "node.purgeHeld",
+            payload: {
+              nodeId,
+              ...(until === undefined ? {} : { until }),
+              ...(reason === undefined ? {} : { reason }),
+            },
+          },
+        },
+        ...withdraw.map((n, i) => ({
+          requestId: derivedRequestId(system, `purge-hold:${req.requestId}`, i),
+          actor: system,
+          body: { type: "inbox.resolved" as const, payload: { itemId: n.id } },
+        })),
+      ]);
+      if (!r.ok) return fail(r.error.code, r.error.cause, ...r.error.nextActions);
+      audit("held", {
+        nodeId,
+        ...(until === undefined ? {} : { until }),
+        withdrawn: withdraw.length,
+      });
+      return { ok: true, value: { held: true, ...(until === undefined ? {} : { until }) } };
+    },
+
+    "node.purgeRelease": (req: HandlerRequest<"node.purgeRelease">): R<"node.purgeRelease"> => {
+      const denied = humanOnly(req.role);
+      if (denied) return denied;
+      const { nodeId } = req.params;
+      const node = log.state().nodes.find((n) => n.id === nodeId);
+      if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
+      if (node.purgeHold === undefined) return { ok: true, value: { released: true } }; // 冪等
+      const human: Actor = { human: true };
+      const r = log.appendAll([
+        {
+          requestId: derivedRequestId(human, req.requestId, 0),
+          actor: human,
+          body: { type: "node.purgeHoldReleased", payload: { nodeId } },
+        },
+      ]);
+      if (!r.ok) return fail(r.error.code, r.error.cause, ...r.error.nextActions);
+      audit("released", { nodeId });
+      return { ok: true, value: { released: true } };
     },
 
     "node.purge": (req: HandlerRequest<"node.purge">): R<"node.purge"> => {

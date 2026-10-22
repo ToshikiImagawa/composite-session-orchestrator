@@ -222,8 +222,21 @@ export interface OperationMap {
       /** `blockers` が空なら `true`。 */
       purgeable: boolean;
       blockers: readonly { code: string; cause: string }[];
+      /** 自動の最終削除の保留（有効なものだけ。T13f-h）。人間の `node.purge` は、保留に関係なく実行できる。 */
+      hold?: { until?: string; reason?: string };
     };
   };
+  /**
+   * 自動の最終削除の保留（T13f-h。人間のみ）。`nodeId` は、予告の `nodeId` と同じもの: 自動の最終削除の対象になる木の根
+   * （アーカイブ済みで、親がアーカイブされていないノード）。`until`（ISO 8601 UTC。現在より後、365 日先まで）を省略すると無期限。
+   * 既にある保留は置き換える（延期）。有効な予告は、その場で取り下げる。
+   */
+  "node.purgeHold": {
+    params: { nodeId: string; until?: string; reason?: string };
+    result: { held: true; until?: string };
+  };
+  /** 保留の解除（人間のみ。冪等）。解除後は、保持期間と予告の条件を、改めて満たすまで消えない（予告から出し直す）。 */
+  "node.purgeRelease": { params: { nodeId: string }; result: { released: true } };
 }
 
 export type DaemonOperation = keyof OperationMap;
@@ -254,6 +267,8 @@ export const ROLE_OPERATIONS = {
     "node.reclaimPreview",
     "node.purge",
     "node.purgePreview",
+    "node.purgeHold",
+    "node.purgeRelease",
   ],
 } as const satisfies Record<ContractRole, readonly DaemonOperation[]>;
 

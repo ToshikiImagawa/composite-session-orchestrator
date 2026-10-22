@@ -8,7 +8,7 @@
  */
 
 import { type Failure, failure, type Result } from "./contract.js";
-import type { OrchEvent, OrchState } from "./events.js";
+import type { NodeRecord, OrchEvent, OrchState } from "./events.js";
 
 export interface PurgePlan {
   /** 削除する木のノード。配下から先（後順）。 */
@@ -124,6 +124,8 @@ export function purgeEventSeqs(
       case "node.exited":
       case "node.discardDecided":
       case "node.lastCommit":
+      case "node.purgeHeld":
+      case "node.purgeHoldReleased":
         subject = e.payload.nodeId;
         break;
       case "inbox.added":
@@ -163,4 +165,16 @@ export function purgeEventSeqs(
     if (subject !== undefined && nodeIds.has(subject)) out.push(e.seq);
   }
   return out;
+}
+
+/**
+ * 自動の最終削除の保留が有効か（T13f-h）。無期限、または期限（`until`）が現在より後。期限を読めなければ有効（迷ったら保留のまま）。
+ * `nowMs` は、呼び出し側の時計（自動の最終削除は、時計の異常の検知を通ったもの）。
+ */
+export function purgeHoldActive(node: NodeRecord, nowMs: number): boolean {
+  const hold = node.purgeHold;
+  if (hold === undefined) return false;
+  if (hold.until === undefined) return true;
+  const until = Date.parse(hold.until);
+  return !Number.isFinite(until) || !Number.isFinite(nowMs) || nowMs < until;
 }

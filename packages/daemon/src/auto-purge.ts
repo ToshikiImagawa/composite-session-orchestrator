@@ -27,6 +27,7 @@ import {
   type Failure,
   type OrchState,
   planPurge,
+  purgeHoldActive,
   type Result,
 } from "@cso/core";
 import { deriveId } from "./api/handlers/context.js";
@@ -76,6 +77,22 @@ const MAX_NOTICES_PER_TREE = 50;
 const noticeId = (nodeId: string, archivedAt: string, index: number): string =>
   deriveId("apn", "system", `${nodeId}:${archivedAt}:${index}`, "notice");
 /** 予告の requestId（ID と同じようにハッシュで短くする。長い nodeId でも、`isSafeId` の上限を超えない）。 */
+/** 木の予告の項目の識別子（新しいものが後ろ。実在するものだけ）。保留（T13f-h）が、有効な予告を、その場で取り下げるのに使う。 */
+export function purgeNoticeItems(
+  state: OrchState,
+  nodeId: string,
+  archivedAt: string,
+): { id: string; resolved: boolean }[] {
+  const out: { id: string; resolved: boolean }[] = [];
+  for (let i = 0; i < MAX_NOTICES_PER_TREE; i++) {
+    const id = noticeId(nodeId, archivedAt, i);
+    const item = state.inbox.find((x) => x.id === id);
+    if (item === undefined) break;
+    out.push({ id, resolved: item.resolved !== undefined });
+  }
+  return out;
+}
+
 const noticeRequestId = (nodeId: string, archivedAt: string, index: number): string =>
   deriveId("apnq", "system", `${nodeId}:${archivedAt}:${index}`, "notice-request");
 
@@ -94,7 +111,7 @@ function noticeSummary(
   const date = new Date(deps.nowMs() + deps.noticeDays * DAY_MS).toISOString().slice(0, 10);
   const open =
     decisions + items === 0 ? "" : `（未回答の判断 ${decisions}・未解決の項目 ${items}）`;
-  const text = `木 ${nodeId} を ${date} 以降に自動で削除する${open}。止めるには autoPurge を無効に、または retentionDays を延ばして daemon を再起動する`;
+  const text = `木 ${nodeId} を ${date} 以降に自動で削除する${open}。止めるには cso purge-hold ${nodeId}（人間のコマンド。期限は --until）`;
   return text.length <= 200 ? text : `${text.slice(0, 197)}...`;
 }
 const FAILURE_NOTE_INTERVAL_MS = DAY_MS;
@@ -123,6 +140,8 @@ export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
     const n = state.nodes.find((x) => x.id === nodeId);
     if (n === undefined || n.state !== "archived" || n.parentId === null) return undefined; // 根は対象外
     if (state.nodes.find((x) => x.id === n.parentId)?.state === "archived") return undefined;
+    // 保留（T13f-h）: 人間が、この木を自動の削除の対象から外している（期限つきなら、期限まで）。
+    if (purgeHoldActive(n, deps.nowMs())) return undefined;
     const plan = planPurge(state, nodeId, deps.nowMs());
     if (!plan.ok || plan.value.elapsedDays < deps.retentionDays) return undefined;
     return { archivedAt: plan.value.archivedAt, nodeIds: plan.value.nodeIds };
