@@ -30,7 +30,9 @@ import {
   type Result,
 } from "@cso/core";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
+import { recoverAnswerDeliveries } from "./api/handlers/answer-delivery.js";
 import { waitRequestKey } from "./api/handlers/context.js";
+import { createInstructionDelivery } from "./api/handlers/instruction-delivery.js";
 import { createPurger, type PurgeHandlerDeps } from "./api/handlers/purge-handlers.js";
 import {
   type ApiLogger,
@@ -424,6 +426,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     { log, clock },
     {
       adapterFor: () => adapter,
+      managed: (id) => adapter.has(id),
       onStopSettled: (nodeId, result) =>
         note("stopSettled", {
           nodeId,
@@ -514,6 +517,16 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           onFailure: (nodeId, cause) => note("reconcileFailure", { nodeId, cause }),
         });
         for (const o of outcomes) note("reconciled", { ...o });
+        // 判断の回答の指示が、記録と配送の間で途切れていたら、配送し直す（届けられなければ、受信箱に failure を出す）。
+        const delivery = createInstructionDelivery({ log, clock, adapterFor: () => adapter });
+        const recovered = await recoverAnswerDeliveries({
+          log,
+          clock,
+          deliver: delivery.deliver,
+          canDeliver: (id) => adapter.has(id),
+          onFailure: (nodeId, cause) => note("answerDeliveryFailure", { nodeId, cause }),
+        });
+        for (const o of recovered) note("answerRecovered", { ...o });
         const { port, url } = await server.listen(config.port);
         running = { port, url, humanTokenPath, rootTokenPath };
         // 待ち受けの後で、前回から残った、依存の揃った pending の子を起動する（子が窓口へ接続できるように）。

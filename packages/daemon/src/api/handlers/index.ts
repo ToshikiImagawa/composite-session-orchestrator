@@ -52,7 +52,13 @@ export function createHandlers(...args: Parameters<typeof createHandlersWithSche
  */
 export function createHandlersWithScheduler(
   deps: StateHandlerDeps,
-  runtime?: Pick<RuntimeHandlerDeps, "adapterFor" | "onStopSettled">,
+  runtime?: Pick<RuntimeHandlerDeps, "adapterFor" | "onStopSettled"> & {
+    /**
+     * アダプタが、そのノードの子を管理しているか。判断の回答（T10b-r）を届けるかの判定に使う（管理していない判断者
+     * 〔daemon の外で動く統合ノードなど〕には届けない）。省略すると、届けない（管理の有無が分からないため）。
+     */
+    managed?: (nodeId: string) => boolean;
+  },
   /** 渡すと、回収の操作（node.reclaimPreview・node.reclaim）も有効になる。 */
   reclaim?: ReclaimPorts,
   spawn?: Pick<
@@ -145,6 +151,13 @@ export function createHandlersWithScheduler(
             present: state["decision.present"],
             answer: state["decision.answer"],
             stop: rt["node.stop"],
+            ...(delivery === undefined
+              ? {}
+              : {
+                  deliver: delivery.deliver,
+                  canDeliver: (id: string) =>
+                    delivery.available(id) && runtime.managed?.(id) === true,
+                }),
             adapterFor: runtime.adapterFor,
             ports: spawn.ports,
             credentials: spawn.credentials,
