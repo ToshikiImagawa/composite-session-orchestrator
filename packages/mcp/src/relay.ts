@@ -42,6 +42,11 @@ export interface RelayOptions {
    * `--config` なしの `CSO_MCP_ALLOW_UNVERIFIED=1` で動くときと、テスト用）。
    */
   readonly verifier?: IdentityVerifier;
+  /**
+   * 検証のあとで、トークンつきの要求の応答の `x-cso-daemon-id` が、検証で得た `daemonId` と一致しなかった（応答を捨てた）ときに呼ぶ
+   * （記録・通知用。引数なし）。検知であって、防止ではない（`docs/daemon-identity.md` §5）。
+   */
+  readonly onIdentityMismatch?: () => void;
   /** 429・409 のあとの待ち（テストで差し替える）。既定は実時間。 */
   readonly sleep?: (ms: number) => Promise<void>;
   /** 待ちに足すジッター（0〜500ms）の乱数（0 以上 1 未満。テストで差し替える）。既定は `Math.random`。 */
@@ -85,6 +90,16 @@ const inProgressFailure = (sec: number): RateLimited =>
       "tree_list などで、先の要求の結果を確かめる",
     ),
     { retryAfterSec: sec },
+  );
+
+/** 応答が、検証した daemon のものでなかった。トークンは、別のプロセスに届いた可能性がある。 */
+const identityMismatch = (): Failure =>
+  failure(
+    "daemon_identity_failed",
+    "応答の送り手が、検証した daemon と違う（応答は捨てた。トークンが別のプロセスに届いた可能性があり、操作の結果は不明）",
+    "daemon を止めて起動し直し、トークンを再発行する（子を作り直す）",
+    "別のプロセスが窓口のポートを使っていないか確認する",
+    "tree_list などで状態を確かめる",
   );
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -151,10 +166,12 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
     init: RequestInit,
     timeout: number,
   ): Promise<{ result: Result<unknown>; transport: boolean; retrySec?: number }> {
+    let expectedDaemonId: string | undefined;
     if (opts.verifier !== undefined) {
       // トークンを送る前に、毎回、相手が本物の daemon か確かめる。失敗なら、トークンを送らない（操作は実行されていない）。
       const v = await opts.verifier.verify();
       if (!v.ok) return { result: { ok: false, error: v.failure }, transport: false };
+      expectedDaemonId = v.daemonId;
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -166,6 +183,19 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
         redirect: "error",
         signal: controller.signal,
       });
+      if (
+        expectedDaemonId !== undefined &&
+        res.headers.get("x-cso-daemon-id") !== expectedDaemonId
+      ) {
+        // 検証から送信までの間に、相手が入れ替わった（daemon の再起動・ポートの奪取）。応答は、捨てる（読まない）。
+        await res.body?.cancel().catch(() => undefined);
+        try {
+          opts.onIdentityMismatch?.();
+        } catch {
+          // 記録先の失敗は、処理を変えない
+        }
+        return done({ ok: false, error: identityMismatch() });
+      }
       if (res.status === 429) {
         // 回数の制限。daemon は実行していない。本文は読まない。
         await res.body?.cancel().catch(() => undefined);
@@ -324,15 +354,21 @@ async function readLimited(res: Response, max: number): Promise<string | undefin
   if (reader === undefined) return "";
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel().catch(() => undefined);
-      return undefined;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch (e) {
+    // 読み取りの途中の失敗でも、本文を開けたままにしない。
+    await reader.cancel().catch(() => undefined);
+    throw e;
   }
   return Buffer.concat(chunks).toString("utf8");
 }

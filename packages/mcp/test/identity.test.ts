@@ -1,5 +1,10 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   createIdentityVerifier,
   hostPortOf,
@@ -8,6 +13,7 @@ import {
   parseIdentityFile,
   proofMatches,
   proofOf,
+  readIdentityFileSecure,
 } from "../src/identity.js";
 import { createRelay } from "../src/relay.js";
 
@@ -108,17 +114,17 @@ const rig = (over: Partial<IdentityVerifierOptions> = {}) => {
 };
 
 describe("createIdentityVerifier", () => {
-  it("本物の daemon なら成功する。要求は GET /v1/identity?nonce=<小文字 16 進 32 桁>・Bearer なし・redirect: error", async () => {
+  it("本物の daemon なら成功する。要求は GET /v1/identity?nonce=<小文字 16 進 32 桁>・Bearer なし・redirect: manual", async () => {
     const r = rig();
     r.replies.push(r.genuine());
-    expect(await r.v.verify()).toEqual({ ok: true });
+    expect(await r.v.verify()).toEqual({ ok: true, daemonId: DAEMON_ID });
     expect(r.calls).toHaveLength(1);
     const url = new URL(r.calls[0]?.url ?? "");
     expect(url.origin + url.pathname).toBe(`${URL1}/v1/identity`);
     expect(url.searchParams.get("nonce")).toMatch(/^[0-9a-f]{32}$/);
     expect([...url.searchParams.keys()]).toEqual(["nonce"]);
     expect(r.calls[0]?.init?.method).toBe("GET");
-    expect(r.calls[0]?.init?.redirect).toBe("error");
+    expect(r.calls[0]?.init?.redirect).toBe("manual");
     expect(JSON.stringify(r.calls[0]?.init?.headers ?? {})).not.toMatch(/authorization/i);
   });
 
@@ -167,7 +173,7 @@ describe("createIdentityVerifier", () => {
     r.files.length = 0;
     r.files.push(fileText(), fileText({ secret: NEW }));
     r.replies.push(r.genuine(NEW), r.genuine(NEW));
-    expect(await r.v.verify()).toEqual({ ok: true });
+    expect(await r.v.verify()).toEqual({ ok: true, daemonId: DAEMON_ID });
     expect(r.calls).toHaveLength(2);
   });
 
@@ -266,7 +272,7 @@ describe("createIdentityVerifier", () => {
   it("429: Retry-After（上限 10 秒）+ ジッターを待って 1 度だけやり直す。2 度目も 429 なら rate_limited", async () => {
     const r = rig({ jitter: () => 7 });
     r.replies.push(new Response("", { status: 429, headers: { "retry-after": "3" } }), r.genuine());
-    expect(await r.v.verify()).toEqual({ ok: true });
+    expect(await r.v.verify()).toEqual({ ok: true, daemonId: DAEMON_ID });
     expect(r.sleeps).toEqual([3007]);
 
     const l = rig();
@@ -286,13 +292,16 @@ describe("relay と身元確認: 失敗のときは、トークンを送らな�
   const TOKEN = "secret-token-0123456789";
   const mk = (
     verify: () => Promise<
-      { ok: true } | { ok: false; kind: "identity" | "transient"; failure: never }
+      { ok: true; daemonId: string } | { ok: false; kind: "identity" | "transient"; failure: never }
     >,
   ) => {
     const sent: string[] = [];
     const fetchImpl = (async (_u: string, init?: RequestInit) => {
       sent.push(JSON.stringify(init?.headers ?? {}));
-      return Response.json({ ok: true, value: { role: "child" } });
+      return Response.json(
+        { ok: true, value: { role: "child" } },
+        { headers: { "x-cso-daemon-id": DAEMON_ID } },
+      );
     }) as unknown as typeof fetch;
     const relay = createRelay({
       daemonUrl: URL1,
@@ -340,12 +349,162 @@ describe("relay と身元確認: 失敗のときは、トークンを送らな�
     let n = 0;
     const { relay, sent } = mk(async () => {
       n++;
-      return { ok: true };
+      return { ok: true, daemonId: DAEMON_ID };
     });
     expect((await relay.whoami()).ok).toBe(true);
     expect(n).toBe(1);
     expect(sent).toHaveLength(1);
     await relay.request("tree.list", {});
     expect(n).toBe(2);
+  });
+});
+
+describe("relay: 応答の x-cso-daemon-id を、検証で得た daemonId と照合する（検証から送信までの窓の検知）", () => {
+  const TOKEN = "secret-token-0123456789";
+  const mk = (headers: Record<string, string>, onMismatch?: () => void) => {
+    const fetchImpl = (async () =>
+      Response.json(
+        { ok: true, value: { role: "child" } },
+        { headers },
+      )) as unknown as typeof fetch;
+    const relay = createRelay({
+      daemonUrl: URL1,
+      token: TOKEN,
+      fetch: fetchImpl,
+      verifier: { verify: async () => ({ ok: true, daemonId: DAEMON_ID }) },
+      ...(onMismatch === undefined ? {} : { onIdentityMismatch: onMismatch }),
+    });
+    if (!relay.ok) throw new Error("relay");
+    return relay.value;
+  };
+
+  it("一致すれば、応答を受け取る", async () => {
+    const r = await mk({ "x-cso-daemon-id": DAEMON_ID }).whoami();
+    expect(r.ok && r.value.role).toBe("child");
+  });
+
+  it.each([
+    ["別の daemonId", { "x-cso-daemon-id": "ff".repeat(16) }],
+    ["ヘッダーがない", {}],
+    ["空", { "x-cso-daemon-id": "" }],
+    ["大文字（形が違う）", { "x-cso-daemon-id": DAEMON_ID.toUpperCase() }],
+  ])(
+    "不一致（%s）: 応答を捨てて daemon_identity_failed にし、知らせる。再送しない",
+    async (_n, headers) => {
+      let mismatches = 0;
+      const r = mk(headers, () => {
+        mismatches++;
+      });
+      const who = await r.whoami();
+      expect(!who.ok && who.error.code).toBe("daemon_identity_failed");
+      expect(JSON.stringify(who)).not.toContain("child"); // 応答の内容は返さない
+      expect(mismatches).toBe(1);
+      const req = await r.request("tree.list", {});
+      expect(!req.ok && req.error.code).toBe("daemon_identity_failed");
+      expect(!req.ok && req.error.nextActions.join(" ")).toContain("再発行");
+      expect(mismatches).toBe(2);
+    },
+  );
+});
+
+describe("検証の fetch は、リダイレクトに従わない（3xx は身元の失敗）", () => {
+  const servers: Server[] = [];
+  afterEach(async () => {
+    for (const s of servers.splice(0)) await new Promise<void>((r) => s.close(() => r()));
+  });
+  const listen = async (handler: Parameters<typeof createServer>[1]) => {
+    const s = createServer(handler);
+    servers.push(s);
+    await new Promise<void>((r) => s.listen(0, "127.0.0.1", () => r()));
+    return (s.address() as { port: number }).port;
+  };
+
+  it.each([301, 302, 303, 307, 308])(
+    "本物の HTTP サーバーが %d を返しても、辿らず、身元の失敗にする",
+    async (status) => {
+      const hits: string[] = [];
+      const target = await listen((req, res) => {
+        hits.push(req.url ?? "");
+        res.writeHead(200).end("{}");
+      });
+      const port = await listen((_req, res) => {
+        res.writeHead(status, { location: `http://127.0.0.1:${target}/elsewhere` }).end();
+      });
+      const v = createIdentityVerifier({
+        daemonUrl: `http://127.0.0.1:${port}`,
+        identityPath: "/s/x",
+        readFile: () => fileText(),
+      });
+      const res = await v.verify();
+      expect(!res.ok && res.kind).toBe("identity");
+      expect(!res.ok && res.failure.code).toBe("daemon_identity_failed");
+      expect(hits).toEqual([]);
+    },
+  );
+});
+
+describe("readIdentityFileSecure（O_NOFOLLOW・fstat。daemon の assertSecureFile と対称）", () => {
+  let dir: string;
+  const setup = () => {
+    dir = mkdtempSync(join(tmpdir(), "cso-id-"));
+    return dir;
+  };
+  afterEach(() => {
+    if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+  });
+  const write = (name: string, mode: number, text = fileText()) => {
+    const p = join(setup(), name);
+    writeFileSync(p, text, { mode });
+    chmodSync(p, mode);
+    return p;
+  };
+
+  it("0600 の通常のファイルは読める", () => {
+    expect(readIdentityFileSecure(write("ok", 0o600))).toBe(fileText());
+  });
+
+  it.each([0o644, 0o640, 0o604, 0o660, 0o666, 0o755])("権限が緩い（%o）と拒否する", (mode) => {
+    expect(() => readIdentityFileSecure(write("loose", mode))).toThrow();
+  });
+
+  it("symlink は辿らない（リンク先が正しいファイルでも拒否）", () => {
+    const real = write("real", 0o600);
+    const link = join(dir, "link");
+    symlinkSync(real, link);
+    expect(() => readIdentityFileSecure(link)).toThrow();
+  });
+
+  it("FIFO は、ブロックせずに拒否する", () => {
+    const p = join(setup(), "fifo");
+    execFileSync("mkfifo", [p]);
+    chmodSync(p, 0o600);
+    expect(() => readIdentityFileSecure(p)).toThrow();
+  });
+
+  it("ディレクトリ・存在しないものは拒否する", () => {
+    expect(() => readIdentityFileSecure(setup())).toThrow();
+    expect(() => readIdentityFileSecure(join(dir, "none"))).toThrow();
+  });
+
+  it("4 KiB を超えるものは拒否する", () => {
+    expect(() => readIdentityFileSecure(write("big", 0o600, " ".repeat(4097)))).toThrow();
+  });
+
+  it("所有者が自分でなければ拒否する（getuid を差し替えて確かめる）", () => {
+    const p = write("owner", 0o600);
+    expect(() => readIdentityFileSecure(p, { getuid: () => 0x7ffffff0 })).toThrow();
+    expect(readIdentityFileSecure(p, { getuid: () => process.getuid?.() })).toBe(fileText());
+  });
+
+  it("verifier の既定の読み出しは、これを使う（緩い権限のファイルは、身元の失敗）", async () => {
+    const v = createIdentityVerifier({
+      daemonUrl: URL1,
+      identityPath: write("loose2", 0o644),
+      fetch: (async () => {
+        throw new Error("呼ばれない");
+      }) as unknown as typeof fetch,
+    });
+    const res = await v.verify();
+    expect(!res.ok && res.failure.code).toBe("daemon_identity_failed");
   });
 });

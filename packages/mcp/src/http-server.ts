@@ -23,7 +23,9 @@ const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 export type McpHttpLogEvent =
   | { readonly event: "sessionFailed"; readonly code: string; readonly at: string }
   /** 検証なしで動いている（起動のとき 1 度だけ）。 */
-  | { readonly event: "identityUnverified"; readonly at: string };
+  | { readonly event: "identityUnverified"; readonly at: string }
+  /** 検証のあとで、応答の送り手が、検証した daemon と違った（応答は捨てた。トークンの再発行が要る）。 */
+  | { readonly event: "identityMismatch"; readonly at: string };
 
 /**
  * daemon の身元確認の方式。`verified`: トークンつきの要求の直前に、毎回、検証する。`unverified`: 検証しない
@@ -169,6 +171,13 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
     }
   };
 
+  const logMismatch = (): void => {
+    try {
+      opts.logger?.({ event: "identityMismatch", at: new Date().toISOString() });
+    } catch {
+      // 記録の失敗は応答を変えない
+    }
+  };
   let warnedUnverified = false;
   const warnUnverified = (): void => {
     if (opts.identity.kind !== "unverified" || warnedUnverified) return;
@@ -257,7 +266,9 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
         : createRelay({
             daemonUrl: opts.daemonUrl,
             token,
-            ...(opts.identity.kind === "verified" ? { verifier: opts.identity.verifier } : {}),
+            ...(opts.identity.kind === "verified"
+              ? { verifier: opts.identity.verifier, onIdentityMismatch: logMismatch }
+              : {}),
             ...(opts.fetch ? { fetch: opts.fetch } : {}),
             ...(opts.relayTimeoutMs !== undefined ? { timeoutMs: opts.relayTimeoutMs } : {}),
           });

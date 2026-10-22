@@ -3,15 +3,19 @@
  * トークンを偽の daemon へ送らないために、**トークンつきの要求を送る直前に毎回**、チャレンジ応答で相手を確かめる。
  *
  * - 秘密（`<stateDir>/daemon-identity`。0600）は、毎回開き直して読む（古い秘密を、メモリに長く持たない）。形が違うものは信用しない。
+ *   読むときは、`O_NOFOLLOW`（symlink を辿らない）・`O_NONBLOCK`（FIFO で止まらない）で開き、`fstat` で、通常のファイル・所有者が自分・
+ *   権限が 0600（グループ・他人に権限がない）・4 KiB 以下を確かめてから読む（daemon の `assertSecureFile` と対称）。
  * - 新しいランダムな `nonce` で `GET /v1/identity`（Bearer なし）を呼び、`proof`（HMAC-SHA256）を、自分が接続したポート
  *   （`127.0.0.1:<port>`）で計算した値と、定数時間で比べる。キャッシュはしない。
  * - 身元の失敗（不一致・形の不正・404・400/403/405・その他の 3xx/4xx/5xx）は、ファイルを読み直して 1 度だけやり直し、それでも
  *   失敗なら `daemon_identity_failed`。通常の失敗（接続できない・タイムアウト・429・503）は、そのまま通常の失敗として返す。
  *   どちらでも、トークンは送らない。`secret`・`proof`・トークンは、失敗の原因・記録に出さない。
+ * - 検証から送信までの窓の検知: 検証に成功すると、`daemonId` を返す。relay は、トークンつきの要求の応答の `x-cso-daemon-id` を、これと
+ *   照合する（不一致・なしなら、応答を捨てて `daemon_identity_failed`）。検知であって、防止ではない（`docs/daemon-identity.md` §5）。
  * - daemon の実装（`packages/daemon/src/api/identity.ts`）には依存しない。同じ式を実装し、試験ベクトルで一致を確かめる。
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { type Failure, failure } from "@cso/core";
 
 export const IDENTITY_FILE = "daemon-identity";
@@ -63,7 +67,10 @@ export function parseIdentityFile(text: string): DaemonIdentity | undefined {
   return { daemonId: o.daemonId, secret: o.secret };
 }
 
-/** 接続先の `127.0.0.1:<port>`（`localhost`・`[::1]` も同じ文字列にする）。ポートがなければ `undefined`。 */
+/**
+ * 接続先の `127.0.0.1:<port>`（`localhost`・`[::1]` も同じ文字列にする）。ポートがなければ `undefined`。
+ * http の既定のポート（80）は仮定しない（URL に明示されたポートだけを使う。daemon の窓口は、必ず明示のポートで待ち受けるため）。
+ */
 export function hostPortOf(daemonUrl: string): string | undefined {
   let url: URL;
   try {
@@ -76,9 +83,41 @@ export function hostPortOf(daemonUrl: string): string | undefined {
     : undefined;
 }
 
-/** 検証の結果。失敗のとき、`failure` は呼び出し元へそのまま返してよい（トークンは送らない）。 */
+export interface SecureReadOps {
+  /** 自分の uid（テストで差し替える）。 */
+  readonly getuid?: () => number | undefined;
+}
+
+/**
+ * 秘密のファイルを、安全に読む。`O_NOFOLLOW`（symlink は開けない）・`O_NONBLOCK`（FIFO で止まらない）で開き、`fstat` で、通常のファイル・
+ * 所有者が自分・`mode & 0o077 === 0`・4 KiB 以下を確かめてから読む。満たさなければ例外（呼び出し側は、身元の失敗にする）。
+ * 内容は、例外に含めない。
+ */
+export function readIdentityFileSecure(path: string, ops: SecureReadOps = {}): string {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error("not a regular file");
+    const uid = (ops.getuid ?? (() => process.getuid?.()))();
+    if (uid !== undefined && st.uid !== uid) throw new Error("owner mismatch");
+    if ((st.mode & 0o077) !== 0) throw new Error("permissions too open");
+    if (st.size > FILE_MAX_BYTES) throw new Error("too large");
+    const buf = Buffer.alloc(st.size);
+    let off = 0;
+    while (off < buf.length) {
+      const n = readSync(fd, buf, off, buf.length - off, off);
+      if (n === 0) break;
+      off += n;
+    }
+    return buf.subarray(0, off).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** 検証の結果。成功のとき、`daemonId`（検証した daemon の公開 ID）を返す。失敗のとき、`failure` は呼び出し元へそのまま返してよい（トークンは送らない）。 */
 export type VerifyResult =
-  | { readonly ok: true }
+  | { readonly ok: true; readonly daemonId: string }
   | { readonly ok: false; readonly kind: "identity" | "transient"; readonly failure: Failure };
 
 export interface IdentityVerifier {
@@ -113,13 +152,13 @@ export const identityFailed = (): Failure =>
 const MAX_RETRY_AFTER_SEC = 10;
 
 type Attempt =
-  | { readonly kind: "ok" }
+  | { readonly kind: "ok"; readonly daemonId: string }
   | { readonly kind: "identity" }
   | { readonly kind: "transient"; readonly failure: Failure; readonly retrySec?: number };
 
 export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityVerifier {
   const doFetch = opts.fetch ?? globalThis.fetch;
-  const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
+  const readFile = opts.readFile ?? ((p: string) => readIdentityFileSecure(p));
   const random = opts.random ?? randomBytes;
   const timeoutMs = opts.timeoutMs ?? IDENTITY_TIMEOUT_MS;
   const maxBytes = opts.maxBytes ?? IDENTITY_MAX_BYTES;
@@ -150,7 +189,8 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
     try {
       const res = await doFetch(`${origin}/v1/identity?nonce=${nonce}`, {
         method: "GET",
-        redirect: "error",
+        // 3xx は辿らない（`manual`）。status で、身元の失敗に分類する（`error` だと、例外になり、接続の失敗と区別できない）。
+        redirect: "manual",
         signal: controller.signal,
       });
       if (res.status === 429) {
@@ -200,7 +240,7 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
       if (!DAEMON_ID_RE.test(daemonId) || !PROOF_RE.test(proof)) return { kind: "identity" };
       if (daemonId !== identity.daemonId) return { kind: "identity" };
       return proofMatches(proofOf(identity, hostPort, nonce), proof)
-        ? { kind: "ok" }
+        ? { kind: "ok", daemonId: identity.daemonId }
         : { kind: "identity" };
     } catch {
       const timedOut = controller.signal.aborted;
@@ -230,7 +270,7 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
       let busyRetries = 0;
       for (;;) {
         const a = await attempt();
-        if (a.kind === "ok") return { ok: true };
+        if (a.kind === "ok") return { ok: true, daemonId: a.daemonId };
         if (a.kind === "identity") {
           // daemon の再起動で秘密が変わる。ファイルを読み直して、1 度だけやり直す。
           if (identityFailures++ < 1) continue;
@@ -252,15 +292,21 @@ async function readLimited(res: Response, max: number): Promise<string | undefin
   if (reader === undefined) return "";
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel().catch(() => undefined);
-      return undefined;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch (e) {
+    // 読み取りの途中の失敗でも、本文を開けたままにしない。
+    await reader.cancel().catch(() => undefined);
+    throw e;
   }
   return Buffer.concat(chunks).toString("utf8");
 }

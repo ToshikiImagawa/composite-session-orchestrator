@@ -162,7 +162,7 @@ describe("偽の窓口には、トークンを送らない", () => {
     expect(fake.seen.every((s) => s.authorization === undefined)).toBe(true);
   });
 
-  it("検証のあとでポートが奪われても、次の要求の直前に検証し直すので、トークンは届かない（キャッシュしない）", async () => {
+  it("検証のあとでポートが奪われても、次の要求から、毎回検証し直すので、トークンは届かない（キャッシュしない。その 1 回の窓は防げない。docs §5）", async () => {
     const real = await startDaemon();
     const file = identityFile();
     const relay = relayFor(real.url, real.token, file);
@@ -178,6 +178,70 @@ describe("偽の窓口には、トークンを送らない", () => {
     expect(!after.ok && after.error.code).toBe("daemon_identity_failed");
     expect(fake.seen.length).toBeGreaterThan(0);
     expect(fake.seen.every((s) => s.authorization === undefined)).toBe(true);
+  });
+});
+
+describe("検証から送信までの窓（残余リスク）: 防止はできないが、検知する", () => {
+  it("検証のあとで、別のプロセスに入れ替わると、トークンは届くが、応答を捨てて daemon_identity_failed にし、知らせる", async () => {
+    const real = await startDaemon();
+    // 偽の窓口: 検証（/v1/identity）は本物へ通し、トークンつきの要求だけ、偽が受ける（窓で入れ替わった状況の再現）。
+    const fake = await startAttacker(0, "forged");
+    let mismatches = 0;
+    const realFetch = globalThis.fetch;
+    const relay = createRelay({
+      daemonUrl: real.url,
+      token: real.token,
+      verifier: createIdentityVerifier({ daemonUrl: real.url, identityPath: identityFile() }),
+      onIdentityMismatch: () => {
+        mismatches++;
+      },
+      fetch: ((u: string, init?: RequestInit) =>
+        realFetch(
+          u.includes("/v1/identity") ? u : u.replace(real.url, fake.url),
+          init,
+        )) as typeof fetch,
+    });
+    if (!relay.ok) throw new Error(relay.error.cause);
+    const who = await relay.value.whoami();
+    expect(!who.ok && who.error.code).toBe("daemon_identity_failed");
+    expect(JSON.stringify(who)).not.toContain("child");
+    expect(mismatches).toBe(1);
+    // 防止ではない: トークンは、偽に届いている（docs §5 の残余リスク。トークンの再発行が要る）。
+    expect(fake.seen.some((s) => s.authorization !== undefined)).toBe(true);
+  });
+
+  it("http-server では、identityMismatch をログに出す（応答は 502）", async () => {
+    const real = await startDaemon();
+    const fake = await startAttacker(0, "forged");
+    const logs: string[] = [];
+    const realFetch = globalThis.fetch;
+    const created = createMcpHttpServer({
+      daemonUrl: real.url,
+      identity: {
+        kind: "verified",
+        verifier: createIdentityVerifier({ daemonUrl: real.url, identityPath: identityFile() }),
+      },
+      fetch: ((u: string, init?: RequestInit) =>
+        realFetch(
+          u.includes("/v1/identity") ? u : u.replace(real.url, fake.url),
+          init,
+        )) as typeof fetch,
+      logger: (e) => logs.push(e.event),
+    });
+    if (!created.ok) throw new Error(created.error.cause);
+    mcp = created.value;
+    const { url } = await mcp.listen(0);
+    const res = await fetch(`${url}/mcp`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${real.token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(res.status).toBe(502);
+    expect(logs).toContain("identityMismatch");
   });
 });
 
