@@ -23,6 +23,7 @@
 
 import {
   type Actor,
+  activePurgeHold,
   type EventBody,
   type Failure,
   type OrchState,
@@ -76,6 +77,22 @@ const MAX_NOTICES_PER_TREE = 50;
 const noticeId = (nodeId: string, archivedAt: string, index: number): string =>
   deriveId("apn", "system", `${nodeId}:${archivedAt}:${index}`, "notice");
 /** 予告の requestId（ID と同じようにハッシュで短くする。長い nodeId でも、`isSafeId` の上限を超えない）。 */
+/** 木の予告の項目の識別子（新しいものが後ろ。実在するものだけ）。保留（T13f-h）が、有効な予告を、その場で取り下げるのに使う。 */
+export function purgeNoticeItems(
+  state: OrchState,
+  nodeId: string,
+  archivedAt: string,
+): { id: string; resolved: boolean }[] {
+  const out: { id: string; resolved: boolean }[] = [];
+  for (let i = 0; i < MAX_NOTICES_PER_TREE; i++) {
+    const id = noticeId(nodeId, archivedAt, i);
+    const item = state.inbox.find((x) => x.id === id);
+    if (item === undefined) break;
+    out.push({ id, resolved: item.resolved !== undefined });
+  }
+  return out;
+}
+
 const noticeRequestId = (nodeId: string, archivedAt: string, index: number): string =>
   deriveId("apnq", "system", `${nodeId}:${archivedAt}:${index}`, "notice-request");
 
@@ -94,7 +111,7 @@ function noticeSummary(
   const date = new Date(deps.nowMs() + deps.noticeDays * DAY_MS).toISOString().slice(0, 10);
   const open =
     decisions + items === 0 ? "" : `（未回答の判断 ${decisions}・未解決の項目 ${items}）`;
-  const text = `木 ${nodeId} を ${date} 以降に自動で削除する${open}。止めるには autoPurge を無効に、または retentionDays を延ばして daemon を再起動する`;
+  const text = `木 ${nodeId} を ${date} 以降に自動で削除する${open}。止めるには cso purge-hold ${nodeId}（人間のコマンド。期限は --until）`;
   return text.length <= 200 ? text : `${text.slice(0, 197)}...`;
 }
 const FAILURE_NOTE_INTERVAL_MS = DAY_MS;
@@ -125,6 +142,9 @@ export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
     if (state.nodes.find((x) => x.id === n.parentId)?.state === "archived") return undefined;
     const plan = planPurge(state, nodeId, deps.nowMs());
     if (!plan.ok || plan.value.elapsedDays < deps.retentionDays) return undefined;
+    // 保留（T13f-h）: 木の中のどのノードでも、有効な保留があれば、その木全体を対象から外す（期限つきなら、期限まで）。
+    // 保留をかけた子の木が、親のアーカイブで外側の新しい木に吸収されても、すり抜けない。外側の根には、保留が有効なうちは予告も出さない。
+    if (activePurgeHold(state, plan.value.nodeIds, deps.nowMs()) !== undefined) return undefined;
     return { archivedAt: plan.value.archivedAt, nodeIds: plan.value.nodeIds };
   };
   /** 木の予告（新しいものが後ろ）。 */
@@ -258,12 +278,18 @@ export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
       for (const n of state0.nodes) {
         if (n.state !== "archived" || n.parentId === null) continue;
         if (eligibleOf(state0, n.id) !== undefined) continue;
-        const archivedAt = n.archivedAt;
-        if (archivedAt === undefined) continue;
-        for (const notice of noticesOf(state0, n.id, archivedAt)) {
-          if (!notice.resolved) {
-            resolveNotice(notice.id);
-            deps.note("autoPurge.noticeWithdrawn", { nodeId: n.id, id: notice.id });
+        // 予告の識別子は、`planPurge` の `archivedAt`（木の中で最大のもの）から作られる。根自身の `archivedAt` とは違いうるので、
+        // 両方の鍵で探す（根が子孫より先にアーカイブされた木でも、取り下げ漏れを出さない）。
+        const plan = planPurge(state0, n.id, deps.nowMs());
+        const keys = new Set<string>();
+        if (plan.ok) keys.add(plan.value.archivedAt);
+        if (n.archivedAt !== undefined) keys.add(n.archivedAt);
+        for (const archivedAt of keys) {
+          for (const notice of noticesOf(state0, n.id, archivedAt)) {
+            if (!notice.resolved) {
+              resolveNotice(notice.id);
+              deps.note("autoPurge.noticeWithdrawn", { nodeId: n.id, id: notice.id });
+            }
           }
         }
       }

@@ -511,3 +511,86 @@ describe("ノード ID の規則は core の isSafeId と一致する（ずれ�
     );
   });
 });
+
+describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h）", () => {
+  const heldClient = () =>
+    fakeClient({
+      "node.purgeHold": ok({ held: true, until: "2026-12-01T00:00:00Z" }),
+      "node.purgeRelease": ok({ released: true }),
+    });
+
+  it("purge-hold は、node.purgeHold を送る（--until・--reason つき）。結果と期限を表示する", async () => {
+    const { client, sent } = heldClient();
+    const r = await runCommand(
+      ["purge-hold", "t", "--until", "2026-12-01T00:00:00Z", "--reason", "調査中"],
+      deps(client),
+    );
+    expect(sent).toEqual([
+      {
+        requestId: "req-1",
+        role: "human",
+        operation: "node.purgeHold",
+        params: { nodeId: "t", until: "2026-12-01T00:00:00Z", reason: "調査中" },
+      },
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("2026-12-01T00:00:00Z");
+    expect(r.stdout).toContain("req-1");
+  });
+
+  it("オプションなしは、無期限の保留", async () => {
+    const { client, sent } = fakeClient({ "node.purgeHold": ok({ held: true }) });
+    const r = await runCommand(["purge-hold", "t"], deps(client));
+    expect(sent[0]?.params).toEqual({ nodeId: "t" });
+    expect(r.stdout).toContain("無期限");
+  });
+
+  it("値のないオプション・未知のオプションは、終了コード 2", async () => {
+    const { client, sent } = heldClient();
+    expect((await runCommand(["purge-hold", "t", "--until"], deps(client))).exitCode).toBe(2);
+    expect((await runCommand(["purge-hold", "t", "--yes"], deps(client))).exitCode).toBe(2);
+    expect((await runCommand(["purge-release", "t", "--until", "x"], deps(client))).exitCode).toBe(
+      2,
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it("失敗は、原因と次の操作を出す。結果が確認できなければ、同じ requestId で再実行する手順を出す", async () => {
+    const f = fakeClient({
+      "node.purgeHold": err(failure("notPurgeRoot", "木の根でない", "予告の木の根を指定する")),
+    });
+    const r = await runCommand(["purge-hold", "c"], deps(f.client));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("木の根でない");
+    const bad = fakeClient({ "node.purgeHold": ok({ unexpected: 1 }) });
+    const u = await runCommand(["purge-hold", "t", "--reason", "a b"], deps(bad.client));
+    expect(u.exitCode).toBe(1);
+    expect(u.stderr).toContain("cso purge-hold t --reason 'a b' --request-id req-1");
+  });
+
+  it("purge-release は、node.purgeRelease を送る", async () => {
+    const { client, sent } = heldClient();
+    const r = await runCommand(["purge-release", "t"], deps(client));
+    expect(ops(sent)).toEqual(["node.purgeRelease"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("解除");
+  });
+
+  it("purge の対象表示に、有効な保留（期限・理由）が出る。--yes では、保留を無視して削除を実行する", async () => {
+    const { client, sent } = fakeClient({
+      "node.purgePreview": ok({
+        ...PREVIEW,
+        hold: { until: "2026-12-01T00:00:00Z", reason: "調査中\u001b[2J" },
+      }),
+      "node.purge": ok({ purged: ["n1", "n2"] }),
+    });
+    const dry = await runCommand(["purge", "n1", "--dry-run"], deps(client));
+    expect(dry.stdout).toContain("保留中");
+    expect(dry.stdout).toContain("2026-12-01T00:00:00Z");
+    expect(dry.stdout).toContain("調査中");
+    expect(dry.stdout).not.toContain("\u001b");
+    const yes = await runCommand(["purge", "n1", "--yes"], deps(client));
+    expect(yes.exitCode).toBe(0);
+    expect(ops(sent)).toContain("node.purge");
+  });
+});
