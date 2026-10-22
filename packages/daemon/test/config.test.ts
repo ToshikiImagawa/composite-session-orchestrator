@@ -148,6 +148,50 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     expect(parseConfig(JSON.stringify({ ...base, retentionDays: 0 })).ok).toBe(true);
   });
 
+  it("rateLimit（窓口の回数の制限の調整。無効にはできない）: 範囲・未知のキーを検査する。下限がある", () => {
+    const d = parseConfig(JSON.stringify(base));
+    expect(d.ok && d.value.rateLimit).toBeUndefined();
+    const ok1 = parseConfig(
+      JSON.stringify({
+        ...base,
+        rateLimit: {
+          perPrincipal: { burst: 10, perSecond: 1 },
+          authFailures: { burst: 5, perMinute: 5 },
+          maxKeys: 100,
+        },
+      }),
+    );
+    expect(ok1.ok && ok1.value.rateLimit).toEqual({
+      perPrincipal: { burst: 10, perSecond: 1 },
+      authFailures: { burst: 5, perMinute: 5 },
+      maxKeys: 100,
+    });
+    const part = parseConfig(
+      JSON.stringify({ ...base, rateLimit: { perPrincipal: { burst: 30 } } }),
+    );
+    expect(part.ok && part.value.rateLimit).toEqual({ perPrincipal: { burst: 30 } });
+    for (const v of [
+      true,
+      "off",
+      null,
+      [],
+      { enabled: false },
+      { perPrincipal: { burst: 9 } }, // 重い操作が通らなくなる下限
+      { perPrincipal: { burst: 10001 } },
+      { perPrincipal: { perSecond: 0 } },
+      { perPrincipal: { perSecond: 1.5 } },
+      { perPrincipal: { unknown: 1 } },
+      { authFailures: { burst: 4 } },
+      { authFailures: { perMinute: 4 } },
+      { authFailures: { perMinute: 100001 } },
+      { maxKeys: 99 },
+      { maxKeys: 1000001 },
+      { perPrincipal: "x" },
+    ]) {
+      bad({ rateLimit: v }, "rateLimit");
+    }
+  });
+
   it("retentionDays（最終削除の保持期間）は 0 以上の整数（既定は 90）。purgeTombstone は真偽値（任意）", () => {
     const d = parseConfig(JSON.stringify(base));
     expect(d.ok && d.value.retentionDays).toBeUndefined();

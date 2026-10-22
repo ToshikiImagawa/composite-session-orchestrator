@@ -39,6 +39,9 @@ import {
   createBindCodes,
   createCredentialStore,
   createHandlersWithScheduler,
+  DEFAULT_AUTH_FAILURE_BURST,
+  DEFAULT_AUTH_FAILURE_PER_MINUTE,
+  DEFAULT_PRINCIPAL_SPEC,
   FileTokenRepository,
   loadOrCreateHumanToken,
   type ReclaimPorts,
@@ -469,6 +472,19 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     logger,
     bind,
     clock,
+    rateLimit: {
+      perPrincipal: {
+        burst: config.rateLimit?.perPrincipal?.burst ?? DEFAULT_PRINCIPAL_SPEC.burst,
+        perSecond: config.rateLimit?.perPrincipal?.perSecond ?? DEFAULT_PRINCIPAL_SPEC.perSecond,
+      },
+      authFailures: {
+        burst: config.rateLimit?.authFailures?.burst ?? DEFAULT_AUTH_FAILURE_BURST,
+        perSecond:
+          (config.rateLimit?.authFailures?.perMinute ?? DEFAULT_AUTH_FAILURE_PER_MINUTE) / 60,
+      },
+      ...(config.rateLimit?.maxKeys === undefined ? {} : { maxKeys: config.rateLimit.maxKeys }),
+      ...(deps.monotonicMs === undefined ? {} : { monotonicMs: deps.monotonicMs }),
+    },
   });
 
   let running: RunningDaemon | undefined;

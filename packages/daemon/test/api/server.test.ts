@@ -625,7 +625,9 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     const logs: Record<string, unknown>[] = [];
     const now = 5_000;
     const r = await rigBind({
-      logger: (e) => logs.push(e as unknown as Record<string, unknown>),
+      logger: (e) => {
+        if (e.event.startsWith("bind")) logs.push(e as unknown as Record<string, unknown>); // 認証の失敗の集計（T10a）は別のテスト
+      },
       throttle: createThrottle({ clock: () => now, perSecond: 100 }),
     });
     const code = r.bind.issue("a");
@@ -654,7 +656,9 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
       expect(text).not.toContain(secret);
     }
     const t = await rigBind({
-      logger: (e) => logs.push(e as unknown as Record<string, unknown>),
+      logger: (e) => {
+        if (e.event.startsWith("bind")) logs.push(e as unknown as Record<string, unknown>); // 認証の失敗の集計（T10a）は別のテスト
+      },
       throttle: createThrottle({ clock: () => now, perSecond: 1 }),
     });
     await t.call("{bad");

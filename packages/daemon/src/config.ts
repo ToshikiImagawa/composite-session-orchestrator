@@ -22,6 +22,7 @@ import {
   type Scope,
   validateScope,
 } from "@cso/core";
+import { RATE_LIMIT_BOUNDS } from "./api/rate-limit.js";
 import { isForbiddenChildEnvName } from "./sdk/child-env.js";
 
 export interface DaemonConfig {
@@ -48,6 +49,17 @@ export interface DaemonConfig {
   readonly retentionDays?: number;
   /** `node.purge` の `tombstone` を省略したときに、墓標を残すか。省略すると `DEFAULT_PURGE_TOMBSTONE`（残す）。 */
   readonly purgeTombstone?: boolean;
+  /**
+   * 窓口の回数の制限（T10l）の調整。**制限そのものは、常に有効**（無効にはできない）。省略した項目は既定: 主体ごと（人間は 1 つ、
+   * ノードは nodeId ごと）に容量 60・毎秒 20（重い操作は 5 トークン）、認証の失敗は接続元ごとに容量 20・毎分 30、キーの数の上限 10,000。
+   * 下限がある（極端に低くして、自分を締め出さないため）: `perPrincipal.burst` 10〜10000、`perSecond` 1〜10000、
+   * `authFailures.burst` 5〜10000、`perMinute` 5〜100000、`maxKeys` 100〜1000000。
+   */
+  readonly rateLimit?: {
+    readonly perPrincipal?: { readonly burst?: number; readonly perSecond?: number };
+    readonly authFailures?: { readonly burst?: number; readonly perMinute?: number };
+    readonly maxKeys?: number;
+  };
   /**
    * 自動の最終削除。省略すると、オフ。**有効にすると、保持期間（`retentionDays`）を過ぎた、アーカイブ済みの最上位の木が、
    * 取り返しのつかない形で（ログの行を物理削除して）自動的に消える。** 人間のコマンド（`cso purge`）と同じ検査を通る。
@@ -90,6 +102,7 @@ const KEYS = [
   "retentionDays",
   "purgeTombstone",
   "autoPurge",
+  "rateLimit",
   "maxTurns",
   "maxBudgetUsd",
   "childEnvAllow",
@@ -182,6 +195,57 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
   }
   if (raw.purgeTombstone !== undefined && typeof raw.purgeTombstone !== "boolean") {
     return bad("purgeTombstone は真偽値");
+  }
+  let rateLimit: DaemonConfig["rateLimit"];
+  if (raw.rateLimit !== undefined) {
+    const v = raw.rateLimit;
+    const inRange = (x: unknown, b: { min: number; max: number }): boolean =>
+      x === undefined || (typeof x === "number" && Number.isInteger(x) && x >= b.min && x <= b.max);
+    const onlyKeys = (o: unknown, keys: readonly string[]): o is Record<string, unknown> =>
+      isRec(o) && Object.keys(o).every((k) => keys.includes(k));
+    const pp = isRec(v) ? v.perPrincipal : undefined;
+    const af = isRec(v) ? v.authFailures : undefined;
+    if (
+      !onlyKeys(v, ["perPrincipal", "authFailures", "maxKeys"]) ||
+      (pp !== undefined && !onlyKeys(pp, ["burst", "perSecond"])) ||
+      (af !== undefined && !onlyKeys(af, ["burst", "perMinute"])) ||
+      !inRange(v.maxKeys, RATE_LIMIT_BOUNDS.maxKeys) ||
+      (isRec(pp) &&
+        (!inRange(pp.burst, RATE_LIMIT_BOUNDS.principalBurst) ||
+          !inRange(pp.perSecond, RATE_LIMIT_BOUNDS.principalPerSecond))) ||
+      (isRec(af) &&
+        (!inRange(af.burst, RATE_LIMIT_BOUNDS.authFailureBurst) ||
+          !inRange(af.perMinute, RATE_LIMIT_BOUNDS.authFailurePerMinute)))
+    ) {
+      return bad(
+        `rateLimit は、perPrincipal（burst ${RATE_LIMIT_BOUNDS.principalBurst.min}〜${RATE_LIMIT_BOUNDS.principalBurst.max}・perSecond ${RATE_LIMIT_BOUNDS.principalPerSecond.min}〜${RATE_LIMIT_BOUNDS.principalPerSecond.max}）・authFailures（burst ${RATE_LIMIT_BOUNDS.authFailureBurst.min}〜${RATE_LIMIT_BOUNDS.authFailureBurst.max}・perMinute ${RATE_LIMIT_BOUNDS.authFailurePerMinute.min}〜${RATE_LIMIT_BOUNDS.authFailurePerMinute.max}）・maxKeys（${RATE_LIMIT_BOUNDS.maxKeys.min}〜${RATE_LIMIT_BOUNDS.maxKeys.max}）だけを持つオブジェクト（整数。制限は無効にできない）`,
+      );
+    }
+    const num = (o: unknown, k: string): number | undefined =>
+      isRec(o) && typeof o[k] === "number" ? (o[k] as number) : undefined;
+    rateLimit = {
+      ...(pp === undefined
+        ? {}
+        : {
+            perPrincipal: {
+              ...(num(pp, "burst") === undefined ? {} : { burst: num(pp, "burst") as number }),
+              ...(num(pp, "perSecond") === undefined
+                ? {}
+                : { perSecond: num(pp, "perSecond") as number }),
+            },
+          }),
+      ...(af === undefined
+        ? {}
+        : {
+            authFailures: {
+              ...(num(af, "burst") === undefined ? {} : { burst: num(af, "burst") as number }),
+              ...(num(af, "perMinute") === undefined
+                ? {}
+                : { perMinute: num(af, "perMinute") as number }),
+            },
+          }),
+      ...(v.maxKeys === undefined ? {} : { maxKeys: v.maxKeys as number }),
+    };
   }
   let autoPurge:
     | { enabled: boolean; intervalMinutes?: number; maxTreesPerRun?: number; noticeDays?: number }
@@ -358,6 +422,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(startLimits === undefined ? {} : { startLimits }),
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
       ...(autoPurge === undefined ? {} : { autoPurge }),
+      ...(rateLimit === undefined ? {} : { rateLimit }),
       ...(raw.childHome === undefined
         ? {}
         : { childHome: raw.childHome as "isolated" | "inherit" }),

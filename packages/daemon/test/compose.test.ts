@@ -698,3 +698,49 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     expect(d.daemon.log.state().nodes.some((n) => n.id === "t")).toBe(true);
   });
 });
+
+describe("createDaemon（窓口の回数の制限。T10l）", () => {
+  it("既定で有効: 設定で小さくした容量を超えると、実 HTTP で 429 と Retry-After。429 の要求は実行されていない。人間は影響されない", async () => {
+    const r = rig({ rateLimit: { perPrincipal: { burst: 10, perSecond: 1 } } });
+    const d = await boot(r);
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      statuses.push((await call(d.url, d.rootToken, "tree.list", {})).status);
+    }
+    expect(statuses.slice(0, 10).every((s) => s === 200)).toBe(true);
+    expect(statuses.slice(10)).toEqual([429, 429]);
+    const res = await fetch(`${d.url}/v1/request`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${d.rootToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ requestId: "q-limited", operation: "tree.list", params: {} }),
+    });
+    expect(res.status).toBe(429);
+    expect(Number(res.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    // 人間は、別の主体なので、影響されない
+    const human = await call(d.url, d.humanToken, "node.purgePreview", { nodeId: "root" });
+    expect(human.status).not.toBe(429);
+  });
+
+  it("設定を省かなければ、既定（容量 60）で動く: 通常の操作の頻度では、制限に当たらない", async () => {
+    const r = rig();
+    const d = await boot(r);
+    for (let i = 0; i < 50; i++) {
+      expect((await call(d.url, d.rootToken, "tree.list", {})).status).toBe(200);
+    }
+  });
+
+  it("認証の失敗が続くと 429 になり、記録には、理由の種類だけが出る（トークンは出ない）", async () => {
+    const r = rig({ rateLimit: { authFailures: { burst: 5, perMinute: 5 } } });
+    const d = await boot(r);
+    const bogus = "z".repeat(43);
+    const statuses: number[] = [];
+    for (let i = 0; i < 8; i++) statuses.push((await call(d.url, bogus, "tree.list", {})).status);
+    expect(statuses.slice(0, 5).every((s) => s === 401)).toBe(true);
+    expect(statuses.slice(5).every((s) => s === 429)).toBe(true);
+    const logs = r.logs.join("\n");
+    expect(logs).toContain("apiAuthFailed");
+    expect(logs).toContain("apiRateLimited");
+    expect(logs).not.toContain(bogus);
+    expect((await call(d.url, d.rootToken, "tree.list", {})).status).toBe(200); // 有効なトークンは通る
+  });
+});
