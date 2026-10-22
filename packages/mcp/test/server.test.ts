@@ -171,3 +171,17 @@ describe("tools/list の入力スキーマ（Anthropic API が受け付ける形
     }
   });
 });
+
+describe("rate_limited（daemon の 429）", () => {
+  it("tools/call は、isError で code: rate_limited と nextActions を返す", async () => {
+    const f = failure("rate_limited", "要求が多すぎる（実行されていない）", "待ってから呼び直す");
+    const c = await connect(
+      "child",
+      fakeRelay(async () => ({ ok: false, error: f }) as Result<never>),
+    );
+    const r = await c.callTool({ name: "report_progress", arguments: { text: "t" } });
+    expect(r.isError).toBe(true);
+    expect(text(r).code).toBe("rate_limited");
+    expect(text(r).nextActions.length).toBeGreaterThan(0);
+  });
+});
