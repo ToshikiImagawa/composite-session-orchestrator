@@ -20,7 +20,6 @@
  * ロールと caller と、検証済みの引数を渡す。caller の部分木に限った結果（受信箱・一覧）にするのはハンドラの責務。
  */
 
-import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -36,7 +35,8 @@ import {
 } from "@cso/core";
 import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
 import { type BindCodes, createThrottle, type Throttle } from "./bind.js";
-import { type CredentialStore, parseBearer } from "./credentials.js";
+import { type CredentialStore, type Principal, parseBearer } from "./credentials.js";
+import { fingerprintOf } from "./dedupe.js";
 import {
   type ApiCounters,
   type BucketSpec,
@@ -226,21 +226,6 @@ interface Reply {
 }
 const sendReply = (res: ServerResponse, r: Reply): void => send(res, r.status, r.body, r.extra);
 
-/** キーを並べ替えて正規化した JSON（本文の指紋に使う。空白・キーの順に影響されない）。 */
-function stableStringify(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
-  if (typeof v === "object" && v !== null) {
-    const o = v as Record<string, unknown>;
-    return `{${Object.keys(o)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(v) ?? "null";
-}
-const fingerprintOf = (operation: string, params: unknown): string =>
-  createHash("sha256").update(stableStringify({ operation, params }), "utf8").digest("hex");
-
 /** 処理中の項目（同じ主体・同じ requestId の要求が、実行中）。 */
 interface InProgressEntry {
   readonly fingerprint: string;
@@ -264,6 +249,7 @@ function readBody(req: IncomingMessage, max: number): Promise<Buffer | undefined
       req.off("data", onData);
       req.off("end", onEnd);
       req.off("error", onError);
+      req.off("close", onClose);
       resolve(v);
     };
     const onData = (c: Buffer): void => {
@@ -280,9 +266,14 @@ function readBody(req: IncomingMessage, max: number): Promise<Buffer | undefined
     const onError = (): void => {
       done(undefined);
     };
+    // 本文を読み終える前に、接続が切れた（`end` も `error` も出ない場合がある）: 待ち続けない（同時数の枠を、返すため）。
+    const onClose = (): void => {
+      done(undefined);
+    };
     req.on("data", onData);
     req.on("end", onEnd);
     req.on("error", onError);
+    req.on("close", onClose);
   });
 }
 
@@ -339,8 +330,11 @@ export function createApiServer(deps: ApiDeps): ApiServer {
   /** 主体ごとの、同時に処理中の要求の数。 */
   const inFlight = new Map<string, number>();
   const maxInFlight = rl.maxInFlightPerPrincipal ?? 8;
-  /** 同時数の枠を取る。取れたら、応答が終わったとき（接続が切れたときも）に返す関数を返す。取れなければ `undefined`。 */
-  const acquire = (key: string, res: ServerResponse): (() => void) | undefined => {
+  /**
+   * 同時数の枠を取る。取れたら、返す関数（冪等）を返す。取れなければ `undefined`。**枠は、接続が終わった時点ではなく、処理が終わった時点で返す**
+   * （ハンドラが終わったとき。接続が切れても、ハンドラが動いている間は、枠を使い続ける）。
+   */
+  const acquire = (key: string): (() => void) | undefined => {
     const cur = inFlight.get(key) ?? 0;
     if (cur >= maxInFlight) return undefined;
     inFlight.set(key, cur + 1);
@@ -352,7 +346,6 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       if (c <= 0) inFlight.delete(key);
       else inFlight.set(key, c);
     };
-    res.once("close", release);
     return release;
   };
   const principalKey = (p: { role: string; nodeId?: string }): string =>
@@ -442,7 +435,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     // 回数の制限（主体ごと）。ハンドラを呼ぶ前にだけ判定するので、429 の要求は実行されていない。本文は読まない。
     // 同時に処理中の要求の数にも上限がある（ゆっくり本文を送る要求で、接続を塞がれないように）。
     const key = principalKey(principal);
-    const releaseSlot = acquire(key, res);
+    const releaseSlot = acquire(key);
     if (releaseSlot === undefined) {
       counters.count("rateLimited", "inflight");
       req.resume();
@@ -450,10 +443,26 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     }
     const used = principalLimiter.tryConsume(key, 1);
     if (!used.ok) {
+      releaseSlot();
       counters.count("rateLimited", "principal");
       req.resume();
       return tooMany(res, used.retryAfterSec, true);
     }
+    try {
+      await processBody(req, res, principal, key, releaseSlot);
+    } finally {
+      releaseSlot(); // ハンドラが終わった（または、ハンドラまで進まなかった）時点で、枠を返す
+    }
+  }
+
+  /** 本文を読んでから、ハンドラまで。同時数の枠は、呼び出し側が、これが終わったときに返す（重複と分かったときは、すぐに返す）。 */
+  async function processBody(
+    req: IncomingMessage,
+    res: ServerResponse,
+    principal: Principal,
+    key: string,
+    releaseSlot: () => void,
+  ): Promise<void> {
     if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {
       req.resume();
       return reject(
@@ -478,6 +487,13 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const env = parseEnvelope(body);
     if (!env.ok) return reject(res, env.error);
     const { requestId, operation } = env.value;
+    // ロール・申告の判定は、重複の判定より前に行う（申告が食い違う要求が、処理中の要求の結果に相乗りして、拒否を逃れないように）。
+    // 引数の検証より先に行う（ロールのない操作に、引数の形を教えない）。
+    const role = authorizeRole(principal, operation, {
+      ...(env.value.claimedRole === undefined ? {} : { claimedRole: env.value.claimedRole }),
+      ...(env.value.claimedCaller === undefined ? {} : { claimedCaller: env.value.claimedCaller }),
+    });
+    if (!role.ok) return reject(res, role.error);
     // 同じ主体・同じ requestId の要求が処理中なら、実行せず、最初の結果を待って、同じ結果を返す（T10l-d。relay の再送で、操作が重なって
     // 実行されないように）。重い操作の追加の重みより前に判定する（重複が、重みを重ねて使わない）。枠も、判明した時点で返す。
     const dupKey = `${key}\u0000${requestId}`;
@@ -542,12 +558,6 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         return tooMany(res, heavy.retryAfterSec);
       }
     }
-    // ロールの判定を、引数の検証より先に行う（ロールのない操作に、引数の形を教えない）。
-    const role = authorizeRole(principal, operation, {
-      ...(env.value.claimedRole === undefined ? {} : { claimedRole: env.value.claimedRole }),
-      ...(env.value.claimedCaller === undefined ? {} : { claimedCaller: env.value.claimedCaller }),
-    });
-    if (!role.ok) return reject(res, role.error);
     const params = validateParams(operation, env.value.params);
     if (!params.ok) return reject(res, params.error);
     const scope = authorizeScope(principal, operation, params.value, deps.getState());

@@ -163,6 +163,10 @@ const post = async (r: Rig, body: unknown, token: string) => {
     },
   };
 };
+const withClaims = (body: Record<string, unknown>, claims: Record<string, unknown>) => ({
+  ...body,
+  ...claims,
+});
 const progress = (id: string, text = "x") => ({
   requestId: id,
   operation: "report.progress",
@@ -246,6 +250,45 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
     const [x, y] = await Promise.all([a, b]);
     expect(y).toEqual(x);
     expect(r.calls["node.purge"]).toBe(1);
+  });
+
+  it("申告（role・caller）が食い違う要求は、処理中の要求の結果に相乗りせず、重複の判定より前に 403 で拒否される（probe D3）", async () => {
+    const r = await start();
+    const first = post(r, progress("claims"), r.tokens.a);
+    await sleep(50);
+    const wrongRole = await post(
+      r,
+      withClaims(progress("claims"), { role: "integrator" }),
+      r.tokens.a,
+    );
+    expect(wrongRole.status).toBe(403);
+    const wrongCaller = await post(
+      r,
+      withClaims(progress("claims"), { caller: { nodeId: "m1" } }),
+      r.tokens.a,
+    );
+    expect(wrongCaller.status).toBe(403);
+    // 持たない操作も、重複の判定より前に拒否される（子が統合ノードの操作に相乗りできない）
+    const notMine = await post(
+      r,
+      { requestId: "claims", operation: "tree.list", params: {} },
+      r.tokens.a,
+    );
+    expect(notMine.status).toBe(403);
+    expect(r.calls["report.progress"]).toBe(1);
+    r.g.open();
+    expect((await first).status).toBe(200);
+    // 申告が正しければ、同じ要求として扱われる
+    r.g.open();
+    expect(
+      (
+        await post(
+          r,
+          withClaims(progress("claims2"), { role: "child", caller: { nodeId: "a" } }),
+          r.tokens.a,
+        )
+      ).status,
+    ).toBe(200);
   });
 
   it("別の主体の同じ requestId は、別の要求（どちらも実行される）", async () => {
@@ -346,6 +389,29 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
     expect((await post(r, preview("p-over"), r.tokens.human)).status).toBe(429);
     r.g.open();
     await first;
+  });
+
+  it("同時数の枠は、接続が切れても、ハンドラが終わるまで使い続ける（ハンドラが終わった時点で返す）", async () => {
+    const r = await start();
+    const controllers = Array.from({ length: 8 }, () => new AbortController());
+    const inflight = controllers.map((c, i) =>
+      fetch(`${r.url}/v1/request`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${r.tokens.a}` },
+        body: JSON.stringify(progress(`held${i}`)),
+        signal: c.signal,
+      }).catch(() => undefined),
+    );
+    await sleep(100);
+    expect(r.calls["report.progress"]).toBe(8); // 8 件とも、ハンドラが動いている
+    for (const c of controllers) c.abort(); // 接続を切る
+    await Promise.all(inflight);
+    await sleep(100);
+    // 接続は切れたが、ハンドラは動いているので、枠は戻っていない
+    expect((await post(r, progress("while-held"), r.tokens.a)).status).toBe(429);
+    r.g.open(); // ハンドラが終わる
+    await sleep(100);
+    expect((await post(r, progress("after-held"), r.tokens.a)).status).toBe(200);
   });
 
   it("表の項目の数に上限がある: 超える新しい要求は、実行せずに 429。完了すれば、また通る", async () => {
