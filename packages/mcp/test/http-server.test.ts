@@ -75,6 +75,7 @@ const start = async (
   });
   const d = await daemon.listen(0);
   const created = createMcpHttpServer({
+    identity: { kind: "unverified" },
     daemonUrl: over.daemonUrl ?? d.url,
     ...(over.fetch ? { fetch: over.fetch } : {}),
     ...(over.shutdownGraceMs !== undefined ? { shutdownGraceMs: over.shutdownGraceMs } : {}),
@@ -307,7 +308,10 @@ describe("実 HTTP の統合（MCP クライアント ↔ cso-mcp ↔ daemon の
 
 describe("createMcpHttpServer の設定の検査", () => {
   it("daemonUrl がループバックでなければ失敗にする", () => {
-    const r = createMcpHttpServer({ daemonUrl: "http://example.com" });
+    const r = createMcpHttpServer({
+      daemonUrl: "http://example.com",
+      identity: { kind: "unverified" },
+    });
     expect(r.ok).toBe(false);
   });
 });
@@ -570,7 +574,7 @@ describe("同時数による 429（daemon の窓口の maxInFlightPerPrincipal�
       },
     });
     const d = await daemon.listen(0);
-    const created = createMcpHttpServer({ daemonUrl: d.url });
+    const created = createMcpHttpServer({ daemonUrl: d.url, identity: { kind: "unverified" } });
     if (!created.ok) throw new Error(created.error.cause);
     const mcp = created.value;
     const m = await mcp.listen(0);

@@ -5,14 +5,25 @@
  * - `--config`（`CSO_DAEMON_CONFIG`）: daemon の設定ファイル。`--port` がなければ、`mcpUrl` のポートを使う（`--port` も
  *   あって違うときは拒否する）。設定の内容は、失敗の原因に出さない。
  * 引数が環境変数より優先。起動の前に、daemon に届くか確かめる（`GET /v1/whoami`。401 が返れば daemon がいるとみなす）。
+ *
+ * daemon の身元確認（T10m-i2。`docs/daemon-identity.md`）:
+ * - `--config` が**必須**。設定の `stateDir`（絶対パス。相対なら拒否）の `daemon-identity` を使い、トークンつきの要求の直前に、
+ *   毎回、daemon の身元を検証する。`--config` がないと、起動しない。
+ * - 環境変数 `CSO_MCP_ALLOW_UNVERIFIED` が**ちょうど `1`** のときだけ、`--config` なしで、検証なしで動く（`true`・空文字などでは
+ *   有効にしない）。起動のログ（`identityUnverified`）を 1 回と、すべての応答のヘッダー（`x-cso-identity: unverified`）で分かる。
+ *   `--config` があるときは、この変数があっても検証する。
  */
 import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { type Failure, failure, ok, type Result } from "@cso/core";
-import { createMcpHttpServer, type McpHttpServer } from "./http-server.js";
+import { createMcpHttpServer, type IdentityMode, type McpHttpServer } from "./http-server.js";
+import { createIdentityVerifier, IDENTITY_FILE } from "./identity.js";
 
 export interface McpCliArgs {
   readonly daemonUrl: string;
   readonly port: number;
+  /** 秘密のファイル（`<stateDir>/daemon-identity`）。検証なしで動くときは `undefined`。 */
+  readonly identityPath?: string;
 }
 
 export interface ParseDeps {
@@ -31,8 +42,11 @@ const bad = (cause: string): Result<never> => ({
   ),
 });
 
-/** daemon の設定ファイルから、`mcpUrl` のポートを読む。内容は原因に出さない。 */
-function portFromConfig(path: string, readFile: (p: string) => string): Result<number> {
+/** daemon の設定ファイルから、`mcpUrl` のポートと `stateDir` を読む。内容は原因に出さない。 */
+function readConfig(
+  path: string,
+  readFile: (p: string) => string,
+): Result<{ port: number; stateDir: string }> {
   let text: string;
   try {
     text = readFile(path);
@@ -60,7 +74,18 @@ function portFromConfig(path: string, readFile: (p: string) => string): Result<n
   if (!/^[0-9]{1,5}$/.test(url.port) || Number(url.port) < 1 || Number(url.port) > 65535) {
     return bad("daemon の設定の mcpUrl に、ポートがない");
   }
-  return ok(Number(url.port));
+  const stateDir =
+    typeof json === "object" && json !== null
+      ? (json as Record<string, unknown>).stateDir
+      : undefined;
+  if (typeof stateDir !== "string" || stateDir === "")
+    return bad("daemon の設定に stateDir がない");
+  if (!isAbsolute(stateDir)) {
+    return bad(
+      "daemon の設定の stateDir が絶対パスでない（読むファイルが、起動した場所で変わってしまう）",
+    );
+  }
+  return ok({ port: Number(url.port), stateDir });
 }
 
 export function parseArgs(
@@ -71,6 +96,7 @@ export function parseArgs(
   let daemonUrl = env.CSO_DAEMON_URL;
   let portText = env.CSO_MCP_PORT;
   let configPath = env.CSO_DAEMON_CONFIG;
+  let identityPath: string | undefined;
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i];
     const value = argv[i + 1];
@@ -89,18 +115,20 @@ export function parseArgs(
     if (port < 1 || port > 65535) return bad("ポート（--port）は 1〜65535 の整数");
   }
   if (configPath !== undefined && configPath !== "") {
-    const fromConfig = portFromConfig(
-      configPath,
-      deps.readFile ?? ((p) => readFileSync(p, "utf8")),
-    );
+    const fromConfig = readConfig(configPath, deps.readFile ?? ((p) => readFileSync(p, "utf8")));
     if (!fromConfig.ok) return fromConfig;
-    if (port !== undefined && port !== fromConfig.value) {
+    if (port !== undefined && port !== fromConfig.value.port) {
       return bad("--port が、daemon の設定の mcpUrl のポートと違う（子が接続できなくなる）");
     }
-    port = fromConfig.value;
+    port = fromConfig.value.port;
+    identityPath = join(fromConfig.value.stateDir, IDENTITY_FILE);
+  } else if (env.CSO_MCP_ALLOW_UNVERIFIED !== "1") {
+    return bad(
+      "daemon の設定（--config）が必要（daemon の身元を確認できないので、起動しない）。検証なしで動かすときだけ、CSO_MCP_ALLOW_UNVERIFIED=1 を付ける",
+    );
   }
   if (port === undefined) return bad("ポート（--port）または daemon の設定（--config）が必要");
-  return ok({ daemonUrl, port });
+  return ok({ daemonUrl, port, ...(identityPath === undefined ? {} : { identityPath }) });
 }
 
 export interface MainResult {
@@ -111,6 +139,8 @@ export interface MainResult {
 
 export interface MainDeps extends ParseDeps {
   readonly fetch?: typeof fetch;
+  /** 秘密のファイルの読み出し（テスト用）。 */
+  readonly readIdentityFile?: (path: string) => string;
 }
 
 /** daemon に届くか確かめる（認証なしの `GET /v1/whoami`。応答があれば、401 でも daemon がいるとみなす）。 */
@@ -143,8 +173,20 @@ export async function main(
   };
   const args = parseArgs(argv, env, deps);
   if (!args.ok) return fail(args.error);
+  const verifier =
+    args.value.identityPath === undefined
+      ? undefined
+      : createIdentityVerifier({
+          daemonUrl: args.value.daemonUrl,
+          identityPath: args.value.identityPath,
+          ...(deps.fetch ? { fetch: deps.fetch } : {}),
+          ...(deps.readIdentityFile ? { readFile: deps.readIdentityFile } : {}),
+        });
+  const identity: IdentityMode =
+    verifier === undefined ? { kind: "unverified" } : { kind: "verified", verifier };
   const created = createMcpHttpServer({
     daemonUrl: args.value.daemonUrl,
+    identity,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     logger: (e) => io.stderr(`${JSON.stringify(e)}\n`),
   });
@@ -158,6 +200,15 @@ export async function main(
         "--daemon-url を確認する",
       ),
     );
+  }
+  if (verifier !== undefined) {
+    // 起動時にも 1 回検証する。失敗しても起動は止めず、警告にとどめる（最初の要求が、daemon_identity_failed で失敗する）。
+    const v = await verifier.verify();
+    if (!v.ok) {
+      io.stderr(
+        `${JSON.stringify({ event: "identityCheckFailed", code: v.failure.code, at: new Date().toISOString() })}\n`,
+      );
+    }
   }
   try {
     const listening = await created.value.listen(args.value.port);

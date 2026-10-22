@@ -60,14 +60,14 @@
 起動の順序は **daemon → `cso-mcp` → 子**。子は、daemon が起動のときに渡す `mcpUrl`（設定の値）と、ノードのトークンで `cso-mcp` に接続する。
 
 1. daemon を起動する（準備の 3）。窓口の URL（`$URL`）が出る。
-2. `cso-mcp` を起動する。`--port` は、**設定の `mcpUrl` のポートと同じ**にする（ずれると、子が接続できない）。`--config` を渡すと、設定の `mcpUrl` のポートを読む（`--port` と違えば起動を拒否する）。
+2. `cso-mcp` を起動する。**`--config`（daemon と同じ設定ファイル）が必須**。設定の `mcpUrl` のポートで待ち受け（`--port` を足すときは、同じ値。違えば起動を拒否する）、設定の `stateDir`（絶対パス。相対なら拒否）の `daemon-identity` で、**トークンつきの要求の直前に毎回**、daemon の身元を検証する（`docs/daemon-identity.md`。偽の窓口には、トークンを送らない）。
 
    ```sh
    node packages/mcp/dist/bin.js --daemon-url "$URL" --config "$W/config.json"
-   # または: node packages/mcp/dist/bin.js --daemon-url "$URL" --port 7777
    ```
 
-   起動のときに、daemon に届くか確かめる（届かなければ失敗する）。`{"event":"listening","url":"http://127.0.0.1:7777/mcp"}` が標準出力に出る。
+   起動のときに、daemon に届くか確かめる（届かなければ失敗する）。`{"event":"listening","url":"http://127.0.0.1:7777/mcp"}` が標準出力に出る。身元の検証に失敗すると、標準エラーに `identityCheckFailed` が出る（起動は続き、最初のトークンつきの要求が `daemon_identity_failed` で失敗する）。
+   `--config` なしで動かせるのは、環境変数 `CSO_MCP_ALLOW_UNVERIFIED=1`（ちょうど `1`）を付けたときだけ（`--port` が必要。検証なし。起動のログ `identityUnverified` を 1 回と、すべての応答のヘッダー `x-cso-identity: unverified` で分かる）。標準の手順では使わない。
 3. 単体で確かめる（トークンのファイルは `$W/state/` にある）。
 
    ```sh
