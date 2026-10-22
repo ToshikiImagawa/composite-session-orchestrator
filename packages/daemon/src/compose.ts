@@ -62,6 +62,7 @@ import {
 } from "./api/index.js";
 import { createAutoPurger } from "./auto-purge.js";
 import type { DaemonConfig } from "./config.js";
+import { ownedBy } from "./discarded-keys.js";
 import { EventLog } from "./eventlog.js";
 import type { GitPorts, LossFacts } from "./git-ports.js";
 import { reconcileOnStartup } from "./reconcile.js";
@@ -447,9 +448,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       const listed = await list.call(deps.worktree);
       if (!listed.ok) throw new Error(listed.error.cause);
       const bases = new Set(nodeIds.map((id) => keyOf.call(deps.worktree, id)));
-      return listed.value.items.filter(
-        (i) => bases.has(i.key) || bases.has(i.key.replace(/-[0-9a-f]{12}$/, "")),
-      ).length;
+      return listed.value.items.filter((i) => ownedBy(i.key, bases)).length;
     },
     // 最終削除で、その木のノードの、保管している破棄した成果（refs/cso/discarded/*）も消す（T13f-r）。最終削除の成否には影響させない。
     onPurged: (nodeIds) => {
@@ -545,7 +544,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
                 (deps.worktree.discardedKeyOf as GitPorts["discardedKeyOf"])(id),
               discardedRestore: (r) =>
                 (deps.worktree.discardedRestore as GitPorts["discardedRestore"])(r),
-              discardedDrop: (k) => (deps.worktree.discardedDrop as GitPorts["discardedDrop"])(k),
+              discardedDrop: (k, tip) =>
+                (deps.worktree.discardedDrop as GitPorts["discardedDrop"])(k, tip),
             },
             audit: (event, data) => note(`discarded.${event}`, data),
           })),

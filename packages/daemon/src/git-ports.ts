@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { type Failure, failure, isCommitSha, isPathUnder, LIMITS, type Result } from "@cso/core";
+import { collisionKey, ownedBy } from "./discarded-keys.js";
 
 export interface GitResult {
   readonly code: number | null;
@@ -133,8 +134,11 @@ export interface GitPorts {
     key: string;
     branch?: string;
   }): Promise<Result<{ branch: string; tip: string }, Failure>>;
-  /** 保管を 1 件消す（取り消せない）。 */
-  discardedDrop(key: string): Promise<Result<{ key: string; tip: string }, Failure>>;
+  /** 保管を 1 件消す（取り消せない）。`expectTip`（一覧で表示した先端）と、今の先端が一致したときだけ消す。 */
+  discardedDrop(
+    key: string,
+    expectTip: string,
+  ): Promise<Result<{ key: string; tip: string }, Failure>>;
   /** 最終削除された木のノードの保管を消す（失敗は、消せたものと残ったものを返す）。 */
   discardedDeleteFor(nodeIds: readonly string[]): Promise<{
     deleted: readonly { key: string; tip: string }[];
@@ -212,6 +216,9 @@ export function createGitPorts(
   const validRef = async (ref: string): Promise<boolean> =>
     (await git(["check-ref-format", ref])).code === 0;
   const validBranch = async (name: string): Promise<boolean> =>
+    // `refs/` で始まる名前（`refs/heads/refs/...` になる）と、`@` だけの名前は、拒否する。
+    !name.startsWith("refs/") &&
+    name !== "@" &&
     (await git(["check-ref-format", "--branch", name])).code === 0;
   const zeros = (sha: string): string => "0".repeat(sha.length);
 
@@ -377,10 +384,9 @@ export function createGitPorts(
     const listed = await listDiscarded();
     if (!listed.ok) return listed;
     const base = nameOf(nodeId);
-    const same = listed.value.find((i) => i.key === base || i.key.startsWith(`${base}-`));
-    const alreadyKept = listed.value.find(
-      (i) => (i.key === base || i.key === `${base}-${tip.slice(0, 12)}`) && i.tip === tip,
-    );
+    const mine = new Set([base]);
+    const owned = listed.value.filter((i) => ownedBy(i.key, mine));
+    const alreadyKept = owned.find((i) => i.tip === tip);
     if (alreadyKept !== undefined) {
       return { ok: true, value: { ref: `${DISCARDED_REF_PREFIX}${alreadyKept.key}` } };
     }
@@ -391,10 +397,8 @@ export function createGitPorts(
         ...NEXT_STORE,
       );
     }
-    const key =
-      same === undefined || !listed.value.some((i) => i.key === base)
-        ? base
-        : `${base}-${tip.slice(0, 12)}`;
+    // 同じ名前の保管がすでにあれば（違う先端）、上書きせず、`<名前>.<先端の先頭 12 桁>` に置く（ほかのノードの名前と取り違えない形）。
+    const key = owned.some((i) => i.key === base) ? collisionKey(base, tip) : base;
     const ref = `${DISCARDED_REF_PREFIX}${key}`;
     if (!(await validRef(ref))) {
       return fail(
@@ -420,7 +424,7 @@ export function createGitPorts(
       serial(async () => {
         const listed = await listDiscarded();
         if (!listed.ok) return listed;
-        const items = listed.value.slice(0, Math.max(discardedMax, 1000));
+        const items = listed.value.slice(0, discardedMax);
         return { ok: true as const, value: { items, max: discardedMax } };
       }),
     discardedRestore: ({ key, branch }) =>
@@ -453,7 +457,7 @@ export function createGitPorts(
         }
         return { ok: true as const, value: { branch: name, tip } };
       }),
-    discardedDrop: (key) =>
+    discardedDrop: (key, expectTip) =>
       serial(async () => {
         const ref = `${DISCARDED_REF_PREFIX}${key}`;
         if (!(await validRef(ref))) {
@@ -463,6 +467,13 @@ export function createGitPorts(
         const tip = tipR.stdout.trim();
         if (tipR.code !== 0 || tip === "") {
           return fail("notFound", "その保管はない", "cso discarded list で名前を確かめる");
+        }
+        if (tip !== expectTip) {
+          return fail(
+            "tipMismatch",
+            "表示した先端と、今の保管の先端が違う（消さなかった）",
+            "cso discarded list で、今の保管を確かめてから、もう一度消す",
+          );
         }
         const r = await git(["update-ref", "-d", ref, tip]); // 古い値の検査つき（途中で変わっていたら消さない）
         if (r.code !== 0) {
@@ -482,8 +493,7 @@ export function createGitPorts(
         if (!listed.ok) return { deleted, failed: [{ key: "*", cause: listed.error.cause }] };
         const bases = new Set(nodeIds.map(nameOf));
         for (const item of listed.value) {
-          const base = item.key.replace(/-[0-9a-f]{12}$/, "");
-          if (!bases.has(item.key) && !bases.has(base)) continue;
+          if (!ownedBy(item.key, bases)) continue;
           const r = await git(["update-ref", "-d", `${DISCARDED_REF_PREFIX}${item.key}`, item.tip]);
           if (r.code === 0) deleted.push({ key: item.key, tip: item.tip });
           else failed.push({ key: item.key, cause: r.stderr.trim().slice(0, 200) });
@@ -637,13 +647,14 @@ export function createGitPorts(
         // 強制で消す前に、ブランチの先端を残す（捨てる成果を、あとから辿れるように）。
         // 先端は、`refs/cso/discarded/<名前>` に付け替えて保管する（gc で消えない）。保管できなければ、何も消さずに失敗する。
         if (force === true && (await branchExists(branch))) {
-          const tip = await git(["rev-parse", branch]);
+          const tip = await git(["rev-parse", `refs/heads/${branch}`]);
           const sha = tip.stdout.trim();
           if (tip.code === 0 && isCommitSha(sha)) {
             const kept = await keepDiscarded(nodeId, sha);
             if (!kept.ok) return kept;
             onTip?.(sha, kept.value.ref);
-          } else if (tip.code !== 0) {
+          } else {
+            // どの経路でも、保管できなければ、何も消さずに失敗する（先端を取得できない・コミットの形でない、など）。
             return fail(
               "keepFailed",
               "消すブランチの先端を取得できなかった（何も消さなかった）",

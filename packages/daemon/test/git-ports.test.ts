@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createGitPorts,
   type GitPorts,
@@ -17,6 +17,9 @@ import {
   gitEnv,
   nodeGit,
 } from "../src/git-ports.js";
+
+// 実際の git を何度も呼ぶ試験が多い。全体を並列に走らせると遅くなるので、時間切れを長めにする（macOS・負荷のある CI でも落ちない）。
+vi.setConfig({ testTimeout: 60_000 });
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, {
@@ -604,7 +607,11 @@ describe("破棄した成果の保管（T13f-r）", () => {
       expect(next).toContain("cso discarded restore");
     }
     expect(existsSync(b)).toBe(true); // 何も消していない
-    expect((await s.ports.discardedDrop(s.ports.discardedKeyOf("c1"))).ok).toBe(true);
+    const first = await s.ports.discardedList();
+    const item = first.ok ? first.value.items[0] : undefined;
+    expect((await s.ports.discardedDrop(s.ports.discardedKeyOf("c1"), item?.tip ?? "")).ok).toBe(
+      true,
+    );
     expect((await force(s, "c2", b)).ok).toBe(true);
   });
 
@@ -631,7 +638,7 @@ describe("破棄した成果の保管（T13f-r）", () => {
     expect((await force(s, "c1", p2)).ok).toBe(true);
     const key = s.ports.discardedKeyOf("c1");
     expect(git(s.repoRoot, "rev-parse", `refs/cso/discarded/${key}`)).toBe(tip1);
-    expect(git(s.repoRoot, "rev-parse", `refs/cso/discarded/${key}-${tip2.slice(0, 12)}`)).toBe(
+    expect(git(s.repoRoot, "rev-parse", `refs/cso/discarded/${key}.${tip2.slice(0, 12)}`)).toBe(
       tip2,
     );
   });
@@ -676,7 +683,19 @@ describe("破棄した成果の保管（T13f-r）", () => {
     expect(git(s.repoRoot, "rev-parse", "refs/heads/main")).toBe(mainBefore);
     // 同じ名前の 2 回目も、上書きしない
     expect((await s.ports.discardedRestore({ key })).ok).toBe(false);
-    for (const bad of ["a..b", "-x", "x y", "a/", "x.lock", "a~b", "@{"]) {
+    // R4: refs/ で始まる名前と、@ だけの名前も拒否する
+    for (const bad of [
+      "a..b",
+      "-x",
+      "x y",
+      "a/",
+      "x.lock",
+      "a~b",
+      "@{",
+      "refs/heads/x",
+      "refs/x",
+      "@",
+    ]) {
       const r = await s.ports.discardedRestore({ key, branch: bad });
       expect(r.ok, bad).toBe(false);
       if (!r.ok) expect(r.error.code, bad).toBe("invalidName");
@@ -695,11 +714,16 @@ describe("破棄した成果の保管（T13f-r）", () => {
     const tip = commitIn(p, "w.txt", "成果");
     await force(s, "c1", p);
     const key = s.ports.discardedKeyOf("c1");
-    const bad = await s.ports.discardedDrop("a..b");
+    const bad = await s.ports.discardedDrop("a..b", tip);
     expect(bad.ok).toBe(false);
-    const none = await s.ports.discardedDrop("no-such");
+    const none = await s.ports.discardedDrop("no-such", tip);
     expect(none.ok).toBe(false);
-    const r = await s.ports.discardedDrop(key);
+    // R2: 表示した先端（expectTip）と違えば、消さない
+    const stale = await s.ports.discardedDrop(key, "0".repeat(40));
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) expect(stale.error.code).toBe("tipMismatch");
+    expect(refs(s)).toHaveLength(1);
+    const r = await s.ports.discardedDrop(key, tip);
     expect(r).toEqual({ ok: true, value: { key, tip } });
     expect(refs(s)).toEqual([]);
   });
@@ -720,5 +744,88 @@ describe("破棄した成果の保管（T13f-r）", () => {
     expect(r.deleted).toHaveLength(2);
     expect(r.failed).toEqual([]);
     expect(refs(s)).toEqual([`refs/cso/discarded/${s.ports.discardedKeyOf("c2")}`]);
+  });
+});
+
+describe("保管の鍵と持ち主（T13f-r レビュー）", () => {
+  const commitIn = (p: string, file: string, subject: string): string => {
+    writeFileSync(join(p, file), `${subject}\n`);
+    git(p, "add", "-A");
+    git(p, "commit", "-q", "-m", subject);
+    return git(p, "rev-parse", "HEAD");
+  };
+  const forceRm = (s: ReturnType<typeof setup>, id: string, p: string) =>
+    s.ports.removeWorktree(id, { expectedPath: p, force: true });
+  const refs = (s: ReturnType<typeof setup>): string[] =>
+    git(s.repoRoot, "for-each-ref", "--format=%(refname)", "refs/cso/discarded/")
+      .split("\n")
+      .filter((l) => l !== "");
+
+  it("R1: ノード側の名前（<安全な部分>-<ハッシュ>）に、「.」は含まれない。衝突した鍵は <名前>.<先頭 12 桁>", async () => {
+    const s = setup();
+    for (const id of ["a.b", "x:y.z", "n1", "日本語.id"]) {
+      expect(s.ports.discardedKeyOf(id)).not.toContain(".");
+    }
+  });
+
+  it("R1: 最終削除の掃除は、ほかのノードの保管を消さない（B の ID が、A の鍵と同じ文字列でも）", async () => {
+    const s = setup();
+    const a1 = await provision(s, "n1");
+    commitIn(a1, "a1.txt", "n1 の成果");
+    await forceRm(s, "n1", a1);
+    const a2 = await provision(s, "n1");
+    commitIn(a2, "a2.txt", "n1 の別の成果");
+    await forceRm(s, "n1", a2); // n1 の保管が 2 件（<名前> と <名前>.<12 桁>）
+    const keyA = s.ports.discardedKeyOf("n1");
+    // B の ID が、A の鍵と同じ文字列（実際の検証と同じ条件）
+    const b = await provision(s, keyA);
+    commitIn(b, "b.txt", "B の成果");
+    await forceRm(s, keyA, b);
+    expect(refs(s)).toHaveLength(3);
+    const delB = await s.ports.discardedDeleteFor([keyA]);
+    expect(delB.deleted).toHaveLength(1); // B の分だけ
+    expect(refs(s).filter((r) => r.includes(keyA)).length).toBe(2); // A の 2 件は残る
+    const delA = await s.ports.discardedDeleteFor(["n1"]);
+    expect(delA.deleted).toHaveLength(2); // A の 2 件だけ
+    expect(refs(s)).toEqual([]);
+  });
+
+  it("N1: ブランチの先端を取得できない（コミットの形でない）ときも、何も消さずに keepFailed", async () => {
+    const s = setup();
+    const p = await provision(s, "c1");
+    commitIn(p, "w.txt", "成果");
+    const key = s.ports.discardedKeyOf("c1");
+    const broken: GitRunner = (args, opts) =>
+      args[0] === "rev-parse" && String(args[1]).startsWith("refs/heads/cso/")
+        ? Promise.resolve({ code: 0, stdout: "not-a-sha\n", stderr: "" })
+        : nodeGit(args, opts);
+    const made = createGitPorts(
+      {
+        repoRoot: s.repoRoot,
+        worktreeRoot: s.worktreeRoot,
+        rootCwd: s.repoRoot,
+        rootNodeId: "root",
+      },
+      broken,
+    );
+    if (!made.ok) throw new Error(made.error.cause);
+    const r = await made.value.removeWorktree("c1", { expectedPath: p, force: true });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("keepFailed");
+    expect(existsSync(p)).toBe(true);
+    expect(git(s.repoRoot, "branch", "--list", `cso/${key}`)).not.toBe("");
+  });
+
+  it("N5: 一覧は、上限（discardedRefsMax）までしか返さない", async () => {
+    const s = setup({ discardedRefsMax: 2 });
+    for (const id of ["c1", "c2"]) {
+      const p = await provision(s, id);
+      commitIn(p, `${id}.txt`, id);
+      await forceRm(s, id, p);
+    }
+    // 上限を下げた設定で開き直した状態（上限より多く保管がある）
+    git(s.repoRoot, "update-ref", "refs/cso/discarded/extra", git(s.repoRoot, "rev-parse", "HEAD"));
+    const l = await s.ports.discardedList();
+    expect(l.ok && l.value.items.length).toBe(2);
   });
 });

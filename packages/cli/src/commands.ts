@@ -233,7 +233,8 @@ function describeDiscarded(v: { items: readonly DiscardedView[]; max: number }):
         : `\n      件名（信頼できない入力）: 「${terminalSafe(i.untrustedSubject)}」`;
     return `  ${terminalSafe(i.key, 128)}  ノード: ${i.nodeId === undefined ? "（孤立）" : terminalSafe(i.nodeId, 128)}  先端: ${i.tip}${i.committedAt === undefined ? "" : `  ${terminalSafe(i.committedAt, 40)}`}${subject}`;
   });
-  return `保管している、破棄した成果（${v.items.length} 件 / 上限 ${v.max} 件）:\n${lines.join("\n")}\n`;
+  const rest = Math.max(v.max - v.items.length, 0);
+  return `保管している、破棄した成果（${v.items.length} 件 / 上限 ${v.max} 件）:\n${lines.join("\n")}\n残り ${rest} 件（上限 ${v.max} − 現在 ${v.items.length}）。上限に達すると、強制の回収は失敗する\n`;
 }
 const isHeld = (v: unknown): v is { held: true; until?: string } =>
   isRecord(v) && v.held === true && (v.until === undefined || typeof v.until === "string");
@@ -432,7 +433,17 @@ export async function runCommand(
   if (command === "discarded-drop") {
     const listed = await invoke(deps.client, id, "node.discardedList", {}, isDiscardedList);
     if (listed.kind !== "ok") return fail(listed);
-    const item = listed.value.items.find((i) => i.key === nodeId || i.nodeId === nodeId);
+    const exact = listed.value.items.filter((i) => i.key === nodeId);
+    const matches =
+      exact.length > 0 ? exact : listed.value.items.filter((i) => i.nodeId === nodeId);
+    if (matches.length > 1) {
+      return failed({
+        code: "multipleKept",
+        cause: `ノード ${terminalSafe(nodeId, 128)} の保管が複数ある（${matches.map((m) => terminalSafe(m.key, 128)).join("、")}）`,
+        nextActions: ["cso discarded list で確かめて、鍵（key）を指定する"],
+      } as Failure);
+    }
+    const item = matches[0];
     if (item === undefined) {
       return failed({
         code: "notFound",
@@ -449,7 +460,14 @@ export async function runCommand(
           "保管を消すと、取り戻せない（先に cso discarded restore で取り出せる）。上の対象でよければ --yes を付けて再実行する\n",
       };
     }
-    const res = await invoke(deps.client, id, "node.discardedDrop", { target: nodeId }, isDropped);
+    // 表示した先端を渡す（表示のあとで保管が変わっていたら、消さない）。鍵で指定する（ノード ID だと、複数あるときに曖昧）。
+    const res = await invoke(
+      deps.client,
+      id,
+      "node.discardedDrop",
+      { target: item.key, expectTip: item.tip },
+      isDropped,
+    );
     if (res.kind !== "ok") return fail(res);
     return { exitCode: 0, stdout: `${shown}消した\nrequestId: ${id}\n`, stderr: "" };
   }

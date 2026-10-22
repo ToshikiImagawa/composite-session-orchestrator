@@ -15,6 +15,7 @@ import {
   type Result,
   sanitizeText,
 } from "@cso/core";
+import { ownedBy, ownerBaseOf } from "../../discarded-keys.js";
 import type { GitPorts } from "../../git-ports.js";
 import type { HandlerRequest } from "../server.js";
 import { fail } from "./context.js";
@@ -33,8 +34,6 @@ export interface DiscardedHandlerDeps {
   readonly audit?: (event: string, data: Record<string, unknown>) => void;
 }
 
-const KEY_SUFFIX = /-[0-9a-f]{12}$/;
-
 export function createDiscardedHandlers(deps: DiscardedHandlerDeps) {
   const { ports } = deps;
   const humanOnly = (role: string): Result<never, Failure> | undefined =>
@@ -52,9 +51,41 @@ export function createDiscardedHandlers(deps: DiscardedHandlerDeps) {
       // 記録先の失敗は、処理を止めない
     }
   };
-  /** `target`（ノード ID か `<key>`）を、保管の鍵にする。存在するノードの ID なら、そのノードの鍵。 */
-  const keyOf = (target: string): string =>
-    deps.state().nodes.some((n) => n.id === target) ? ports.discardedKeyOf(target) : target;
+  /** 保管の鍵 → その保管を持つノード（まだ存在するノードだけ）。持ち主の判定は、`ownerBaseOf`（鍵の形の判定）だけを使う。 */
+  const nodeOfKey = (key: string): string | undefined => {
+    const owner = ownerBaseOf(key);
+    if (owner === undefined) return undefined;
+    return deps.state().nodes.find((n) => ports.discardedKeyOf(n.id) === owner)?.id;
+  };
+  /**
+   * `target`（保管の鍵か、ノード ID）を、保管 1 件に決める。鍵が一覧にあれば、それ。なければ、存在するノードの ID として、そのノードの保管を探す。
+   * 複数あれば `multipleKept`（鍵を指定させる）、なければ `notFound`。
+   */
+  const resolve = async (
+    target: string,
+  ): Promise<Result<{ key: string; tip: string }, Failure>> => {
+    const listed = await ports.discardedList();
+    if (!listed.ok) return listed;
+    const exact = listed.value.items.find((i) => i.key === target);
+    if (exact !== undefined) return { ok: true, value: { key: exact.key, tip: exact.tip } };
+    if (!deps.state().nodes.some((n) => n.id === target)) {
+      return fail("notFound", "その保管はない", "cso discarded list で名前を確かめる");
+    }
+    const mine = new Set([ports.discardedKeyOf(target)]);
+    const owned = listed.value.items.filter((i) => ownedBy(i.key, mine));
+    if (owned.length === 0) {
+      return fail("notFound", "そのノードの保管はない", "cso discarded list で名前を確かめる");
+    }
+    if (owned.length > 1) {
+      return fail(
+        "multipleKept",
+        `ノード ${target} の保管が複数ある（${owned.map((i) => i.key).join("、")}）`,
+        "cso discarded list で確かめて、鍵（key）を指定する",
+      );
+    }
+    const only = owned[0] as { key: string; tip: string };
+    return { ok: true, value: { key: only.key, tip: only.tip } };
+  };
 
   return {
     "node.discardedList": async (
@@ -64,14 +95,12 @@ export function createDiscardedHandlers(deps: DiscardedHandlerDeps) {
       if (denied) return denied;
       const listed = await ports.discardedList();
       if (!listed.ok) return listed;
-      const byBase = new Map<string, string>();
-      for (const n of deps.state().nodes) byBase.set(ports.discardedKeyOf(n.id), n.id);
       return {
         ok: true,
         value: {
           max: listed.value.max,
           items: listed.value.items.map((i) => {
-            const nodeId = byBase.get(i.key) ?? byBase.get(i.key.replace(KEY_SUFFIX, ""));
+            const nodeId = nodeOfKey(i.key);
             return {
               key: i.key,
               tip: i.tip,
@@ -97,11 +126,13 @@ export function createDiscardedHandlers(deps: DiscardedHandlerDeps) {
     ): Promise<R<"node.discardedRestore">> => {
       const denied = humanOnly(req.role);
       if (denied) return denied;
+      const one = await resolve(req.params.target);
+      if (!one.ok) return one;
       const r = await ports.discardedRestore({
-        key: keyOf(req.params.target),
+        key: one.value.key,
         ...(req.params.branch === undefined ? {} : { branch: req.params.branch }),
       });
-      if (r.ok) audit("discardedRestored", { key: keyOf(req.params.target), tip: r.value.tip });
+      if (r.ok) audit("discardedRestored", { key: one.value.key, tip: r.value.tip });
       return r;
     },
 
@@ -110,10 +141,11 @@ export function createDiscardedHandlers(deps: DiscardedHandlerDeps) {
     ): Promise<R<"node.discardedDrop">> => {
       const denied = humanOnly(req.role);
       if (denied) return denied;
-      const key = keyOf(req.params.target);
-      const r = await ports.discardedDrop(key);
+      const one = await resolve(req.params.target);
+      if (!one.ok) return one;
+      const r = await ports.discardedDrop(one.value.key, req.params.expectTip);
       if (!r.ok) return r;
-      audit("discardedDropped", { key, tip: r.value.tip });
+      audit("discardedDropped", { key: one.value.key, tip: r.value.tip });
       return { ok: true, value: { dropped: true, key: r.value.key, tip: r.value.tip } };
     },
   };

@@ -681,7 +681,7 @@ describe("discarded（保管した、破棄した成果。T13f-r）", () => {
     const done = await runCommand(["discarded", "drop", "c1", "--yes"], deps(client));
     expect(done.exitCode).toBe(0);
     expect(ops(sent)).toEqual(["node.discardedList", "node.discardedList", "node.discardedDrop"]);
-    expect(sent.at(-1)?.params).toEqual({ target: "c1" });
+    expect(sent.at(-1)?.params).toEqual({ target: "k-c1", expectTip: "a".repeat(40) }); // 表示した先端を渡す。鍵で指定する
   });
 
   it("drop: 一覧にないものは、notFound（消す要求を送らない）", async () => {
@@ -702,5 +702,36 @@ describe("discarded（保管した、破棄した成果。T13f-r）", () => {
     expect(
       (await runCommand(["purge", "n1", "--dry-run"], deps(zero.client))).stdout,
     ).not.toContain("保管している、破棄した成果");
+  });
+});
+
+describe("discarded（T13f-r レビュー）", () => {
+  const two = {
+    max: 5,
+    items: [
+      { key: "k-c1", tip: "a".repeat(40), nodeId: "c1", orphan: false },
+      { key: `k-c1.${"b".repeat(12)}`, tip: "b".repeat(40), nodeId: "c1", orphan: false },
+    ],
+  };
+
+  it("R3: 1 つのノードに保管が複数あるとき、ノード ID の drop は multipleKept で失敗する（消さない）。鍵を指定すれば消せる", async () => {
+    const { client, sent } = fakeClient({
+      "node.discardedList": ok(two),
+      "node.discardedDrop": ok({ dropped: true, key: "k-c1", tip: "a".repeat(40) }),
+    });
+    const many = await runCommand(["discarded", "drop", "c1", "--yes"], deps(client));
+    expect(many.exitCode).toBe(1);
+    expect(many.stderr).toContain("multipleKept");
+    expect(many.stderr).toContain("k-c1");
+    expect(ops(sent)).not.toContain("node.discardedDrop");
+    const byKey = await runCommand(["discarded", "drop", "k-c1", "--yes"], deps(client));
+    expect(byKey.exitCode).toBe(0);
+    expect(sent.at(-1)?.params).toEqual({ target: "k-c1", expectTip: "a".repeat(40) });
+  });
+
+  it("R5: list の末尾に、残りの件数（上限 − 現在の数）を出す", async () => {
+    const { client } = fakeClient({ "node.discardedList": ok(two) });
+    const r = await runCommand(["discarded", "list"], deps(client));
+    expect(r.stdout).toContain("残り 3 件");
   });
 });

@@ -31,7 +31,18 @@ const state = (): OrchState => {
   return r.value;
 };
 
-const rig = () => {
+const ALL = [
+  {
+    key: "k-c1",
+    tip: "a".repeat(40),
+    committedAt: "2026-10-01T00:00:00+09:00",
+    subject: "\u001b[2J悪い\n件名  です",
+  },
+  { key: `k-c1.${"b".repeat(12)}`, tip: "b".repeat(40) },
+  { key: "k-gone", tip: "c".repeat(40) },
+];
+
+const rig = (only?: string[]) => {
   const calls: string[] = [];
   const audits: string[] = [];
   const keyOf = (id: string): string => `k-${id}`;
@@ -40,24 +51,15 @@ const rig = () => {
     discardedList: async () =>
       ok({
         max: 200,
-        items: [
-          {
-            key: "k-c1",
-            tip: "a".repeat(40),
-            committedAt: "2026-10-01T00:00:00+09:00",
-            subject: "\u001b[2J悪い\n件名  です",
-          },
-          { key: `k-c1-${"b".repeat(12)}`, tip: "b".repeat(40) },
-          { key: "k-gone", tip: "c".repeat(40) },
-        ],
+        items: ALL.filter((i) => only === undefined || only.includes(i.key)),
       }),
     discardedRestore: async (r) => {
       calls.push(`restore:${r.key}:${r.branch ?? ""}`);
       return ok({ branch: r.branch ?? `cso/restored/${r.key}`, tip: "a".repeat(40) });
     },
-    discardedDrop: async (key) => {
-      calls.push(`drop:${key}`);
-      return ok({ key, tip: "a".repeat(40) });
+    discardedDrop: async (key, expectTip) => {
+      calls.push(`drop:${key}:${expectTip.slice(0, 4)}`);
+      return ok({ key, tip: expectTip });
     },
   };
   const h = createDiscardedHandlers({
@@ -118,23 +120,38 @@ describe("保管した成果の操作（T13f-r）", () => {
     expect(a.untrustedSubject).toContain("悪い 件名 です");
   });
 
-  it("取り出し・消去: target は、存在するノードの ID なら、そのノードの鍵に直す。鍵そのものも通る", async () => {
+  it("取り出し・消去: 鍵そのものを指定できる。ノード ID の指定は、保管が 1 つなら、その保管（複数ある・ないときは失敗する）", async () => {
     const r = rig();
-    await r.call("node.discardedRestore", { target: "c1", branch: "my/branch" });
+    // 鍵の指定（c1 の保管が複数あっても通る）
+    await r.call("node.discardedRestore", { target: "k-c1", branch: "my/branch" });
     await r.call("node.discardedRestore", { target: "k-gone" });
-    await r.call("node.discardedDrop", { target: "c1" });
-    await r.call("node.discardedDrop", { target: "k-gone" });
-    expect(r.calls).toEqual([
-      "restore:k-c1:my/branch",
-      "restore:k-gone:",
-      "drop:k-c1",
-      "drop:k-gone",
-    ]);
-    expect(r.audits).toEqual([
-      "discardedRestored",
-      "discardedRestored",
-      "discardedDropped",
-      "discardedDropped",
-    ]);
+    await r.call("node.discardedDrop", { target: "k-gone", expectTip: "c".repeat(40) });
+    // ノード ID の指定: c1 には保管が 2 件ある → multipleKept（何も呼ばない）
+    const many = await r.call("node.discardedRestore", { target: "c1" });
+    expect(many.ok).toBe(false);
+    expect(many.error?.code).toBe("multipleKept");
+    const manyDrop = await r.call("node.discardedDrop", {
+      target: "c1",
+      expectTip: "a".repeat(40),
+    });
+    expect(manyDrop.error?.code).toBe("multipleKept");
+    // 存在しない
+    expect((await r.call("node.discardedRestore", { target: "no-such" })).error?.code).toBe(
+      "notFound",
+    );
+    expect(r.calls).toEqual(["restore:k-c1:my/branch", "restore:k-gone:", "drop:k-gone:cccc"]);
+    expect(r.audits).toEqual(["discardedRestored", "discardedRestored", "discardedDropped"]);
+    // 保管が 1 つだけなら、ノード ID の指定でも通る
+    const one = rig(["k-c1"]);
+    expect(
+      (await one.call("node.discardedDrop", { target: "c1", expectTip: "a".repeat(40) })).ok,
+    ).toBe(true);
+    expect(one.calls).toEqual(["drop:k-c1:aaaa"]);
+  });
+
+  it("一覧: 名前違いの重複（<鍵>.<12 桁>）も、持ち主のノードが付く。形の違う鍵は孤立", async () => {
+    const r = rig();
+    const res = await r.call("node.discardedList", {});
+    expect(res.value.items[1]).toMatchObject({ nodeId: "c1", orphan: false });
   });
 });

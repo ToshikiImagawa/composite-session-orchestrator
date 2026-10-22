@@ -256,14 +256,21 @@ export interface OperationMap {
       max: number;
     };
   };
-  /** 保管している先端から、新しいブランチを作る（人間のみ。**作成だけ**で、既存のブランチは上書きしない。保管は残る）。`target` は、`nodeId` か `key`。 */
+  /**
+   * 保管している先端から、新しいブランチを作る（人間のみ。**作成だけ**で、既存のブランチは上書きしない。保管は残る）。`target` は、`nodeId` か `key`。
+   * 1 つのノードに保管が複数あるとき、`nodeId` の指定は `multipleKept` で失敗する（`key` を指定する）。
+   * 保管するのは、**コミットだけ**（先端とその祖先）。作業ツリーの未コミットの変更・未追跡のファイルは、保管されない。
+   */
   "node.discardedRestore": {
     params: { target: string; branch?: string };
     result: { branch: string; tip: string };
   };
-  /** 保管を 1 件消す（人間のみ。取り消せない）。`target` は、`nodeId` か `key`。 */
+  /**
+   * 保管を 1 件消す（人間のみ。取り消せない）。`target` は、`nodeId` か `key`。**`expectTip` は必須**: 一覧（`node.discardedList`）で表示した先端と、今の先端が
+   * 一致したときだけ消す（違えば `tipMismatch`）。1 つのノードに保管が複数あるとき、`nodeId` の指定は `multipleKept` で失敗する（`key` を指定する）。
+   */
   "node.discardedDrop": {
-    params: { target: string };
+    params: { target: string; expectTip: string };
     result: { dropped: true; key: string; tip: string };
   };
   /** 保留の解除（人間のみ。冪等）。解除後は、保持期間と予告の条件を、改めて満たすまで消えない（予告から出し直す）。 */

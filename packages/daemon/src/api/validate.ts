@@ -14,6 +14,7 @@ import {
   failure,
   ID_MAX_LENGTH,
   isBoundedText,
+  isCommitSha,
   isSafeId,
   isValidInboxTime,
   LIMITS,
@@ -339,8 +340,10 @@ const VALIDATORS: Validators = {
     return { target, branch };
   },
   "node.discardedDrop": (p) => {
-    const o = strict(p, ["target"]);
-    return { target: id(o, "target") };
+    const o = strict(p, ["target", "expectTip"]);
+    const expectTip = o.expectTip;
+    if (!isCommitSha(expectTip)) fail("expectTip が不正（小文字の 16 進で 40 桁か 64 桁）");
+    return { target: id(o, "target"), expectTip: expectTip as string };
   },
 };
 

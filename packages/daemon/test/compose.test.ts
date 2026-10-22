@@ -978,9 +978,14 @@ describe("createDaemon（保管した成果の操作。T13f-r）", () => {
       (await call(d.url, d.humanToken, "node.discardedRestore", { target: "k-x", branch: "nb" }))
         .json.value,
     ).toEqual({ branch: "nb", tip: "a".repeat(40) });
-    expect((await call(d.url, d.humanToken, "node.discardedDrop", { target: "k-x" })).status).toBe(
-      200,
-    );
+    expect(
+      (
+        await call(d.url, d.humanToken, "node.discardedDrop", {
+          target: "k-x",
+          expectTip: "a".repeat(40),
+        })
+      ).status,
+    ).toBe(200);
     expect(calls).toEqual(["restore:k-x", "drop:k-x"]);
     for (const op of ["node.discardedList", "node.discardedRestore", "node.discardedDrop"]) {
       expect(
