@@ -91,7 +91,7 @@ const rig = (
     onFailure: (_id, cause) => calls.failures.push(cause),
   });
   const call = (
-    op: "node.purge" | "node.purgePreview",
+    op: "node.purge" | "node.purgePreview" | "node.purgeHold" | "node.purgeRelease",
     params: Record<string, unknown>,
     role = "human",
     requestId = `q-${++n}`,
@@ -226,6 +226,7 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
       state: () => base.log.state(),
       purgeTree: () => ({ ok: false as const, error: failure("storeIntegrity", "x", "y") }),
       checkPurge: () => ({ ok: true as const, value: { deleteCount: 0 } }),
+      appendAll: () => ({ ok: true as const, value: [] }),
     };
     const audits: string[] = [];
     const failures: string[] = [];
@@ -309,5 +310,109 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     const res = r.call("node.purge", { nodeId: "t" });
     expect(res.ok).toBe(true);
     expect(r.log.state().nodes.some((x) => x.id === "t")).toBe(false);
+  });
+});
+
+describe("node.purgeHold・node.purgeRelease（自動の最終削除の保留。T13f-h）", () => {
+  const UNTIL = "2026-03-01T00:00:00Z";
+
+  it("人間以外は、どちらも拒否する（forbidden）。何も記録しない", () => {
+    const r = rig();
+    const before = r.log.state().lastSeq;
+    for (const op of ["node.purgeHold", "node.purgeRelease"] as const) {
+      for (const role of ["integrator", "child"]) {
+        const res = r.call(op, { nodeId: "t" }, role);
+        expect(res.ok).toBe(false);
+        expect(res.error?.code).toBe("forbidden");
+      }
+    }
+    expect(r.log.state().lastSeq).toBe(before);
+  });
+
+  it("保留を記録する（無期限・期限つき・理由つき）。事前確認に、有効な保留が出る", () => {
+    const r = rig();
+    const res = r.call("node.purgeHold", { nodeId: "t", until: UNTIL, reason: "調査中" });
+    expect(res).toEqual({ ok: true, value: { held: true, until: UNTIL } });
+    expect(r.log.state().nodes.find((x) => x.id === "t")?.purgeHold).toMatchObject({
+      until: UNTIL,
+      reason: "調査中",
+      by: { human: true },
+    });
+    r.advance(40);
+    const preview = r.call("node.purgePreview", { nodeId: "t" });
+    expect(preview.value.hold).toEqual({ nodeId: "t", until: UNTIL, reason: "調査中" });
+    expect(r.calls.audit).toContain("held");
+  });
+
+  it("期限が過ぎた保留は、事前確認に出ない（期限は、daemon の時計で判定する）", () => {
+    const r = rig();
+    r.call("node.purgeHold", { nodeId: "t", until: UNTIL });
+    r.advance(100); // 2026-04 ごろ（期限は 2026-03-01）
+    expect(r.call("node.purgePreview", { nodeId: "t" }).value.hold).toBeUndefined();
+  });
+
+  it("木の根でないノード・存在しないノード・不正な期限は失敗する", () => {
+    const r = rig();
+    expect(r.call("node.purgeHold", { nodeId: "c" }).error?.code).toBe("notPurgeRoot");
+    expect(r.call("node.purgeHold", { nodeId: "zz" }).error?.code).toBe("notFound");
+    expect(
+      r.call("node.purgeHold", { nodeId: "t", until: "2020-01-01T00:00:00Z" }).error?.code,
+    ).toBe("invalidPurgeHoldUntil");
+  });
+
+  it("同じ requestId の再送は、重複して記録しない", () => {
+    const r = rig();
+    r.call("node.purgeHold", { nodeId: "t" }, "human", "same");
+    const seq = r.log.state().lastSeq;
+    expect(r.call("node.purgeHold", { nodeId: "t" }, "human", "same").ok).toBe(true);
+    expect(r.log.state().lastSeq).toBe(seq);
+  });
+
+  it("解除する。保留がなければ、そのまま成功する（冪等）。記録も増やさない", () => {
+    const r = rig();
+    r.call("node.purgeHold", { nodeId: "t" });
+    expect(r.call("node.purgeRelease", { nodeId: "t" })).toEqual({
+      ok: true,
+      value: { released: true },
+    });
+    expect(r.log.state().nodes.find((x) => x.id === "t")?.purgeHold).toBeUndefined();
+    const seq = r.log.state().lastSeq;
+    expect(r.call("node.purgeRelease", { nodeId: "t" }).ok).toBe(true);
+    expect(r.log.state().lastSeq).toBe(seq);
+    expect(r.call("node.purgeRelease", { nodeId: "zz" }).error?.code).toBe("notFound");
+  });
+
+  it("人間の node.purge は、保留を無視して消せる。無視したことを監査に残す", () => {
+    const r = rig();
+    r.advance(90);
+    r.call("node.purgeHold", { nodeId: "t" });
+    const res = r.call("node.purge", { nodeId: "t" });
+    expect(res.ok).toBe(true);
+    expect(r.calls.audit).toContain("purgeHoldIgnored");
+    expect(r.log.state().nodes.some((x) => x.id === "t")).toBe(false);
+  });
+
+  it("R1: 保留を無視して消したことは、標識（永続する記録）に残る。墓標を残さないときも残る（期限があれば holdUntil も）", () => {
+    for (const tombstone of [true, false]) {
+      const r = rig();
+      r.advance(90);
+      r.call("node.purgeHold", { nodeId: "t", until: "2026-12-01T00:00:00Z" });
+      expect(r.call("node.purge", { nodeId: "t", tombstone }).ok).toBe(true);
+      const rec = r.log.state().tombstones.at(-1);
+      expect(rec?.holdIgnored).toBe(true);
+      expect(rec?.holdUntil).toBe("2026-12-01T00:00:00Z");
+      expect(rec?.tombstone !== undefined).toBe(tombstone);
+    }
+    const none = rig();
+    none.advance(90);
+    none.call("node.purge", { nodeId: "t" });
+    expect(none.log.state().tombstones.at(-1)?.holdIgnored).toBeUndefined();
+  });
+
+  it("保留のない木では、保留の無視の監査を出さない", () => {
+    const r = rig();
+    r.advance(90);
+    r.call("node.purge", { nodeId: "t" });
+    expect(r.calls.audit).not.toContain("purgeHoldIgnored");
   });
 });

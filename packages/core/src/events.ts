@@ -176,6 +176,24 @@ export type EventBody =
     }
   | {
       /**
+       * 自動の最終削除の保留（T13f-h）。アーカイブ済みの木の根（親がアーカイブされていないノード）にだけ置く。保留した者は封筒の `actor`
+       * （人間）。`until` を省略すると無期限、指定すると、その時刻（ISO 8601 UTC。イベントの時刻より後、上限は `LIMITS.purgeHoldMaxDays` 日先）まで。
+       * 保留が既にあれば置き換える（延期・短縮）。木のノードを主語とするので、最終削除で一緒に消える。
+       */
+      readonly type: "node.purgeHeld";
+      readonly payload: {
+        readonly nodeId: string;
+        readonly until?: string;
+        readonly reason?: string;
+      };
+    }
+  | {
+      /** 自動の最終削除の保留の解除（T13f-h）。保留がなければ拒否する。 */
+      readonly type: "node.purgeHoldReleased";
+      readonly payload: { readonly nodeId: string };
+    }
+  | {
+      /**
        * 最終削除（FR_031）の標識。木のノードを主語とするイベントの行は、先に物理削除されている（`EventLog.purgeTree`）。
        * 標識は、削除を監査できるようにし、`seq` が戻らないようにするために、墓標を残さないときも残す。
        * 標識に載せたノードが、まだ存在すれば拒否する（行を消さずに標識だけを足した、不整合なログ）。
@@ -190,6 +208,9 @@ export type EventBody =
         readonly archivedAt: string;
         /** 墓標（残すとき）: タイトル・結果・最終コミット（記録があるときだけ）。日付は標識の `at`。 */
         readonly tombstone?: PurgeTombstone;
+        /** 人間が、有効な自動の最終削除の保留を無視して消した（T13f-h）。保留の期限（あれば）は `holdUntil`。墓標を残さないときも残る。 */
+        readonly holdIgnored?: true;
+        readonly holdUntil?: string;
       };
     }
   | {
@@ -213,6 +234,9 @@ export interface PurgeRecord {
   readonly nodeIds: readonly string[];
   readonly archivedAt: string;
   readonly tombstone?: PurgeTombstone;
+  /** 人間が、有効な保留を無視して消した（`node.purged` の `holdIgnored`・`holdUntil`）。 */
+  readonly holdIgnored?: true;
+  readonly holdUntil?: string;
 }
 
 /** 報告の種類。`review`: 完了の判定（受理）のコメント（`node.review` の `feedback`）。 */
@@ -278,6 +302,14 @@ export interface NodeRecord {
   readonly scope?: Scope;
   /** 破棄の判断（停止したノードだけ。再開すると消える）。回収の再判定の入力 `facts.discarded` の情報源。 */
   readonly discarded?: { readonly seq: number; readonly at: string; readonly by: Actor };
+  /** 自動の最終削除の保留（`node.purgeHeld`。T13f-h）。`until` がなければ無期限。 */
+  readonly purgeHold?: {
+    readonly seq: number;
+    readonly at: string;
+    readonly by: Actor;
+    readonly until?: string;
+    readonly reason?: string;
+  };
   /** 最終コミット（`node.lastCommit` の記録。SHA）。最終削除の墓標に載せる。 */
   readonly lastCommit?: string;
   /** アーカイブした時刻（`archive` のイベントの `at`）。 */
@@ -464,6 +496,9 @@ export type FoldFailureCode =
   | "unknownRef"
   | "duplicateExtension"
   | "alreadyDiscarded"
+  | "notPurgeRoot"
+  | "invalidPurgeHoldUntil"
+  | "noPurgeHold"
   | "unknownInboxItem"
   | "unknownInstruction"
   | "tooManyOpenExtensions"
@@ -1546,7 +1581,14 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     }
 
     case "node.purged": {
-      const { rootId, nodeIds, archivedAt, tombstone } = p;
+      const { rootId, nodeIds, archivedAt, tombstone, holdIgnored, holdUntil } = p;
+      if (
+        (holdIgnored !== undefined && holdIgnored !== true) ||
+        (holdUntil !== undefined &&
+          (holdIgnored !== true || typeof holdUntil !== "string" || !isValidInboxTime(holdUntil)))
+      ) {
+        return invalid(seq, "node.purged の holdIgnored・holdUntil");
+      }
       if (
         !isId(rootId) ||
         !isIdArray(nodeIds) ||
@@ -1592,6 +1634,10 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           nodeIds: Object.freeze([...nodeIds]),
           archivedAt,
           ...(record === undefined ? {} : { tombstone: freezeRecord(record) }),
+          ...(holdIgnored === true ? { holdIgnored: true as const } : {}),
+          ...(holdIgnored === true && holdUntil !== undefined
+            ? { holdUntil: holdUntil as string }
+            : {}),
         }),
       );
       return commit();
@@ -1634,6 +1680,72 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       const node = nodeAt(d, nodeId);
       if (node === undefined) return unknownNode(seq, nodeId);
       d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({ ...node, lastCommit: sha });
+      return commit();
+    }
+
+    case "node.purgeHeld": {
+      const { nodeId, until, reason } = p;
+      if (!isId(nodeId)) return invalid(seq, "node.purgeHeld の nodeId");
+      if (reason !== undefined && !isBoundedText(reason, LIMITS.purgeHoldReason)) {
+        return invalid(seq, `node.purgeHeld の reason（${LIMITS.purgeHoldReason} 文字以下）`);
+      }
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      const parent = node.parentId === null ? undefined : nodeAt(d, node.parentId);
+      if (node.state !== "archived" || parent === undefined || parent.state === "archived") {
+        return reject(
+          seq,
+          "notPurgeRoot",
+          `ノード ${nodeId} は、アーカイブ済みの木の根（親がアーカイブされていない、アーカイブ済みのノード）でない`,
+          "自動の最終削除の予告に出ている木の根を指定する",
+        );
+      }
+      let untilAt: string | undefined;
+      if (until !== undefined) {
+        const t =
+          typeof until === "string" && isValidInboxTime(until) ? Date.parse(until) : Number.NaN;
+        const now = Date.parse(raw.at as string);
+        if (!Number.isFinite(t) || !Number.isFinite(now)) {
+          return invalid(seq, "node.purgeHeld の until（ISO 8601 UTC）");
+        }
+        if (t <= now || t > now + LIMITS.purgeHoldMaxDays * 86_400_000) {
+          return reject(
+            seq,
+            "invalidPurgeHoldUntil",
+            `保留の期限は、現在より後で、${LIMITS.purgeHoldMaxDays} 日先まで`,
+            "期限を指定し直す（無期限にするときは省略する）",
+          );
+        }
+        untilAt = until as string;
+      }
+      d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({
+        ...node,
+        purgeHold: Object.freeze({
+          seq,
+          at: raw.at as string,
+          by: actor,
+          ...(untilAt === undefined ? {} : { until: untilAt }),
+          ...(reason === undefined ? {} : { reason }),
+        }),
+      });
+      return commit();
+    }
+
+    case "node.purgeHoldReleased": {
+      const { nodeId } = p;
+      if (!isId(nodeId)) return invalid(seq, "node.purgeHoldReleased の nodeId");
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (node.purgeHold === undefined) {
+        return reject(
+          seq,
+          "noPurgeHold",
+          `ノード ${nodeId} に、自動の最終削除の保留はない`,
+          "保留の状態を確認する",
+        );
+      }
+      const { purgeHold: _hold, ...rest } = node;
+      d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord(rest);
       return commit();
     }
 

@@ -135,7 +135,12 @@ export function createHandlersWithScheduler(
       ? {}
       : createPurgeHandlers({
           ...purge,
-          log: { state: () => deps.log.state(), purgeTree, checkPurge },
+          log: {
+            state: () => deps.log.state(),
+            purgeTree,
+            checkPurge,
+            appendAll: (rs) => deps.log.appendAll(rs),
+          },
         })),
     ...(!full
       ? {}
