@@ -93,6 +93,8 @@ export const operationWeight = (operation: string): number =>
 
 /** 既定: 主体ごとに、容量 60・毎秒 20。認証の失敗は、接続元ごとに、容量 20・毎分 30。 */
 export const DEFAULT_PRINCIPAL_SPEC: BucketSpec = { burst: 60, perSecond: 20 };
+/** 身元確認（`GET /v1/identity`）: 接続元ごとに、容量 600・毎秒 200。mcp は、トークンつきの要求の直前ごとに 1 回呼ぶので、その頻度に耐える。 */
+export const DEFAULT_IDENTITY_SPEC: BucketSpec = { burst: 600, perSecond: 200 };
 export const DEFAULT_AUTH_FAILURE_PER_MINUTE = 30;
 export const DEFAULT_AUTH_FAILURE_BURST = 20;
 

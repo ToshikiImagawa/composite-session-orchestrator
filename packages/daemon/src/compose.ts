@@ -4,6 +4,8 @@
  *
  * - 状態の置き場（`stateDir`）は 0700。SQLite（`state.db`）・ノードのトークン（`node-tokens.json`、ハッシュだけ）・人間のトークン
  *   （`human-token`）・根のトークン（`root-token`）は、置き場の中に 0600 で置く。
+ * - 身元の秘密（`daemon-identity`。T10m-i）は、`start()` のたびに作り直して、待ち受けの前に 0600 で書き、`stop()` で消す。窓口の `GET /v1/identity` が、
+ *   秘密と待ち受けのポートから作った `proof` だけを返す（`docs/daemon-identity.md`）。
  * - 根のノード（`rootNodeId`。統合ノード）がなければ作って開始する。あれば、役割・親を確かめる（違えば起動を失敗させる）。
  *   根のトークンは、`root-token` がなければ発行して書く（あれば、保存済みのトークンが有効）。
  * - 起動に失敗する条件（置き場の権限・ストアの破損・根の不一致など）は、例外でなく `Failure` で返す（フェイルクローズ）。
@@ -34,6 +36,13 @@ import { recoverAnswerDeliveries } from "./api/handlers/answer-delivery.js";
 import { waitRequestKey } from "./api/handlers/context.js";
 import { createInstructionDelivery } from "./api/handlers/instruction-delivery.js";
 import { createPurger, type PurgeHandlerDeps } from "./api/handlers/purge-handlers.js";
+import {
+  createIdentity,
+  IDENTITY_FILE,
+  type Identity,
+  removeIdentityFile,
+  writeIdentityFile,
+} from "./api/identity.js";
 import {
   type ApiLogger,
   type BindCodes,
@@ -114,6 +123,8 @@ export interface RunningDaemon {
   readonly humanTokenPath: string;
   /** 根の統合ノードのトークンのファイル（0600）。 */
   readonly rootTokenPath: string;
+  /** 身元の秘密のファイル（0600。起動ごとに作り直す。停止で消える。`docs/daemon-identity.md`）。 */
+  readonly identityPath: string;
 }
 
 export interface Daemon {
@@ -477,7 +488,10 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     else note(e.event, e as unknown as Record<string, unknown>);
   };
   const bind: BindCodes = createBindCodes();
+  const identityPath = join(config.stateDir, IDENTITY_FILE);
+  let currentIdentity: Identity | undefined;
   const server = createApiServer({
+    identity: () => currentIdentity,
     credentials,
     getState: () => log.state(),
     handlers,
@@ -527,8 +541,26 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           onFailure: (nodeId, cause) => note("answerDeliveryFailure", { nodeId, cause }),
         });
         for (const o of recovered) note("answerRecovered", { ...o });
-        const { port, url } = await server.listen(config.port);
-        running = { port, url, humanTokenPath, rootTokenPath };
+        // 身元確認（T10m-i）: 起動ごとに、新しい秘密を作り、待ち受けの前に、ファイルへ書く（異常終了で残った古いファイルは、上書きされる）。
+        const identity = createIdentity();
+        try {
+          writeIdentityFile(identityPath, identity);
+        } catch (e) {
+          throw new Error(
+            `身元の秘密のファイルを書けない（${String(e instanceof Error ? e.message : e)}）。stateDir の権限を確認する`,
+          );
+        }
+        currentIdentity = identity;
+        let listened: { port: number; url: string };
+        try {
+          listened = await server.listen(config.port);
+        } catch (e) {
+          currentIdentity = undefined;
+          removeIdentityFile(identityPath, identity);
+          throw e;
+        }
+        const { port, url } = listened;
+        running = { port, url, humanTokenPath, rootTokenPath, identityPath };
         // 待ち受けの後で、前回から残った、依存の揃った pending の子を起動する（子が窓口へ接続できるように）。
         void schedule();
         autoPurger?.start();
@@ -538,6 +570,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       async stop() {
         await autoPurger?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await server.close();
+        if (currentIdentity !== undefined) removeIdentityFile(identityPath, currentIdentity);
+        currentIdentity = undefined;
         await closeScheduler(); // 起動の途中の tick が終わるのを待つ（終わる前に、タイマー・DB を閉じない）
         tracked.cancelAll(); // アダプタが作った、残りのタイマーを止める
         running = undefined;
