@@ -12,8 +12,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Failure, ok, type Result } from "@cso/core";
+import { type Failure, ok, planPurge, type Result } from "@cso/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { deriveId } from "../src/api/handlers/context.js";
 import { FileTokenRepository } from "../src/api/token-repository.js";
 import {
   createDaemon,
@@ -388,7 +389,7 @@ describe("createDaemon（起動時のスケジューラ）", () => {
 
 describe("createDaemon（最終削除）", () => {
   /** 前回の実行から残った、アーカイブ済みの木 t（子 c）を、状態の置き場に用意する。 */
-  const seedArchivedTree = (r: ReturnType<typeof rig>) => {
+  const seedArchivedTree = (r: ReturnType<typeof rig>, opts: { staleNotice?: boolean } = {}) => {
     mkdirSync(r.config.stateDir, { mode: 0o700 });
     const store = openSqliteStore(join(r.config.stateDir, "state.db"));
     if (!store.ok) throw new Error("store");
@@ -489,7 +490,7 @@ describe("createDaemon（起動時のトークンの掃除）", () => {
 
 describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
   /** 保持期間を過ぎた、アーカイブ済みの木（t ─ tc）を、前回の実行から残す。 */
-  const seedArchivedTree = (r: ReturnType<typeof rig>) => {
+  const seedArchivedTree = (r: ReturnType<typeof rig>, opts: { staleNotice?: boolean } = {}) => {
     mkdirSync(r.config.stateDir, { mode: 0o700 });
     const store = openSqliteStore(join(r.config.stateDir, "state.db"));
     if (!store.ok) throw new Error("store");
@@ -517,9 +518,27 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
       ev(x, { type: "markReclaimable", discarded: false });
       ev(x, { type: "archive" });
     }
-    // 直近の記録（時計の異常の検知: ログの最後の記録が、現在に近いこと）
-    at = "2026-05-31T23:30:00Z";
-    add({ type: "node.toolDenied", payload: { nodeId: "root", tool: "x" } });
+    if (opts.staleNotice === true) {
+      // 前回の実行で出した予告（有効）と、その後 11 日間の停止（最後の記録は 2026-05-21）
+      const plan = planPurge(log.value.state(), "t", Date.parse("2026-06-01T00:00:00Z"));
+      if (!plan.ok) throw new Error("plan");
+      at = "2026-05-20T00:00:00Z";
+      add({
+        type: "inbox.added",
+        payload: {
+          id: deriveId("apn", "system", `t:${plan.value.archivedAt}:0`, "notice"),
+          kind: "info",
+          nodeId: "root",
+          summary: "予告",
+        },
+      });
+      at = "2026-05-21T00:00:00Z";
+      add({ type: "node.toolDenied", payload: { nodeId: "root", tool: "x" } });
+    } else {
+      // 直近の記録（時計の異常の検知: ログの最後の記録が、現在に近いこと）
+      at = "2026-05-31T23:30:00Z";
+      add({ type: "node.toolDenied", payload: { nodeId: "root", tool: "x" } });
+    }
     store.value.close();
   };
 
@@ -561,7 +580,7 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     const r = rig();
     seedArchivedTree(r);
     const m = manual();
-    r.deps = { ...r.deps, timers: m.timers, clock: m.clock };
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock, monotonicMs: () => m.timers.now() };
     const d = await boot(r);
     await m.advance(24 * 60 * 60_000);
     expect(hasTree(d.daemon)).toBe(true);
@@ -571,7 +590,7 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     const r = rig({ autoPurge: { enabled: false } });
     seedArchivedTree(r);
     const m = manual();
-    r.deps = { ...r.deps, timers: m.timers, clock: m.clock };
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock, monotonicMs: () => m.timers.now() };
     const d = await boot(r);
     await m.advance(24 * 60 * 60_000);
     expect(hasTree(d.daemon)).toBe(true);
@@ -581,7 +600,7 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     const r = rig({ autoPurge: { enabled: true } });
     seedArchivedTree(r);
     const m = manual();
-    r.deps = { ...r.deps, timers: m.timers, clock: m.clock };
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock, monotonicMs: () => m.timers.now() };
     const d = await boot(r);
     expect(hasTree(d.daemon)).toBe(true);
     await m.advance(30 * 60_000);
@@ -597,11 +616,25 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     expect(d.daemon.log.state().tombstones[0]?.rootId).toBe("t");
   });
 
+  it("止まっていた時間は、予告の期間に数えない: 前回の予告から 11 日たった起動で、予告を出し直し、すぐには消さない", async () => {
+    const r = rig({ autoPurge: { enabled: true } });
+    seedArchivedTree(r, { staleNotice: true });
+    const m = manual();
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock, monotonicMs: () => m.timers.now() };
+    const d = await boot(r);
+    const notices = () => d.daemon.log.state().inbox.filter((i) => i.id.startsWith("apn-"));
+    expect(notices()).toHaveLength(2); // 起動のときに、出し直した
+    await m.advance(60 * 60_000); // 1 周期
+    expect(hasTree(d.daemon)).toBe(true); // 前回の予告からは 11 日たつが、すぐには消さない
+    await m.advance(8 * 24 * 60 * 60_000); // 出し直した予告から 8 日
+    expect(hasTree(d.daemon)).toBe(false);
+  });
+
   it("intervalMinutes を指定できる。stop の後は、周期が来ても消さない", async () => {
     const r = rig({ autoPurge: { enabled: true, intervalMinutes: 5 } });
     seedArchivedTree(r);
     const m = manual();
-    r.deps = { ...r.deps, timers: m.timers, clock: m.clock };
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock, monotonicMs: () => m.timers.now() };
     const d = await boot(r);
     await d.daemon.stop();
     await m.advance(10 * 60_000);

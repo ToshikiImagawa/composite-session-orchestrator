@@ -85,6 +85,8 @@ export interface DaemonDeps {
   readonly probe?: ProcessProbe;
   readonly clock?: () => string;
   readonly timers?: Timers;
+  /** 単調時計（ミリ秒）。既定は `process.hrtime`。自動の最終削除が、時計が飛んだことを検知するのに使う（試験で差し替える）。 */
+  readonly monotonicMs?: () => number;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
@@ -231,6 +233,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     return logOpened;
   }
   const log = logOpened.value;
+  /** 起動の時点（整合などでログに書く前）の、最後の記録の時刻。自動の最終削除が、止まっていた時間を検知する。 */
+  const startupLastEventAt = log.lastEventAt();
   const closeAll = (): void => {
     try {
       store.close();
@@ -442,6 +446,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           note,
           isStopped: () => fatalSeen,
           lastEventAt: () => log.lastEventAt(),
+          monoMs: deps.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n)),
+          lastEventAtAtStartup: startupLastEventAt,
         })
       : undefined;
 
@@ -492,7 +498,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         return running;
       },
       async stop() {
-        autoPurger?.stop();
+        await autoPurger?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await server.close();
         await closeScheduler(); // 起動の途中の tick が終わるのを待つ（終わる前に、タイマー・DB を閉じない）
         tracked.cancelAll(); // アダプタが作った、残りのタイマーを止める

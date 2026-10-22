@@ -1,8 +1,9 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type EventBody, failure, type NodeEvent } from "@cso/core";
+import { type EventBody, failure, type NodeEvent, planPurge } from "@cso/core";
 import { describe, expect, it } from "vitest";
+import { deriveId } from "../src/api/handlers/context.js";
 import { createPurger, type PurgeHandlerDeps } from "../src/api/handlers/purge-handlers.js";
 import { createAutoPurger } from "../src/auto-purge.js";
 import { EventLog } from "../src/eventlog.js";
@@ -103,6 +104,8 @@ const make = (
     retentionDays?: number;
     maxTreesPerRun?: number;
     noticeDays?: number;
+    /** 起動の時点の、ログの最後の記録の時刻。 */
+    startupLastEventAt?: string;
     defaultTombstone?: boolean;
     isStopped?: () => boolean;
     /** 省略すると、現在時刻の 1 秒前（時計が正常な場合）。 */
@@ -114,6 +117,8 @@ const make = (
 ) => {
   const mt = manualTimers();
   let days = opts.nowDays;
+  /** 壁時計だけが飛んだ分（単調時計は進まない）。 */
+  let jumpMs = 0;
   r.setNow(T0 + days * DAY);
   const notes: { event: string; data: Record<string, unknown> }[] = [];
   const audits: { event: string; data: Record<string, unknown> }[] = [];
@@ -139,11 +144,18 @@ const make = (
     timers: mt.timers,
     note: (event, data) => notes.push({ event, data }),
     isStopped: opts.isStopped ?? (() => false),
+    monoMs: () => (opts.nowMs ?? (() => T0 + days * DAY))() - T0 - jumpMs,
+    lastEventAtAtStartup: opts.startupLastEventAt,
     lastEventAt: opts.lastEventAt ?? (() => new Date(T0 + days * DAY - 1000).toISOString()),
   });
   const setDays = (d: number): void => {
     days = d;
     r.setNow(T0 + d * DAY);
+  };
+  /** 壁時計だけを `d` 日動かす（時計が飛んだ。単調時計は進まない）。 */
+  const jumpClock = (d: number): void => {
+    jumpMs += d * DAY;
+    setDays(days + d);
   };
   /** 予告を出し（1 回目）、noticeDays 日すぎてから、削除する（2 回目）。2 回目の結果を返す。 */
   const settle = async () => {
@@ -151,7 +163,7 @@ const make = (
     setDays(days + (opts.noticeDays ?? 7) + 1);
     return auto.runOnce();
   };
-  return { auto, mt, notes, audits, revoked, setDays, settle };
+  return { auto, mt, notes, audits, revoked, setDays, jumpClock, settle, days: () => days };
 };
 
 const ids = (r: ReturnType<typeof rig>) =>
@@ -422,7 +434,7 @@ describe("自動の最終削除（T13f-a・T13f-n）", () => {
     m.setDays(108);
     await m.mt.advance(60 * 60_000);
     expect(ids(r)).not.toContain("a");
-    m.auto.stop();
+    await m.auto.stop();
     r.tree("c", 3);
     await m.mt.advance(120 * 60_000);
     expect(noticesOf(r).filter((i) => i.summary?.includes("木 c"))).toHaveLength(0);
@@ -469,24 +481,153 @@ describe("自動の最終削除（T13f-a・T13f-n）", () => {
     expect(String(note?.data.reason)).toContain("前に戻っている");
   });
 
-  it("最後の記録から保持期間の半分以上進んでいたら、その回は止める。半分に満たなければ動く", async () => {
+  it("時計が前へ飛んだら（壁時計だけが 10 日進んだ）、その回は止めて、予告を出し直す。飛んだ時間は、予告の期間に数えない（すぐには消さない）", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100 });
+    m.auto.start();
+    await m.auto.runOnce(); // 予告
+    const firstId = noticesOf(r)[0]?.id;
+    m.jumpClock(10); // 予告から 10 日（noticeDays 7 日を超える）
+    const out = await m.auto.runOnce();
+    expect(out.skipped).toBe(true);
+    expect(String(m.notes.find((x) => x.event === "autoPurge.skipped")?.data.reason)).toContain(
+      "前に飛んだ",
+    );
+    expect(ids(r)).toContain("t"); // すぐ消えない
+    const items = noticesOf(r);
+    expect(items).toHaveLength(2); // 出し直した
+    expect(items.find((i) => i.id === firstId)?.resolved?.by).toEqual({ system: true });
+    // 出し直した予告から noticeDays 日たつまでは、消さない
+    m.setDays(m.days() + 6);
+    expect((await m.auto.runOnce()).purged).toEqual([]);
+    m.setDays(m.days() + 2);
+    expect((await m.auto.runOnce()).purged).toEqual(["tc", "t"]);
+  });
+
+  it("時計の飛びの閾値は min(noticeDays の半分, 1 日)。noticeDays が 1 日なら 12 時間を超える飛びを検知し、それ未満は通す", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100, noticeDays: 1 });
+    m.auto.start();
+    await m.auto.runOnce();
+    m.jumpClock(0.4); // 9.6 時間: 閾値（12 時間）未満
+    expect((await m.auto.runOnce()).skipped).toBe(false);
+    m.jumpClock(0.6); // 14.4 時間: 閾値を超える
+    expect((await m.auto.runOnce()).skipped).toBe(true);
+  });
+
+  it("時計が後ろへ戻ったら、その回は止める（予告は出し直さない）", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100 });
+    m.auto.start();
+    await m.auto.runOnce();
+    m.jumpClock(-3);
+    const out = await m.auto.runOnce();
+    expect(out.skipped).toBe(true);
+    expect(String(m.notes.at(-1)?.data.reason)).toContain("戻った");
+    expect(noticesOf(r)).toHaveLength(1);
+  });
+
+  it("daemon が止まっていた時間は、予告の期間に数えない: 起動のとき、ログの最後の記録から 1 日以上たっていたら、有効な予告を出し直す", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const before = make(r, { nowDays: 100 });
+    await before.auto.runOnce(); // 予告（100 日目）
+    expect(noticesOf(r)).toHaveLength(1);
+    // 10 日停止して、110 日目に起動する（起動の時点の最後の記録は、100 日目）
+    const lastAt = new Date(T0 + 100 * DAY).toISOString();
+    const after = make(r, { nowDays: 110, startupLastEventAt: lastAt });
+    after.auto.start();
+    expect(noticesOf(r)).toHaveLength(2);
+    expect(noticesOf(r)[0]?.resolved?.by).toEqual({ system: true });
+    // 1 周期後に動いても、すぐには消さない（出し直した予告から noticeDays 日たつまで）
+    expect((await after.auto.runOnce()).purged).toEqual([]);
+    expect(ids(r)).toContain("t");
+    after.setDays(117);
+    expect((await after.auto.runOnce()).purged).toEqual(["tc", "t"]);
+  });
+
+  it("止まっていたのが 1 日未満なら、予告を出し直さない", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    await make(r, { nowDays: 100 }).auto.runOnce();
+    const lastAt = new Date(T0 + 100 * DAY).toISOString();
+    const after = make(r, { nowDays: 100.5, startupLastEventAt: lastAt });
+    after.auto.start();
+    expect(noticesOf(r)).toHaveLength(1);
+  });
+
+  it("動きのない daemon でも、自動の削除は止まらない（ログの最後の記録からの経過では止めない）", async () => {
     const r = rig();
     r.tree("a", 1);
-    const stop = make(r, {
+    const m = make(r, {
       nowDays: 100,
       retentionDays: 90,
-      lastEventAt: () => new Date(T0 + 55 * DAY).toISOString(), // 45 日（半分）
+      lastEventAt: () => new Date(T0 + 20 * DAY).toISOString(), // 80 日前（保持期間の半分より古い）
     });
-    expect((await stop.auto.runOnce()).skipped).toBe(true);
-    expect(String(stop.notes.at(-1)?.data.reason)).toContain("半分以上");
-    expect(ids(r)).toContain("a");
-    const ok = make(r, {
-      nowDays: 100,
-      retentionDays: 90,
-      lastEventAt: () => new Date(T0 + 56 * DAY).toISOString(), // 44 日
-    });
-    expect((await ok.auto.runOnce()).skipped).toBe(false);
+    m.auto.start();
+    expect((await m.auto.runOnce()).skipped).toBe(false);
     expect(noticesOf(r)).toHaveLength(1);
+  });
+
+  it("stop のあと、実行中の 1 回は、残りの木を処理しない。stop は実行中の 1 回が終わるのを待つ", async () => {
+    const r = rig();
+    r.tree("a", 1);
+    r.tree("b", 2);
+    r.tree("c", 3);
+    let stopPromise: Promise<void> | undefined;
+    let auto: ReturnType<typeof createAutoPurger> | undefined;
+    const m = make(r, {
+      nowDays: 100,
+      purgeWrap: (f) => (args) => {
+        const res = f(args);
+        if (args.nodeId === "a") stopPromise = auto?.stop(); // 1 本目の削除の最中に stop
+        return res;
+      },
+    });
+    auto = m.auto;
+    await m.auto.runOnce(); // 予告
+    m.setDays(108);
+    await m.auto.runOnce();
+    await stopPromise;
+    expect(ids(r)).not.toContain("a");
+    expect(ids(r)).toContain("b"); // 2 本目以降は、処理されない
+    expect(ids(r)).toContain("c");
+  });
+
+  it("長い nodeId でも、予告の requestId・ID が isSafeId の上限（128 文字）を超えない", async () => {
+    const r = rig();
+    const long = "x".repeat(100);
+    r.tree(long, 1);
+    const m = make(r, { nowDays: 100 });
+    await m.auto.runOnce();
+    expect(m.notes.some((x) => x.event === "autoPurge.noticePosted")).toBe(true);
+    expect(noticesOf(r)).toHaveLength(1);
+  });
+
+  it("予告が 1 木 50 件に達したら、理由を付けて記録し、その木の自動の削除を止める（予告を出し続けない）", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const plan = planPurge(r.log.state(), "t", T0 + 100 * DAY);
+    const at = plan.ok ? plan.value.archivedAt : "";
+    for (let i = 0; i < 50; i++) {
+      const id = deriveId("apn", "system", `t:${at}:${i}`, "notice");
+      r.add({ type: "inbox.added", payload: { id, kind: "info", nodeId: "root", summary: "x" } });
+      r.log.append({
+        requestId: `res-${i}`,
+        actor: { system: true },
+        body: { type: "inbox.resolved", payload: { itemId: id } },
+      });
+    }
+    const m = make(r, { nowDays: 100 });
+    const out = await m.settle();
+    expect(out.purged).toEqual([]);
+    expect(ids(r)).toContain("t");
+    const note = m.notes.find((x) => x.event === "autoPurge.noticeFailed");
+    expect(String(note?.data.reason)).toContain("上限");
+    expect(noticesOf(r)).toHaveLength(50);
   });
 
   it("ログが空（最後の記録がない）か、最後の時刻を読めないとき: 空は動き、読めなければ止める", async () => {

@@ -48,15 +48,22 @@ export interface AutoPurgeDeps {
   readonly note: (event: string, data: Record<string, unknown>) => void;
   /** ログが壊れた（fail closed）後は、動かさない。 */
   readonly isStopped: () => boolean;
-  /** イベントログの最後の `at`（時計の異常の検知に使う）。ログが空なら `undefined`。 */
+  /** イベントログの最後の `at`（時計がログより前に戻っていないかの検知に使う）。ログが空なら `undefined`。 */
   readonly lastEventAt: () => string | undefined;
+  /** 単調時計（ミリ秒。`process.hrtime` 由来）。壁時計との差で、時計が飛んだことを検知する。 */
+  readonly monoMs: () => number;
+  /** daemon の起動の時点（整合などでログに書く前）の、イベントログの最後の `at`。止まっていた時間の検知に使う。 */
+  readonly lastEventAtAtStartup: string | undefined;
 }
 
 export interface AutoPurger {
-  /** 周期の実行を始める（最初の実行は 1 周期後）。 */
+  /**
+   * 周期の実行を始める（最初の実行は 1 周期後）。始めるときに、止まっていた時間（`lastEventAtAtStartup` から現在まで）が
+   * 1 日以上なら、有効な予告を出し直す（止まっていた時間は、予告の期間に数えない）。
+   */
   start(): void;
-  /** 周期を止める（実行中の 1 回は、終わるまで進む）。 */
-  stop(): void;
+  /** 周期を止め、実行中の 1 回が（木ごとに旗を確かめて）終わるのを待つ。 */
+  stop(): Promise<void>;
   /** 1 回の実行。実行中なら `skipped`。 */
   runOnce(): Promise<{ readonly skipped: boolean; readonly purged: string[] }>;
 }
@@ -68,6 +75,9 @@ const MAX_NOTICES_PER_RUN = 20;
 const MAX_NOTICES_PER_TREE = 50;
 const noticeId = (nodeId: string, archivedAt: string, index: number): string =>
   deriveId("apn", "system", `${nodeId}:${archivedAt}:${index}`, "notice");
+/** 予告の requestId（ID と同じようにハッシュで短くする。長い nodeId でも、`isSafeId` の上限を超えない）。 */
+const noticeRequestId = (nodeId: string, archivedAt: string, index: number): string =>
+  deriveId("apnq", "system", `${nodeId}:${archivedAt}:${index}`, "notice-request");
 
 /** 予告の要約（`INBOX_SUMMARY_MAX` 文字以下）。 */
 function noticeSummary(
@@ -92,21 +102,138 @@ const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmedi
 
 export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
   let running = false;
-  let stopped = true;
+  /** `stop()` が呼ばれた。実行中の 1 回も、木ごとに確かめて、残りを処理しない。 */
+  let stopRequested = false;
+  let started = false;
   let timer: { cancel(): void } | undefined;
+  let current: Promise<unknown> | undefined;
+  /** 直前の確認の時点の、壁時計と単調時計（時計が飛んだことの検知）。 */
+  let baseline: { wall: number; mono: number } | undefined;
   /** 同じ木・同じ原因の失敗を最後に記録した時刻（1 日に 1 回まで）。 */
   const failureNotedAt = new Map<string, number>();
+  const retentionMs = deps.retentionDays * DAY_MS;
+  const noticeMs = deps.noticeDays * DAY_MS;
+  /** 時計の異常の閾値: 予告の期間の半分と 1 日の、短いほう。 */
+  const driftLimitMs = Math.min(noticeMs / 2, DAY_MS);
 
-  /** 時計が疑わしければ、理由を返す。 */
-  function clockProblem(): string | undefined {
-    const lastAt = deps.lastEventAt();
-    if (lastAt === undefined) return undefined;
-    const last = Date.parse(lastAt);
-    if (!Number.isFinite(last)) return `イベントログの最後の時刻を読めない（${lastAt}）`;
+  const eligibleOf = (
+    state: OrchState,
+    nodeId: string,
+  ): { archivedAt: string; nodeIds: readonly string[] } | undefined => {
+    const n = state.nodes.find((x) => x.id === nodeId);
+    if (n === undefined || n.state !== "archived" || n.parentId === null) return undefined; // 根は対象外
+    if (state.nodes.find((x) => x.id === n.parentId)?.state === "archived") return undefined;
+    const plan = planPurge(state, nodeId, deps.nowMs());
+    if (!plan.ok || plan.value.elapsedDays < deps.retentionDays) return undefined;
+    return { archivedAt: plan.value.archivedAt, nodeIds: plan.value.nodeIds };
+  };
+  /** 木の予告（新しいものが後ろ）。 */
+  const noticesOf = (state: OrchState, nodeId: string, archivedAt: string) => {
+    const out: { id: string; at: string; resolved: boolean; resolvedBySystem: boolean }[] = [];
+    for (let i = 0; i < MAX_NOTICES_PER_TREE; i++) {
+      const id = noticeId(nodeId, archivedAt, i);
+      const item = state.inbox.find((x) => x.id === id);
+      if (item === undefined) break;
+      out.push({
+        id,
+        at: item.at,
+        resolved: item.resolved !== undefined,
+        resolvedBySystem: item.resolved !== undefined && "system" in item.resolved.by,
+      });
+    }
+    return out;
+  };
+  const resolveNotice = (id: string): void => {
+    const r = deps.record(`auto-purge-resolve:${id}`, {
+      type: "inbox.resolved",
+      payload: { itemId: id },
+    });
+    if (!r.ok) deps.note("autoPurge.noticeResolveFailed", { id, code: r.error.code });
+  };
+  /** 予告を 1 件出す（持ち主は、木の根の親）。出せたら true。 */
+  const postNotice = (
+    state: OrchState,
+    nodeId: string,
+    e: { archivedAt: string; nodeIds: readonly string[] },
+    index: number,
+  ): boolean => {
+    const parentId = state.nodes.find((x) => x.id === nodeId)?.parentId;
+    if (parentId === null || parentId === undefined) return false;
+    const r = deps.record(noticeRequestId(nodeId, e.archivedAt, index), {
+      type: "inbox.added",
+      payload: {
+        id: noticeId(nodeId, e.archivedAt, index),
+        kind: "info",
+        nodeId: parentId,
+        summary: noticeSummary(state, nodeId, e.nodeIds, deps),
+      },
+    });
+    if (r.ok) deps.note("autoPurge.noticePosted", { nodeId, index });
+    else deps.note("autoPurge.noticeFailed", { nodeId, code: r.error.code });
+    return r.ok;
+  };
+  /** 有効な予告（取り下げられておらず、保持期間が過ぎたあとに出したもの。人間の解決は影響しない）かどうか。 */
+  const isValid = (
+    latest: { at: string; resolvedBySystem: boolean } | undefined,
+    archivedAt: string,
+  ): boolean =>
+    latest !== undefined &&
+    !latest.resolvedBySystem &&
+    Date.parse(latest.at) >= Date.parse(archivedAt) + retentionMs;
+
+  /**
+   * 有効な予告を、すべて出し直す（止まっていた時間・時計が飛んだ時間は、予告の期間に数えない）。古い予告は、system が解決済みにする
+   * （人間が解決済みにしていても、新しい予告が後ろにつくので、古いほうは判定に使われない）。
+   */
+  function reissueNotices(reason: string): void {
+    const state = deps.state();
+    let n = 0;
+    for (const node of state.nodes) {
+      const e = eligibleOf(state, node.id);
+      if (e === undefined) continue;
+      const notices = noticesOf(state, node.id, e.archivedAt);
+      const latest = notices.at(-1);
+      if (!isValid(latest, e.archivedAt)) continue;
+      if (notices.length < MAX_NOTICES_PER_TREE && postNotice(state, node.id, e, notices.length)) {
+        for (const old of notices) if (!old.resolved) resolveNotice(old.id);
+        n += 1;
+      }
+    }
+    deps.note("autoPurge.noticesReissued", { reason, count: n });
+  }
+
+  /** 時計が疑わしければ、理由を返す（その回は止める）。前に飛んだとき（`forward`）は、予告も出し直す。 */
+  function clockProblem(): { reason: string; forward: boolean } | undefined {
     const now = deps.nowMs();
-    if (now < last) return `時計が、イベントログの最後の記録（${lastAt}）より前に戻っている`;
-    if (now - last >= (deps.retentionDays * DAY_MS) / 2) {
-      return `イベントログの最後の記録（${lastAt}）から、保持期間（${deps.retentionDays} 日）の半分以上進んでいる（時計が大きく進んだ可能性）`;
+    const mono = deps.monoMs();
+    const base = baseline;
+    baseline = { wall: now, mono };
+    const lastAt = deps.lastEventAt();
+    if (lastAt !== undefined) {
+      const last = Date.parse(lastAt);
+      if (!Number.isFinite(last)) {
+        return { reason: `イベントログの最後の時刻を読めない（${lastAt}）`, forward: false };
+      }
+      if (now < last) {
+        return {
+          reason: `時計が、イベントログの最後の記録（${lastAt}）より前に戻っている`,
+          forward: false,
+        };
+      }
+    }
+    if (base === undefined) return undefined;
+    const drift = now - base.wall - (mono - base.mono); // 壁時計の経過 − 単調時計の経過
+    if (drift > driftLimitMs) {
+      return {
+        reason: `時計が、直前の確認から、単調時計より ${Math.round(drift / 60_000)} 分多く進んだ（時計が前に飛んだ可能性）`,
+        forward: true,
+      };
+    }
+    if (drift < -driftLimitMs) {
+      return {
+        reason: `時計が、直前の確認から、単調時計より ${Math.round(-drift / 60_000)} 分少なくしか進んでいない（時計が前に戻った可能性）`,
+        forward: false,
+      };
     }
     return undefined;
   }
@@ -121,48 +248,13 @@ export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
     try {
       const problem = clockProblem();
       if (problem !== undefined) {
-        deps.note("autoPurge.skipped", { reason: problem });
+        deps.note("autoPurge.skipped", { reason: problem.reason });
+        if (problem.forward) reissueNotices(problem.reason);
         return { skipped: true, purged };
       }
-      const state0 = deps.state();
-      const retentionMs = deps.retentionDays * DAY_MS;
-      const noticeMs = deps.noticeDays * DAY_MS;
-      const eligibleOf = (
-        state: OrchState,
-        nodeId: string,
-      ): { archivedAt: string; nodeIds: readonly string[] } | undefined => {
-        const n = state.nodes.find((x) => x.id === nodeId);
-        if (n === undefined || n.state !== "archived" || n.parentId === null) return undefined; // 根は対象外
-        if (state.nodes.find((x) => x.id === n.parentId)?.state === "archived") return undefined;
-        const plan = planPurge(state, nodeId, deps.nowMs());
-        if (!plan.ok || plan.value.elapsedDays < deps.retentionDays) return undefined;
-        return { archivedAt: plan.value.archivedAt, nodeIds: plan.value.nodeIds };
-      };
-      /** 木の予告（新しいものが後ろ）。 */
-      const noticesOf = (state: OrchState, nodeId: string, archivedAt: string) => {
-        const out: { id: string; at: string; resolvedBySystem: boolean; resolved: boolean }[] = [];
-        for (let i = 0; i < MAX_NOTICES_PER_TREE; i++) {
-          const id = noticeId(nodeId, archivedAt, i);
-          const item = state.inbox.find((x) => x.id === id);
-          if (item === undefined) break;
-          out.push({
-            id,
-            at: item.at,
-            resolved: item.resolved !== undefined,
-            resolvedBySystem: item.resolved !== undefined && "system" in item.resolved.by,
-          });
-        }
-        return out;
-      };
-      const resolveNotice = (id: string): void => {
-        const r = deps.record(`auto-purge-resolve:${id}`, {
-          type: "inbox.resolved",
-          payload: { itemId: id },
-        });
-        if (!r.ok) deps.note("autoPurge.noticeResolveFailed", { id, code: r.error.code });
-      };
 
       // (1) 対象から外れた木の予告を取り下げる（system が解決済みにする）。
+      const state0 = deps.state();
       for (const n of state0.nodes) {
         if (n.state !== "archived" || n.parentId === null) continue;
         if (eligibleOf(state0, n.id) !== undefined) continue;
@@ -187,41 +279,27 @@ export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
       let posted = 0;
       let deleted = 0;
       for (const { nodeId, archivedAt } of due) {
-        if (deps.isStopped()) break;
+        if (deps.isStopped() || stopRequested) break;
         const cur = deps.state();
         const e = eligibleOf(cur, nodeId); // 削除の直前に、保持期間を含めて、もう一度判定する
         if (e === undefined) continue;
-        const dueAtMs = Date.parse(e.archivedAt) + retentionMs;
         const notices = noticesOf(cur, nodeId, e.archivedAt);
         const latest = notices.at(-1);
-        // 有効な予告: 取り下げられておらず、保持期間が過ぎたあとに出したもの（保持期間を延ばしたあとの古い予告は、無効）。
-        // 人間が解決済みにしても、有効なまま（判定に使うのは、予告が出たことと、その `at`）。
-        const valid =
-          latest !== undefined && !latest.resolvedBySystem && Date.parse(latest.at) >= dueAtMs;
-        if (!valid) {
-          if (posted >= MAX_NOTICES_PER_RUN) continue;
-          const parentId = cur.nodes.find((x) => x.id === nodeId)?.parentId;
-          if (parentId === null || parentId === undefined) continue;
-          const index = latest === undefined ? 0 : notices.length;
-          const r = deps.record(`auto-purge-notice:${nodeId}:${e.archivedAt}:${index}`, {
-            type: "inbox.added",
-            payload: {
-              id: noticeId(nodeId, e.archivedAt, index),
-              kind: "info",
-              nodeId: parentId,
-              summary: noticeSummary(cur, nodeId, e.nodeIds, deps),
-            },
-          });
-          if (r.ok) {
-            posted += 1;
-            deps.note("autoPurge.noticePosted", { nodeId, index });
-          } else {
-            deps.note("autoPurge.noticeFailed", { nodeId, code: r.error.code });
+        if (!isValid(latest, e.archivedAt)) {
+          if (notices.length >= MAX_NOTICES_PER_TREE) {
+            deps.note("autoPurge.noticeFailed", {
+              nodeId,
+              reason: `予告が上限（${MAX_NOTICES_PER_TREE} 件）に達した。この木の自動の削除を止める（人間のコマンドで消す）`,
+            });
+            continue;
           }
+          if (posted >= MAX_NOTICES_PER_RUN) continue;
+          if (postNotice(cur, nodeId, e, notices.length)) posted += 1;
           continue;
         }
         if (deleted >= deps.maxTreesPerRun) continue;
-        if (deps.nowMs() - Date.parse(latest.at) < noticeMs) continue; // 予告から noticeDays 日たっていない
+        // 予告から noticeDays 日たっていない（latest は、isValid で存在が確かめられている）。
+        if (latest === undefined || deps.nowMs() - Date.parse(latest.at) < noticeMs) continue;
         const r = deps.purgeTreeOf({
           nodeId,
           requestId: `auto-purge:${nodeId}:${archivedAt}`,
@@ -252,28 +330,50 @@ export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
     return { skipped: false, purged };
   }
 
+  /** 実行を 1 回にまとめて追跡する（`stop()` が終わりを待てるように）。 */
+  function track(): Promise<{ skipped: boolean; purged: string[] }> {
+    const p = runOnce();
+    current = p;
+    void p.finally(() => {
+      if (current === p) current = undefined;
+    });
+    return p;
+  }
+
   function schedule(): void {
-    if (stopped) return;
+    if (stopRequested || !started) return;
     const t = deps.timers.after(deps.intervalMs);
     timer = t;
     void t.promise.then(async () => {
-      if (stopped || deps.isStopped()) return;
-      await runOnce();
+      if (stopRequested || deps.isStopped()) return;
+      await track();
       schedule();
     });
   }
 
   return {
     start() {
-      if (!stopped) return;
-      stopped = false;
+      if (started) return;
+      started = true;
+      stopRequested = false;
+      baseline = { wall: deps.nowMs(), mono: deps.monoMs() };
+      // 止まっていた時間は、予告の期間に数えない: 起動の時点で、ログの最後の記録から 1 日以上たっていたら、予告を出し直す。
+      const startedAt = deps.lastEventAtAtStartup;
+      if (startedAt !== undefined) {
+        const last = Date.parse(startedAt);
+        if (Number.isFinite(last) && deps.nowMs() - last >= DAY_MS) {
+          reissueNotices(`daemon が止まっていた（最後の記録 ${startedAt} から 1 日以上）`);
+        }
+      }
       schedule();
     },
-    stop() {
-      stopped = true;
+    async stop() {
+      stopRequested = true;
+      started = false;
       timer?.cancel();
       timer = undefined;
+      await current?.catch(() => undefined);
     },
-    runOnce,
+    runOnce: track,
   };
 }
