@@ -203,12 +203,16 @@ describe("窓口の回数の制限（T10l）", () => {
     for (let i = 0; i < 10; i++) await post(r, list(`q${i}`), r.tokens.m1);
     // 本文を読まずに返して、接続を閉じる。巨大な本文を送りきる前に閉じられると、クライアントは、429 の応答を受け取れず、
     // 接続のエラー（EPIPE・ECONNRESET）になることがある（タイミング次第）。どちらでも、413 にはならず、実行もされない。
-    const big = await post(r, `{"x":"${"y".repeat(2 * 1024 * 1024)}"}`, r.tokens.m1).then(
+    const big: { status: number; error?: string } = await post(
+      r,
+      `{"x":"${"y".repeat(2 * 1024 * 1024)}"}`,
+      r.tokens.m1,
+    ).then(
       (res) => ({ status: res.status }),
       (error: unknown) => ({ status: 0, error: String((error as Error).cause ?? error) }),
     );
     expect([429, 0]).toContain(big.status);
-    if (big.status === 0) expect(big.error).toMatch(/EPIPE|ECONNRESET|other side closed/);
+    if (big.status === 0) expect(big.error ?? "").toMatch(/EPIPE|ECONNRESET|other side closed/);
     expect(r.calls).toHaveLength(10); // 巨大な本文の要求は、実行されていない
     const unauth = await post(r, list(), "wrong-token");
     expect(unauth.status).toBe(401); // 主体の制限は、認証の後
