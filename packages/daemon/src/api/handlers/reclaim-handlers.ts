@@ -22,6 +22,8 @@ import {
   failure,
   isCommitSha,
   isStrictDescendant,
+  LIMITS,
+  type NodeLoss,
   type NodeRecord,
   type OperationMap,
   type OrchState,
@@ -30,8 +32,10 @@ import {
   type ReclaimNode,
   type ReclaimNodeFacts,
   type Result,
+  sanitizeText,
   type UnmetReason,
 } from "@cso/core";
+import type { LossFacts } from "../../git-ports.js";
 import type { ProcessProbe } from "../../sdk/lsof-probe.js";
 import type { HandlerRequest } from "../server.js";
 import { appendAtomically, fail, type LogPort } from "./context.js";
@@ -65,6 +69,8 @@ export interface ReclaimPorts {
     nodeId: string,
     opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
   ): Promise<Result<undefined, Failure>>;
+  /** 強制の回収で失われるもの（T21r）。なければ、事前確認に `loss` を出さない。 */
+  lossFor?(nodeId: string): Promise<LossFacts | undefined>;
   /** daemon の作業ツリー置き場（作業ツリーのパスがこの配下であることを検査する）。 */
   readonly worktreeRoot: string;
   /** 強制で消す直前の、ブランチの先端（捨てる成果の最後のコミット）の記録先。 */
@@ -218,6 +224,53 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     return { plan, unmet };
   }
 
+  /**
+   * 強制の回収で失われるもの。`lossFor` がなければ `undefined`（情報なし）。取得に失敗したノードは `unknown` として残す（事前確認は止めない）。
+   * 件名はコミットメッセージ由来の信頼できない入力なので、空白を詰めて 1 行にし、制御文字を除き、長さを切る。
+   */
+  async function lossOf(plan: readonly NodeRecord[]): Promise<NodeLoss[] | undefined> {
+    const lossFor = ports.lossFor;
+    if (lossFor === undefined) return undefined;
+    const out: NodeLoss[] = [];
+    for (const n of plan) {
+      if (n.state === "archived") continue;
+      // 調べられなかった（失敗・例外）ノードは、飛ばさずに「不明」として残す（「失われるものなし」と誤らせない）。
+      let facts: LossFacts | undefined;
+      try {
+        facts = await lossFor(n.id);
+      } catch (e) {
+        deps.onFailure?.(n.id, String(e));
+        out.push({
+          nodeId: n.id,
+          untrustedSubjects: [],
+          uncommitted: false,
+          untracked: 0,
+          unknown: true,
+        });
+        continue;
+      }
+      if (facts === undefined) continue; // 作業ツリーもブランチもない（失われるものがない）
+      const lost =
+        facts.workingTreeUnknown === true ||
+        facts.aheadCommits === undefined ||
+        facts.aheadCommits > 0 ||
+        facts.uncommitted ||
+        facts.untracked > 0;
+      if (!lost) continue;
+      out.push({
+        nodeId: n.id,
+        ...(facts.aheadCommits === undefined ? {} : { aheadCommits: facts.aheadCommits }),
+        untrustedSubjects: facts.subjects
+          .slice(0, LIMITS.lossSubjects)
+          .map((s) => sanitizeText(s.replace(/\s+/g, " ").trim(), LIMITS.lossSubjectLength)),
+        uncommitted: facts.uncommitted,
+        untracked: facts.untracked,
+        ...(facts.workingTreeUnknown === true ? { workingTreeUnknown: true as const } : {}),
+      });
+    }
+    return out;
+  }
+
   const notReclaimable = (list: readonly Unmet[]) => {
     const needsHuman = list.some((u) => u.unmet.includes("discardRequired"));
     return fail(
@@ -270,9 +323,16 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
       req: HandlerRequest<"node.reclaimPreview">,
     ): Promise<R<"node.reclaimPreview">> => {
       const { nodeId } = req.params;
-      const outside = outsideSubtree(req.caller?.nodeId ?? "", nodeId);
-      if (outside) return outside;
-      const { unmet } = await assess(log.state(), nodeId);
+      if (req.role === "human") {
+        // 人間（`cso reclaim` が、破棄を指示する前に、失われるものを確かめる。T21r）: 部分木の制限はない（読み取りだけ）。
+        if (!log.state().nodes.some((n) => n.id === nodeId)) {
+          return fail("notFound", "ノードが見つからない", "ID を確認する");
+        }
+      } else {
+        const outside = outsideSubtree(req.caller?.nodeId ?? "", nodeId);
+        if (outside) return outside;
+      }
+      const { plan, unmet } = await assess(log.state(), nodeId);
       // 満たしていない条件の和と、原因（対象の配下のノードは、そのノードの条件も原因として挙げる）。
       const reasons = [...new Set(unmet.flatMap((u) => u.unmet))];
       if (
@@ -287,7 +347,18 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
           ? []
           : u.unmet.map((reason) => ({ kind: "node" as const, reason, nodeId: u.nodeId }))),
       ]);
-      return { ok: true, value: { reclaimable: unmet.length === 0, unmet: reasons, blockers } };
+      // 強制の回収で失われるもの（T21r）。対象と配下のうち、作業ツリーがあって、失われるものがあるノードだけ。
+      // 人間のロールにだけ返す（統合ノードの呼び出しでは、git の負荷を避けるため、計算もしない）。
+      const loss = req.role === "human" ? await lossOf(plan) : undefined;
+      return {
+        ok: true,
+        value: {
+          reclaimable: unmet.length === 0,
+          unmet: reasons,
+          blockers,
+          ...(loss === undefined ? {} : { loss }),
+        },
+      };
     },
 
     "node.reclaim": async (

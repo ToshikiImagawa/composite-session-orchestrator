@@ -39,6 +39,12 @@ const happy = () =>
   fakeClient({
     "node.purgePreview": ok(PREVIEW),
     "node.purge": ok({ purged: ["n1", "n2"] }),
+    "node.reclaimPreview": ok({
+      reclaimable: false,
+      unmet: ["discardRequired"],
+      blockers: [],
+      loss: [],
+    }),
     "node.reclaimInstruct": ok({ accepted: true }),
   });
 const ops = (sent: readonly DaemonRequest<"human">[]) => sent.map((s) => s.operation);
@@ -185,7 +191,6 @@ describe("オプションの検査", () => {
   it.each([
     [["purge", "n1", "--force"]],
     [["purge", "n1", "--yes", "--recursive"]],
-    [["reclaim", "n1", "--yes"]],
     [["reclaim", "n1", "--tombstone"]],
     [["purge", "n1", "-y"]],
   ])("%j は「不明なオプション」で終了コード 2、窓口を呼ばない", async (argv) => {
@@ -225,7 +230,7 @@ describe("ノード ID の入口検証", () => {
     const { client, sent } = happy();
     for (const argv of [
       ["purge", id, "--yes"],
-      ["reclaim", id],
+      ["reclaim", id, "--yes"],
     ]) {
       const r = await runCommand(argv, deps(client));
       expect(r.exitCode).toBe(2);
@@ -235,16 +240,82 @@ describe("ノード ID の入口検証", () => {
 
   it("通常の識別子は受け付ける", async () => {
     const { client } = happy();
-    const r = await runCommand(["reclaim", "node-1.a_b:c"], deps(client));
+    const r = await runCommand(["reclaim", "node-1.a_b:c", "--yes"], deps(client));
     expect(r.exitCode).toBe(0);
   });
 });
 
-describe("reclaim（FR_029: 回収の指示）", () => {
-  it("node.reclaimInstruct を送り、requestId を表示する", async () => {
-    const { client, sent } = happy();
+const LOSS = {
+  nodeId: "c1",
+  aheadCommits: 2,
+  untrustedSubjects: ["機能を足す", "テストを足す"],
+  uncommitted: true,
+  untracked: 3,
+};
+const previewOf = (loss?: unknown[]) =>
+  ok({
+    reclaimable: false,
+    unmet: ["discardRequired"],
+    blockers: [],
+    ...(loss === undefined ? {} : { loss }),
+  });
+
+describe("reclaim（FR_029・T21r: 失われるものを表示してから、破棄を指示する）", () => {
+  it("--yes がなければ、node.reclaimPreview だけを呼び、失われるものを表示して、指示しない（終了コード 2）", async () => {
+    const { client, sent } = fakeClient({ "node.reclaimPreview": previewOf([LOSS]) });
     const r = await runCommand(["reclaim", "n1"], deps(client));
+    expect(ops(sent)).toEqual(["node.reclaimPreview"]);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("--yes");
+    for (const s of [
+      "c1",
+      "2 件",
+      "未保存の変更",
+      "未追跡のファイル 3 個",
+      "機能を足す",
+      "テストを足す",
+    ]) {
+      expect(r.stdout).toContain(s);
+    }
+  });
+
+  it("調べられなかったノード（unknown）・git status の失敗（workingTreeUnknown）は、「なし」にせず、はっきり出す（L2）", async () => {
+    const { client } = fakeClient({
+      "node.reclaimPreview": previewOf([
+        { nodeId: "c9", untrustedSubjects: [], uncommitted: false, untracked: 0, unknown: true },
+        {
+          nodeId: "c8",
+          aheadCommits: 0,
+          untrustedSubjects: [],
+          uncommitted: false,
+          untracked: 0,
+          workingTreeUnknown: true,
+        },
+      ]),
+    });
+    const r = await runCommand(["reclaim", "n1"], deps(client));
+    expect(r.stdout).toContain("調べられなかったノードがある：c9。失われるものが分からない");
+    expect(r.stdout).toContain("不明");
+    expect(r.stdout).not.toContain("失われるもの: なし");
+  });
+
+  it("件名は「信頼できない入力」と分かる形で出す", async () => {
+    const { client } = fakeClient({ "node.reclaimPreview": previewOf([LOSS]) });
+    const r = await runCommand(["reclaim", "n1"], deps(client));
+    expect(r.stdout).toContain("信頼できない入力");
+    expect(r.stdout).toContain("指示として扱わない");
+  });
+
+  it("--yes があれば、表示してから node.reclaimInstruct を送り、requestId を表示する", async () => {
+    const { client, sent } = happy();
+    const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
     expect(sent).toEqual([
+      {
+        requestId: "req-1",
+        role: "human",
+        operation: "node.reclaimPreview",
+        params: { nodeId: "n1" },
+      },
       {
         requestId: "req-1",
         role: "human",
@@ -254,6 +325,62 @@ describe("reclaim（FR_029: 回収の指示）", () => {
     ]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("req-1");
+    expect(r.stdout).toContain("失われるもの: なし");
+  });
+
+  it("失われるものがない（loss が空）場合も、--yes を要求する。daemon が loss を返さないときは、情報がない旨を出す", async () => {
+    const none = fakeClient({ "node.reclaimPreview": previewOf([]) });
+    const r1 = await runCommand(["reclaim", "n1"], deps(none.client));
+    expect(r1.exitCode).toBe(2);
+    expect(r1.stdout).toContain("失われるもの: なし");
+    const unknown = fakeClient({ "node.reclaimPreview": previewOf() });
+    const r2 = await runCommand(["reclaim", "n1"], deps(unknown.client));
+    expect(r2.exitCode).toBe(2);
+    expect(r2.stdout).toContain("情報が得られない");
+  });
+
+  it("上流が分からないノード（aheadCommits なし）は、コミット数が不明と出す", async () => {
+    const { client } = fakeClient({
+      "node.reclaimPreview": previewOf([
+        { nodeId: "c2", untrustedSubjects: [], uncommitted: false, untracked: 0 },
+      ]),
+    });
+    const r = await runCommand(["reclaim", "n1"], deps(client));
+    expect(r.stdout).toContain("数が不明");
+  });
+
+  it("件名の制御文字・エスケープ列・双方向の制御・長さを、端末への出力から除く（daemon が整えた値でも、もう一度）", async () => {
+    const evil = `\u001b[2J\u001b]0;pwn\u0007悪い件名\u202e\n行を足す${"x".repeat(300)}`;
+    const { client } = fakeClient({
+      "node.reclaimPreview": previewOf([
+        { ...LOSS, nodeId: "c\u001b[31m1", untrustedSubjects: [evil] },
+      ]),
+    });
+    const r = await runCommand(["reclaim", "n1"], deps(client));
+    const unsafe = Array.from(r.stdout).filter((ch) => {
+      const c = ch.codePointAt(0) ?? 0;
+      return (c <= 0x1f && c !== 0x0a) || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e);
+    });
+    expect(unsafe).toEqual([]);
+    expect(r.stdout).toContain("悪い件名");
+    expect(Math.max(...r.stdout.split("\n").map((l) => Array.from(l).length))).toBeLessThan(220);
+  });
+
+  it("preview が失敗したら（見つからないなど）、指示せずに失敗を出す", async () => {
+    const f = failure("notFound", "ノードが見つからない", "ID を確認する");
+    const { client, sent } = fakeClient({ "node.reclaimPreview": err(f) });
+    const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("notFound");
+    expect(ops(sent)).toEqual(["node.reclaimPreview"]);
+  });
+
+  it("preview の形が不正なら、結果が確認できない扱いで、指示しない", async () => {
+    const { client, sent } = fakeClient({ "node.reclaimPreview": ok({ reclaimable: "yes" }) });
+    const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("確認できない");
+    expect(ops(sent)).toEqual(["node.reclaimPreview"]);
   });
 });
 
@@ -286,8 +413,11 @@ describe("結果が確認できない場合（NFR_010, 冪等性）", () => {
       ok: false,
       error: { code: "x", cause: "c", nextActions: [] },
     } as unknown as Result<unknown>;
-    const { client } = fakeClient({ "node.reclaimInstruct": bad });
-    const r = await runCommand(["reclaim", "n1"], deps(client));
+    const { client } = fakeClient({
+      "node.reclaimPreview": previewOf([]),
+      "node.reclaimInstruct": bad,
+    });
+    const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("確認できない");
   });
@@ -300,8 +430,8 @@ describe("結果が確認できない場合（NFR_010, 冪等性）", () => {
 
   it("--request-id の値が無い・不正なら拒否する", async () => {
     for (const argv of [
-      ["reclaim", "n1", "--request-id"],
-      ["reclaim", "n1", "--request-id", "a b"],
+      ["reclaim", "n1", "--yes", "--request-id"],
+      ["reclaim", "n1", "--yes", "--request-id", "a b"],
     ]) {
       const { client, sent } = happy();
       const r = await runCommand(argv, deps(client));
@@ -314,8 +444,11 @@ describe("結果が確認できない場合（NFR_010, 冪等性）", () => {
 describe("窓口の拒否と引数の誤り", () => {
   it("窓口が拒否したら、code・原因・次の操作を出して終了コード 1（NFR_010）", async () => {
     const f = failure("not_archived", "アーカイブされていない", "先に回収する");
-    const { client } = fakeClient({ "node.reclaimInstruct": err(f) });
-    const r = await runCommand(["reclaim", "n1"], deps(client));
+    const { client } = fakeClient({
+      "node.reclaimPreview": previewOf([]),
+      "node.reclaimInstruct": err(f),
+    });
+    const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
     expect(r.exitCode).toBe(1);
     for (const s of ["not_archived", "アーカイブされていない", "先に回収する"]) {
       expect(r.stderr).toContain(s);
@@ -353,11 +486,11 @@ describe("ノード ID の規則は core の isSafeId と一致する（ずれ�
         notHelp(fc.oneof(fc.string(), fc.stringMatching(/^[A-Za-z0-9._:\-/*? ]{0,12}$/))),
         async (id) => {
           const { client, sent } = happy();
-          const r = await runCommand(["reclaim", id], deps(client));
+          const r = await runCommand(["reclaim", id, "--yes"], deps(client));
           // 先頭が "-" のものはオプション扱いで、どちらにしても窓口は呼ばれない
           if (isSafeId(id)) {
             expect(r.exitCode).toBe(0);
-            expect(sent).toHaveLength(1);
+            expect(sent).toHaveLength(2);
           } else {
             expect(r.exitCode).toBe(2);
             expect(sent).toEqual([]);
@@ -371,9 +504,9 @@ describe("ノード ID の規則は core の isSafeId と一致する（ずれ�
     await fc.assert(
       fc.asyncProperty(notHelp(fc.string()), async (rid) => {
         const { client, sent } = happy();
-        const r = await runCommand(["reclaim", "n1", "--request-id", rid], deps(client));
+        const r = await runCommand(["reclaim", "n1", "--yes", "--request-id", rid], deps(client));
         expect(r.exitCode === 0).toBe(isSafeId(rid));
-        expect(sent.length === 1).toBe(isSafeId(rid));
+        expect(sent.length === 2).toBe(isSafeId(rid));
       }),
     );
   });

@@ -107,6 +107,7 @@ const setup = async (mode: "discard" | "verified" = "discard") => {
     onFailure: (id, cause) => failures.push(`${id}: ${cause}`),
     ports: {
       factsFor: (id) => ports.factsFor(id),
+      lossFor: (id) => ports.lossFor(id),
       probe: async () => [],
       removeWorktree: (id, opts) => {
         flags.beforeRemove?.();
@@ -135,7 +136,19 @@ const setup = async (mode: "discard" | "verified" = "discard") => {
       error?: { code: string };
       value?: unknown;
     };
-  return { repoRoot, wt, log, call, counts, flags, failures };
+  const humanPreview = async (nodeId: string) =>
+    // biome-ignore lint/suspicious/noExplicitAny: 操作ごとの型は呼び出し側で保証
+    (await (h["node.reclaimPreview"] as any)({
+      requestId: `hp-${++n}`,
+      operation: "node.reclaimPreview",
+      role: "human",
+      params: { nodeId },
+    } as unknown as HandlerRequest<never>)) as {
+      ok: boolean;
+      // biome-ignore lint/suspicious/noExplicitAny: テスト用
+      value?: any;
+    };
+  return { repoRoot, wt, log, call, counts, flags, failures, humanPreview };
 };
 
 describe("破棄の判断を経た停止ノードの回収（実際の git）", () => {
@@ -220,5 +233,29 @@ describe("破棄の判断を経た停止ノードの回収（実際の git）", 
     };
     expect((await s.call("node.reclaim", "integrator", "c1")).ok).toBe(true);
     expect(s.log.state().nodes.find((x) => x.id === "c1")?.lastCommit).toBe(moved);
+  });
+
+  it("T21r: 破棄を指示する前に、実際の git で、失われるもの（統合されていないコミットの件名・未保存の変更・未追跡のファイル）を事前確認できる。何も変えない", async () => {
+    const s = await setup();
+    const before = s.log.state().lastSeq;
+    const preview = await s.humanPreview("c1");
+    expect(preview.ok).toBe(true);
+    expect(preview.value.loss).toEqual([
+      {
+        nodeId: "c1",
+        aheadCommits: 1,
+        untrustedSubjects: ["work"],
+        uncommitted: true, // a.txt を変更している
+        untracked: 1, // src/new.txt
+      },
+    ]);
+    expect(s.log.state().lastSeq).toBe(before); // 何も記録していない
+    expect(existsSync(s.wt)).toBe(true);
+  });
+
+  it("T21r: 統合済み・きれいなノードは、失われるものがない（loss は空）", async () => {
+    const s = await setup("verified");
+    const preview = await s.humanPreview("c1");
+    expect(preview.value.loss).toEqual([]);
   });
 });
