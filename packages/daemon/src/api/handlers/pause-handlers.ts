@@ -27,6 +27,7 @@ import {
 import type { RuntimeAdapter } from "../../sdk/runtime.js";
 import type { CredentialStore } from "../credentials.js";
 import type { HandlerRequest } from "../server.js";
+import { deliverAnswer, noteStoppingAnswer } from "./answer-delivery.js";
 import {
   alreadyApplied,
   appendAtomically,
@@ -37,6 +38,7 @@ import {
   summarize,
   waitRequestKey,
 } from "./context.js";
+import type { InstructionDelivery } from "./instruction-delivery.js";
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 type Async<Op extends keyof OperationMap> = R<Op> | Promise<R<Op>>;
@@ -57,6 +59,12 @@ export interface PauseHandlerDeps {
     readonly mcpUrl: string;
   };
   readonly credentials: Pick<CredentialStore, "issueNodeToken" | "revokeNode">;
+  /**
+   * 回答を、判断を出したノード（動作中・待機中）へ追加指示として届ける（T10b-r）。省略すると、届けない
+   * （状態を戻すだけ）。
+   */
+  readonly deliver?: InstructionDelivery["deliver"];
+  readonly canDeliver?: InstructionDelivery["available"];
   readonly onFailure?: (nodeId: string, cause: string) => void;
 }
 
@@ -302,8 +310,30 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       const skipped: string[] = [];
       for (const t of targets) {
         const o = await resumeOne(d, t, answer);
-        if (o.kind === "failed") failed.push(o.message ?? t);
-        else if (o.kind === "skipped") skipped.push(t);
+        if (o.kind === "failed") {
+          failed.push(o.message ?? t);
+          if (t === d.nodeId && deps.deliver !== undefined) {
+            noteStoppingAnswer(
+              { log, clock: deps.clock, deliver: deps.deliver, canDeliver: () => false },
+              d,
+            );
+          }
+        } else if (o.kind === "skipped") skipped.push(t);
+        else if (o.kind === "notStopped" && t === d.nodeId && deps.deliver !== undefined) {
+          // 動作中・待機中のまま（セッションが生きている）の判断者には、回答を追加指示として届ける。
+          const sent = await deliverAnswer(
+            {
+              log,
+              clock: deps.clock,
+              deliver: deps.deliver,
+              canDeliver: deps.canDeliver ?? (() => false),
+              ...(deps.onFailure === undefined ? {} : { onFailure: deps.onFailure }),
+            },
+            d,
+            answer,
+          );
+          if (sent.kind === "failed") failed.push(sent.message);
+        }
       }
       // 再開しなかった子（人間などが止めた子）は、判断を出した統合ノードの受信箱に載せる。
       if (skipped.length > 0) {
