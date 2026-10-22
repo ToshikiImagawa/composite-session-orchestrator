@@ -47,7 +47,15 @@ afterEach(async () => {
   rig = undefined;
 });
 
-const start = async (over: { daemonUrl?: string } = {}): Promise<Rig> => {
+const start = async (
+  over: {
+    daemonUrl?: string;
+    fetch?: typeof fetch;
+    shutdownGraceMs?: number;
+    bodyTimeoutMs?: number;
+    relayTimeoutMs?: number;
+  } = {},
+): Promise<Rig> => {
   const credentials = createCredentialStore({ humanToken: HUMAN });
   const calls: Rig["calls"] = [];
   const daemon = createApiServer({
@@ -65,7 +73,13 @@ const start = async (over: { daemonUrl?: string } = {}): Promise<Rig> => {
     },
   });
   const d = await daemon.listen(0);
-  const created = createMcpHttpServer({ daemonUrl: over.daemonUrl ?? d.url });
+  const created = createMcpHttpServer({
+    daemonUrl: over.daemonUrl ?? d.url,
+    ...(over.fetch ? { fetch: over.fetch } : {}),
+    ...(over.shutdownGraceMs !== undefined ? { shutdownGraceMs: over.shutdownGraceMs } : {}),
+    ...(over.bodyTimeoutMs !== undefined ? { bodyTimeoutMs: over.bodyTimeoutMs } : {}),
+    ...(over.relayTimeoutMs !== undefined ? { relayTimeoutMs: over.relayTimeoutMs } : {}),
+  });
   if (!created.ok) throw new Error(created.error.cause);
   const mcp = created.value;
   const m = await mcp.listen(0);
@@ -237,5 +251,199 @@ describe("createMcpHttpServer の設定の検査", () => {
   it("daemonUrl がループバックでなければ失敗にする", () => {
     const r = createMcpHttpServer({ daemonUrl: "http://example.com" });
     expect(r.ok).toBe(false);
+  });
+});
+
+import { request as httpRequest } from "node:http";
+
+const rawHttp = (
+  url: string,
+  headers: Record<string, string>,
+  body?: string,
+): Promise<{ status: number; text: string }> =>
+  new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpRequest(
+      { host: "127.0.0.1", port: u.port, path: "/mcp", method: "POST", headers },
+      (res) => {
+        let text = "";
+        res.on("data", (c) => {
+          text += c;
+        });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+
+describe("停止（graceful shutdown）", () => {
+  it("停止の要求のあとも、処理中の呼び出しは完了し、結果が返る", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inFlight = false;
+    const slowFetch: typeof fetch = async (input, init) => {
+      if (String(input).endsWith("/v1/request")) {
+        inFlight = true;
+        await gate;
+      }
+      return fetch(input, init);
+    };
+    const r = await start({ fetch: slowFetch, shutdownGraceMs: 3000 });
+    const c = await connect(r, r.tokens.a);
+    const call = c.callTool({ name: "report_progress", arguments: { text: "t" } });
+    while (!inFlight) await new Promise((res) => setTimeout(res, 5));
+    const closing = r.mcp.close();
+    // 停止の要求のあとで、処理中の呼び出しを進める
+    await new Promise((res) => setTimeout(res, 50));
+    release?.();
+    const res = await call;
+    expect(res.isError).toBeFalsy();
+    await closing;
+    expect(r.calls).toHaveLength(1);
+  });
+
+  it("猶予を超えた処理中の要求は、強制的に切って、close が終わる", async () => {
+    const never: typeof fetch = async (input, init) => {
+      if (String(input).endsWith("/v1/request")) await new Promise(() => undefined);
+      return fetch(input, init);
+    };
+    const r = await start({ fetch: never, shutdownGraceMs: 100 });
+    const c = await connect(r, r.tokens.a);
+    void c.callTool({ name: "report_progress", arguments: { text: "t" } }).catch(() => undefined);
+    await new Promise((res) => setTimeout(res, 100));
+    const t0 = Date.now();
+    await r.mcp.close();
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it("停止の後は、新しい接続を受け付けない", async () => {
+    const r = await start();
+    const url = r.mcpUrl;
+    await r.mcp.close();
+    await expect(fetch(url, { method: "POST", body: INIT })).rejects.toThrow();
+  });
+});
+
+describe("遅い接続・並列の要求への対策", () => {
+  it("本文の読み取りに全体の上限があり、遅い本文は 408 で切る", async () => {
+    const r = await start({ bodyTimeoutMs: 150 });
+    const u = new URL(r.mcpUrl);
+    const status = await new Promise<number>((resolve) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: u.port,
+          path: "/mcp",
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${r.tokens.a}`,
+            "content-type": "application/json",
+            "content-length": "1000",
+          },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", () => resolve(0));
+      req.write('{"jsonrpc"');
+      // 続きを送らない
+    });
+    expect([408, 0]).toContain(status);
+  });
+
+  it("並列の要求が、それぞれ正しく処理される", async () => {
+    const r = await start();
+    const clients = await Promise.all([1, 2, 3, 4, 5].map(() => connect(r, r.tokens.a)));
+    const results = await Promise.all(
+      clients.map((c, i) => c.callTool({ name: "report_progress", arguments: { text: `p${i}` } })),
+    );
+    expect(results.every((x) => !x.isError)).toBe(true);
+    expect(r.calls).toHaveLength(5);
+    await Promise.all(clients.map((c) => c.close()));
+  });
+
+  it("接続の上限・タイムアウトを明示している", async () => {
+    const r = await start();
+    const info = r.mcp.limits();
+    expect(info.maxConnections).toBe(64);
+    expect(info.requestTimeoutMs).toBe(30_000);
+    expect(info.headersTimeoutMs).toBe(10_000);
+    expect(info.keepAliveTimeoutMs).toBe(5_000);
+  });
+});
+
+describe("検査の順序（トークンの確認が本文より先）", () => {
+  it("無効なトークンは、Content-Type・本文の検査より先に 401 になる", async () => {
+    const r = await start();
+    const res = await raw(r, {
+      body: "x",
+      headers: {
+        authorization: "Bearer not-a-valid-token-0123456789",
+        "content-type": "text/plain",
+      },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("有効なトークンで Content-Type が違えば 415（トークンの確認のあと）", async () => {
+    const r = await start();
+    const res = await raw(r, {
+      body: "x",
+      headers: { authorization: `Bearer ${r.tokens.a}`, "content-type": "text/plain" },
+    });
+    expect(res.status).toBe(415);
+  });
+});
+
+describe("Host・Origin のポートの照合", () => {
+  it("listen したポートと違う Host・Origin は拒否する。同じポートは許可する", async () => {
+    const r = await start();
+    const port = new URL(r.mcpUrl).port;
+    const h = { authorization: `Bearer ${r.tokens.a}`, "content-type": "application/json" };
+    const wrongHost = await rawHttp(r.mcpUrl, { ...h, host: "127.0.0.1:9" }, INIT);
+    expect(wrongHost.status).toBe(403);
+    const noPortHost = await rawHttp(r.mcpUrl, { ...h, host: "127.0.0.1" }, INIT);
+    expect(noPortHost.status).toBe(403);
+    const rightHost = await rawHttp(
+      r.mcpUrl,
+      { ...h, host: `localhost:${port}`, accept: "application/json, text/event-stream" },
+      INIT,
+    );
+    expect(rightHost.status).toBe(200);
+    const wrongOrigin = await rawHttp(r.mcpUrl, { ...h, origin: "http://127.0.0.1:9" }, INIT);
+    expect(wrongOrigin.status).toBe(403);
+    const rightOrigin = await rawHttp(
+      r.mcpUrl,
+      { ...h, origin: `http://127.0.0.1:${port}`, accept: "application/json, text/event-stream" },
+      INIT,
+    );
+    expect(rightOrigin.status).toBe(200);
+  });
+});
+
+describe("Bearer の形と daemon の失敗の状態", () => {
+  it("Bearer の形は daemon と同じ規則（スキームは大文字小文字を区別。トークンは 16〜512 文字の許可された文字）", async () => {
+    const r = await start();
+    const send = (authorization: string) => raw(r, { body: INIT, headers: { authorization } });
+    expect((await send(`bearer ${r.tokens.a}`)).status).toBe(401);
+    expect((await send(`BEARER ${r.tokens.a}`)).status).toBe(401);
+    expect((await send("Bearer short")).status).toBe(401);
+    expect((await send(`Bearer ${"a".repeat(513)}`)).status).toBe(401);
+    expect((await send(`Bearer ${r.tokens.a} extra`)).status).toBe(401);
+  });
+
+  it("daemon の応答が遅れたときは 504", async () => {
+    const hang = ((_input: unknown, init: RequestInit) =>
+      new Promise((_res, rej) => {
+        init.signal?.addEventListener("abort", () => rej(new Error("aborted")));
+      })) as unknown as typeof fetch;
+    const r = await start({ fetch: hang, relayTimeoutMs: 50 });
+    const res = await raw(r, { body: INIT, headers: { authorization: `Bearer ${r.tokens.a}` } });
+    expect(res.status).toBe(504);
   });
 });
