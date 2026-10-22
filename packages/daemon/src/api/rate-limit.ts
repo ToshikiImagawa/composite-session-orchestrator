@@ -110,18 +110,16 @@ export const RATE_LIMIT_BOUNDS = {
  * すぐに `first` として出し、窓が終わるときに、種類別の件数を 1 行にまとめる（次の記録が来たとき、または `flush`）。
  * 理由・キーの種類・操作の名前だけを出す。トークン・nodeId・内容は出さない。
  */
+export type CounterKind = "authFailed" | "rateLimited" | "deduped";
 export interface ApiCounters {
-  count(kind: "authFailed" | "rateLimited", name: string): void;
+  count(kind: CounterKind, name: string): void;
   /** 溜まっている件数を、今すぐ 1 行にまとめて出す（停止のとき）。 */
   flush(): void;
 }
 
 export interface CounterSink {
-  first(kind: "authFailed" | "rateLimited", name: string): void;
-  summary(
-    windowSec: number,
-    counts: Record<"authFailed" | "rateLimited", Record<string, number>>,
-  ): void;
+  first(kind: CounterKind, name: string): void;
+  summary(windowSec: number, counts: Record<CounterKind, Record<string, number>>): void;
 }
 
 export function createApiCounters(options: {
@@ -132,16 +130,20 @@ export function createApiCounters(options: {
   const now = options.nowMs ?? hrtimeMs;
   const windowMs = options.windowMs ?? 60_000;
   let start: number | undefined;
-  let counts: Record<"authFailed" | "rateLimited", Record<string, number>> = {
+  const empty = (): Record<CounterKind, Record<string, number>> => ({
     authFailed: {},
     rateLimited: {},
-  };
+    deduped: {},
+  });
+  let counts = empty();
   const total = (): number =>
-    Object.values(counts.authFailed).reduce((a, b) => a + b, 0) +
-    Object.values(counts.rateLimited).reduce((a, b) => a + b, 0);
+    Object.values(counts).reduce(
+      (sum, byName) => sum + Object.values(byName).reduce((a, b) => a + b, 0),
+      0,
+    );
   const emit = (): void => {
     if (total() > 0) options.sink.summary(Math.round(windowMs / 1000), counts);
-    counts = { authFailed: {}, rateLimited: {} };
+    counts = empty();
   };
   return {
     count(kind, name) {

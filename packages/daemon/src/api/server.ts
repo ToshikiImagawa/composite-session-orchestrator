@@ -35,7 +35,8 @@ import {
 } from "@cso/core";
 import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
 import { type BindCodes, createThrottle, type Throttle } from "./bind.js";
-import { type CredentialStore, parseBearer } from "./credentials.js";
+import { type CredentialStore, type Principal, parseBearer } from "./credentials.js";
+import { fingerprintOf } from "./dedupe.js";
 import {
   type ApiCounters,
   type BucketSpec,
@@ -44,6 +45,7 @@ import {
   DEFAULT_AUTH_FAILURE_BURST,
   DEFAULT_AUTH_FAILURE_PER_MINUTE,
   DEFAULT_PRINCIPAL_SPEC,
+  hrtimeMs,
   operationWeight,
 } from "./rate-limit.js";
 import { pickResult } from "./results.js";
@@ -100,6 +102,20 @@ export type ApiLogEvent =
       readonly windowSec: number;
       readonly authFailed: Readonly<Record<string, number>>;
       readonly rateLimited: Readonly<Record<string, number>>;
+      /** 同じ要求の重複（`coalesced`: 最初の結果を待って返した、`inProgress`: 待ちきれず 409、`conflict`: 本文が違う）。 */
+      readonly deduped: Readonly<Record<string, number>>;
+      readonly at: string;
+    }
+  /** 同じ要求の重複の処理（窓の最初の 1 件）。`kind`: coalesced・inProgress・conflict。 */
+  | { readonly event: "apiDeduped"; readonly kind: string; readonly at: string }
+  /**
+   * 処理中の表の項目が古くなって（`staleMs` を超えて）外された。**外したあとに届いた同じ組の要求は、ハンドラが実行されうる**ので、
+   * 件数にまとめず、毎回すぐに記録する。`requestId`・主体・内容は出さない。
+   */
+  | {
+      readonly event: "apiInProgressStale";
+      readonly operation: string;
+      readonly ageSec: number;
       readonly at: string;
     };
 
@@ -133,6 +149,17 @@ export interface ApiDeps {
     readonly summaryWindowMs?: number;
     /** 主体ごとに同時に処理中の要求の数の上限（超えたら、本文を読まずに 429）。既定 8。 */
     readonly maxInFlightPerPrincipal?: number;
+  };
+  /** 同じ要求（同じ主体・同じ requestId）の処理中の重複の扱い（T10l-d。試験で小さくする）。 */
+  readonly inProgress?: {
+    /** 最初の結果を待つ上限（ミリ秒）。既定 20 秒。超えたら 409 `inProgress`。 */
+    readonly waitMs?: number;
+    /** 1 つの処理中の項目に、同時に待てる重複の数。既定 16。 */
+    readonly maxWaiters?: number;
+    /** この時間（ミリ秒）を超えた項目は、古いと見なして外す。既定 5 分。 */
+    readonly staleMs?: number;
+    /** 表の項目の数の上限。既定 1,024。 */
+    readonly maxEntries?: number;
   };
   /** 接続の上限と、遅い要求への対策（slowloris）。既定は、要求 30 秒・ヘッダ 10 秒・keep-alive 5 秒・接続 256。試験で小さくする。 */
   readonly connection?: {
@@ -171,6 +198,7 @@ const STATUS: Readonly<Record<string, number>> = {
   notImplemented: 501,
   internalError: 500,
   tooManyRequests: 429,
+  inProgress: 409,
 };
 
 function send(
@@ -190,6 +218,23 @@ function send(
   res.end(json);
 }
 
+/** 完成した応答（最初の要求の結果を、重複した要求にも同じに返すため、送る前の形で持つ）。 */
+interface Reply {
+  readonly status: number;
+  readonly body: unknown;
+  readonly extra?: Record<string, string>;
+}
+const sendReply = (res: ServerResponse, r: Reply): void => send(res, r.status, r.body, r.extra);
+
+/** 処理中の項目（同じ主体・同じ requestId の要求が、実行中）。 */
+interface InProgressEntry {
+  readonly fingerprint: string;
+  readonly startedAt: number;
+  readonly operation: string;
+  waiters: number;
+  readonly reply: Promise<Reply>;
+}
+
 const reject = (res: ServerResponse, error: Failure, extra: Record<string, string> = {}): void =>
   send(res, STATUS[error.code] ?? 422, { ok: false, error }, extra);
 
@@ -204,6 +249,7 @@ function readBody(req: IncomingMessage, max: number): Promise<Buffer | undefined
       req.off("data", onData);
       req.off("end", onEnd);
       req.off("error", onError);
+      req.off("close", onClose);
       resolve(v);
     };
     const onData = (c: Buffer): void => {
@@ -220,9 +266,14 @@ function readBody(req: IncomingMessage, max: number): Promise<Buffer | undefined
     const onError = (): void => {
       done(undefined);
     };
+    // 本文を読み終える前に、接続が切れた（`end` も `error` も出ない場合がある）: 待ち続けない（同時数の枠を、返すため）。
+    const onClose = (): void => {
+      done(undefined);
+    };
     req.on("data", onData);
     req.on("end", onEnd);
     req.on("error", onError);
+    req.on("close", onClose);
   });
 }
 
@@ -253,7 +304,9 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         log(
           kind === "authFailed"
             ? { event: "apiAuthFailed", reason: name, at: now() }
-            : { event: "apiRateLimited", key: name, at: now() },
+            : kind === "rateLimited"
+              ? { event: "apiRateLimited", key: name, at: now() }
+              : { event: "apiDeduped", kind: name, at: now() },
         ),
       summary: (windowSec, c) =>
         log({
@@ -261,15 +314,27 @@ export function createApiServer(deps: ApiDeps): ApiServer {
           windowSec,
           authFailed: c.authFailed,
           rateLimited: c.rateLimited,
+          deduped: c.deduped,
           at: now(),
         }),
     },
   });
+  /** 処理中の要求の表（T10l-d）。キーは「主体のキー + requestId」。項目は、ハンドラが実行中の要求だけで、終わったら（例外でも）必ず消す。 */
+  const ip = deps.inProgress ?? {};
+  const waitMs = ip.waitMs ?? 20_000;
+  const maxWaiters = ip.maxWaiters ?? 16;
+  const staleMs = ip.staleMs ?? 5 * 60_000;
+  const maxEntries = ip.maxEntries ?? 1_024;
+  const monoNow = mono ?? hrtimeMs;
+  const inProgress = new Map<string, InProgressEntry>();
   /** 主体ごとの、同時に処理中の要求の数。 */
   const inFlight = new Map<string, number>();
   const maxInFlight = rl.maxInFlightPerPrincipal ?? 8;
-  /** 同時数の枠を取る。取れたら、応答が終わったとき（接続が切れたときも）に返す関数を返す。取れなければ `undefined`。 */
-  const acquire = (key: string, res: ServerResponse): (() => void) | undefined => {
+  /**
+   * 同時数の枠を取る。取れたら、返す関数（冪等）を返す。取れなければ `undefined`。**枠は、接続が終わった時点ではなく、処理が終わった時点で返す**
+   * （ハンドラが終わったとき。接続が切れても、ハンドラが動いている間は、枠を使い続ける）。
+   */
+  const acquire = (key: string): (() => void) | undefined => {
     const cur = inFlight.get(key) ?? 0;
     if (cur >= maxInFlight) return undefined;
     inFlight.set(key, cur + 1);
@@ -281,7 +346,6 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       if (c <= 0) inFlight.delete(key);
       else inFlight.set(key, c);
     };
-    res.once("close", release);
     return release;
   };
   const principalKey = (p: { role: string; nodeId?: string }): string =>
@@ -371,17 +435,34 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     // 回数の制限（主体ごと）。ハンドラを呼ぶ前にだけ判定するので、429 の要求は実行されていない。本文は読まない。
     // 同時に処理中の要求の数にも上限がある（ゆっくり本文を送る要求で、接続を塞がれないように）。
     const key = principalKey(principal);
-    if (acquire(key, res) === undefined) {
+    const releaseSlot = acquire(key);
+    if (releaseSlot === undefined) {
       counters.count("rateLimited", "inflight");
       req.resume();
       return tooMany(res, 1, true);
     }
     const used = principalLimiter.tryConsume(key, 1);
     if (!used.ok) {
+      releaseSlot();
       counters.count("rateLimited", "principal");
       req.resume();
       return tooMany(res, used.retryAfterSec, true);
     }
+    try {
+      await processBody(req, res, principal, key, releaseSlot);
+    } finally {
+      releaseSlot(); // ハンドラが終わった（または、ハンドラまで進まなかった）時点で、枠を返す
+    }
+  }
+
+  /** 本文を読んでから、ハンドラまで。同時数の枠は、呼び出し側が、これが終わったときに返す（重複と分かったときは、すぐに返す）。 */
+  async function processBody(
+    req: IncomingMessage,
+    res: ServerResponse,
+    principal: Principal,
+    key: string,
+    releaseSlot: () => void,
+  ): Promise<void> {
     if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {
       req.resume();
       return reject(
@@ -406,6 +487,68 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const env = parseEnvelope(body);
     if (!env.ok) return reject(res, env.error);
     const { requestId, operation } = env.value;
+    // ロール・申告の判定は、重複の判定より前に行う（申告が食い違う要求が、処理中の要求の結果に相乗りして、拒否を逃れないように）。
+    // 引数の検証より先に行う（ロールのない操作に、引数の形を教えない）。
+    const role = authorizeRole(principal, operation, {
+      ...(env.value.claimedRole === undefined ? {} : { claimedRole: env.value.claimedRole }),
+      ...(env.value.claimedCaller === undefined ? {} : { claimedCaller: env.value.claimedCaller }),
+    });
+    if (!role.ok) return reject(res, role.error);
+    // 同じ主体・同じ requestId の要求が処理中なら、実行せず、最初の結果を待って、同じ結果を返す（T10l-d。relay の再送で、操作が重なって
+    // 実行されないように）。重い操作の追加の重みより前に判定する（重複が、重みを重ねて使わない）。枠も、判明した時点で返す。
+    const dupKey = `${key}\u0000${requestId}`;
+    const fingerprint = fingerprintOf(operation, env.value.params);
+    let existing = inProgress.get(dupKey);
+    if (existing !== undefined && monoNow() - existing.startedAt >= staleMs) {
+      // 古い項目（ハンドラが戻らない不具合）は外す。外したあとの同じ組の要求は、ハンドラが実行されうるので、毎回すぐに記録する。
+      log({
+        event: "apiInProgressStale",
+        operation: existing.operation,
+        ageSec: Math.round((monoNow() - existing.startedAt) / 1000),
+        at: now(),
+      });
+      inProgress.delete(dupKey);
+      existing = undefined;
+    }
+    if (existing !== undefined) {
+      releaseSlot();
+      if (existing.fingerprint !== fingerprint) {
+        // 同じ requestId が、別の内容の要求に使われている（実行しない）。ハンドラ層の requestIdConflict と同じ 422。
+        counters.count("deduped", "conflict");
+        return reject(
+          res,
+          failure(
+            "requestIdConflict",
+            "同じ requestId が、別の内容の要求に使われている",
+            "新しい requestId で要求する",
+          ),
+        );
+      }
+      const busy = (): void => {
+        counters.count("deduped", "inProgress");
+        reject(
+          res,
+          failure(
+            "inProgress",
+            "同じ要求を処理中（この要求は実行していない）",
+            "Retry-After の秒数を待ってから、同じ要求をもう一度送る",
+          ),
+          { "retry-after": "2" },
+        );
+      };
+      if (existing.waiters >= maxWaiters) return busy();
+      existing.waiters += 1;
+      counters.count("deduped", "coalesced");
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), waitMs);
+      });
+      const outcome = await Promise.race([existing.reply, timedOut]);
+      clearTimeout(timer);
+      existing.waiters -= 1;
+      if (outcome === "timeout") return busy();
+      return sendReply(res, outcome);
+    }
     // 重い操作は、追加のトークンを使う（操作の名前は本文から分かる。ハンドラの前）。
     const extra = operationWeight(operation) - 1;
     if (extra > 0) {
@@ -415,12 +558,6 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         return tooMany(res, heavy.retryAfterSec);
       }
     }
-    // ロールの判定を、引数の検証より先に行う（ロールのない操作に、引数の形を教えない）。
-    const role = authorizeRole(principal, operation, {
-      ...(env.value.claimedRole === undefined ? {} : { claimedRole: env.value.claimedRole }),
-      ...(env.value.claimedCaller === undefined ? {} : { claimedCaller: env.value.claimedCaller }),
-    });
-    if (!role.ok) return reject(res, role.error);
     const params = validateParams(operation, env.value.params);
     if (!params.ok) return reject(res, params.error);
     const scope = authorizeScope(principal, operation, params.value, deps.getState());
@@ -442,27 +579,55 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       ...(principal.role === "human" ? {} : { caller: { nodeId: principal.nodeId } }),
       params: params.value,
     };
+    if (inProgress.size >= maxEntries) {
+      counters.count("rateLimited", "inProgressTable");
+      return tooMany(res, 1);
+    }
+    let resolveReply: (r: Reply) => void = () => undefined;
+    const entry: InProgressEntry = {
+      fingerprint,
+      startedAt: monoNow(),
+      operation,
+      waiters: 0,
+      reply: new Promise<Reply>((resolve) => {
+        resolveReply = resolve;
+      }),
+    };
+    inProgress.set(dupKey, entry);
+    let reply: Reply;
+    try {
+      reply = await execute(handler, request, operation, requestId);
+    } finally {
+      // 例外でも、必ず表から消す（古い項目を外したあとに入った、別の項目は消さない）。
+      if (inProgress.get(dupKey) === entry) inProgress.delete(dupKey);
+    }
+    resolveReply(reply);
+    sendReply(res, reply);
+  }
+
+  /** ハンドラを呼んで、応答を作る（送らない）。例外は 500。 */
+  async function execute(
+    handler: (r: HandlerRequest) => unknown,
+    request: HandlerRequest,
+    operation: DaemonOperation,
+    requestId: string,
+  ): Promise<Reply> {
     let result: Result<unknown, Failure>;
     try {
       result = (await handler(request)) as Result<unknown, Failure>;
     } catch (error) {
-      return internalError(res, requestId, operation, error);
+      return internalReply(requestId, operation, error);
     }
     if (!result.ok) {
       // 操作の失敗（権限・入力の検査を通った後の、状態に依る失敗）は 422。コードごとの状態に写さない:
       // ハンドラの失敗コードは操作ごとに増えるため、ここでは「要求は正しいが、今は実行できない」で統一する。
-      return send(res, 422, { ok: false, error: result.error });
+      return { status: 422, body: { ok: false, error: result.error } };
     }
     const value = pickResult(operation, result.value);
     if (value === undefined) {
-      return internalError(
-        res,
-        requestId,
-        operation,
-        new Error("ハンドラの結果がオブジェクトでない"),
-      );
+      return internalReply(requestId, operation, new Error("ハンドラの結果がオブジェクトでない"));
     }
-    send(res, 200, { ok: true, value });
+    return { status: 200, body: { ok: true, value } };
   }
 
   /** 認証したロールだけを返す。トークンはクエリでは受け取らない（Authorization ヘッダだけ）。 */
@@ -623,17 +788,32 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     send(res, 200, { ok: true, value: { nodeId: redeemed.nodeId, token } });
   }
 
+  function internalReply(
+    requestId: string,
+    operation: DaemonOperation | "bind",
+    error: unknown,
+  ): Reply {
+    log({ event: "internalError", requestId, operation, error, at: now() });
+    return {
+      status: 500,
+      body: {
+        ok: false,
+        error: failure(
+          "internalError",
+          "内部エラー",
+          "もう一度試す",
+          "改善しなければ管理者に知らせる",
+        ),
+      },
+    };
+  }
   function internalError(
     res: ServerResponse,
     requestId: string,
     operation: DaemonOperation | "bind",
     error: unknown,
   ): void {
-    log({ event: "internalError", requestId, operation, error, at: now() });
-    reject(
-      res,
-      failure("internalError", "内部エラー", "もう一度試す", "改善しなければ管理者に知らせる"),
-    );
+    sendReply(res, internalReply(requestId, operation, error));
   }
 
   const conn = deps.connection ?? {};
