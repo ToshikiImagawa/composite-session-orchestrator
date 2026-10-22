@@ -9,6 +9,8 @@ export const INBOX_KINDS = [
   "done",
   "progress",
   "info",
+  /** 中間統合ノードの配下の要約（T24。FR_013）。システムが、決定的に作る。優先度は、項目の `priority` で決まる。 */
+  "digest",
 ] as const;
 export type InboxKind = (typeof INBOX_KINDS)[number];
 
@@ -35,7 +37,18 @@ export const INBOX_KIND_PRIORITY: Readonly<Record<InboxKind, Priority>> = {
   done: "completed",
   progress: "progress",
   info: "info",
+  // 要約の既定。実際の優先度は、項目の `priority`（配下の未解決の項目の最高の優先度）で決まる（`priorityOf`）。
+  digest: "info",
 };
+
+/** 項目の優先度: `digest` は、項目の `priority`（あれば）。そのほかは、種類で決まる（`INBOX_KIND_PRIORITY`）。 */
+export const priorityOf = (item: {
+  readonly kind: InboxKind;
+  readonly priority?: Priority;
+}): Priority =>
+  item.kind === "digest" && item.priority !== undefined
+    ? item.priority
+    : INBOX_KIND_PRIORITY[item.kind];
 
 /** 受信箱の項目の要約（`summary`）の最大文字数。短い要約だけを載せ、全文は参照先（`ref`）で読む。 */
 export const INBOX_SUMMARY_MAX = 200;

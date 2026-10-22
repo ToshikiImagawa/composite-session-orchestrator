@@ -33,6 +33,8 @@ const NEXT_ACTIONS: Readonly<Record<InboxKind, readonly IntegratorOperation[]>> 
   done: ["report.get", "node.review"],
   progress: ["report.get"],
   info: [],
+  // 配下の要約（T24）: 詳細は、受信箱の全体と木の一覧で読む。
+  digest: ["inbox.fetch", "tree.list"],
 };
 
 /** 次に取るべき操作の候補を、MCP のツール名で返す。 */
@@ -69,7 +71,11 @@ export const MAX_LIMIT = 100;
 interface WithNext {
   readonly nextActions: readonly string[];
 }
-export type BriefEntry = Pick<InboxItem, "id" | "kind" | "nodeId" | "summary" | "ref"> & WithNext;
+export type BriefEntry = Pick<
+  InboxItem,
+  "id" | "kind" | "nodeId" | "summary" | "ref" | "priority"
+> &
+  WithNext;
 export type FullEntry = InboxItem & WithNext;
 
 export interface InboxPage {
@@ -160,6 +166,7 @@ export function renderInbox(
       nodeId: it.nodeId,
       ...(it.summary !== undefined ? { summary: it.summary } : {}),
       ...(it.ref !== undefined ? { ref: it.ref } : {}),
+      ...(it.priority !== undefined ? { priority: it.priority } : {}),
       nextActions,
     };
   });

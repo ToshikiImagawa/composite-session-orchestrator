@@ -21,6 +21,7 @@ const NEXT_ACTIONS: Record<InboxKind, readonly string[]> = {
   done: ["report_get", "node_review"],
   progress: ["report_get"],
   info: [],
+  digest: ["inbox_fetch", "tree_list"],
 };
 
 describe("nextActionsFor（FR_012: 次に取るべき操作の候補）", () => {

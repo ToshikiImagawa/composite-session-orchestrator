@@ -14,7 +14,7 @@
  * - 依存が循環する（相互に先行する）ノードどうしには制約を課さない。
  */
 import type { Actor } from "./events.js";
-import { INBOX_KIND_PRIORITY, type InboxKind, PRIORITIES } from "./inbox-kinds.js";
+import { type InboxKind, PRIORITIES, type Priority, priorityOf } from "./inbox-kinds.js";
 
 export interface InboxItem {
   /** daemon が採番する単調増加の番号。差分取得の cursor に使う。 */
@@ -31,6 +31,8 @@ export interface InboxItem {
   readonly summary?: string;
   /** 参照 ID（判断要求の `decisionId`、報告の `reportId` など）。種類（`kind`）が参照先を決める。 */
   readonly ref?: string;
+  /** 優先度（`digest` だけ。配下の未解決の項目の最高の優先度）。ほかの種類は、種類で決まる（`priorityOf`）。 */
+  readonly priority?: Priority;
   /** 解決済み（`inbox.resolved`）。解決した者・時刻・イベントの `seq`。項目そのものは消えない（記録）。 */
   readonly resolved?: { readonly seq: number; readonly at: string; readonly by: Actor };
 }
@@ -105,7 +107,7 @@ export function sortInbox(items: readonly InboxItem[], nodeDeps?: NodeDeps): Inb
 
   const out: InboxItem[] = [];
   for (const priority of PRIORITIES) {
-    const rest = unique.filter((it) => INBOX_KIND_PRIORITY[it.kind] === priority);
+    const rest = unique.filter((it) => priorityOf(it) === priority);
     while (rest.length > 0) {
       let best = -1;
       rest.forEach((cand, i) => {
