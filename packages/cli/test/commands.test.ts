@@ -279,6 +279,26 @@ describe("reclaim（FR_029・T21r: 失われるものを表示してから、破
     }
   });
 
+  it("調べられなかったノード（unknown）・git status の失敗（workingTreeUnknown）は、「なし」にせず、はっきり出す（L2）", async () => {
+    const { client } = fakeClient({
+      "node.reclaimPreview": previewOf([
+        { nodeId: "c9", untrustedSubjects: [], uncommitted: false, untracked: 0, unknown: true },
+        {
+          nodeId: "c8",
+          aheadCommits: 0,
+          untrustedSubjects: [],
+          uncommitted: false,
+          untracked: 0,
+          workingTreeUnknown: true,
+        },
+      ]),
+    });
+    const r = await runCommand(["reclaim", "n1"], deps(client));
+    expect(r.stdout).toContain("調べられなかったノードがある：c9。失われるものが分からない");
+    expect(r.stdout).toContain("不明");
+    expect(r.stdout).not.toContain("失われるもの: なし");
+  });
+
   it("件名は「信頼できない入力」と分かる形で出す", async () => {
     const { client } = fakeClient({ "node.reclaimPreview": previewOf([LOSS]) });
     const r = await runCommand(["reclaim", "n1"], deps(client));

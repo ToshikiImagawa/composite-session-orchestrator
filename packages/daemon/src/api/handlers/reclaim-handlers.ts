@@ -225,7 +225,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
   }
 
   /**
-   * 強制の回収で失われるもの。`lossFor` がなければ `undefined`（情報なし）。取得に失敗したノードは、飛ばす（事前確認は止めない）。
+   * 強制の回収で失われるもの。`lossFor` がなければ `undefined`（情報なし）。取得に失敗したノードは `unknown` として残す（事前確認は止めない）。
    * 件名はコミットメッセージ由来の信頼できない入力なので、空白を詰めて 1 行にし、制御文字を除き、長さを切る。
    */
   async function lossOf(plan: readonly NodeRecord[]): Promise<NodeLoss[] | undefined> {
@@ -234,9 +234,24 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     const out: NodeLoss[] = [];
     for (const n of plan) {
       if (n.state === "archived") continue;
-      const facts = await safely(n.id, () => lossFor(n.id), undefined);
-      if (facts === undefined) continue;
+      // 調べられなかった（失敗・例外）ノードは、飛ばさずに「不明」として残す（「失われるものなし」と誤らせない）。
+      let facts: LossFacts | undefined;
+      try {
+        facts = await lossFor(n.id);
+      } catch (e) {
+        deps.onFailure?.(n.id, String(e));
+        out.push({
+          nodeId: n.id,
+          untrustedSubjects: [],
+          uncommitted: false,
+          untracked: 0,
+          unknown: true,
+        });
+        continue;
+      }
+      if (facts === undefined) continue; // 作業ツリーもブランチもない（失われるものがない）
       const lost =
+        facts.workingTreeUnknown === true ||
         facts.aheadCommits === undefined ||
         facts.aheadCommits > 0 ||
         facts.uncommitted ||
@@ -250,6 +265,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
           .map((s) => sanitizeText(s.replace(/\s+/g, " ").trim(), LIMITS.lossSubjectLength)),
         uncommitted: facts.uncommitted,
         untracked: facts.untracked,
+        ...(facts.workingTreeUnknown === true ? { workingTreeUnknown: true as const } : {}),
       });
     }
     return out;
@@ -332,7 +348,8 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
           : u.unmet.map((reason) => ({ kind: "node" as const, reason, nodeId: u.nodeId }))),
       ]);
       // 強制の回収で失われるもの（T21r）。対象と配下のうち、作業ツリーがあって、失われるものがあるノードだけ。
-      const loss = await lossOf(plan);
+      // 人間のロールにだけ返す（統合ノードの呼び出しでは、git の負荷を避けるため、計算もしない）。
+      const loss = req.role === "human" ? await lossOf(plan) : undefined;
       return {
         ok: true,
         value: {

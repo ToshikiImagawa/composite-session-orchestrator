@@ -184,7 +184,7 @@ describe("node.reclaimPreview の loss（強制の回収で失われるもの。
       loss: { a: lossA, m1: { aheadCommits: 0, subjects: [], uncommitted: false, untracked: 0 } },
     });
     const before = r.s().lastSeq;
-    const res = await r.call("node.reclaimPreview", { nodeId: "a" });
+    const res = await humanPreview(r, "a");
     expect(res.value.loss).toEqual([
       {
         nodeId: "a",
@@ -202,35 +202,36 @@ describe("node.reclaimPreview の loss（強制の回収で失われるもの。
     const none = rig({
       loss: { a: { aheadCommits: 0, subjects: [], uncommitted: false, untracked: 0 } },
     });
-    expect((await none.call("node.reclaimPreview", { nodeId: "a" })).value.loss).toEqual([]);
+    expect((await humanPreview(none, "a")).value.loss).toEqual([]);
     const absent = rig();
-    expect(await absent.call("node.reclaimPreview", { nodeId: "a" })).toEqual({
+    expect(await humanPreview(absent, "a")).toEqual({
       ok: true,
       value: { reclaimable: true, unmet: [], blockers: [] },
     });
   });
 
-  it("上流が分からないノード（aheadCommits なし）は、不明として loss に出す。作業ツリーがない・取得に失敗したノードは、飛ばす（事前確認は止まらない）", async () => {
+  it("上流が分からないノード（aheadCommits なし）は、不明として loss に出す。作業ツリーがないノードは、飛ばす。取得に失敗したノードは、飛ばさず unknown として残す（事前確認は止まらない。L2b）", async () => {
     const r = rig({
       loss: {
         a: { subjects: [], uncommitted: false, untracked: 0 },
         m1: "throw",
       },
     });
-    const res = await r.call("node.reclaimPreview", { nodeId: "m1" }, "root");
+    const res = await humanPreview(r, "m1");
     expect(res.ok).toBe(true);
     expect(res.value.loss).toEqual([
       { nodeId: "a", untrustedSubjects: [], uncommitted: false, untracked: 0 },
+      { nodeId: "m1", untrustedSubjects: [], uncommitted: false, untracked: 0, unknown: true },
     ]);
     const missing = rig({ loss: { a: undefined } });
-    expect((await missing.call("node.reclaimPreview", { nodeId: "a" })).value.loss).toEqual([]);
+    expect((await humanPreview(missing, "a")).value.loss).toEqual([]);
   });
 
   it("件名は信頼できない入力: 制御文字・エスケープ列・改行を除き、1 行にして、100 文字に切り、5 件までにする", async () => {
     const evil = `\u001b[2J\u001b]0;pwn\u0007悪い\n件名\r\n${"x".repeat(300)}`;
     const subjects = [evil, "2", "3", "4", "5", "6", "7"];
     const r = rig({ loss: { a: { aheadCommits: 7, subjects, uncommitted: false, untracked: 0 } } });
-    const res = await r.call("node.reclaimPreview", { nodeId: "a" });
+    const res = await humanPreview(r, "a");
     const got = res.value.loss[0].untrustedSubjects as string[];
     expect(got).toHaveLength(5);
     const first = got[0] as string;
@@ -241,6 +242,40 @@ describe("node.reclaimPreview の loss（強制の回収で失われるもの。
       return c < 0x20 || (c >= 0x7f && c <= 0x9f);
     });
     expect(unsafe).toEqual([]);
+  });
+
+  it("git status が失敗したノードは、未保存の変更・未追跡のファイルを不明として出す（false・0 にしない。L2c）", async () => {
+    const r = rig({
+      loss: {
+        a: {
+          aheadCommits: 0,
+          subjects: [],
+          uncommitted: false,
+          untracked: 0,
+          workingTreeUnknown: true,
+        },
+      },
+    });
+    const res = await humanPreview(r, "a");
+    expect(res.value.loss).toEqual([
+      {
+        nodeId: "a",
+        aheadCommits: 0,
+        untrustedSubjects: [],
+        uncommitted: false,
+        untracked: 0,
+        workingTreeUnknown: true,
+      },
+    ]);
+  });
+
+  it("loss は人間のロールにだけ返す。統合ノードの結果には含まれず、lossFor も呼ばない（git の負荷を避ける）", async () => {
+    const r = rig({ loss: { a: lossA, m1: "throw" } });
+    const res = await r.call("node.reclaimPreview", { nodeId: "a" }, "m1");
+    expect(res.ok).toBe(true);
+    expect("loss" in res.value).toBe(false);
+    const asRoot = await r.call("node.reclaimPreview", { nodeId: "m1" }, "root");
+    expect("loss" in asRoot.value).toBe(false);
   });
 
   it("人間は、部分木の制限なしで呼べる（読み取りだけ）。存在しないノードは notFound。統合ノードの部分木の制限は変わらない", async () => {

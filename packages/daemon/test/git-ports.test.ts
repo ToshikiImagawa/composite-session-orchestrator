@@ -471,6 +471,29 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
       expect(loss?.aheadCommits).toBe(1);
     });
 
+    it("L2a: 作業ツリーは消えたがブランチだけ残ったノードは、ブランチ側の差と件名を返す（作業ツリーの変更はない）", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      writeFileSync(join(p, "f.txt"), "1\n");
+      git(p, "add", "-A");
+      git(p, "commit", "-q", "-m", "残る成果");
+      git(s.repoRoot, "worktree", "remove", "--force", p);
+      expect(await s.ports.lossFor("c1")).toEqual({
+        aheadCommits: 1,
+        subjects: ["残る成果"],
+        uncommitted: false,
+        untracked: 0,
+      });
+    });
+
+    it("L2c: git status が失敗したら、uncommitted・untracked は不明（workingTreeUnknown）", async () => {
+      const s = setup();
+      const p = await provision(s, "c1");
+      writeFileSync(join(p, ".git"), "gitdir: /nonexistent\n"); // 作業ツリーの .git を壊す（登録は残る）
+      const loss = await s.ports.lossFor("c1");
+      expect(loss?.workingTreeUnknown).toBe(true);
+    });
+
     it("上流が分からなければ、aheadCommits を省略する（不明）。作業ツリーが登録されていなければ undefined", async () => {
       const s = setup();
       const p = await provision(s, "c1");

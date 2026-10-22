@@ -89,6 +89,8 @@ export interface LossFacts {
   subjects: string[];
   uncommitted: boolean;
   untracked: number;
+  /** `git status` が失敗して、`uncommitted`・`untracked` が分からない。 */
+  workingTreeUnknown?: true;
 }
 
 export interface GitPorts {
@@ -235,9 +237,14 @@ export function createGitPorts(
 
   /** 失われるもの: 統合されていないコミット（数と件名）、追跡中の変更、未追跡のファイルの数。 */
   const lossOf = async (nodeId: string): Promise<LossFacts | undefined> => {
-    if ((await isRegistered(nodeId)) !== true) return undefined;
+    const registered = await isRegistered(nodeId);
+    // 作業ツリーの一覧を取れなければ、調べられなかった（呼び出し側が「不明」として扱う）。
+    if (registered === undefined) throw new Error("作業ツリーの一覧を取得できなかった");
     const path = pathOf(nodeId);
     const branch = branchOf(nodeId);
+    // 作業ツリーは消えたがブランチだけ残った（途中の失敗）ノード: ブランチ側の情報を返す（`factsFor` と同じ状態の扱い）。
+    const branchOnly = registered !== true && !dirExists(path) && (await branchExists(branch));
+    if (registered !== true && !branchOnly) return undefined;
     const out: LossFacts = { subjects: [], uncommitted: false, untracked: 0 };
     const up = await git(["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
     const upstream = up.code === 0 ? up.stdout.trim() : "";
@@ -256,6 +263,7 @@ export function createGitPorts(
         if (log.code === 0) out.subjects = log.stdout.split("\n").filter((l) => l !== "");
       }
     }
+    if (branchOnly) return out; // 作業ツリーがないので、未保存の変更・未追跡のファイルは、ない
     // fsmonitor・フックは使わない（作業ツリーの設定に、コマンドを走らせない）。
     const status = await git(
       [
@@ -270,7 +278,8 @@ export function createGitPorts(
       ],
       path,
     );
-    if (status.code === 0) {
+    if (status.code !== 0) out.workingTreeUnknown = true;
+    else {
       for (const line of status.stdout.split("\n")) {
         if (line === "") continue;
         if (line.startsWith("?? ")) out.untracked += 1;

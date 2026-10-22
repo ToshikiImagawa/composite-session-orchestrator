@@ -86,6 +86,10 @@ export interface NodeLoss {
   readonly uncommitted: boolean;
   /** 未追跡のファイル（再生成できない gitignore の対象を含む）の数。 */
   readonly untracked: number;
+  /** `git status` が失敗し、`uncommitted`・`untracked` が分からない（`false`・`0` は「ない」ではなく「不明」）。 */
+  readonly workingTreeUnknown?: true;
+  /** このノードの失われるものを調べられなかった（他のフィールドは意味を持たない。「なし」ではない）。 */
+  readonly unknown?: true;
 }
 
 export interface OperationMap {

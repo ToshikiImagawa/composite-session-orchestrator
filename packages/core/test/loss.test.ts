@@ -34,6 +34,8 @@ describe("回収の事前確認の loss（T21r）", () => {
       readonly untrustedSubjects: readonly string[];
       readonly uncommitted: boolean;
       readonly untracked: number;
+      readonly workingTreeUnknown?: true;
+      readonly unknown?: true;
     }>();
   });
 

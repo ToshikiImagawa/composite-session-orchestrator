@@ -127,6 +127,8 @@ interface LossView {
   readonly untrustedSubjects: readonly string[];
   readonly uncommitted: boolean;
   readonly untracked: number;
+  readonly workingTreeUnknown?: true;
+  readonly unknown?: true;
 }
 interface ReclaimPreview {
   readonly reclaimable: boolean;
@@ -142,6 +144,8 @@ const isLossView = (v: unknown): v is LossView =>
       Number.isInteger(v.aheadCommits) &&
       v.aheadCommits >= 0)) &&
   isStringArray(v.untrustedSubjects) &&
+  (v.unknown === undefined || v.unknown === true) &&
+  (v.workingTreeUnknown === undefined || v.workingTreeUnknown === true) &&
   typeof v.uncommitted === "boolean" &&
   typeof v.untracked === "number" &&
   Number.isInteger(v.untracked) &&
@@ -184,7 +188,12 @@ function describeReclaim(nodeId: string, p: ReclaimPreview): string {
     return `${head}失われるもの: なし（調べられた範囲。統合されていないコミット・未保存の変更・未追跡のファイルは、ない）。\n`;
   }
   const lines = p.loss.map((l) => {
+    if (l.unknown === true) {
+      return `  調べられなかったノードがある：${terminalSafe(l.nodeId, 128)}。失われるものが分からない`;
+    }
     const parts: string[] = [];
+    if (l.workingTreeUnknown === true)
+      parts.push("未保存の変更・未追跡のファイルが不明（git status に失敗）");
     if (l.aheadCommits === undefined)
       parts.push("統合されていないコミットの数が不明（上流が分からない）");
     else if (l.aheadCommits > 0) parts.push(`統合されていないコミット ${l.aheadCommits} 件`);
