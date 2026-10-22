@@ -222,8 +222,8 @@ export interface OperationMap {
       /** `blockers` が空なら `true`。 */
       purgeable: boolean;
       blockers: readonly { code: string; cause: string }[];
-      /** 自動の最終削除の保留（有効なものだけ。T13f-h）。人間の `node.purge` は、保留に関係なく実行できる。 */
-      hold?: { until?: string; reason?: string };
+      /** 自動の最終削除の保留（木の中の、有効なもの。`nodeId` は保留をかけたノード。T13f-h）。人間の `node.purge` は、保留に関係なく実行できる。 */
+      hold?: { nodeId: string; until?: string; reason?: string };
     };
   };
   /**

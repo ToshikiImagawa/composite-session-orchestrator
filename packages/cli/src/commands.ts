@@ -177,6 +177,8 @@ const isReclaimPreview = (v: unknown): v is ReclaimPreview =>
   isStringArray(v.unmet) &&
   Array.isArray(v.blockers) &&
   (v.loss === undefined || (Array.isArray(v.loss) && v.loss.every(isLossView)));
+/** シェルで安全に貼り付けられるように、単一引用符で囲む（中の `'` は `'\''` にする）。 */
+const shellQuote = (v: string): string => `'${v.replace(/'/g, "'\\''")}'`;
 const isHeld = (v: unknown): v is { held: true; until?: string } =>
   isRecord(v) && v.held === true && (v.until === undefined || typeof v.until === "string");
 const isReleased = (v: unknown): v is { released: true } => isRecord(v) && v.released === true;
@@ -297,7 +299,7 @@ export async function runCommand(
         const v = rest[i + 1];
         if (v === undefined || v.startsWith("--")) return usageError(`${a} には値を指定する`);
         values.set(a, v);
-        rerunArgs.push(a, JSON.stringify(v));
+        rerunArgs.push(a, shellQuote(v));
         i++;
         continue;
       }

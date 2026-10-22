@@ -565,7 +565,7 @@ describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h�
     const bad = fakeClient({ "node.purgeHold": ok({ unexpected: 1 }) });
     const u = await runCommand(["purge-hold", "t", "--reason", "a b"], deps(bad.client));
     expect(u.exitCode).toBe(1);
-    expect(u.stderr).toContain('cso purge-hold t --reason "a b" --request-id req-1');
+    expect(u.stderr).toContain("cso purge-hold t --reason 'a b' --request-id req-1");
   });
 
   it("purge-release は、node.purgeRelease を送る", async () => {

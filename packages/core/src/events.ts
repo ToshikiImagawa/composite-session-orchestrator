@@ -208,6 +208,9 @@ export type EventBody =
         readonly archivedAt: string;
         /** 墓標（残すとき）: タイトル・結果・最終コミット（記録があるときだけ）。日付は標識の `at`。 */
         readonly tombstone?: PurgeTombstone;
+        /** 人間が、有効な自動の最終削除の保留を無視して消した（T13f-h）。保留の期限（あれば）は `holdUntil`。墓標を残さないときも残る。 */
+        readonly holdIgnored?: true;
+        readonly holdUntil?: string;
       };
     }
   | {
@@ -231,6 +234,9 @@ export interface PurgeRecord {
   readonly nodeIds: readonly string[];
   readonly archivedAt: string;
   readonly tombstone?: PurgeTombstone;
+  /** 人間が、有効な保留を無視して消した（`node.purged` の `holdIgnored`・`holdUntil`）。 */
+  readonly holdIgnored?: true;
+  readonly holdUntil?: string;
 }
 
 /** 報告の種類。`review`: 完了の判定（受理）のコメント（`node.review` の `feedback`）。 */
@@ -1575,7 +1581,14 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     }
 
     case "node.purged": {
-      const { rootId, nodeIds, archivedAt, tombstone } = p;
+      const { rootId, nodeIds, archivedAt, tombstone, holdIgnored, holdUntil } = p;
+      if (
+        (holdIgnored !== undefined && holdIgnored !== true) ||
+        (holdUntil !== undefined &&
+          (holdIgnored !== true || typeof holdUntil !== "string" || !isValidInboxTime(holdUntil)))
+      ) {
+        return invalid(seq, "node.purged の holdIgnored・holdUntil");
+      }
       if (
         !isId(rootId) ||
         !isIdArray(nodeIds) ||
@@ -1621,6 +1634,10 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           nodeIds: Object.freeze([...nodeIds]),
           archivedAt,
           ...(record === undefined ? {} : { tombstone: freezeRecord(record) }),
+          ...(holdIgnored === true ? { holdIgnored: true as const } : {}),
+          ...(holdIgnored === true && holdUntil !== undefined
+            ? { holdUntil: holdUntil as string }
+            : {}),
         }),
       );
       return commit();

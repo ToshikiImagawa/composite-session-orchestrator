@@ -860,3 +860,172 @@ describe("自動の最終削除の保留（T13f-h）", () => {
     expect(ids(r)).toContain("t");
   });
 });
+
+describe("自動の最終削除の保留: レビューの指摘（T13f-h）", () => {
+  const holdOf = (r: ReturnType<typeof rig>, days: () => number) => {
+    const h = createPurgeHandlers({
+      log: r.log,
+      nowMs: () => T0 + days() * DAY,
+      retentionDays: 90,
+      defaultTombstone: true,
+      revokeNode: () => {},
+    });
+    let n = 0;
+    return (nodeId: string, until?: string) =>
+      h["node.purgeHold"]({
+        requestId: `hold-${++n}`,
+        operation: "node.purgeHold",
+        role: "human",
+        params: { nodeId, ...(until === undefined ? {} : { until }) },
+      } as never);
+  };
+  const isoAt = (days: number): string => new Date(T0 + days * DAY).toISOString();
+  const archive = (r: ReturnType<typeof rig>, id: string) => {
+    for (const e of [
+      { type: "reportDone" },
+      { type: "accept" },
+      { type: "markReclaimable", discarded: false },
+      { type: "archive" },
+    ] as const) {
+      r.ev(id, e as never);
+    }
+  };
+
+  it("M1: 子 T に保留をかけたあとで、親 P がアーカイブされても、T ごと自動で消えない（P を根とする新しい木も、保留のうちは対象外）", async () => {
+    const r = rig();
+    r.node("p", "integrator", "root");
+    r.ev("p", { type: "start" });
+    r.node("t", "integrator", "p");
+    r.ev("t", { type: "start" });
+    r.node("tc", "implement", "t");
+    r.ev("tc", { type: "start" });
+    r.setNow(T0 + DAY);
+    archive(r, "tc");
+    archive(r, "t");
+    const m = make(r, { nowDays: 100 });
+    const hold = holdOf(r, m.days);
+    expect(hold("t").ok).toBe(true); // 親 p はまだ実行中。t が木の根
+    r.setNow(T0 + 2 * DAY);
+    archive(r, "p"); // t は、p を根とする新しい木に吸収される
+    m.setDays(100);
+    await m.auto.runOnce();
+    expect(noticesOf(r)).toHaveLength(0); // 保留が有効なうちは、外側の根にも予告を出さない
+    m.setDays(300);
+    expect((await m.auto.runOnce()).purged).toEqual([]);
+    expect(ids(r)).toEqual(expect.arrayContaining(["p", "t", "tc"]));
+    // 保留を解除すると、予告から出し直し、noticeDays 日後に、木ごと消える
+    r.log.append({
+      requestId: "release",
+      actor: { human: true },
+      body: { type: "node.purgeHoldReleased", payload: { nodeId: "t" } },
+    });
+    await m.auto.runOnce();
+    expect(noticesOf(r)).toHaveLength(1);
+    m.setDays(308);
+    expect((await m.auto.runOnce()).purged).toContain("p");
+  });
+
+  it("M1: purgeTreeOf（自動）は、木の中のどのノードの保留でも拒否する（最後の砦）", () => {
+    const r = rig();
+    r.node("p", "integrator", "root");
+    r.ev("p", { type: "start" });
+    r.node("t", "integrator", "p");
+    r.ev("t", { type: "start" });
+    r.setNow(T0 + DAY);
+    archive(r, "t");
+    holdOf(r, () => 100)("t");
+    r.setNow(T0 + 2 * DAY);
+    archive(r, "p");
+    const purger = createPurger({
+      log: r.log,
+      nowMs: () => T0 + 100 * DAY,
+      retentionDays: 90,
+      defaultTombstone: true,
+      revokeNode: () => {},
+    });
+    const res = purger.purgeTreeOf({ nodeId: "p", requestId: "x", actor: SYS, origin: "auto" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("purgeHeld");
+    // 人間は、無視して消せる。標識に、無視したことが残る
+    const human = purger.purgeTreeOf({
+      nodeId: "p",
+      requestId: "h",
+      actor: { human: true },
+      origin: "human",
+    });
+    expect(human.ok).toBe(true);
+    expect(r.log.state().tombstones.at(-1)?.holdIgnored).toBe(true);
+  });
+
+  it("M2: 根が子孫より先にアーカイブされた木（根の archivedAt と、木の中で最大の archivedAt が違う）でも、保留をかけると、有効な予告を取り下げる", async () => {
+    const r = rig();
+    r.node("t", "integrator", "root");
+    r.ev("t", { type: "start" });
+    r.node("tc", "implement", "t");
+    r.ev("tc", { type: "start" });
+    for (const e of [{ type: "reportDone" }, { type: "accept" }]) r.ev("tc", e as never);
+    r.ev("tc", { type: "markReclaimable", discarded: false });
+    for (const e of [{ type: "reportDone" }, { type: "accept" }]) r.ev("t", e as never);
+    r.ev("t", { type: "markReclaimable", discarded: false });
+    r.setNow(T0 + 2 * DAY);
+    r.ev("t", { type: "archive" }); // 根が先
+    r.setNow(T0 + 9 * DAY);
+    r.ev("tc", { type: "archive" }); // 子孫が後
+    const rootAt = r.log.state().nodes.find((n) => n.id === "t")?.archivedAt;
+    const plan = planPurge(r.log.state(), "t", T0 + 100 * DAY);
+    expect(plan.ok && plan.value.archivedAt).not.toBe(rootAt); // 鍵が違う（これが再現の条件）
+    const m = make(r, { nowDays: 100 });
+    await m.auto.runOnce();
+    expect(noticesOf(r).filter((i) => i.resolved === undefined)).toHaveLength(1);
+    expect(holdOf(r, m.days)("t", isoAt(300)).ok).toBe(true);
+    expect(noticesOf(r).filter((i) => i.resolved === undefined)).toHaveLength(0); // ハンドラが、その場で取り下げた
+    // 保留が切れたあと、予告なしで消えない（出し直して、noticeDays 日待つ）
+    m.setDays(301);
+    expect((await m.auto.runOnce()).purged).toEqual([]);
+    expect(noticesOf(r)).toHaveLength(2);
+  });
+
+  it("M2: 実行側の取り下げ（ステップ 1）も、予告の鍵で探す: 保留が有効になった木の予告は、次の実行で取り下げる", async () => {
+    const r = rig();
+    r.node("t", "integrator", "root");
+    r.ev("t", { type: "start" });
+    r.node("tc", "implement", "t");
+    r.ev("tc", { type: "start" });
+    for (const e of [{ type: "reportDone" }, { type: "accept" }]) r.ev("tc", e as never);
+    r.ev("tc", { type: "markReclaimable", discarded: false });
+    for (const e of [{ type: "reportDone" }, { type: "accept" }]) r.ev("t", e as never);
+    r.ev("t", { type: "markReclaimable", discarded: false });
+    r.setNow(T0 + 2 * DAY);
+    r.ev("t", { type: "archive" });
+    r.setNow(T0 + 9 * DAY);
+    r.ev("tc", { type: "archive" });
+    const m = make(r, { nowDays: 100 });
+    await m.auto.runOnce();
+    // 取り下げないまま、保留だけを記録する（ハンドラを通さない）
+    r.log.append({
+      requestId: "raw-hold",
+      actor: { human: true },
+      body: { type: "node.purgeHeld", payload: { nodeId: "t" } },
+    });
+    expect(noticesOf(r).filter((i) => i.resolved === undefined)).toHaveLength(1);
+    await m.auto.runOnce();
+    expect(noticesOf(r).filter((i) => i.resolved === undefined)).toHaveLength(0);
+  });
+
+  it("R2: 時計が前に飛んで、期限が早く切れたように見えても、新しく予告を出して noticeDays 日待つ（すぐには消えない）", async () => {
+    const r = rig();
+    r.tree("t", 1);
+    const m = make(r, { nowDays: 100, noticeDays: 7 });
+    holdOf(r, m.days)("t", isoAt(130));
+    await m.auto.runOnce();
+    m.jumpClock(40); // 壁時計だけが 40 日進む（期限が過ぎたように見える）
+    expect((await m.auto.runOnce()).skipped).toBe(true); // その回は止まる
+    expect(ids(r)).toContain("t");
+    expect((await m.auto.runOnce()).purged).toEqual([]); // 次の回: 予告だけを出す
+    expect(noticesOf(r)).toHaveLength(1);
+    m.setDays(m.days() + 6);
+    expect((await m.auto.runOnce()).purged).toEqual([]);
+    m.setDays(m.days() + 2);
+    expect((await m.auto.runOnce()).purged).toEqual(["tc", "t"]);
+  });
+});

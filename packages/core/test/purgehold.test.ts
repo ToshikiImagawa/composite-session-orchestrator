@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activePurgeHold,
   type EventBody,
   foldEvents,
   LIMITS,
@@ -149,5 +150,36 @@ describe("purgeHoldActive（保留が有効か）", () => {
     expect(purgeHoldActive(n, Number.NaN)).toBe(true);
     const broken = { ...n, purgeHold: { ...n.purgeHold, until: "壊れた" } } as never;
     expect(purgeHoldActive(broken, Date.parse(AT))).toBe(true);
+  });
+});
+
+describe("activePurgeHold（木の中のどのノードの保留でも、その木を対象から外す）", () => {
+  it("木の中のノードの保留を返す。複数あれば、最も長く続くもの。なければ undefined", () => {
+    const s = must(foldEvents([...base(), hold("t", { until: "2026-02-01T00:00:00Z" })]));
+    const now = Date.parse(AT);
+    expect(activePurgeHold(s, ["c", "t"], now)?.id).toBe("t");
+    expect(activePurgeHold(s, ["c"], now)).toBeUndefined(); // 保留のあるノードが木に含まれない
+    expect(activePurgeHold(s, ["c", "t"], Date.parse("2026-03-01T00:00:00Z"))).toBeUndefined();
+  });
+});
+
+describe("node.purged の holdIgnored・holdUntil（保留を無視した削除の記録）", () => {
+  const purged = (extra: Record<string, unknown>) =>
+    ev({
+      type: "node.purged",
+      payload: { rootId: "t", nodeIds: ["c", "t"], archivedAt: AT, ...extra },
+    } as never);
+  // 木を消した状態（標識を読むだけの検査: ノードは存在しない前提）なので、別の最小のログで確かめる
+  const fold = (extra: Record<string, unknown>) => foldEvents([purged(extra)]);
+  it("holdIgnored は true だけ。holdUntil は holdIgnored とともに、ISO 8601 UTC", () => {
+    const ok = must(fold({ holdIgnored: true, holdUntil: "2026-12-01T00:00:00Z" }));
+    expect(ok.tombstones[0]).toMatchObject({
+      holdIgnored: true,
+      holdUntil: "2026-12-01T00:00:00Z",
+    });
+    expect(must(fold({})).tombstones[0]?.holdIgnored).toBeUndefined();
+    expect(code(fold({ holdIgnored: false }))).toBe("invalidPayload");
+    expect(code(fold({ holdUntil: "2026-12-01T00:00:00Z" }))).toBe("invalidPayload");
+    expect(code(fold({ holdIgnored: true, holdUntil: "明日" }))).toBe("invalidPayload");
   });
 });

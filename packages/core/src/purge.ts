@@ -175,6 +175,31 @@ export function purgeHoldActive(node: NodeRecord, nowMs: number): boolean {
   const hold = node.purgeHold;
   if (hold === undefined) return false;
   if (hold.until === undefined) return true;
+  // 期限を読めない（壊れた記録）・時計が不明なときは、保留のままにする（迷ったら消さない側に倒す）。
   const until = Date.parse(hold.until);
   return !Number.isFinite(until) || !Number.isFinite(nowMs) || nowMs < until;
+}
+
+/**
+ * 木（`nodeIds`）の中に、有効な保留があるノードを返す（T13f-h）。木の中のどのノードの保留でも、その木全体を自動の削除の対象から外す
+ * （保留をかけたあとで、親がアーカイブされ、外側の新しい木に吸収されても、すり抜けない）。複数あれば、最も長く続くもの（無期限が先）。
+ */
+export function activePurgeHold(
+  state: OrchState,
+  nodeIds: readonly string[],
+  nowMs: number,
+): NodeRecord | undefined {
+  const ids = new Set(nodeIds);
+  const untilOf = (n: NodeRecord): number => {
+    const u = n.purgeHold?.until;
+    if (u === undefined) return Number.POSITIVE_INFINITY;
+    const t = Date.parse(u);
+    return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
+  };
+  let best: NodeRecord | undefined;
+  for (const n of state.nodes) {
+    if (!ids.has(n.id) || !purgeHoldActive(n, nowMs)) continue;
+    if (best === undefined || untilOf(n) > untilOf(best)) best = n;
+  }
+  return best;
 }

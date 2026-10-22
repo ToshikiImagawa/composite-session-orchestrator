@@ -23,11 +23,11 @@
 
 import {
   type Actor,
+  activePurgeHold,
   type EventBody,
   type Failure,
   type OrchState,
   planPurge,
-  purgeHoldActive,
   type Result,
 } from "@cso/core";
 import { deriveId } from "./api/handlers/context.js";
@@ -140,10 +140,11 @@ export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
     const n = state.nodes.find((x) => x.id === nodeId);
     if (n === undefined || n.state !== "archived" || n.parentId === null) return undefined; // 根は対象外
     if (state.nodes.find((x) => x.id === n.parentId)?.state === "archived") return undefined;
-    // 保留（T13f-h）: 人間が、この木を自動の削除の対象から外している（期限つきなら、期限まで）。
-    if (purgeHoldActive(n, deps.nowMs())) return undefined;
     const plan = planPurge(state, nodeId, deps.nowMs());
     if (!plan.ok || plan.value.elapsedDays < deps.retentionDays) return undefined;
+    // 保留（T13f-h）: 木の中のどのノードでも、有効な保留があれば、その木全体を対象から外す（期限つきなら、期限まで）。
+    // 保留をかけた子の木が、親のアーカイブで外側の新しい木に吸収されても、すり抜けない。外側の根には、保留が有効なうちは予告も出さない。
+    if (activePurgeHold(state, plan.value.nodeIds, deps.nowMs()) !== undefined) return undefined;
     return { archivedAt: plan.value.archivedAt, nodeIds: plan.value.nodeIds };
   };
   /** 木の予告（新しいものが後ろ）。 */
@@ -277,12 +278,18 @@ export function createAutoPurger(deps: AutoPurgeDeps): AutoPurger {
       for (const n of state0.nodes) {
         if (n.state !== "archived" || n.parentId === null) continue;
         if (eligibleOf(state0, n.id) !== undefined) continue;
-        const archivedAt = n.archivedAt;
-        if (archivedAt === undefined) continue;
-        for (const notice of noticesOf(state0, n.id, archivedAt)) {
-          if (!notice.resolved) {
-            resolveNotice(notice.id);
-            deps.note("autoPurge.noticeWithdrawn", { nodeId: n.id, id: notice.id });
+        // 予告の識別子は、`planPurge` の `archivedAt`（木の中で最大のもの）から作られる。根自身の `archivedAt` とは違いうるので、
+        // 両方の鍵で探す（根が子孫より先にアーカイブされた木でも、取り下げ漏れを出さない）。
+        const plan = planPurge(state0, n.id, deps.nowMs());
+        const keys = new Set<string>();
+        if (plan.ok) keys.add(plan.value.archivedAt);
+        if (n.archivedAt !== undefined) keys.add(n.archivedAt);
+        for (const archivedAt of keys) {
+          for (const notice of noticesOf(state0, n.id, archivedAt)) {
+            if (!notice.resolved) {
+              resolveNotice(notice.id);
+              deps.note("autoPurge.noticeWithdrawn", { nodeId: n.id, id: notice.id });
+            }
           }
         }
       }
