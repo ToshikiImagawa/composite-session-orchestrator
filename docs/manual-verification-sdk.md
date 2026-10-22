@@ -118,6 +118,8 @@
 | 日付 | SDK / CLI | 環境 | 確認した項目 | 結果・問題 |
 |:--|:--|:--|:--|:--|
 | 2026-10-21 | 0.3.292 / 2.1.x（cloud 環境の `claude`） | Linux（Claude Code Remote）、Node 22.22 | 1, 2, 3（`src/` の外の拒否・`src/` の中は許可）, 5, 8, 9, 11, 12, 10（拒否のみ） | 下の「2026-10-21 の結果」 |
+| 2026-10-22 | 0.3.292 / 2.1.292（cloud 環境の `claude`） | Linux（Claude Code Remote）、Node 22 | 6, 7（`cso-mcp` 経由） | 下の「2026-10-22 の結果」。6 は合格、7 は不合格（回答が子に届かない）→ T10b-a で修正し、再確認で合格 |
+| 2026-10-22（再確認） | 0.3.292 / 2.1.292 | Linux（Claude Code Remote）、Node 22 | 7（T10b-a の後） | 合格。回答が子に届き、`src/b.txt`（YAML）が作られ、`report_done` で完了。下の「2026-10-22 の再確認」 |
 
 ### 2026-10-21 の結果（実 SDK 0.3.292）
 
@@ -152,6 +154,17 @@
 実 SDK（0.3.292）で、子の `HOME` を空の 0700 のディレクトリに分けて、項目 16 をやり直した（2026-10-21）: 認証は通り（`ready`、約 7 秒で結果）、
 `src/a.txt` への Write は許可されて書けた。範囲の外（`outside.txt`）への Write は、フックが拒否して書かれなかった。分けた HOME には、SDK が
 `.claude`・`.claude.json` を作った（親の設定・資格情報は持ち込まれていない）。`NO_PROXY` に loopback が足されても、接続に影響はなかった。
+
+### 2026-10-22 の結果（手順 6・7。`cso-mcp` 経由）
+
+使い捨てのリポジトリで、daemon（窓口は自動のポート）→ `cso-mcp`（`--config` で 7777）→ 子の順に起動した。`maxTurns: 12`・`maxBudgetUsd: 1`。
+
+| # | 結果 | 観測 |
+|:--|:--|:--|
+| 6 | 合格 | 子が `mcp__node__report_done` を呼び（`{"accepted":true}`）、受信箱に `done`（「完了報告（根拠 1 件）」）、ノードは `done`。根拠は受け入れ基準ごと（`criterion` と `evidence`）に付いた。子は `mcp__node__*` を ToolSearch で読み込んでから呼んだ（`ToolSearch` はフックが許可している）。`cso-mcp` の認証: トークンなし・無効は 401、人間のトークンは 403、統合のトークンは統合のツール 14 個（`node_spawn`・`node_send`・`node_stop`・`inbox_fetch` など）。子のトークンのツール一覧は、実 SDK の子に `ToolSearch`（`mcp__node__`）で列挙させて確認した: **5 ツールだけ**（`report_decision`・`report_done`・`report_outOfScope`・`report_progress`・`scope_extend`）で、統合のツールは見えない |
+| 7 | **不合格** → T10b-a（2026-10-22）で修正し、再確認で**合格**（下の「2026-10-22 の再確認」） | 子が `report_decision` を呼び、受信箱に `decision`、ノードは `waiting`。`decision.answer`（人間のトークン、`choice: "YAML"`）は `accepted`、受信箱に `answer`、ノードは `running` に戻った。**ただし、回答の内容は子に届かない**: 子のセッションは「回答がないので何もしない」と述べて 1 ターンで終わっており、再開後に新しいターンが始まらない（約 75 秒待っても `src/b.txt` はできず、`node.instructionDelivered` もない）。`decision.answer` は状態を `running` にするだけで、回答を子へ配送する経路がない（子のロールには `decision.get` もない） |
+
+見つかった問題（項目 7 → T10b-a で修正）: 判断の回答が子に届かないため、子が `report_decision` で待つ使い方が成立しない。回答を子へ配送するか（追加指示として送る等）、子に回答を読ませる経路が要る。
 
 ### 2026-10-22 の再確認（項目 7。T10b-a の後）
 
