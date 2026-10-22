@@ -31,6 +31,7 @@ import {
 } from "@cso/core";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import { waitRequestKey } from "./api/handlers/context.js";
+import { createPurger, type PurgeHandlerDeps } from "./api/handlers/purge-handlers.js";
 import {
   type ApiLogger,
   type BindCodes,
@@ -44,6 +45,7 @@ import {
   type SpawnPorts,
   type WorktreeFacts,
 } from "./api/index.js";
+import { createAutoPurger } from "./auto-purge.js";
 import type { DaemonConfig } from "./config.js";
 import { EventLog } from "./eventlog.js";
 import { reconcileOnStartup } from "./reconcile.js";
@@ -57,6 +59,9 @@ import { openSqliteStore } from "./sqlite-store.js";
 
 /** 最終削除の保持期間の既定（日。spec 5.8）。 */
 const DEFAULT_RETENTION_DAYS = 90;
+const DEFAULT_AUTO_PURGE_INTERVAL_MINUTES = 60;
+const DEFAULT_AUTO_PURGE_MAX_TREES = 2;
+const DEFAULT_AUTO_PURGE_NOTICE_DAYS = 7;
 
 /** git の作業ツリーに関わる口（実装は git を呼ぶ。テストはフェイク）。 */
 export interface WorktreePorts {
@@ -80,6 +85,8 @@ export interface DaemonDeps {
   readonly probe?: ProcessProbe;
   readonly clock?: () => string;
   readonly timers?: Timers;
+  /** 単調時計（ミリ秒）。既定は `process.hrtime`。自動の最終削除が、時計が飛んだことを検知するのに使う（試験で差し替える）。 */
+  readonly monotonicMs?: () => number;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
@@ -210,11 +217,13 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   }
   if (!opened.ok) return opened;
   const store = opened.value;
+  let fatalSeen = false;
   const logOpened = EventLog.open(store, {
     clock,
     verifySnapshot: true,
     onSnapshotMismatch: () => note("snapshotMismatch"),
     onFatal: (cause) => {
+      fatalSeen = true;
       note("fatal", { cause });
       deps.onFatal?.(cause);
     },
@@ -224,6 +233,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     return logOpened;
   }
   const log = logOpened.value;
+  /** 起動の時点（整合などでログに書く前）の、最後の記録の時刻。自動の最終削除が、止まっていた時間を検知する。 */
+  const startupLastEventAt = log.lastEventAt();
   const closeAll = (): void => {
     try {
       store.close();
@@ -384,6 +395,15 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   };
   const onFailure = (nodeId: string, cause: string): void =>
     note("handlerFailure", { nodeId, cause });
+  const purgeDeps: PurgeHandlerDeps = {
+    log,
+    nowMs: () => Date.parse(clock()),
+    retentionDays: config.retentionDays ?? DEFAULT_RETENTION_DAYS,
+    defaultTombstone: config.purgeTombstone ?? DEFAULT_PURGE_TOMBSTONE,
+    revokeNode: (id) => credentials.revokeNode(id),
+    audit: (event, data) => note(`purge.${event}`, data),
+    onFailure,
+  };
   const {
     handlers,
     tick: schedule,
@@ -407,15 +427,29 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       onFailure,
       ...(config.startLimits === undefined ? {} : { startLimits: config.startLimits }),
     },
-    {
-      nowMs: () => Date.parse(clock()),
-      retentionDays: config.retentionDays ?? DEFAULT_RETENTION_DAYS,
-      defaultTombstone: config.purgeTombstone ?? DEFAULT_PURGE_TOMBSTONE,
-      revokeNode: (id) => credentials.revokeNode(id),
-      audit: (event, data) => note(`purge.${event}`, data),
-      onFailure,
-    },
+    purgeDeps,
   );
+  // 自動の最終削除（設定で有効にしたときだけ）。人間のコマンドと同じ関数を通る。
+  const autoPurger =
+    config.autoPurge?.enabled === true
+      ? createAutoPurger({
+          state: () => log.state(),
+          nowMs: purgeDeps.nowMs,
+          retentionDays: purgeDeps.retentionDays,
+          intervalMs:
+            (config.autoPurge.intervalMinutes ?? DEFAULT_AUTO_PURGE_INTERVAL_MINUTES) * 60_000,
+          maxTreesPerRun: config.autoPurge.maxTreesPerRun ?? DEFAULT_AUTO_PURGE_MAX_TREES,
+          noticeDays: config.autoPurge.noticeDays ?? DEFAULT_AUTO_PURGE_NOTICE_DAYS,
+          record: (requestId, body) => log.append({ requestId, actor: { system: true }, body }),
+          purgeTreeOf: createPurger(purgeDeps).purgeTreeOf,
+          timers,
+          note,
+          isStopped: () => fatalSeen,
+          lastEventAt: () => log.lastEventAt(),
+          monoMs: deps.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n)),
+          lastEventAtAtStartup: startupLastEventAt,
+        })
+      : undefined;
 
   const logger: ApiLogger = (e) => {
     // 秘密（コード・トークン）は、イベントに含まれない（`ApiLogEvent` の規則）。
@@ -459,10 +493,12 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         running = { port, url, humanTokenPath, rootTokenPath };
         // 待ち受けの後で、前回から残った、依存の揃った pending の子を起動する（子が窓口へ接続できるように）。
         void schedule();
+        autoPurger?.start();
         note("started", { port, rootNodeId: config.rootNodeId });
         return running;
       },
       async stop() {
+        await autoPurger?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await server.close();
         await closeScheduler(); // 起動の途中の tick が終わるのを待つ（終わる前に、タイマー・DB を閉じない）
         tracked.cancelAll(); // アダプタが作った、残りのタイマーを止める

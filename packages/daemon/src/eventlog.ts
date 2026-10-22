@@ -272,6 +272,11 @@ export class EventLog {
     return this.current;
   }
 
+  /** 最後のイベントの時刻（`at`）。空なら `undefined`。時計の異常の検知（自動の最終削除）に使う。 */
+  lastEventAt(): string | undefined {
+    return this.store.findBySeq(this.store.lastSeq())?.at;
+  }
+
   /**
    * イベントを追記する。検査に失敗したら何も書かず、seq も消費しない。
    * 同じ `requestId` で同一内容の再試行は、行を増やさず最初のイベントを返す。
