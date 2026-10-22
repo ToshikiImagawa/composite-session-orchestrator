@@ -54,6 +54,7 @@ const start = async (
     shutdownGraceMs?: number;
     bodyTimeoutMs?: number;
     relayTimeoutMs?: number;
+    maxBodyBytes?: number;
   } = {},
 ): Promise<Rig> => {
   const credentials = createCredentialStore({ humanToken: HUMAN });
@@ -79,6 +80,7 @@ const start = async (
     ...(over.shutdownGraceMs !== undefined ? { shutdownGraceMs: over.shutdownGraceMs } : {}),
     ...(over.bodyTimeoutMs !== undefined ? { bodyTimeoutMs: over.bodyTimeoutMs } : {}),
     ...(over.relayTimeoutMs !== undefined ? { relayTimeoutMs: over.relayTimeoutMs } : {}),
+    ...(over.maxBodyBytes !== undefined ? { maxBodyBytes: over.maxBodyBytes } : {}),
   });
   if (!created.ok) throw new Error(created.error.cause);
   const mcp = created.value;
@@ -236,22 +238,63 @@ describe("実 HTTP の統合（MCP クライアント ↔ cso-mcp ↔ daemon の
     ).toBe(415);
     expect((await raw(r, { body: "{not json", headers: h })).status).toBe(400);
     // 上限を超える本文は、読まずに 413 を返して、接続を閉じる（`connection: close`）。巨大な本文を送りきる前に閉じられると、
-    // クライアントは、413 の応答を受け取れず、接続のエラー（EPIPE・ECONNRESET）になることがある（OS・タイミング次第。macOS で起きた）。
-    // どちらでも、実行はされず（daemon の窓口に届かない）、トークンも漏れない。
+    // クライアントは、413 の応答を受け取れず、接続のエラー（EPIPE・ECONNRESET・UND_ERR_SOCKET）になることがある（OS・タイミング次第）。
+    // 実際に、macOS の CI で起きた（PR #61 の Actions run #237 の 1 回目の実行。再実行で成功）:
+    // https://github.com/ToshikiImagawa/composite-session-orchestrator/actions/runs/39752311636
+    // この試験は、どちらでも通す緩い版。応答を必ず 413 で確かめる決定的な版は、下の 2 本（宣言した長さ・チャンク形式）。
+    // どちらでも、実行はされない（daemon の窓口に届かない）。
     const big = JSON.stringify({ x: "y".repeat(1024 * 1024 + 1) });
     const outcome: { status: number; text: string; error?: string } = await raw(r, {
       body: big,
       headers: h,
     }).then(
       async (res) => ({ status: res.status, text: await res.text() }),
-      (error: unknown) => ({ status: 0, text: "", error: String((error as Error).cause ?? error) }),
+      (error: unknown) => {
+        const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+        return { status: 0, text: "", error: String(cause?.code ?? cause?.message ?? error) };
+      },
     );
     expect([413, 0]).toContain(outcome.status);
     if (outcome.status === 0) {
-      expect(outcome.error ?? "").toMatch(/EPIPE|ECONNRESET|other side closed/);
+      expect(["EPIPE", "ECONNRESET", "UND_ERR_SOCKET"]).toContain(outcome.error);
     }
+    // トークンが漏れないことの確認は、413 の本文を読めたとき（status が 413 のとき）に意味を持つ（接続エラーのときは、本文がない）。
     expect(outcome.text).not.toContain(r.tokens.a);
     expect(r.calls).toEqual([]); // 巨大な本文の要求は、窓口に届いていない（実行されていない）
+  });
+
+  it("上限より 1 大きい長さを宣言したら、本文を待たずに、必ず 413（connection: close・payloadTooLarge）。実行されない（決定的）", async () => {
+    const r = await start();
+    const res = await rawHttp(
+      r.mcpUrl,
+      {
+        authorization: `Bearer ${r.tokens.a}`,
+        "content-type": "application/json",
+        "content-length": String(1024 * 1024 + 1),
+      },
+      undefined,
+      { endBody: false }, // 本文は送らない（宣言だけで、サーバーは本文を読まずに 413 を返す）
+    );
+    expect(res.status).toBe(413);
+    expect(res.headers.connection).toBe("close");
+    expect(JSON.parse(res.text).error.code).toBe("payloadTooLarge");
+    expect(res.text).not.toContain(r.tokens.a);
+    expect(r.calls).toEqual([]);
+  });
+
+  it("チャンク形式（長さを宣言しない）の本文が、上限を超えたら、必ず 413（connection: close・payloadTooLarge）。実行されない（決定的）", async () => {
+    const r = await start({ maxBodyBytes: 200 });
+    const res = await rawHttp(
+      r.mcpUrl,
+      { authorization: `Bearer ${r.tokens.a}`, "content-type": "application/json" },
+      undefined,
+      { chunks: [`{"x":"${"y".repeat(150)}`, "y".repeat(150), `${"y".repeat(150)}"}`] },
+    );
+    expect(res.status).toBe(413);
+    expect(res.headers.connection).toBe("close");
+    expect(JSON.parse(res.text).error.code).toBe("payloadTooLarge");
+    expect(res.text).not.toContain(r.tokens.a);
+    expect(r.calls).toEqual([]);
   });
 
   it("daemon に接続できなければ 502。トークンを含めない", async () => {
@@ -275,7 +318,12 @@ const rawHttp = (
   url: string,
   headers: Record<string, string>,
   body?: string,
-): Promise<{ status: number; text: string }> =>
+  opts: { endBody?: boolean; chunks?: string[] } = {},
+): Promise<{
+  status: number;
+  text: string;
+  headers: Record<string, string | string[] | undefined>;
+}> =>
   new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = httpRequest(
@@ -285,11 +333,19 @@ const rawHttp = (
         res.on("data", (c) => {
           text += c;
         });
-        res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+        const done = (): void =>
+          resolve({ status: res.statusCode ?? 0, text, headers: res.headers });
+        res.on("end", done);
+        res.on("close", done);
       },
     );
     req.on("error", reject);
-    req.end(body);
+    if (opts.chunks !== undefined) {
+      for (const c of opts.chunks) req.write(c);
+      req.end();
+    } else if (opts.endBody === false) {
+      req.flushHeaders(); // 本文は送らない（応答を受け取ったら、呼び出し側が接続を破棄する）
+    } else req.end(body);
   });
 
 describe("停止（graceful shutdown）", () => {
