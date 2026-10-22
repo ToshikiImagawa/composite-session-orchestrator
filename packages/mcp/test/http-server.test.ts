@@ -235,8 +235,23 @@ describe("実 HTTP の統合（MCP クライアント ↔ cso-mcp ↔ daemon の
       (await raw(r, { body: INIT, headers: { ...h, "content-type": "text/plain" } })).status,
     ).toBe(415);
     expect((await raw(r, { body: "{not json", headers: h })).status).toBe(400);
+    // 上限を超える本文は、読まずに 413 を返して、接続を閉じる（`connection: close`）。巨大な本文を送りきる前に閉じられると、
+    // クライアントは、413 の応答を受け取れず、接続のエラー（EPIPE・ECONNRESET）になることがある（OS・タイミング次第。macOS で起きた）。
+    // どちらでも、実行はされず（daemon の窓口に届かない）、トークンも漏れない。
     const big = JSON.stringify({ x: "y".repeat(1024 * 1024 + 1) });
-    expect((await raw(r, { body: big, headers: h })).status).toBe(413);
+    const outcome: { status: number; text: string; error?: string } = await raw(r, {
+      body: big,
+      headers: h,
+    }).then(
+      async (res) => ({ status: res.status, text: await res.text() }),
+      (error: unknown) => ({ status: 0, text: "", error: String((error as Error).cause ?? error) }),
+    );
+    expect([413, 0]).toContain(outcome.status);
+    if (outcome.status === 0) {
+      expect(outcome.error ?? "").toMatch(/EPIPE|ECONNRESET|other side closed/);
+    }
+    expect(outcome.text).not.toContain(r.tokens.a);
+    expect(r.calls).toEqual([]); // 巨大な本文の要求は、窓口に届いていない（実行されていない）
   });
 
   it("daemon に接続できなければ 502。トークンを含めない", async () => {
