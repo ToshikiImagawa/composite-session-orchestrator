@@ -11,11 +11,13 @@
 
 - 効果はある: 子（SDK が起動する `claude`）が Bash・フック・stdio MCP として起動するプロセスから、`ANTHROPIC_API_KEY`・`CLAUDE_CODE_OAUTH_TOKEN` など、許可リストで子に**渡している**認証情報を除ける。許可リストだけでは防げない穴を埋める。
 - しかし 0.3.292 では、有効にすると (1) **bubblewrap が必須**（無ければ子が起動しない）、(2) **権限モードが `default` に強制**され、このリポジトリの設計 `permissionMode: "dontAsk"` が効かなくなる。(2) は権限の設計そのものを変えるため、単純に足すことはできない。
+- macOS での挙動は未確認（Linux の、この環境でのみ確かめた）。
+- 残る穴（残余リスク）: 子に渡した `ANTHROPIC_*`・OAuth トークン・`childEnvAllow` の認証情報は、孫プロセス（Bash・フック・stdio MCP）から見える。これは**後続の調査 T10w-2**（代替: `sandbox.credentials` の deny、Bash を絞る PreToolUse フックなど）で扱い、それまでは残余リスクとして受け入れる。
 
 ## 1. 何をするものか
 
 - ［確認・ドキュメント］`1` にすると、Claude Code が起動するサブプロセス（Bash コマンド、フック、stdio MCP サーバー）の環境から認証情報を除く。Claude Code 本体は自分の API 呼び出しのために認証情報を保持する。判定は**変数名または値の形**による（拒否リスト・発見的方法）。
-  - 除く: `ANTHROPIC_API_KEY`・`AWS_SECRET_ACCESS_KEY`、名前が認証情報らしいもの（`NPM_TOKEN`・`DB_PASSWORD`）、値にパスワードを含む `DATABASE_URL`、`CLAUDE_CONFIG_DIR`。
+  - 除く: `ANTHROPIC_API_KEY`・`AWS_SECRET_ACCESS_KEY`、名前が認証情報らしいもの（`NPM_TOKEN`・`DB_PASSWORD`）、値にパスワードを含む `DATABASE_URL`、`CLAUDE_CONFIG_DIR`（影響は 3 章）。
   - URL の中の利用者名・パスワードだけ切る: `PIP_INDEX_URL`・`NPM_CONFIG_REGISTRY`。
   - 残す: `GITHUB_TOKEN`・`GH_TOKEN`・`GH_ENTERPRISE_TOKEN`・`GITHUB_ENTERPRISE_TOKEN`、`HTTP(S)_PROXY`（URL 内の認証情報も）、`GIT_CONFIG_*`、名前も値も認証情報らしくない秘密。
   - Linux では Bash サブプロセスを別の PID 名前空間で動かし、`/proc` から親の環境を読めなくする（副作用で `ps`・`kill` がホストのプロセスを見られない）。
@@ -34,7 +36,7 @@
 - ［確認・CLI の実体］有効時の制約:
   - 権限モードを `default` に強制する。CLI・継承・エージェント定義のいずれかで `default` 以外（`dontAsk` を含む）が指定されると、「Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set (allowed_non_write_users hardening). Declare allowedTools explicitly…」を出して `default` にする。
   - `--await-claim`（予備プロセスの取り置き）と併用できない。
-- ［推測］macOS では bubblewrap が無いため、Linux と同じ隔離は無い（未確認。macOS での挙動は確かめていない）。
+- ［推測］macOS では bubblewrap が無いため、Linux と同じ隔離は無い。macOS での挙動は確かめていない。
 
 ## 3. 子の環境変数の許可リスト（`packages/daemon/src/sdk/child-env.ts`, #45）との比較
 
@@ -45,10 +47,11 @@
 | `GH_TOKEN` など | 子に渡さない | 孫に**残す** |
 | `ANTHROPIC_*`・`CLAUDE_CODE_OAUTH_TOKEN` | 子に渡す（認証に必要） | 孫から除く |
 | `childEnvAllow` で足した AWS・GCP 等の認証 | 子に渡す | 孫から除く（名前・値が認識できれば） |
-| `CLAUDE_CONFIG_DIR` | 子に渡す | 孫から除く |
 
 - 得: 許可リストで**子には渡す必要がある**認証情報（`ANTHROPIC_*`、OAuth トークン、`childEnvAllow` の追加分）が、子の Bash 等へ漏れるのを防げる。これは許可リストだけでは原理的に防げない（［確認］許可リストは子の環境を決めるだけで、子が孫に何を渡すかには関与しない）。
-- 二重・害: 除く対象の重なり（`GH_TOKEN` 等）は、許可リストが先に除くので実害はない（SCRUB は残す側なので、重なっても矛盾しない）。害は重なりではなく**副作用**: bubblewrap 必須、権限モードの強制、PID 名前空間による `ps`/`kill` の制限、孫が `CLAUDE_CONFIG_DIR` を受け取れない（［推測］孫で `claude` を入れ子に起動する使い方があれば、HOME 分離の前提が崩れる可能性）。
+- 二重・害: 除く対象の重なり（`GH_TOKEN` 等）は、許可リストが先に除くので実害はない（SCRUB は残す側なので、重なっても矛盾しない）。害は重なりではなく**副作用**: bubblewrap 必須、権限モードの強制、PID 名前空間による `ps`/`kill` の制限。
+- `CLAUDE_CONFIG_DIR`: 許可リストは子に渡すが、SCRUB は孫から除く（［確認・ドキュメント］）。
+- ［推測］孫で `claude` を入れ子に起動する使い方があれば、孫が `CLAUDE_CONFIG_DIR` を受け取れず、HOME 分離の前提が崩れる可能性がある。
 - 足す場合の実装（参考・未実装）: `DEFAULT_CHILD_ENV` に名前を足すのではなく、`childEnv()` の結果に `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` を固定で入れる形になる（親の環境にある値を写すのでは、有効かどうかが daemon の起動環境次第になるため）。
 
 ## 4. 子が Bash などで起動するプロセスへの秘密の受け渡しを防げるか
@@ -62,9 +65,17 @@
 
 **採らない（現時点）**。以下が全部そろったら「採る」で再検討する（条件つき）。
 
-1. 権限の設計を `dontAsk` から、`default` ＋明示的な `allowedTools`（＋ `canUseTool` または PreToolUse フックで拒否）に移してよいと判断できる。［推測］SDK で `default` のとき、許可していない操作は `canUseTool` に回るか、無ければ拒否になるはずだが、0.3.292 での挙動は実機で未確認（要検証）。
+1. 権限の設計を `dontAsk` から、`default` ＋明示的な `allowedTools`（＋ `canUseTool` または PreToolUse フックで拒否）に移してよいと判断できる。
+   - ［推測］SDK で `default` のとき、許可していない操作は `canUseTool` に回るか、無ければ拒否になるはず。0.3.292 での挙動は実機で未確認。
 2. daemon を動かす全ホストで bubblewrap が使える（Linux 限定でよい、または macOS での挙動を確認済み）。無ければ子が起動しないため、起動前に検査して分かりやすく失敗させる必要がある。
 3. `--await-claim`（予備プロセス）を使う予定がない。
+
+再検討のきっかけ:
+- (a) SDK・CLI の版を上げたとき（権限モードの強制・bubblewrap 必須が変わる可能性がある）。
+- (b) `childEnvAllow` で子に渡す認証情報が増えたとき。
+- (c) 孫プロセスへの漏れの実害、または報告があったとき。
+
+再検討するときの最初の作業: 0.3.292（またはその時点の固定版）で、`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` のもと、`default` ＋ `allowedTools` ＋ PreToolUse フックを組み合わせたときの挙動（許可外の操作が確認待ちで止まらず拒否されるか）を、bubblewrap のある Linux の実機で確かめる。
 
 根拠:
 - 得（子に渡す認証情報を孫から隠す）は本物で、許可リストと補い合う。
