@@ -152,3 +152,7 @@
 実 SDK（0.3.292）で、子の `HOME` を空の 0700 のディレクトリに分けて、項目 16 をやり直した（2026-10-21）: 認証は通り（`ready`、約 7 秒で結果）、
 `src/a.txt` への Write は許可されて書けた。範囲の外（`outside.txt`）への Write は、フックが拒否して書かれなかった。分けた HOME には、SDK が
 `.claude`・`.claude.json` を作った（親の設定・資格情報は持ち込まれていない）。`NO_PROXY` に loopback が足されても、接続に影響はなかった。
+
+### 2026-10-22 の再確認（項目 7。T10b-a の後）
+
+判断の回答を子へ届ける変更（T10b-a）の後、同じ手順で項目 7 をやり直した（実 SDK 0.3.292）: 子が `report_decision`（「JSON か YAML か」）を呼び、人間が `decision.answer`（`choice: "YAML"`）を送ると、受信箱に `answer` が出て、子が**回答を受け取って**新しいターンを始め、`src/b.txt`（`format: yaml`）を作り、`report_done` で完了を報告した（約 45 秒）。**合格**。
