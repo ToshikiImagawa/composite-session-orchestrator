@@ -131,6 +131,17 @@ export interface ApiDeps {
     readonly monotonicMs?: () => number;
     /** 件数のまとめの窓（ミリ秒）。既定 1 分。 */
     readonly summaryWindowMs?: number;
+    /** 主体ごとに同時に処理中の要求の数の上限（超えたら、本文を読まずに 429）。既定 8。 */
+    readonly maxInFlightPerPrincipal?: number;
+  };
+  /** 接続の上限と、遅い要求への対策（slowloris）。既定は、要求 30 秒・ヘッダ 10 秒・keep-alive 5 秒・接続 256。試験で小さくする。 */
+  readonly connection?: {
+    readonly requestTimeoutMs?: number;
+    readonly headersTimeoutMs?: number;
+    readonly keepAliveTimeoutMs?: number;
+    readonly maxConnections?: number;
+    /** タイムアウトを検査する間隔（ミリ秒）。既定 1 秒（Node の既定は 30 秒）。 */
+    readonly checkIntervalMs?: number;
   };
 }
 
@@ -141,6 +152,8 @@ export interface ApiServer {
 }
 
 const HOST = "127.0.0.1";
+/** 本文を読まずに返す応答には、接続を閉じさせる（読んでいない本文が、次の要求と混ざらない。遅い本文で接続を占有されない）。 */
+const CLOSE = { connection: "close" } as const;
 const DEFAULT_MAX_BODY = 1024 * 1024;
 /** bind の本文は { nodeId, bindCode } だけなので小さく。 */
 const BIND_MAX_BODY = 1024;
@@ -252,13 +265,32 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         }),
     },
   });
+  /** 主体ごとの、同時に処理中の要求の数。 */
+  const inFlight = new Map<string, number>();
+  const maxInFlight = rl.maxInFlightPerPrincipal ?? 8;
+  /** 同時数の枠を取る。取れたら、応答が終わったとき（接続が切れたときも）に返す関数を返す。取れなければ `undefined`。 */
+  const acquire = (key: string, res: ServerResponse): (() => void) | undefined => {
+    const cur = inFlight.get(key) ?? 0;
+    if (cur >= maxInFlight) return undefined;
+    inFlight.set(key, cur + 1);
+    let done = false;
+    const release = (): void => {
+      if (done) return;
+      done = true;
+      const c = (inFlight.get(key) ?? 1) - 1;
+      if (c <= 0) inFlight.delete(key);
+      else inFlight.set(key, c);
+    };
+    res.once("close", release);
+    return release;
+  };
   const principalKey = (p: { role: string; nodeId?: string }): string =>
     p.role === "human" ? "human" : `node:${p.nodeId ?? ""}`;
   /**
    * 429（要求が多すぎる）。**この要求は実行していない**ことを保証する応答: 制限の判定は、ハンドラを呼ぶ前にだけ行う
    * （再試行しても二重に実行されない）。cause・nextActions には、トークン・nodeId・残りの量を出さない（`Retry-After` だけ）。
    */
-  const tooMany = (res: ServerResponse, retryAfterSec: number): void =>
+  const tooMany = (res: ServerResponse, retryAfterSec: number, early = false): void =>
     reject(
       res,
       failure(
@@ -266,7 +298,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         "要求が多すぎる（この要求は実行していない）",
         "Retry-After の秒数を待ってから、同じ要求をもう一度送る",
       ),
-      { "retry-after": String(retryAfterSec) },
+      { "retry-after": String(retryAfterSec), ...(early ? CLOSE : {}) },
     );
   /** 認証の失敗を数え、接続元ごとの制限に達していれば 429、そうでなければ 401。 */
   const authFailed = (
@@ -277,11 +309,9 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     counters.count("authFailed", reason);
     const origin = req.socket.remoteAddress ?? "unknown";
     const c = failureLimiter.tryConsume(origin, 1);
-    if (!c.ok) {
-      counters.count("rateLimited", "origin");
-      tooMany(res, c.retryAfterSec);
-      return;
-    }
+    // 失敗の制限が尽きている間も、無効なトークンには 401 を返す（429 にすると、待っても直らない再試行に誘導してしまう）。
+    // 待つ秒数は `Retry-After` で伝える。
+    if (!c.ok) counters.count("rateLimited", "origin");
     reject(
       res,
       failure(
@@ -290,7 +320,11 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         "正しい資格情報で呼び出す",
         "資格情報を再発行する",
       ),
-      { "www-authenticate": "Bearer" },
+      {
+        "www-authenticate": "Bearer",
+        ...CLOSE,
+        ...(c.ok ? {} : { "retry-after": String(c.retryAfterSec) }),
+      },
     );
   };
 
@@ -331,21 +365,29 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const valid = checkPrincipal(principal, deps.getState());
     if (!valid.ok) {
       counters.count("authFailed", "principalRejected");
-      return reject(res, valid.error, { "www-authenticate": "Bearer" });
+      req.resume();
+      return reject(res, valid.error, { "www-authenticate": "Bearer", ...CLOSE });
     }
     // 回数の制限（主体ごと）。ハンドラを呼ぶ前にだけ判定するので、429 の要求は実行されていない。本文は読まない。
+    // 同時に処理中の要求の数にも上限がある（ゆっくり本文を送る要求で、接続を塞がれないように）。
     const key = principalKey(principal);
+    if (acquire(key, res) === undefined) {
+      counters.count("rateLimited", "inflight");
+      req.resume();
+      return tooMany(res, 1, true);
+    }
     const used = principalLimiter.tryConsume(key, 1);
     if (!used.ok) {
       counters.count("rateLimited", "principal");
       req.resume();
-      return tooMany(res, used.retryAfterSec);
+      return tooMany(res, used.retryAfterSec, true);
     }
     if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {
       req.resume();
       return reject(
         res,
         failure("unsupportedMediaType", "Content-Type が application/json でない", "JSON で送る"),
+        CLOSE,
       );
     }
     const raw = await readBody(req, maxBody);
@@ -594,17 +636,25 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     );
   }
 
-  const server: Server = createServer((req, res) => {
-    handle(req, res).catch(() => {
-      if (!res.headersSent) {
-        reject(res, failure("internalError", "内部エラー", "もう一度試す"));
-      } else {
-        res.destroy();
-      }
-    });
-  });
-  server.requestTimeout = 30_000;
-  server.headersTimeout = 10_000;
+  const conn = deps.connection ?? {};
+  const server: Server = createServer(
+    // タイムアウトは、この間隔でしか検査されない（既定 30 秒）。ヘッダ 10 秒・要求 30 秒を、ほぼ正確に効かせるため、1 秒にする。
+    { connectionsCheckingInterval: conn.checkIntervalMs ?? 1000 },
+    (req, res) => {
+      handle(req, res).catch(() => {
+        if (!res.headersSent) {
+          reject(res, failure("internalError", "内部エラー", "もう一度試す"));
+        } else {
+          res.destroy();
+        }
+      });
+    },
+  );
+  // 遅い要求で接続を塞がれないように、明示する（有効なトークンでも、本文をゆっくり送って、接続を占有できてしまう）。
+  server.requestTimeout = conn.requestTimeoutMs ?? 30_000;
+  server.headersTimeout = conn.headersTimeoutMs ?? 10_000;
+  server.keepAliveTimeout = conn.keepAliveTimeoutMs ?? 5_000;
+  server.maxConnections = conn.maxConnections ?? 256;
 
   return {
     listen: (p) =>

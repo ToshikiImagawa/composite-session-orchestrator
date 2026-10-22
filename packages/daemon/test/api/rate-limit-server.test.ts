@@ -1,3 +1,5 @@
+import { request as httpRequest } from "node:http";
+import { connect, type Socket } from "node:net";
 import { type EventBody, foldEvents, type OrchEvent, type OrchState, ok } from "@cso/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCredentialStore } from "../../src/api/credentials.js";
@@ -47,6 +49,7 @@ const HUMAN = "human-token-human-token-human-token-1234";
 interface Rig {
   server: ApiServer;
   url: string;
+  port: number;
   tokens: { human: string; m1: string; a: string };
   calls: string[];
   logs: ApiLogEvent[];
@@ -64,6 +67,13 @@ const start = async (
     authFailures?: { burst: number; perSecond: number };
     summaryWindowMs?: number;
   } = {},
+  connection?: {
+    requestTimeoutMs?: number;
+    headersTimeoutMs?: number;
+    keepAliveTimeoutMs?: number;
+    maxConnections?: number;
+    checkIntervalMs?: number;
+  },
 ): Promise<Rig> => {
   const credentials = createCredentialStore({ humanToken: HUMAN });
   const calls: string[] = [];
@@ -102,6 +112,7 @@ const start = async (
     getState: () => s,
     handlers,
     logger: (e) => logs.push(e),
+    ...(connection === undefined ? {} : { connection }),
     rateLimit: {
       perPrincipal: limits.perPrincipal ?? { burst: 10, perSecond: 1 },
       authFailures: limits.authFailures ?? { burst: 5, perSecond: 0.1 },
@@ -109,10 +120,11 @@ const start = async (
       ...(limits.summaryWindowMs === undefined ? {} : { summaryWindowMs: limits.summaryWindowMs }),
     },
   });
-  const { url } = await server.listen(0);
+  const { url, port } = await server.listen(0);
   rig = {
     server,
     url,
+    port,
     calls,
     logs,
     mono,
@@ -219,15 +231,19 @@ describe("窓口の回数の制限（T10l）", () => {
     expect(r.calls.filter((c) => c === "node.purge")).toHaveLength(0);
   });
 
-  it("認証の失敗は、接続元ごとに数え、容量を超えたら、401 でなく 429 にする。有効なトークンは、失敗の制限に影響されない", async () => {
+  it("認証の失敗は、接続元ごとに数える。容量を超えても、無効なトークンには 401 を返し、Retry-After を付ける（429 にしない）。有効なトークンは、失敗の制限に影響されない", async () => {
     const r = await start();
-    const statuses: number[] = [];
-    for (let i = 0; i < 8; i++) statuses.push((await post(r, list(`q${i}`), UNKNOWN_A)).status);
-    expect(statuses.slice(0, 5)).toEqual([401, 401, 401, 401, 401]);
-    expect(statuses.slice(5)).toEqual([429, 429, 429]);
+    const out: { status: number; retryAfter: string | null }[] = [];
+    for (let i = 0; i < 8; i++) out.push(await post(r, list(`q${i}`), UNKNOWN_A));
+    expect(out.map((x) => x.status)).toEqual([401, 401, 401, 401, 401, 401, 401, 401]);
+    expect(out.slice(0, 5).every((x) => x.retryAfter === null)).toBe(true);
+    expect(out.slice(5).every((x) => Number(x.retryAfter) >= 1)).toBe(true);
     // 失敗の制限に達しても、有効なトークンの要求は通る（締め出されない）
     expect((await post(r, list("ok"), r.tokens.m1)).status).toBe(200);
     expect((await post(r, preview("ok-h"), r.tokens.human)).status).toBe(200);
+    // 待てば、Retry-After なしの 401 に戻る
+    r.mono.advance(60_000);
+    expect((await post(r, list("again"), UNKNOWN_A)).retryAfter).toBeNull();
   });
 
   it("whoami も、主体ごとの制限を受ける。認証の失敗は同じ入口で数える", async () => {
@@ -289,5 +305,168 @@ describe("窓口の回数の制限（T10l）", () => {
     await r.server.close();
     expect(r.logs.some((e) => e.event === "apiSummary")).toBe(true);
     rig = undefined;
+  });
+});
+
+/** 生のソケットで、ヘッダと本文の一部だけを送って、止める（遅い要求）。 */
+const slowRequest = (r: Rig, token: string, bodyBytes = 1000): Promise<Socket> =>
+  new Promise((resolve, reject) => {
+    const s = connect(r.port, "127.0.0.1", () => {
+      s.write(
+        `POST /v1/request HTTP/1.1\r\nHost: 127.0.0.1:${r.port}\r\nAuthorization: Bearer ${token}\r\n` +
+          `Content-Type: application/json\r\nContent-Length: ${bodyBytes}\r\n\r\n{"requestId":`,
+      );
+      resolve(s);
+    });
+    s.on("error", () => undefined);
+    s.once("error", reject);
+  });
+const closedWithin = (s: Socket, ms: number): Promise<boolean> =>
+  new Promise((resolve) => {
+    if (s.destroyed) return resolve(true);
+    s.resume(); // 読まないと、相手が閉じても、close が出ない
+    const timer = setTimeout(() => resolve(false), ms);
+    s.once("close", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
+
+/** `agent: false`（接続を使い回さない）で送って、応答のヘッダと、接続が閉じたかを返す。 */
+const rawPost = (
+  r: Rig,
+  body: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; connection: string | undefined; closed: boolean }> =>
+  new Promise((resolve, reject) => {
+    const req = httpRequest(
+      `${r.url}/v1/request`,
+      {
+        method: "POST",
+        agent: false,
+        headers: { "content-length": String(Buffer.byteLength(body)), ...headers },
+      },
+      (res) => {
+        res.resume();
+        res.once("end", () => {
+          const socket = res.socket;
+          const closed = socket.destroyed;
+          if (closed) {
+            resolve({ status: res.statusCode ?? 0, connection: res.headers.connection, closed });
+            return;
+          }
+          socket.once("close", () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              connection: res.headers.connection,
+              closed: true,
+            }),
+          );
+          setTimeout(
+            () =>
+              resolve({
+                status: res.statusCode ?? 0,
+                connection: res.headers.connection,
+                closed: false,
+              }),
+            1500,
+          );
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+
+describe("遅い要求・接続の占有への対策（T10l）", () => {
+  it("本文を読まずに返す応答（429・401・415）は、connection: close で、応答のあと接続を閉じる", async () => {
+    const r = await start({ perPrincipal: { burst: 10, perSecond: 1 } });
+    const json = { "content-type": "application/json" };
+    const unauth = await rawPost(r, JSON.stringify(list()), {
+      ...json,
+      authorization: `Bearer ${UNKNOWN_A}`,
+    });
+    expect(unauth).toMatchObject({ status: 401, connection: "close", closed: true });
+    const media = await rawPost(r, "x", {
+      "content-type": "text/plain",
+      authorization: `Bearer ${r.tokens.m1}`,
+    });
+    expect(media).toMatchObject({ status: 415, connection: "close", closed: true });
+    for (let i = 0; i < 9; i++) await post(r, list(`q${i}`), r.tokens.m1); // 415 の 1 + 9 で、容量 10 を使い切る
+    const limited = await rawPost(r, JSON.stringify(list("over")), {
+      ...json,
+      authorization: `Bearer ${r.tokens.m1}`,
+    });
+    expect(limited).toMatchObject({ status: 429, connection: "close", closed: true });
+  });
+
+  it("主体ごとに同時に処理中の要求は 8 まで: 遅い要求で埋められたら、9 件目は、本文を読まずに 429（実行しない）。別の主体は通る。遅い要求が切れれば、枠が戻る", async () => {
+    const r = await start({ perPrincipal: { burst: 100, perSecond: 100 } });
+    const slow: Socket[] = [];
+    for (let i = 0; i < 8; i++) slow.push(await slowRequest(r, r.tokens.m1));
+    await sleep(100); // サーバーが 8 件を受け付けるのを待つ
+    const ninth = await post(r, list("ninth"), r.tokens.m1);
+    expect(ninth.status).toBe(429);
+    expect(Number(ninth.retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(r.calls).toHaveLength(0); // どれも実行されていない
+    expect((await post(r, preview("other"), r.tokens.human)).status).toBe(200); // 別の主体は通る
+    for (const s of slow) s.destroy();
+    await sleep(150);
+    expect((await post(r, list("after"), r.tokens.m1)).status).toBe(200); // 枠が戻った
+  });
+
+  it("遅い要求（本文を送りきらない）は、requestTimeout で打ち切られ、枠が戻る", async () => {
+    const r = await start(
+      { perPrincipal: { burst: 100, perSecond: 100 } },
+      { requestTimeoutMs: 300, headersTimeoutMs: 300, checkIntervalMs: 50 },
+    );
+    const s = await slowRequest(r, r.tokens.m1);
+    expect(await closedWithin(s, 3000)).toBe(true);
+    expect((await post(r, list("after"), r.tokens.m1)).status).toBe(200);
+  });
+
+  it("ヘッダを送りきらない接続は、headersTimeout で閉じられる", async () => {
+    const r = await start(
+      {},
+      { headersTimeoutMs: 300, requestTimeoutMs: 1000, checkIntervalMs: 50 },
+    );
+    const s = await new Promise<Socket>((resolve) => {
+      const sock = connect(r.port, "127.0.0.1", () => {
+        sock.write("POST /v1/request HTTP/1.1\r\nHost: 127.0.0.1\r\n"); // 終わらせない
+        resolve(sock);
+      });
+      sock.on("error", () => undefined);
+    });
+    expect(await closedWithin(s, 3000)).toBe(true);
+  });
+
+  it("接続の数に上限がある（maxConnections）: 上限を超えた接続は、受け付けられずに閉じられる", async () => {
+    const r = await start({}, { maxConnections: 2 });
+    const held: Socket[] = [];
+    for (let i = 0; i < 2; i++) {
+      held.push(
+        await new Promise<Socket>((resolve) => {
+          const sock = connect(r.port, "127.0.0.1", () => resolve(sock));
+          sock.on("error", () => undefined);
+        }),
+      );
+    }
+    await sleep(50);
+    const third = await new Promise<Socket>((resolve) => {
+      const sock = connect(r.port, "127.0.0.1", () => resolve(sock));
+      sock.on("error", () => undefined);
+    });
+    expect(await closedWithin(third, 2000)).toBe(true);
+    for (const s of held) s.destroy();
+  });
+
+  it("keep-alive の待ちは短い（keepAliveTimeout）: 使われない接続は、閉じられる", async () => {
+    const r = await start({}, { keepAliveTimeoutMs: 200 });
+    const res = await fetch(`${r.url}/v1/whoami`, {
+      headers: { authorization: `Bearer ${r.tokens.m1}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("keep-alive")).toContain("timeout=");
   });
 });

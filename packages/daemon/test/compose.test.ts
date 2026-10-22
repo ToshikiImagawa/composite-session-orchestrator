@@ -389,7 +389,7 @@ describe("createDaemon（起動時のスケジューラ）", () => {
 
 describe("createDaemon（最終削除）", () => {
   /** 前回の実行から残った、アーカイブ済みの木 t（子 c）を、状態の置き場に用意する。 */
-  const seedArchivedTree = (r: ReturnType<typeof rig>, opts: { staleNotice?: boolean } = {}) => {
+  const seedArchivedTree = (r: ReturnType<typeof rig>) => {
     mkdirSync(r.config.stateDir, { mode: 0o700 });
     const store = openSqliteStore(join(r.config.stateDir, "state.db"));
     if (!store.ok) throw new Error("store");
@@ -729,14 +729,13 @@ describe("createDaemon（窓口の回数の制限。T10l）", () => {
     }
   });
 
-  it("認証の失敗が続くと 429 になり、記録には、理由の種類だけが出る（トークンは出ない）", async () => {
+  it("認証の失敗が続いても 401 のまま（Retry-After 付き）で、記録には、理由の種類だけが出る（トークンは出ない）", async () => {
     const r = rig({ rateLimit: { authFailures: { burst: 5, perMinute: 5 } } });
     const d = await boot(r);
     const bogus = "z".repeat(43);
     const statuses: number[] = [];
     for (let i = 0; i < 8; i++) statuses.push((await call(d.url, bogus, "tree.list", {})).status);
-    expect(statuses.slice(0, 5).every((s) => s === 401)).toBe(true);
-    expect(statuses.slice(5).every((s) => s === 429)).toBe(true);
+    expect(statuses.every((s) => s === 401)).toBe(true); // 失敗の制限が尽きても、401（Retry-After 付き）
     const logs = r.logs.join("\n");
     expect(logs).toContain("apiAuthFailed");
     expect(logs).toContain("apiRateLimited");
