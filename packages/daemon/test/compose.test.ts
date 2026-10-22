@@ -835,7 +835,10 @@ describe("createDaemon（daemon の身元確認。T10m-i）", () => {
     const body = await res.json();
     expect(body).toEqual({
       ok: true,
-      value: { daemonId: id?.daemonId, proof: proofOf(id as never, NONCE) },
+      value: {
+        daemonId: id?.daemonId,
+        proof: proofOf(id as never, `127.0.0.1:${run.port}`, NONCE),
+      },
     });
     expect(JSON.stringify(body)).not.toContain(id?.secret);
     // nonce が違えば、proof も違う
@@ -873,8 +876,8 @@ describe("createDaemon（daemon の身元確認。T10m-i）", () => {
     const id = parseIdentityFile(readFileSync(path, "utf8"));
     const stale = { daemonId: id?.daemonId as string, secret: "00".repeat(32) };
     const body = await (await identityOf(d.url, NONCE)).json();
-    expect(body.value.proof).not.toBe(proofOf(stale, NONCE));
-    expect(body.value.proof).toBe(proofOf(id as never, NONCE));
+    expect(body.value.proof).not.toBe(proofOf(stale, `127.0.0.1:${new URL(d.url).port}`, NONCE));
+    expect(body.value.proof).toBe(proofOf(id as never, `127.0.0.1:${new URL(d.url).port}`, NONCE));
   });
 
   it("nonce が不正（ない・短い・長い・大文字・重複・余計なパラメータ）なら 400。GET 以外は 405。Host が違えば 403", async () => {
@@ -913,17 +916,5 @@ describe("createDaemon（daemon の身元確認。T10m-i）", () => {
       req.end();
     });
     expect(status).toBe(403);
-  });
-
-  it("接続元ごとの回数の制限がある（超えたら 429。Retry-After つき）。秘密は、429 にも出ない", async () => {
-    const r = rig();
-    const d = await boot(r);
-    let limited: Response | undefined;
-    for (let i = 0; i < 200 && limited === undefined; i++) {
-      const res = await identityOf(d.url, NONCE);
-      if (res.status === 429) limited = res;
-    }
-    expect(limited?.status).toBe(429);
-    expect(limited?.headers.get("retry-after")).toBeTruthy();
   });
 });

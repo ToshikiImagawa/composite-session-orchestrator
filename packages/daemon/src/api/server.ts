@@ -14,7 +14,7 @@
  * 受け取った資格情報のロールを知るのに使う。Host・Origin の検査と、主体の検査（失効・止まったノードは 401）は、操作の入口と同じ。
  *
  * `GET /v1/identity?nonce=…`（`identity` を渡したときだけ）: 認証なし。daemon の身元確認（T10m-i。`docs/daemon-identity.md`）。`daemonId` と、
- *   秘密を使った `proof` だけを返す（秘密は返さない）。接続元ごとの回数の制限がある。
+ *   秘密と、待ち受けているポートを使った `proof` だけを返す（秘密は返さない）。接続元ごとの、専用の回数の制限がある。
  *
  * もう 1 つの入口 `POST /v1/bind`（`bind` を渡したときだけ）は、トークンを持たない子のための専用の経路で、`nodeId` と bind コードだけで
  * 子ロールのノードトークンを返す（そのノードの既存のトークンは無効になる）（失敗が続いたら 429）。
@@ -48,6 +48,7 @@ import {
   createRateLimiter,
   DEFAULT_AUTH_FAILURE_BURST,
   DEFAULT_AUTH_FAILURE_PER_MINUTE,
+  DEFAULT_IDENTITY_SPEC,
   DEFAULT_PRINCIPAL_SPEC,
   hrtimeMs,
   operationWeight,
@@ -146,6 +147,8 @@ export interface ApiDeps {
   readonly rateLimit?: {
     /** 主体（人間は 1 つ、ノードは nodeId ごと）の bucket。 */
     readonly perPrincipal?: BucketSpec;
+    /** 身元確認（`GET /v1/identity`。接続元ごと）の bucket。認証済みの要求とは別。既定は容量 600・毎秒 200。 */
+    readonly identity?: BucketSpec;
     /** 認証の失敗（接続元ごと）の bucket。 */
     readonly authFailures?: BucketSpec;
     readonly maxKeys?: number;
@@ -291,6 +294,11 @@ export function createApiServer(deps: ApiDeps): ApiServer {
   const mono = rl.monotonicMs;
   const principalLimiter = createRateLimiter({
     spec: rl.perPrincipal ?? DEFAULT_PRINCIPAL_SPEC,
+    ...(mono === undefined ? {} : { nowMs: mono }),
+    ...(rl.maxKeys === undefined ? {} : { maxKeys: rl.maxKeys }),
+  });
+  const identityLimiter = createRateLimiter({
+    spec: rl.identity ?? DEFAULT_IDENTITY_SPEC,
     ...(mono === undefined ? {} : { nowMs: mono }),
     ...(rl.maxKeys === undefined ? {} : { maxKeys: rl.maxKeys }),
   });
@@ -646,10 +654,8 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       });
       return;
     }
-    const used = principalLimiter.tryConsume(
-      `identity:${req.socket.remoteAddress ?? "unknown"}`,
-      1,
-    );
+    // 認証済みの要求とは別の bucket（mcp は、トークンつきの要求の直前ごとに 1 回呼ぶ）。
+    const used = identityLimiter.tryConsume(req.socket.remoteAddress ?? "unknown", 1);
     if (!used.ok) {
       counters.count("rateLimited", "identity");
       tooMany(res, used.retryAfterSec);
@@ -683,7 +689,8 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     }
     send(res, 200, {
       ok: true,
-      value: { daemonId: identity.daemonId, proof: proofOf(identity, nonce) },
+      // 接続先（このサーバーが待ち受けているポート）を、proof に含める。別のポートの偽の daemon が、本物へ中継しても、一致しない。
+      value: { daemonId: identity.daemonId, proof: proofOf(identity, `${HOST}:${port}`, nonce) },
     });
   }
 

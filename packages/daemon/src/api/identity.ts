@@ -7,8 +7,9 @@
  *   ポートを奪っただけの相手は `secret` を知らないので、`proof` を作れない。
  * - 同じユーザーの別プロセスは、ファイルを読めるので、守れない（脅威モデルの範囲外。`docs/daemon-identity.md`）。
  *
- * 形式は、`docs/daemon-identity.md` の契約。`proof = HMAC-SHA256(key = secret のバイト列, data = "cso-daemon-identity-v1\0" + daemonId + "\0" + nonce)` の
- * 16 進（小文字 64 桁）。
+ * 形式は、`docs/daemon-identity.md` の契約。`proof = HMAC-SHA256(key = secret のバイト列,
+ * data = "cso-daemon-identity-v1\0" + daemonId + "\0" + "127.0.0.1:<port>" + "\0" + nonce)` の 16 進（小文字 64 桁）。
+ * `<port>` は、相手が接続した（daemon が待ち受けている）ポート。偽の daemon が、本物へ中継しても、ポートが違うので、proof が一致しない。
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
@@ -51,9 +52,9 @@ export function createIdentity(random: (n: number) => Buffer = randomBytes): Ide
 }
 
 /** `proof` を計算する（daemon と、相手の検証が、同じ式）。 */
-export function proofOf(identity: Identity, nonce: string): string {
+export function proofOf(identity: Identity, hostPort: string, nonce: string): string {
   return createHmac("sha256", Buffer.from(identity.secret, "hex"))
-    .update(`${IDENTITY_CONTEXT}\0${identity.daemonId}\0${nonce}`, "utf8")
+    .update(`${IDENTITY_CONTEXT}\0${identity.daemonId}\0${hostPort}\0${nonce}`, "utf8")
     .digest("hex");
 }
 
@@ -73,12 +74,22 @@ export function writeIdentityFile(path: string, identity: Identity): void {
   const body = `${JSON.stringify({ version: IDENTITY_VERSION, daemonId: identity.daemonId, secret: identity.secret })}\n`;
   const fd = openSync(tmp, "wx", 0o600);
   try {
-    writeSync(fd, body);
-  } finally {
-    closeSync(fd);
+    try {
+      writeSync(fd, body);
+    } finally {
+      closeSync(fd);
+    }
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (e) {
+    // 途中で失敗したら、一時ファイル（秘密を含む）を残さない。
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // すでにない（置き換え済み）: 何もしない
+    }
+    throw e;
   }
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
 }
 
 /** 自分のファイルだけを消す（別の起動が上書きしたものは消さない）。失敗は無視する（停止を止めない）。 */

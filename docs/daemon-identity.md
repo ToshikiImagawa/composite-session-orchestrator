@@ -7,8 +7,8 @@
 
 1. daemon は、**起動のたびに**、ランダムな秘密 `secret`（32 バイト）と、公開の `daemonId`（16 バイト）を作る。
 2. `secret` は、`<stateDir>/daemon-identity`（0600）にだけ置く。窓口は `secret` を返さず、`proof`（HMAC）だけを返す。
-3. mcp は、ファイルから `secret` を読み、ランダムな `nonce` で `GET /v1/identity` を呼び、同じ式で計算した `proof` と**定数時間で**比べる。
-   一致したときだけ、トークンつきの要求（`GET /v1/whoami`・`POST /v1/request`）を送る。
+3. mcp は、**トークンつきの要求（`GET /v1/whoami`・`POST /v1/request`）を送るたびに、その直前に**、ファイルから `secret` を読み、ランダムな `nonce` で
+   `GET /v1/identity` を呼び、同じ式で計算した `proof` と**定数時間で**比べる。一致したときだけ、トークンを送る（キャッシュはしない。§4）。
 4. ポートを奪っただけの相手は `secret` を知らない（ファイルは 0600 の `stateDir` の中）ので、`proof` を作れない。
 
 ## 1. 秘密のファイル
@@ -38,17 +38,24 @@
 
 - 応答には `Cache-Control: no-store`。`secret` は含まれない。
 - 失敗: 400 `invalidRequest`（nonce が不正）、405 `methodNotAllowed`（GET 以外）、403 `invalidHost`、
-  429 `tooManyRequests`（接続元ごとの回数の制限。`Retry-After` あり。ほかの入口と同じ bucket の仕組み）、503 `unavailable`（起動の途中で、まだ身元がない）。
-- 回数の制限に入るので、**毎要求ごとに呼ばない**（下のキャッシュを使う）。
+  429 `tooManyRequests`（回数の制限。`Retry-After` あり）、503 `unavailable`（起動の途中で、まだ身元がない）。
+- **回数の制限は、認証済みの要求とは別の、専用の bucket**（接続元ごと。既定は容量 600・毎秒 200）。mcp は、トークンつきの要求ごとに 1 回呼ぶので、その頻度に耐える値にしてある
+  （loopback で HMAC だけなので、費用は小さい）。認証済みの要求の bucket は、消費しない。
+- **429 が、サービス拒否（DoS）になりうる**: 同じ接続元（loopback はすべて同じ）から、`/v1/identity` を大量に呼ぶと、専用の bucket が尽き、mcp の検証が 429 になる
+  （mcp は、トークンを送らずに、通常の失敗として扱う）。認証済みの要求の側は影響を受けない。loopback の同じユーザーの別プロセスには、もともと守れない（§5）。
 
 ## 3. proof の計算
 
 ```
 proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト列（32 バイト）,
-                          data = "cso-daemon-identity-v1" + "\0" + daemonId + "\0" + nonce ) )
+                          data = "cso-daemon-identity-v1" + "\0" + daemonId + "\0" + hostPort + "\0" + nonce ) )
 ```
 
-- `data` は UTF-8。`\0` は NUL（1 バイト）。`daemonId`・`nonce` は、**文字列（16 進）のまま**つなぐ（バイト列に戻さない）。
+- `hostPort` は、**接続先**: `127.0.0.1:<port>`（固定の文字列 `127.0.0.1`、`:`、ポートの 10 進）。
+  - daemon は、**自分が待ち受けているポート**を使う。
+  - mcp は、**自分が接続した `daemonUrl` のポート**を使う（`daemonUrl` の host が `localhost` でも、`hostPort` は `127.0.0.1:<port>`。ポートが URL にないときは、身元の失敗）。
+  - これにより、偽の daemon（別のポート）が、本物の `/v1/identity` へ中継しても、本物が返す `proof` は本物のポートで作られているので、mcp が期待する `proof` と一致しない（中継の攻撃を防ぐ）。
+- `data` は UTF-8。`\0` は NUL（1 バイト）。`daemonId`・`hostPort`・`nonce` は、**文字列のまま**つなぐ（バイト列に戻さない）。
 - 出力は小文字の 16 進 64 桁。
 - 比較は**定数時間**（`crypto.timingSafeEqual` など。長さが違えば不一致）。
 
@@ -58,22 +65,41 @@ proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト
 | --- | --- |
 | daemonId | `00112233445566778899aabbccddeeff` |
 | secret | `ff` を 32 個（`ffff…ff`、64 桁） |
+| hostPort | `127.0.0.1:43210` |
 | nonce | `0123456789abcdef0123456789abcdef` |
-| proof | `1fb4d3ef33530736dc4f9c6258ea01b10e8300a6eac867298eadf58b76ccad92` |
+| proof | `a4c03bfab8207e7a550d464c02f9467f4bed4a7e504bfb5da6fe98b22e29be3a` |
+| （hostPort が `127.0.0.1:43211` のときの proof） | `1577069198737695bc2df73dc098dce25f6abd3157c269450ab49f29d58f4855` |
 
 ## 4. mcp の手順（契約）
 
-1. **いつ**: 起動時、と、トークンつきの要求を送る前（検証済みの結果のキャッシュが切れていれば）。
-2. **検証**: 新しいランダムな `nonce`（16〜64 バイトの乱数を 16 進にしたもの）で `GET /v1/identity` を呼ぶ。
-   応答の `daemonId` が、ファイルの `daemonId` と一致し、`proof` が一致すれば成功。
-3. **失敗したとき（1 度だけやり直す）**: daemon が再起動すると、`secret` が変わる。**検証に失敗したら、ファイルを読み直して、1 度だけ**やり直す。
-   それでも失敗なら、**トークンを送らず**、失敗コード `daemon_identity_failed` で失敗させる（原因に、`secret`・`proof`・トークンを出さない）。
-   接続できない・429・503 は、身元の失敗ではなく、通常の接続の失敗として扱う（429 は `Retry-After` に従う）。
-4. **キャッシュ**: 成功した結果は、**最長 30 秒**まで使い回してよい。応答の `daemonId` が、キャッシュ済みの値と変わったら、キャッシュを捨てて、検証をやり直す
-   （`daemonId` は、トークンつきの要求の前に、`/v1/identity` で確かめた値）。
-5. **`--config` がないとき**: 検証できないので、**警告を出して、検証なしで動く**（従来の動き）。`--config` を使う形が、標準の起動手順。
-   `--config` があるのに、ファイルが読めない・形が違うときは、**検証に失敗したものとして扱う**（トークンを送らない）。
-6. ファイルは、毎回開き直して読む（古い `secret` を、メモリに長く持たない。読み直しの 1 度を含む）。
+1. **いつ**: **トークンつきの要求（`whoami`・`request`）を送るたびに、その直前に**。**キャッシュはしない**（検証と送信の間に、ポートが奪われても、次の要求で必ず検証し直す。
+   loopback で HMAC だけなので、費用は小さい）。起動時にも 1 回検証する（失敗したら、起動の警告ではなく、最初の要求の失敗として扱ってよい）。
+2. **検証**: 新しいランダムな `nonce`（16〜64 バイトの乱数を 16 進にしたもの）で `GET /v1/identity`（Bearer なし）を呼ぶ。応答が 200 で、`daemonId` がファイルの `daemonId` と一致し、
+   `proof` が、§3 の式（`hostPort` は自分が接続したポート）の結果と一致すれば成功。成功したら、そのあと**同じ接続先へ**トークンつきの要求を送る。
+3. **失敗したとき（1 度だけやり直す）**: daemon が再起動すると、`secret` が変わる。**身元の失敗（下の表）なら、ファイルを読み直して、1 度だけ**やり直す。
+   それでも身元の失敗なら、**トークンを送らず**、失敗コード `daemon_identity_failed` で失敗させる（原因に、`secret`・`proof`・トークンを出さない）。
+4. **ファイルは、毎回開き直して読む**（古い `secret` を、メモリに長く持たない。3 の読み直しもこれ）。
+5. **`--config` がないとき（fail-closed）**: 検証できないので、**既定では起動しない**。環境変数 `CSO_MCP_ALLOW_UNVERIFIED=1` を付けたときだけ、検証なしで動く
+   （そのときは、起動時に**警告を 1 回**出す）。`--config` を使う形が、標準の起動手順。
+   `--config` があるのに、ファイルが読めない・形が違うときは、**身元の失敗として扱う**（トークンを送らない。1 の毎回の検証の中で、3 のやり直しを 1 度）。
+6. **`stateDir` が相対パスなら、拒否する**（設定ファイルの `stateDir` は絶対パス。daemon の設定の検査と同じ。相対パスだと、読むファイルが、起動した場所で変わってしまう）。起動を失敗させる。
+
+### 失敗の分類（身元の失敗か、通常の失敗か）
+
+| 状況 | 分類 | mcp の動き |
+| --- | --- | --- |
+| 200 だが、`proof` が不一致 | **身元の失敗** | 1 度だけ、ファイルを読み直してやり直す。それでも失敗なら、トークンを送らず `daemon_identity_failed` |
+| 200 だが、`daemonId` が、ファイルの値と不一致 | **身元の失敗** | 同上 |
+| 200 だが、応答の形が不正（JSON でない・`ok` がない・`daemonId`・`proof` が 16 進でない、など） | **身元の失敗** | 同上 |
+| 404（この入口がない） | **身元の失敗**（古い daemon か、別のプロセス） | 同上 |
+| ファイルが読めない・形が違う（`--config` あり） | **身元の失敗** | 同上（読み直しは 1 度） |
+| 接続できない・タイムアウト | 通常の失敗 | 通常の接続の失敗（`daemon_unreachable`・`daemon_timeout`）。トークンは送らない |
+| 429 | 通常の失敗 | `Retry-After` に従って待つ（既存の中継と同じ。上限あり）。トークンは送らない |
+| 503（起動の途中） | 通常の失敗 | 通常の接続の失敗として扱う。トークンは送らない |
+| 400・403・405 | **身元の失敗** | mcp が送る要求が不正（nonce・Host）か、別のプロセス。同上 |
+| 5xx（503 以外）・そのほかの 4xx・3xx | **身元の失敗** | 同上（リダイレクトには従わない） |
+
+「トークンを送らない」のは、**身元の失敗と、通常の失敗の両方**。トークンを送るのは、検証に成功したときだけ。
 
 ## 5. 脅威モデル（範囲）
 
@@ -81,8 +107,8 @@ proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト
   mcp は、トークンを送らない。
 - **守れないもの（範囲外）**:
   - **同じユーザーの別プロセス**: 0600 のファイルを読めるので、`secret` を取れる。同じユーザーで動くコードは、もともと信頼の範囲内（トークンのファイルも同じ）。
-  - **中継（MITM）**: 本物の daemon の前に立って、`/v1/identity` を本物へ転送し、その後のトークンつきの要求も転送する相手。ポートを奪ったうえで、本物も動いている状況が必要で、
-    その相手は、本物の daemon が受ける要求を、そのまま転送できる。`secret` の保護ではなく、ポートの占有の防止（`stateDir`・ポートの設定）で守る。
+  - **完全な中継（MITM）**: 本物の daemon が別のポートで動いていて、その前に立つ相手が、`/v1/identity` だけでなく、トークンつきの要求も、そのまま本物へ転送する場合。
+    `hostPort` を `proof` に含めるので、`/v1/identity` を本物へ中継するだけでは、`proof` が一致しない（§3）。ただし、同じ `hostPort` の接続を奪えた相手には、守れない。
   - **子 → mcp の方向**（子が `mcpUrl` の偽物へトークンを送る）: 子の MCP クライアント（SDK）の外なので、この仕組みでは扱わない。別の課題（T10m-j）。
 - `secret` は、ログ・応答・エラーに出さない。
 
@@ -90,4 +116,4 @@ proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト
 
 - `packages/daemon/src/api/identity.ts`（`createIdentity`・`proofOf`・`writeIdentityFile`・`removeIdentityFile`・`parseIdentityFile`・`isValidNonce`）。
 - 窓口は `packages/daemon/src/api/server.ts` の `handleIdentity`。`createDaemon` の `start()` が、ファイルを書いてから待ち受ける。`RunningDaemon.identityPath`。
-- 試験: `packages/daemon/test/api/identity.test.ts`（試験ベクトル）・`packages/daemon/test/compose.test.ts`（実 HTTP）。
+- 試験: `packages/daemon/test/api/identity.test.ts`（試験ベクトル）・`packages/daemon/test/api/identity-server.test.ts`（中継・回数の制限）・`packages/daemon/test/compose.test.ts`（実 HTTP）。

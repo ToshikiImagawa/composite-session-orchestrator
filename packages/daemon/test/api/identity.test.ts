@@ -27,23 +27,33 @@ afterEach(() => {
 const VECTOR = {
   daemonId: "00112233445566778899aabbccddeeff",
   secret: "ff".repeat(32),
+  hostPort: "127.0.0.1:43210",
   nonce: "0123456789abcdef0123456789abcdef",
-  proof: "1fb4d3ef33530736dc4f9c6258ea01b10e8300a6eac867298eadf58b76ccad92",
+  proof: "a4c03bfab8207e7a550d464c02f9467f4bed4a7e504bfb5da6fe98b22e29be3a",
+  /** 同じ入力で、ポートだけが違う（43211）ときの proof。 */
+  proofOtherPort: "1577069198737695bc2df73dc098dce25f6abd3157c269450ab49f29d58f4855",
 };
 
 describe("身元の proof（T10m-i）", () => {
   it("契約の試験ベクトルと一致する（HMAC-SHA256。鍵は秘密のバイト列、データは文脈・daemonId・nonce を NUL でつなぐ）", () => {
-    expect(proofOf({ daemonId: VECTOR.daemonId, secret: VECTOR.secret }, VECTOR.nonce)).toBe(
-      VECTOR.proof,
-    );
+    expect(
+      proofOf({ daemonId: VECTOR.daemonId, secret: VECTOR.secret }, VECTOR.hostPort, VECTOR.nonce),
+    ).toBe(VECTOR.proof);
+  });
+
+  it("ポートだけが違っても、proof は変わる（試験ベクトル。中継の攻撃を防ぐ）", () => {
+    const id = { daemonId: VECTOR.daemonId, secret: VECTOR.secret };
+    expect(proofOf(id, "127.0.0.1:43211", VECTOR.nonce)).toBe(VECTOR.proofOtherPort);
+    expect(VECTOR.proofOtherPort).not.toBe(VECTOR.proof);
   });
 
   it("nonce・秘密・daemonId のどれが違っても、proof は変わる", () => {
     const id = { daemonId: VECTOR.daemonId, secret: VECTOR.secret };
-    const base = proofOf(id, VECTOR.nonce);
-    expect(proofOf(id, `${VECTOR.nonce.slice(0, -1)}0`)).not.toBe(base);
-    expect(proofOf({ ...id, secret: "ee".repeat(32) }, VECTOR.nonce)).not.toBe(base);
-    expect(proofOf({ ...id, daemonId: "11".repeat(16) }, VECTOR.nonce)).not.toBe(base);
+    const hp = VECTOR.hostPort;
+    const base = proofOf(id, hp, VECTOR.nonce);
+    expect(proofOf(id, hp, `${VECTOR.nonce.slice(0, -1)}0`)).not.toBe(base);
+    expect(proofOf({ ...id, secret: "ee".repeat(32) }, hp, VECTOR.nonce)).not.toBe(base);
+    expect(proofOf({ ...id, daemonId: "11".repeat(16) }, hp, VECTOR.nonce)).not.toBe(base);
   });
 
   it("起動ごとの身元は、毎回違う（形式: daemonId 32 桁・secret 64 桁の小文字 16 進）", () => {
