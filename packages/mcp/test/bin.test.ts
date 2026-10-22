@@ -7,19 +7,27 @@ const noFile = () => {
   throw new Error("読まない");
 };
 const cfg = (mcpUrl: unknown) => () => JSON.stringify({ stateDir: "/s", mcpUrl });
+/** 検証なしで動く（`--config` なし）ための環境変数。ちょうど "1" のときだけ有効。 */
+const UNVERIFIED = { CSO_MCP_ALLOW_UNVERIFIED: "1" };
 
 describe("cso-mcp の引数", () => {
   it("--daemon-url と --port を読む。環境変数でも指定できる（引数が優先）", () => {
-    expect(parseArgs(["--daemon-url", URL1, "--port", "8123"], {}, { readFile: noFile })).toEqual({
+    expect(
+      parseArgs(["--daemon-url", URL1, "--port", "8123"], UNVERIFIED, { readFile: noFile }),
+    ).toEqual({
       ok: true,
       value: { daemonUrl: URL1, port: 8123 },
     });
     expect(
-      parseArgs([], { CSO_DAEMON_URL: URL1, CSO_MCP_PORT: "8123" }, { readFile: noFile }),
+      parseArgs(
+        [],
+        { CSO_DAEMON_URL: URL1, CSO_MCP_PORT: "8123", ...UNVERIFIED },
+        { readFile: noFile },
+      ),
     ).toEqual({ ok: true, value: { daemonUrl: URL1, port: 8123 } });
     const both = parseArgs(
       ["--port", "9000"],
-      { CSO_DAEMON_URL: URL1, CSO_MCP_PORT: "8123" },
+      { CSO_DAEMON_URL: URL1, CSO_MCP_PORT: "8123", ...UNVERIFIED },
       { readFile: noFile },
     );
     expect(both.ok && both.value.port).toBe(9000);
@@ -49,7 +57,10 @@ describe("--config（daemon の設定から mcpUrl のポートを読む）", ()
       {},
       { readFile: cfg("http://127.0.0.1:7788/mcp") },
     );
-    expect(r).toEqual({ ok: true, value: { daemonUrl: URL1, port: 7788 } });
+    expect(r).toEqual({
+      ok: true,
+      value: { daemonUrl: URL1, port: 7788, identityPath: "/s/daemon-identity" },
+    });
   });
 
   it("環境変数 CSO_DAEMON_CONFIG でも指定できる", () => {
@@ -128,7 +139,7 @@ describe("起動時の確認（daemon に届くか）", () => {
     }) as unknown as typeof fetch;
     const x = io();
     const port = String(await freePort());
-    const r = await main(["--daemon-url", URL1, "--port", port], {}, x.io, {
+    const r = await main(["--daemon-url", URL1, "--port", port], UNVERIFIED, x.io, {
       fetch: fetchImpl,
       readFile: noFile,
     });
@@ -144,7 +155,7 @@ describe("起動時の確認（daemon に届くか）", () => {
     }) as unknown as typeof fetch;
     const x = io();
     const port = String(await freePort());
-    const r = await main(["--daemon-url", URL1, "--port", port], {}, x.io, {
+    const r = await main(["--daemon-url", URL1, "--port", port], UNVERIFIED, x.io, {
       fetch: fetchImpl,
       readFile: noFile,
     });
@@ -157,5 +168,94 @@ describe("起動時の確認（daemon に届くか）", () => {
     const x = io();
     const r = await main([], {}, x.io, { readFile: noFile });
     expect(r.exitCode).toBe(2);
+  });
+});
+
+describe("daemon の身元確認の設定（T10m-i2）", () => {
+  const args = ["--daemon-url", URL1, "--port", "8123"];
+
+  it("--config がないと、既定では起動しない（invalid_config）", () => {
+    const r = parseArgs(args, {}, { readFile: noFile });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("invalid_config");
+      expect(r.error.cause).toContain("CSO_MCP_ALLOW_UNVERIFIED=1");
+    }
+  });
+
+  it.each(["true", "", "0", "yes", " 1", "1 ", "TRUE", "2"])(
+    "CSO_MCP_ALLOW_UNVERIFIED=%j では、検証なしで動かさない（ちょうど 1 のときだけ）",
+    (v) => {
+      expect(parseArgs(args, { CSO_MCP_ALLOW_UNVERIFIED: v }, { readFile: noFile }).ok).toBe(false);
+    },
+  );
+
+  it("CSO_MCP_ALLOW_UNVERIFIED=1 なら、--config なしで動く（identityPath なし）", () => {
+    const r = parseArgs(args, UNVERIFIED, { readFile: noFile });
+    expect(r).toEqual({ ok: true, value: { daemonUrl: URL1, port: 8123 } });
+  });
+
+  it("--config があるときは、CSO_MCP_ALLOW_UNVERIFIED=1 があっても検証する（identityPath あり）", () => {
+    const r = parseArgs(["--daemon-url", URL1, "--config", "/c.json"], UNVERIFIED, {
+      readFile: cfg("http://127.0.0.1:7788/mcp"),
+    });
+    expect(r.ok && r.value.identityPath).toBe("/s/daemon-identity");
+  });
+
+  it.each([
+    ["stateDir が相対パス", { stateDir: "state", mcpUrl: "http://127.0.0.1:7788/mcp" }],
+    ["stateDir が ./ で始まる相対パス", { stateDir: "./s", mcpUrl: "http://127.0.0.1:7788/mcp" }],
+    ["stateDir が空", { stateDir: "", mcpUrl: "http://127.0.0.1:7788/mcp" }],
+    ["stateDir が文字列でない", { stateDir: 5, mcpUrl: "http://127.0.0.1:7788/mcp" }],
+    ["stateDir がない", { mcpUrl: "http://127.0.0.1:7788/mcp" }],
+  ])("設定が不正（%s）なら起動を拒否する", (_n, conf) => {
+    const r = parseArgs(
+      ["--daemon-url", URL1, "--config", "/c.json"],
+      {},
+      { readFile: () => JSON.stringify(conf) },
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("invalid_config");
+  });
+
+  it("検証なしで動くときは、起動のログ（identityUnverified）を 1 回だけ出す", async () => {
+    const fetchImpl = (async () => new Response("{}", { status: 401 })) as unknown as typeof fetch;
+    const x = io();
+    const port = String(await freePort());
+    const r = await main(["--daemon-url", URL1, "--port", port], UNVERIFIED, x.io, {
+      fetch: fetchImpl,
+      readFile: noFile,
+    });
+    expect(r.exitCode).toBe(0);
+    const warned = x.err.filter((l) => l.includes("identityUnverified"));
+    expect(warned).toHaveLength(1);
+    await r.server?.close();
+  });
+
+  it("--config なしで、環境変数もなければ、終了コード 2（待ち受けない）", async () => {
+    const x = io();
+    const r = await main(["--daemon-url", URL1, "--port", "8123"], {}, x.io, { readFile: noFile });
+    expect(r.exitCode).toBe(2);
+    expect(r.server).toBeUndefined();
+  });
+
+  it("検証ありで起動したとき、起動時にも 1 回検証し、失敗しても起動は止めずに警告を出す", async () => {
+    const fetchImpl = (async (u: string) => {
+      if (u.includes("/v1/identity")) return new Response("{}", { status: 404 });
+      return new Response("{}", { status: 401 });
+    }) as unknown as typeof fetch;
+    const x = io();
+    const port = String(await freePort());
+    const r = await main(["--daemon-url", URL1, "--config", "/c.json", "--port", port], {}, x.io, {
+      fetch: fetchImpl,
+      readFile: () => JSON.stringify({ stateDir: "/s", mcpUrl: `http://127.0.0.1:${port}/mcp` }),
+      readIdentityFile: () => {
+        throw new Error("ENOENT");
+      },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(x.err.join("")).toContain("identityCheckFailed");
+    expect(x.err.join("")).not.toContain("identityUnverified");
+    await r.server?.close();
   });
 });

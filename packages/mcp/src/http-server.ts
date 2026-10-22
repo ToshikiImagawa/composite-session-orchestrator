@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
 import { type Failure, failure, ok, type Result } from "@cso/core";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { IdentityVerifier } from "./identity.js";
 import { createRelay, MAX_RELAY_BYTES } from "./relay.js";
 import { openSession } from "./server.js";
 
@@ -19,11 +20,22 @@ const HOST = "127.0.0.1";
 const PATH = "/mcp";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
-export type McpHttpLogEvent = {
-  readonly event: "sessionFailed";
-  readonly code: string;
-  readonly at: string;
-};
+export type McpHttpLogEvent =
+  | { readonly event: "sessionFailed"; readonly code: string; readonly at: string }
+  /** 検証なしで動いている（起動のとき 1 度だけ）。 */
+  | { readonly event: "identityUnverified"; readonly at: string };
+
+/**
+ * daemon の身元確認の方式。`verified`: トークンつきの要求の直前に、毎回、検証する。`unverified`: 検証しない
+ * （`--config` なしの `CSO_MCP_ALLOW_UNVERIFIED=1`）。そのときは、起動のログと、すべての応答のヘッダー
+ * （`x-cso-identity: unverified`）で分かるようにする。
+ */
+export type IdentityMode =
+  | { readonly kind: "verified"; readonly verifier: IdentityVerifier }
+  | { readonly kind: "unverified" };
+
+/** 検証なしで動いているときの、応答のヘッダー。 */
+export const UNVERIFIED_HEADER = "x-cso-identity";
 
 /** 接続の上限・タイムアウト（遅い接続・多すぎる接続への対策）。 */
 export const MAX_CONNECTIONS = 64;
@@ -38,6 +50,8 @@ export const SHUTDOWN_GRACE_MS = 8_000;
 export interface McpHttpOptions {
   /** daemon の窓口（ループバックの URL）。 */
   readonly daemonUrl: string;
+  /** daemon の身元確認の方式（必須。省略して、検証なしで動くことがないように）。 */
+  readonly identity: IdentityMode;
   readonly fetch?: typeof fetch;
   /** 本文の上限（バイト）。既定 1 MiB。 */
   readonly maxBodyBytes?: number;
@@ -155,6 +169,17 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
     }
   };
 
+  let warnedUnverified = false;
+  const warnUnverified = (): void => {
+    if (opts.identity.kind !== "unverified" || warnedUnverified) return;
+    warnedUnverified = true; // 警告は 1 回だけ
+    try {
+      opts.logger?.({ event: "identityUnverified", at: new Date().toISOString() });
+    } catch {
+      // 記録の失敗は応答を変えない
+    }
+  };
+
   /** listen で決まったポート。Host・Origin の照合に使う（それ以外のポートは拒否）。 */
   let listenPort = 0;
   const allowedAuthority = (hostname: string, port: string): boolean =>
@@ -190,6 +215,7 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
   };
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (opts.identity.kind === "unverified") res.setHeader(UNVERIFIED_HEADER, "unverified");
     const hostHeader = req.headers.host;
     if (typeof hostHeader !== "string" || !hostAllowed(hostHeader)) {
       return send(
@@ -231,6 +257,7 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
         : createRelay({
             daemonUrl: opts.daemonUrl,
             token,
+            ...(opts.identity.kind === "verified" ? { verifier: opts.identity.verifier } : {}),
             ...(opts.fetch ? { fetch: opts.fetch } : {}),
             ...(opts.relayTimeoutMs !== undefined ? { timeoutMs: opts.relayTimeoutMs } : {}),
           });
@@ -346,6 +373,7 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
       });
       const actual = (server.address() as AddressInfo).port;
       listenPort = actual;
+      warnUnverified();
       return { port: actual, url: `http://${HOST}:${actual}` };
     },
     async close() {

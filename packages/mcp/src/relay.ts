@@ -4,6 +4,7 @@
  * 外へ出すのはループバックの daemon だけ。トークンと本文は、失敗の原因にもログにも入れない。
  */
 import { type Failure, failure, ok, type Result, sanitizeText } from "@cso/core";
+import type { IdentityVerifier } from "./identity.js";
 
 /** 中継する本文・応答の上限（daemon の窓口と同じ 1 MiB）。 */
 export const MAX_RELAY_BYTES = 1024 * 1024;
@@ -35,6 +36,12 @@ export interface RelayOptions {
   /** 指定すると、全操作のタイムアウトをこの値にする（既定は操作ごと。`timeoutFor`）。 */
   readonly timeoutMs?: number;
   readonly maxBytes?: number;
+  /**
+   * daemon の身元の検証（T10m-i2）。渡すと、トークンつきの要求（whoami・request）を送る**直前に毎回**検証し、失敗したら
+   * トークンを送らずに失敗を返す（送っていないので、操作は実行されていない）。省略すると検証しない（`cso-mcp` が
+   * `--config` なしの `CSO_MCP_ALLOW_UNVERIFIED=1` で動くときと、テスト用）。
+   */
+  readonly verifier?: IdentityVerifier;
   /** 429・409 のあとの待ち（テストで差し替える）。既定は実時間。 */
   readonly sleep?: (ms: number) => Promise<void>;
   /** 待ちに足すジッター（0〜500ms）の乱数（0 以上 1 未満。テストで差し替える）。既定は `Math.random`。 */
@@ -144,6 +151,11 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
     init: RequestInit,
     timeout: number,
   ): Promise<{ result: Result<unknown>; transport: boolean; retrySec?: number }> {
+    if (opts.verifier !== undefined) {
+      // トークンを送る前に、毎回、相手が本物の daemon か確かめる。失敗なら、トークンを送らない（操作は実行されていない）。
+      const v = await opts.verifier.verify();
+      if (!v.ok) return { result: { ok: false, error: v.failure }, transport: false };
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     const done = (result: Result<unknown>) => ({ result, transport: false });
