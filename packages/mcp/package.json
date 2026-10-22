@@ -20,5 +20,8 @@
   },
   "devDependencies": {
     "@types/node": "22.20.5"
+  },
+  "bin": {
+    "cso-mcp": "./dist/bin.js"
   }
 }

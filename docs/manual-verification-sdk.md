@@ -9,8 +9,7 @@
 - Node 22 以上、`git`、`lsof`。`pnpm install && pnpm build` 済み。
 - Claude の認証が、実行する環境にあること（`ANTHROPIC_API_KEY` または、`claude` CLI のログイン）。認証情報は、設定ファイルにも、このリポジトリにも書かない。
 - 依存: `@anthropic-ai/claude-agent-sdk` **0.3.292**（2026-10-06 公開。固定。ライセンスは `SEE LICENSE IN README.md`。ユーザーが確認・承認）。推移的な依存の公開日は `docs/dependency-release-ages.md`。
-- **MCP サーバーの起動口は、まだない**（`packages/mcp` はツールの定義だけで、待ち受けるプロセスがない）。このため、子が使う `mcp__node__*`
-  （`report.progress`・`report.done` など）は、いまは接続できない（init の MCP の状態が `failed` になる）。手順 6〜7 は、MCP の起動口ができてから行う。
+- MCP サーバー（`cso-mcp`）は、`packages/mcp` の bin（`pnpm build` で `packages/mcp/dist/bin.js` ができる）。手順 6〜7 は、これを起動して行う（下の「MCP サーバーの起動」）。
 
 ## 準備
 
@@ -56,6 +55,36 @@
    ROOT=$W/state/root-token; HUMAN=$W/state/human-token
    ```
 
+## MCP サーバーの起動（手順 6・7 の前提）
+
+起動の順序は **daemon → `cso-mcp` → 子**。子は、daemon が起動のときに渡す `mcpUrl`（設定の値）と、ノードのトークンで `cso-mcp` に接続する。
+
+1. daemon を起動する（準備の 3）。窓口の URL（`$URL`）が出る。
+2. `cso-mcp` を起動する。`--port` は、**設定の `mcpUrl` のポートと同じ**にする（ずれると、子が接続できない）。`--config` を渡すと、設定の `mcpUrl` のポートを読む（`--port` と違えば起動を拒否する）。
+
+   ```sh
+   node packages/mcp/dist/bin.js --daemon-url "$URL" --config "$W/config.json"
+   # または: node packages/mcp/dist/bin.js --daemon-url "$URL" --port 7777
+   ```
+
+   起動のときに、daemon に届くか確かめる（届かなければ失敗する）。`{"event":"listening","url":"http://127.0.0.1:7777/mcp"}` が標準出力に出る。
+3. 単体で確かめる（トークンのファイルは `$W/state/` にある）。
+
+   ```sh
+   # 子のトークンで、子のツールだけが見える
+   curl -s -X POST http://127.0.0.1:7777/mcp -H "authorization: Bearer $(cat <子のトークンのファイル>)" \
+     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+   ```
+
+   期待する結果:
+   - 子のトークン: 子のロールの 5 ツール（`report_progress`・`report_decision`・`report_outOfScope`・`report_done`・`scope_extend`）だけ（`ROLE_OPERATIONS.child` の件数。統合のツールは見えない）。
+   - 統合のトークン（`$ROOT`）: 統合のロールのツール（`node_spawn`・`node_send`・`node_stop`・`inbox_fetch` など）。
+   - 人間のトークン（`$HUMAN`）: 403（MCP では、人間用の操作を公開しない）。トークンなし・無効なトークンは 401。
+4. 子に渡す MCP の設定は、daemon が組み立てる（`mcpServers.node = { type: "http", url: <mcpUrl>, headers: { Authorization: "Bearer <ノードのトークン>" } }`）。手で試すときは、この形で書く。`.mcp.json` に書くトークンは、使い捨てのリポジトリでだけにする。
+
+停止するときは、`cso-mcp` に SIGINT・SIGTERM を送る（処理中の呼び出しが終わるのを最大 8 秒待ってから止まる）。
+
 ## 確認する項目
 
 | # | 操作 | 期待 | 確認すること |
@@ -65,8 +94,8 @@
 | 3 | フック: 子が `src/` の外（例: `README.md`）を書こうとする | 拒否される（`scope.violation` が受信箱に出る）。`src/` の中への書き込みは通る | **`permissionMode: "dontAsk"` のもとで、フックが `allow` を返したツールが、確認なしに実行される**こと（実行されなければ、`claude-launcher.ts` の権限の設定を見直す） |
 | 4 | フックが許可するツール名 | `LS`・`TodoWrite`・`ToolSearch`・`BashOutput` などが拒否されない | 実際に使われたツール名を記録し、`hook-policy.ts` の許可の一覧と合わせる（足りなければ足す） |
 | 5 | 追加指示: `req $ROOT node.send '{"nodeId":"<id>","text":"途中経過を 1 行で答えて"}'` | `{"status":"queued"}`。子が（実行中ならツール完了後に）応答する | 配送の記録（`node.instructionDelivered`）が出る |
-| 6 | 子の報告（MCP の起動口ができてから） | `report.done` → 受信箱に `done` | 完了報告の根拠が、受け入れ基準ごとに付く |
-| 7 | 判断（MCP の起動口ができてから）: 子が `report.decision` | 受信箱に判断要求 → `req $HUMAN decision.answer …` で回答 → 子が再開 | `pauseNodeIds` の子が止まり、回答で再開する |
+| 6 | 子の報告（`cso-mcp` を起動して）: 子が `report_done` を呼ぶ（`mcp__node__report_done`） | `report.done` → 受信箱に `done`。init の MCP の状態が `connected` で、`mcp__node__*` のツールが見える | 完了報告の根拠が、受け入れ基準ごとに付く。子のトークンで統合のツール（`node_spawn` など）は見えない／呼べない |
+| 7 | 判断（`cso-mcp` を起動して）: 子が `report_decision` を呼ぶ | 受信箱に判断要求 → `req $HUMAN decision.answer …` で回答 → 子が再開 | `pauseNodeIds` の子が止まり、回答で再開する |
 | 8 | 穏当な停止: `req $ROOT node.stop '{"nodeId":"<id>","mode":"graceful"}'` | `stopping` → `stopped` | 実行中のツールが打ち切られ、`stopObserved` が `withinGrace` か `interrupted` で記録される |
 | 9 | 即時の停止: 別の子で `mode":"immediate"` | プロセスが終了し、`stopped` | **子のプロセスが残らないこと**: `lsof +D <作業ツリー>` が空で、`ps -eo pid,ppid,args` に、その作業ツリーを cwd とする `claude` のプロセスがない（孫のプロセス〔`sleep` など〕も含む）。残っていれば、`stopIncomplete` になっているはず |
 | 10 | 回収: 受理（`node.review`）の後に `node.reclaimPreview` → `node.reclaim` | 作業ツリーが消え、ブランチが `-d` で消える（統合済みのときだけ） | 未統合・未保存の変更があるときは、拒否される（強制しない） |
