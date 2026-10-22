@@ -10,11 +10,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Failure, ok, planPurge, type Result } from "@cso/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deriveId } from "../src/api/handlers/context.js";
+import { parseIdentityFile, proofOf } from "../src/api/identity.js";
 import { FileTokenRepository } from "../src/api/token-repository.js";
 import {
   createDaemon,
@@ -810,5 +812,118 @@ describe("createDaemon（自動の最終削除の保留。T13f-h）", () => {
       until: "明日",
     });
     expect(bad.status).toBe(400);
+  });
+});
+
+describe("createDaemon（daemon の身元確認。T10m-i）", () => {
+  const identityOf = (url: string, nonce: string, init: RequestInit = {}) =>
+    fetch(`${url}/v1/identity?nonce=${nonce}`, init);
+  const NONCE = "0123456789abcdef0123456789abcdef";
+
+  it("起動すると、秘密のファイル（0600）が作られ、認証なしの /v1/identity が、その秘密で作った proof を返す（秘密は返さない）。停止で消える", async () => {
+    const r = rig();
+    const made = createDaemon(r.config, r.deps);
+    if (!made.ok) throw new Error(made.error.code);
+    const run = await made.value.start();
+    const text = readFileSync(run.identityPath, "utf8");
+    expect(statSync(run.identityPath).mode & 0o777).toBe(0o600);
+    const id = parseIdentityFile(text);
+    expect(id).toBeDefined();
+    const res = await identityOf(run.url, NONCE);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = await res.json();
+    expect(body).toEqual({
+      ok: true,
+      value: { daemonId: id?.daemonId, proof: proofOf(id as never, NONCE) },
+    });
+    expect(JSON.stringify(body)).not.toContain(id?.secret);
+    // nonce が違えば、proof も違う
+    const other = await (await identityOf(run.url, "ab".repeat(16))).json();
+    expect(other.value.proof).not.toBe(body.value.proof);
+    await made.value.stop();
+    expect(existsSync(run.identityPath)).toBe(false);
+  });
+
+  it("異常終了で古いファイルが残っていても、次の起動で必ず作り直される。再起動のたびに、身元（daemonId・秘密）が変わる", async () => {
+    const r = rig();
+    mkdirSync(r.config.stateDir, { recursive: true, mode: 0o700 });
+    const path = join(r.config.stateDir, "daemon-identity");
+    writeFileSync(path, "古い内容", { mode: 0o600 });
+    const a = createDaemon(r.config, r.deps);
+    if (!a.ok) throw new Error(a.error.code);
+    const runA = await a.value.start();
+    const idA = parseIdentityFile(readFileSync(path, "utf8"));
+    expect(idA).toBeDefined();
+    await a.value.stop();
+    const b = createDaemon(r.config, r.deps);
+    if (!b.ok) throw new Error(b.error.code);
+    await b.value.start();
+    cleanups.push(() => b.value.stop());
+    const idB = parseIdentityFile(readFileSync(path, "utf8"));
+    expect(idB?.daemonId).not.toBe(idA?.daemonId);
+    expect(idB?.secret).not.toBe(idA?.secret);
+    expect(runA.identityPath).toBe(path);
+  });
+
+  it("古いファイルが残っているままでも、起動前の（古い秘密の）proof は通用しない: 新しい秘密で作った proof だけが返る", async () => {
+    const r = rig();
+    const d = await boot(r);
+    const path = join(r.config.stateDir, "daemon-identity");
+    const id = parseIdentityFile(readFileSync(path, "utf8"));
+    const stale = { daemonId: id?.daemonId as string, secret: "00".repeat(32) };
+    const body = await (await identityOf(d.url, NONCE)).json();
+    expect(body.value.proof).not.toBe(proofOf(stale, NONCE));
+    expect(body.value.proof).toBe(proofOf(id as never, NONCE));
+  });
+
+  it("nonce が不正（ない・短い・長い・大文字・重複・余計なパラメータ）なら 400。GET 以外は 405。Host が違えば 403", async () => {
+    const r = rig();
+    const d = await boot(r);
+    for (const q of [
+      "",
+      "?nonce=",
+      `?nonce=${"a".repeat(30)}`,
+      `?nonce=${"a".repeat(130)}`,
+      `?nonce=${"A".repeat(32)}`,
+      `?nonce=${NONCE}&nonce=${NONCE}`,
+      `?nonce=${NONCE}&x=1`,
+    ]) {
+      const res = await fetch(`${d.url}/v1/identity${q}`);
+      expect(res.status, q).toBe(400);
+    }
+    expect((await fetch(`${d.url}/v1/identity?nonce=${NONCE}`, { method: "POST" })).status).toBe(
+      405,
+    );
+    const status = await new Promise<number>((resolve, reject) => {
+      const u = new URL(d.url);
+      const req = httpRequest(
+        {
+          host: u.hostname,
+          port: u.port,
+          path: `/v1/identity?nonce=${NONCE}`,
+          headers: { host: "evil.example" },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(status).toBe(403);
+  });
+
+  it("接続元ごとの回数の制限がある（超えたら 429。Retry-After つき）。秘密は、429 にも出ない", async () => {
+    const r = rig();
+    const d = await boot(r);
+    let limited: Response | undefined;
+    for (let i = 0; i < 200 && limited === undefined; i++) {
+      const res = await identityOf(d.url, NONCE);
+      if (res.status === 429) limited = res;
+    }
+    expect(limited?.status).toBe(429);
+    expect(limited?.headers.get("retry-after")).toBeTruthy();
   });
 });

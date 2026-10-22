@@ -33,6 +33,13 @@ import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-sa
 import { waitRequestKey } from "./api/handlers/context.js";
 import { createPurger, type PurgeHandlerDeps } from "./api/handlers/purge-handlers.js";
 import {
+  createIdentity,
+  IDENTITY_FILE,
+  type Identity,
+  removeIdentityFile,
+  writeIdentityFile,
+} from "./api/identity.js";
+import {
   type ApiLogger,
   type BindCodes,
   createApiServer,
@@ -112,6 +119,8 @@ export interface RunningDaemon {
   readonly humanTokenPath: string;
   /** 根の統合ノードのトークンのファイル（0600）。 */
   readonly rootTokenPath: string;
+  /** 身元の秘密のファイル（0600。起動ごとに作り直す。停止で消える。`docs/daemon-identity.md`）。 */
+  readonly identityPath: string;
 }
 
 export interface Daemon {
@@ -474,7 +483,10 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     else note(e.event, e as unknown as Record<string, unknown>);
   };
   const bind: BindCodes = createBindCodes();
+  const identityPath = join(config.stateDir, IDENTITY_FILE);
+  let currentIdentity: Identity | undefined;
   const server = createApiServer({
+    identity: () => currentIdentity,
     credentials,
     getState: () => log.state(),
     handlers,
@@ -514,8 +526,26 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           onFailure: (nodeId, cause) => note("reconcileFailure", { nodeId, cause }),
         });
         for (const o of outcomes) note("reconciled", { ...o });
-        const { port, url } = await server.listen(config.port);
-        running = { port, url, humanTokenPath, rootTokenPath };
+        // 身元確認（T10m-i）: 起動ごとに、新しい秘密を作り、待ち受けの前に、ファイルへ書く（異常終了で残った古いファイルは、上書きされる）。
+        const identity = createIdentity();
+        try {
+          writeIdentityFile(identityPath, identity);
+        } catch (e) {
+          throw new Error(
+            `身元の秘密のファイルを書けない（${String(e instanceof Error ? e.message : e)}）。stateDir の権限を確認する`,
+          );
+        }
+        currentIdentity = identity;
+        let listened: { port: number; url: string };
+        try {
+          listened = await server.listen(config.port);
+        } catch (e) {
+          currentIdentity = undefined;
+          removeIdentityFile(identityPath, identity);
+          throw e;
+        }
+        const { port, url } = listened;
+        running = { port, url, humanTokenPath, rootTokenPath, identityPath };
         // 待ち受けの後で、前回から残った、依存の揃った pending の子を起動する（子が窓口へ接続できるように）。
         void schedule();
         autoPurger?.start();
@@ -525,6 +555,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       async stop() {
         await autoPurger?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await server.close();
+        if (currentIdentity !== undefined) removeIdentityFile(identityPath, currentIdentity);
+        currentIdentity = undefined;
         await closeScheduler(); // 起動の途中の tick が終わるのを待つ（終わる前に、タイマー・DB を閉じない）
         tracked.cancelAll(); // アダプタが作った、残りのタイマーを止める
         running = undefined;

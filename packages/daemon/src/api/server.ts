@@ -13,6 +13,9 @@
  * `GET /v1/whoami`: Bearer で認証し、ロール（`integrator`・`child`・`human`）だけを返す（`nodeId` は返さない）。MCP の入口が、
  * 受け取った資格情報のロールを知るのに使う。Host・Origin の検査と、主体の検査（失効・止まったノードは 401）は、操作の入口と同じ。
  *
+ * `GET /v1/identity?nonce=…`（`identity` を渡したときだけ）: 認証なし。daemon の身元確認（T10m-i。`docs/daemon-identity.md`）。`daemonId` と、
+ *   秘密を使った `proof` だけを返す（秘密は返さない）。接続元ごとの回数の制限がある。
+ *
  * もう 1 つの入口 `POST /v1/bind`（`bind` を渡したときだけ）は、トークンを持たない子のための専用の経路で、`nodeId` と bind コードだけで
  * 子ロールのノードトークンを返す（そのノードの既存のトークンは無効になる）（失敗が続いたら 429）。
  *
@@ -37,6 +40,7 @@ import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
 import { type BindCodes, createThrottle, type Throttle } from "./bind.js";
 import { type CredentialStore, type Principal, parseBearer } from "./credentials.js";
 import { fingerprintOf } from "./dedupe.js";
+import { type Identity, isValidNonce, NONCE_MAX_HEX, NONCE_MIN_HEX, proofOf } from "./identity.js";
 import {
   type ApiCounters,
   type BucketSpec,
@@ -130,6 +134,8 @@ export interface ApiDeps {
   readonly maxBodyBytes?: number;
   /** 500 の原因と、bind の結果を記録する。省略すると記録しない。 */
   readonly logger?: ApiLogger;
+  /** 身元確認の入口（`GET /v1/identity`）。起動のたびに変わりうるので、関数で渡す。`undefined` を返す間は、503（まだ使えない）。省略すると、この入口はない（404）。 */
+  readonly identity?: () => Identity | undefined;
   /** bind 専用の入口（`POST /v1/bind`）の bind コード。省略すると、この入口はない（404）。 */
   readonly bind?: BindCodes;
   /** bind の入口の、全体のスロットル（1 秒あたりの失敗）。省略すると 1 秒に 10 回。 */
@@ -413,6 +419,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const path = (req.url ?? "").split("?")[0];
     if (path === "/v1/bind" && deps.bind !== undefined) return handleBind(req, res, deps.bind);
     if (path === "/v1/whoami") return handleWhoami(req, res);
+    if (path === "/v1/identity" && deps.identity !== undefined) return handleIdentity(req, res);
     if (path !== "/v1/request") {
       return reject(res, failure("notFound", "このパスはない", "POST /v1/request を使う"));
     }
@@ -631,6 +638,55 @@ export function createApiServer(deps: ApiDeps): ApiServer {
   }
 
   /** 認証したロールだけを返す。トークンはクエリでは受け取らない（Authorization ヘッダだけ）。 */
+  /** 身元確認。認証なし。Host・Origin の検査は、入口で済んでいる。接続元ごとの回数の制限がある（超えたら 429）。 */
+  function handleIdentity(req: IncomingMessage, res: ServerResponse): void {
+    if (req.method !== "GET") {
+      reject(res, failure("methodNotAllowed", "GET だけを受け付ける", "GET で呼び出す"), {
+        allow: "GET",
+      });
+      return;
+    }
+    const used = principalLimiter.tryConsume(
+      `identity:${req.socket.remoteAddress ?? "unknown"}`,
+      1,
+    );
+    if (!used.ok) {
+      counters.count("rateLimited", "identity");
+      tooMany(res, used.retryAfterSec);
+      return;
+    }
+    const query = new URL(req.url ?? "", "http://127.0.0.1").searchParams;
+    const nonces = query.getAll("nonce");
+    const nonce = nonces[0];
+    if (
+      [...query.keys()].some((k) => k !== "nonce") ||
+      nonces.length !== 1 ||
+      !isValidNonce(nonce)
+    ) {
+      reject(
+        res,
+        failure(
+          "invalidRequest",
+          `nonce が不正（小文字の 16 進で ${NONCE_MIN_HEX}〜${NONCE_MAX_HEX} 桁の偶数。1 つだけ）`,
+          "ランダムな nonce を 1 つ指定する",
+        ),
+      );
+      return;
+    }
+    const identity = deps.identity?.();
+    if (identity === undefined) {
+      send(res, 503, {
+        ok: false,
+        error: failure("unavailable", "身元をまだ用意できていない", "少し待って、もう一度呼び出す"),
+      });
+      return;
+    }
+    send(res, 200, {
+      ok: true,
+      value: { daemonId: identity.daemonId, proof: proofOf(identity, nonce) },
+    });
+  }
+
   function handleWhoami(req: IncomingMessage, res: ServerResponse): void {
     if (req.method !== "GET") {
       reject(res, failure("methodNotAllowed", "GET だけを受け付ける", "GET で呼び出す"), {
