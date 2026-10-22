@@ -27,7 +27,7 @@ import {
 import type { RuntimeAdapter } from "../../sdk/runtime.js";
 import type { CredentialStore } from "../credentials.js";
 import type { HandlerRequest } from "../server.js";
-import { deliverAnswer } from "./answer-delivery.js";
+import { deliverAnswer, noteStoppingAnswer } from "./answer-delivery.js";
 import {
   alreadyApplied,
   appendAtomically,
@@ -310,8 +310,15 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       const skipped: string[] = [];
       for (const t of targets) {
         const o = await resumeOne(d, t, answer);
-        if (o.kind === "failed") failed.push(o.message ?? t);
-        else if (o.kind === "skipped") skipped.push(t);
+        if (o.kind === "failed") {
+          failed.push(o.message ?? t);
+          if (t === d.nodeId && deps.deliver !== undefined) {
+            noteStoppingAnswer(
+              { log, clock: deps.clock, deliver: deps.deliver, canDeliver: () => false },
+              d,
+            );
+          }
+        } else if (o.kind === "skipped") skipped.push(t);
         else if (o.kind === "notStopped" && t === d.nodeId && deps.deliver !== undefined) {
           // 動作中・待機中のまま（セッションが生きている）の判断者には、回答を追加指示として届ける。
           const sent = await deliverAnswer(
@@ -319,7 +326,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
               log,
               clock: deps.clock,
               deliver: deps.deliver,
-              canDeliver: deps.canDeliver ?? (() => true),
+              canDeliver: deps.canDeliver ?? (() => false),
               ...(deps.onFailure === undefined ? {} : { onFailure: deps.onFailure }),
             },
             d,

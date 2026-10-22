@@ -9,7 +9,7 @@ import {
   stateOf,
 } from "@cso/core";
 import { describe, expect, it } from "vitest";
-import { recoverAnswerDeliveries } from "../../../src/api/handlers/answer-delivery.js";
+import { answerText, recoverAnswerDeliveries } from "../../../src/api/handlers/answer-delivery.js";
 import { createInstructionDelivery } from "../../../src/api/handlers/instruction-delivery.js";
 import { createPauseHandlers } from "../../../src/api/handlers/pause-handlers.js";
 import { createRuntimeHandlers } from "../../../src/api/handlers/runtime-handlers.js";
@@ -25,7 +25,7 @@ let n = 0;
 const SCOPE: Scope = { writableLocations: ["src"], forbiddenLocations: [], allowedCommands: [] };
 
 /** root ─ m1(統合) ─ a(running の子)。a が report.decision で判断を出す */
-const rig = (opts: { live?: boolean } = {}) => {
+const rig = (opts: { live?: boolean; withCanDeliver?: boolean } = {}) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
   const log = opened.value;
@@ -59,7 +59,11 @@ const rig = (opts: { live?: boolean } = {}) => {
   });
   ev("a", { type: "start" });
 
-  const flags = { sendFails: false, live: opts.live ?? true };
+  const flags = {
+    sendFails: false,
+    live: opts.live ?? true,
+    gate: undefined as Promise<void> | undefined,
+  };
   const sent: { nodeId: string; text: string }[] = [];
   const failures: string[] = [];
   const adapter = {
@@ -72,6 +76,7 @@ const rig = (opts: { live?: boolean } = {}) => {
       sessionId: true,
     }),
     async send(nodeId: string, text: string): Promise<Result<{ status: "queued" }, Failure>> {
+      if (flags.gate !== undefined) await flags.gate;
       if (flags.sendFails) return { ok: false, error: failure("sendFailed", "x", "y") };
       sent.push({ nodeId, text });
       return ok({ status: "queued" as const });
@@ -93,7 +98,7 @@ const rig = (opts: { live?: boolean } = {}) => {
     stop: runtime["node.stop"],
     adapterFor,
     deliver: delivery.deliver,
-    canDeliver: delivery.available,
+    ...(opts.withCanDeliver === false ? {} : { canDeliver: delivery.available }),
     ports: { cwdOf: async (id) => `/wt/${id}`, mcpUrl: "http://127.0.0.1:1/mcp" },
     credentials: { issueNodeToken: (id) => `tok-${id}`, revokeNode: () => undefined },
     onFailure: (_id, cause) => failures.push(cause),
@@ -288,5 +293,135 @@ describe("起動時の回復（記録と配送の間で daemon が落ちた回�
     });
     expect(out).toEqual([]);
     expect(r.sent).toHaveLength(0);
+  });
+});
+
+describe("#58 のレビュー対応", () => {
+  it("M1: 同じ回答が同時に届いても、配送は 1 回だけ", async () => {
+    const r = rig();
+    const id = await r.decide();
+    let open: () => void = () => undefined;
+    r.flags.gate = new Promise<void>((res) => {
+      open = res;
+    });
+    const calls = [1, 2, 3].map(() => r.answer(id, { choice: "YAML" }));
+    await new Promise((res) => setTimeout(res, 20));
+    open();
+    const results = await Promise.all(calls);
+    expect(results.every((x) => x.ok)).toBe(true);
+    expect(r.sent).toHaveLength(1);
+    expect(r.log.state().instructions.filter((i) => i.nodeId === "a")).toHaveLength(1);
+  });
+
+  it("M1: 回答と起動時の回復が重なっても、配送は 1 回だけ", async () => {
+    const { r } = await (async () => {
+      const r = rig();
+      const id = await r.decide();
+      r.flags.sendFails = true;
+      await r.answer(id, { choice: "YAML" }, "crash");
+      r.flags.sendFails = false;
+      return { r, id };
+    })();
+    let open: () => void = () => undefined;
+    r.flags.gate = new Promise<void>((res) => {
+      open = res;
+    });
+    const rec = recoverAnswerDeliveries({
+      log: r.log,
+      clock,
+      deliver: r.delivery.deliver,
+      canDeliver: r.delivery.available,
+    });
+    const again = r.answer(
+      r.log.state().decisions[0]?.decisionId ?? "",
+      { choice: "YAML" },
+      "crash",
+    );
+    await new Promise((res) => setTimeout(res, 20));
+    open();
+    await Promise.all([rec, again]);
+    expect(r.sent).toHaveLength(1);
+  });
+
+  it("R1: 再送で配送に成功したら、前に出した failure の項目を解決済みにする", async () => {
+    const r = rig();
+    const id = await r.decide();
+    r.flags.sendFails = true;
+    await r.answer(id, { choice: "YAML" }, "x");
+    expect(r.inbox("failure")[0]?.resolved).toBeUndefined();
+    r.flags.sendFails = false;
+    await r.answer(id, { choice: "YAML" }, "x");
+    const item = r.inbox("failure")[0];
+    expect(item?.resolved).toBeDefined();
+    expect(item?.resolved?.by).toEqual({ system: true });
+  });
+
+  it("R2: 回復は、回答の requestId から指示を引く（同じ本文の別の指示を取り違えない）", async () => {
+    const r = rig();
+    const id = await r.decide();
+    r.flags.sendFails = true;
+    await r.answer(id, { choice: "YAML" }, "x");
+    r.flags.sendFails = false;
+    const d = r.log.state().decisions[0];
+    if (d === undefined) throw new Error("no decision");
+    // 同じ本文で、別の requestId（人間の追加指示など）の、未配送の指示を先に置く
+    const impostor = r.log.append({
+      requestId: "human-send",
+      actor: { human: true },
+      body: { type: "node.instructed", payload: { nodeId: "a", text: answerText(d, "YAML") } },
+    });
+    expect(impostor.ok).toBe(true);
+    const out = await recoverAnswerDeliveries({
+      log: r.log,
+      clock,
+      deliver: r.delivery.deliver,
+      canDeliver: r.delivery.available,
+    });
+    expect(out).toEqual([{ nodeId: "a", result: "delivered" }]);
+    const ins = r.log.state().instructions.filter((i) => i.nodeId === "a");
+    expect(ins).toHaveLength(2);
+    const real = ins.find((i) => "system" in i.actor);
+    const fake = ins.find((i) => "human" in i.actor);
+    expect(real?.deliveredSeq).toBeDefined();
+    expect(fake?.deliveredSeq).toBeUndefined();
+  });
+
+  it("R4: canDeliver を渡さないときは、届けない（安全側）", async () => {
+    const r = rig({ withCanDeliver: false });
+    const id = await r.decide();
+    const res = await r.answer(id, { choice: "YAML" });
+    expect(res.ok).toBe(true);
+    expect(r.sent).toHaveLength(0);
+    expect(r.log.state().instructions).toHaveLength(0);
+  });
+
+  it("N1: 停止の途中（stopping）の判断者には、届かないので受信箱に info を 1 件出す", async () => {
+    const r = rig();
+    const id = await r.decide();
+    r.ev("a", { type: "stop", mode: "graceful" });
+    const res = await r.answer(id, { choice: "YAML" });
+    expect(res.ok).toBe(false);
+    expect(r.sent).toHaveLength(0);
+    await r.answer(id, { choice: "YAML" });
+    const infos = r
+      .inbox("info")
+      .filter((i) => i.nodeId === "a" && i.summary?.includes("停止の途中"));
+    expect(infos).toHaveLength(1);
+  });
+
+  it("N2: 上限で切り詰めても、末尾の定型文は残る", () => {
+    const d = {
+      decisionId: "decision-x",
+      nodeId: "a",
+      status: "answered" as const,
+      question: "q".repeat(100_000),
+      options: [],
+      answer: "あ".repeat(100_000),
+      rejected: [],
+    };
+    const text = answerText(d, d.answer);
+    expect(Array.from(text).length).toBeLessThanOrEqual(64 * 1024);
+    expect(text.endsWith("この回答をふまえて、作業を続けてください。")).toBe(true);
+    expect(text.startsWith("【人間からの回答】判断 decision-x")).toBe(true);
   });
 });
