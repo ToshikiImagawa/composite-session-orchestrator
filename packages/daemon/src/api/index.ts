@@ -3,6 +3,7 @@ export * from "./bind.js";
 export * from "./credentials.js";
 export * from "./handlers/index.js";
 export * from "./human-token.js";
+export * from "./rate-limit.js";
 export * from "./read-handlers.js";
 export * from "./results.js";
 export * from "./server.js";
