@@ -97,13 +97,14 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     const on = parseConfig(
       JSON.stringify({
         ...base,
-        autoPurge: { enabled: true, intervalMinutes: 5, maxTreesPerRun: 2 },
+        autoPurge: { enabled: true, intervalMinutes: 5, maxTreesPerRun: 2, noticeDays: 14 },
       }),
     );
     expect(on.ok && on.value.autoPurge).toEqual({
       enabled: true,
       intervalMinutes: 5,
       maxTreesPerRun: 2,
+      noticeDays: 14,
     });
     const min = parseConfig(JSON.stringify({ ...base, autoPurge: { enabled: false } }));
     expect(min.ok && min.value.autoPurge).toEqual({ enabled: false });
@@ -119,6 +120,10 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
       { enabled: true, intervalMinutes: 1.5 },
       { enabled: true, maxTreesPerRun: 0 },
       { enabled: true, maxTreesPerRun: 101 },
+      { enabled: true, noticeDays: 0 },
+      { enabled: true, noticeDays: 31 },
+      { enabled: true, noticeDays: 1.5 },
+      { enabled: true, noticeDays: "7" },
       { enabled: true, unknown: 1 },
     ]) {
       bad({ autoPurge: v }, "autoPurge");

@@ -59,6 +59,8 @@ export interface DaemonConfig {
     readonly enabled: boolean;
     readonly intervalMinutes?: number;
     readonly maxTreesPerRun?: number;
+    /** 予告（受信箱の項目）を出してから、削除するまでの日数（1〜30。既定 7）。予告の後にだけ削除する。 */
+    readonly noticeDays?: number;
   };
   /** 子に渡す環境変数の、既定（PATH・HOME・認証・プロキシなど）に加える名前（完全一致）。 */
   readonly childEnvAllow?: readonly string[];
@@ -182,7 +184,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     return bad("purgeTombstone は真偽値");
   }
   let autoPurge:
-    | { enabled: boolean; intervalMinutes?: number; maxTreesPerRun?: number }
+    | { enabled: boolean; intervalMinutes?: number; maxTreesPerRun?: number; noticeDays?: number }
     | undefined;
   if (raw.autoPurge !== undefined) {
     const v = raw.autoPurge;
@@ -191,20 +193,26 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     if (
       !isRec(v) ||
       Object.keys(v).some(
-        (k) => k !== "enabled" && k !== "intervalMinutes" && k !== "maxTreesPerRun",
+        (k) =>
+          k !== "enabled" &&
+          k !== "intervalMinutes" &&
+          k !== "maxTreesPerRun" &&
+          k !== "noticeDays",
       ) ||
       typeof v.enabled !== "boolean" ||
       !okInt(v.intervalMinutes, 1440) ||
-      !okInt(v.maxTreesPerRun, 100)
+      !okInt(v.maxTreesPerRun, 100) ||
+      !okInt(v.noticeDays, 30)
     ) {
       return bad(
-        "autoPurge は、enabled（真偽値）・intervalMinutes（1〜1440 の整数。任意）・maxTreesPerRun（1〜100 の整数。任意）だけを持つオブジェクト",
+        "autoPurge は、enabled（真偽値）・intervalMinutes（1〜1440 の整数。任意）・maxTreesPerRun（1〜100 の整数。任意）・noticeDays（1〜30 の整数。任意）だけを持つオブジェクト",
       );
     }
     autoPurge = {
       enabled: v.enabled,
       ...(v.intervalMinutes === undefined ? {} : { intervalMinutes: v.intervalMinutes as number }),
       ...(v.maxTreesPerRun === undefined ? {} : { maxTreesPerRun: v.maxTreesPerRun as number }),
+      ...(v.noticeDays === undefined ? {} : { noticeDays: v.noticeDays as number }),
     };
   }
   if (

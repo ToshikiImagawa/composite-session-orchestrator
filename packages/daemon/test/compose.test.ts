@@ -577,7 +577,7 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     expect(hasTree(d.daemon)).toBe(true);
   });
 
-  it("有効なら、起動直後は消さず、1 周期後（既定 60 分）に、保持期間を過ぎた木を消す。記録に残る", async () => {
+  it("有効なら、起動直後は何もせず、1 周期後（既定 60 分）に予告を出し、予告から 7 日後（既定）に、保持期間を過ぎた木を消す。記録に残る", async () => {
     const r = rig({ autoPurge: { enabled: true } });
     seedArchivedTree(r);
     const m = manual();
@@ -585,8 +585,13 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     const d = await boot(r);
     expect(hasTree(d.daemon)).toBe(true);
     await m.advance(30 * 60_000);
+    expect(d.daemon.log.state().inbox.some((i) => i.id.startsWith("apn-"))).toBe(false);
+    await m.advance(30 * 60_000); // 1 周期: 予告
     expect(hasTree(d.daemon)).toBe(true);
-    await m.advance(30 * 60_000);
+    expect(d.daemon.log.state().inbox.some((i) => i.id.startsWith("apn-"))).toBe(true);
+    await m.advance(6 * 24 * 60 * 60_000); // 予告から 6 日: まだ消さない
+    expect(hasTree(d.daemon)).toBe(true);
+    await m.advance(2 * 24 * 60 * 60_000); // 予告から 8 日
     expect(hasTree(d.daemon)).toBe(false);
     expect(r.logs.some((l) => l.includes("autoPurge.purged"))).toBe(true);
     expect(d.daemon.log.state().tombstones[0]?.rootId).toBe("t");

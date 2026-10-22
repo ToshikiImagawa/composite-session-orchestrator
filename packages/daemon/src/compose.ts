@@ -61,6 +61,7 @@ import { openSqliteStore } from "./sqlite-store.js";
 const DEFAULT_RETENTION_DAYS = 90;
 const DEFAULT_AUTO_PURGE_INTERVAL_MINUTES = 60;
 const DEFAULT_AUTO_PURGE_MAX_TREES = 2;
+const DEFAULT_AUTO_PURGE_NOTICE_DAYS = 7;
 
 /** git の作業ツリーに関わる口（実装は git を呼ぶ。テストはフェイク）。 */
 export interface WorktreePorts {
@@ -434,6 +435,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           intervalMs:
             (config.autoPurge.intervalMinutes ?? DEFAULT_AUTO_PURGE_INTERVAL_MINUTES) * 60_000,
           maxTreesPerRun: config.autoPurge.maxTreesPerRun ?? DEFAULT_AUTO_PURGE_MAX_TREES,
+          noticeDays: config.autoPurge.noticeDays ?? DEFAULT_AUTO_PURGE_NOTICE_DAYS,
+          record: (requestId, body) => log.append({ requestId, actor: { system: true }, body }),
           purgeTreeOf: createPurger(purgeDeps).purgeTreeOf,
           timers,
           note,

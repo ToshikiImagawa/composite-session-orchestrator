@@ -2,8 +2,6 @@
 
 daemon の設定ファイルの `autoPurge` で、保持期間を過ぎた木を自動的に最終削除できる。**既定はオフ**（省略するとオフ）。
 
-> **事前の通知（T13f-n）ができるまでは、有効にしないことを勧める。** 自動の削除の前に、人間へ知らせる仕組みはまだない。
-
 ## 有効にすると何が起こるか
 
 **保持期間（`retentionDays`。既定 90 日）を過ぎた、アーカイブ済みの最上位の木が、取り返しのつかない形で消える。**
@@ -20,7 +18,7 @@ daemon の設定ファイルの `autoPurge` で、保持期間を過ぎた木を
 {
   "retentionDays": 90,
   "purgeTombstone": true,
-  "autoPurge": { "enabled": true, "intervalMinutes": 60, "maxTreesPerRun": 2 }
+  "autoPurge": { "enabled": true, "intervalMinutes": 60, "maxTreesPerRun": 2, "noticeDays": 7 }
 }
 ```
 
@@ -28,6 +26,7 @@ daemon の設定ファイルの `autoPurge` で、保持期間を過ぎた木を
 | --- | --- | --- |
 | `enabled` | 自動の最終削除を有効にする（必須） | （`autoPurge` ごと省略するとオフ） |
 | `intervalMinutes` | 実行の周期（分。1〜1440） | 60 |
+| `noticeDays` | 予告（受信箱の項目）を出してから、削除するまでの日数（1〜30）。予告の後にだけ削除する | 7 |
 | `maxTreesPerRun` | 1 回の実行で消す木の数の上限（1〜100）。アーカイブが古い順 | 2 |
 
 - **有効にするときは、`retentionDays` を 7 以上にする**（0〜6 だと、設定の検査で起動に失敗する。省略した既定の 90 は可）。
@@ -37,8 +36,16 @@ daemon の設定ファイルの `autoPurge` で、保持期間を過ぎた木を
   疑わしいときは、その回の実行を止め、理由を付けて `autoPurge.skipped` に記録する（時計が大きく進んだせいで、期間内の木が「過ぎた」と判定されるのを防ぐ）。
   daemon が保持期間の半分以上、まったく記録を書かないまま動いていると、自動の削除は止まる（人間のコマンドは使える）。
 - 木を 1 本処理するごとに、イベントループに譲る。ただし、削除そのもの（ログの行の物理削除）は同期で行うので、**大きなログでは、短い間、応答が遅くなる**。
+- **予告（T13f-n）:** 削除の対象になった木ごとに、受信箱に `info` の項目を 1 件出す（持ち主は、木の根の親。木のノードに付けると、削除で一緒に消えるため）。
+  要約に、削除の予定日・木の中の未回答の判断の数・未解決の項目の数を載せる。**削除は、予告が出てから `noticeDays` 日たったものだけ。**
+  daemon が止まっていて、保持期間をだいぶ過ぎてから起動した場合も、予告を今出して、`noticeDays` 日後に削除する。予告は 1 回の実行で 20 件まで。
+  - **止める方法:** 木ごとの保留はまだない（T13f-h）。`autoPurge` を無効にするか、`retentionDays` を延ばして、daemon を再起動する。
+    削除の直前に保持期間をもう一度判定するので、予告のあとで `retentionDays` を延ばせば、予告済みでも消えない。その予告は、system が解決済みにして取り下げる
+    （また対象になれば、予告を出し直し、そこから `noticeDays` 日待つ）。
+  - 木が対象から外れたとき（保持期間を延ばした、親がアーカイブされて最上位でなくなった、外から依存された、など）も、予告を system が解決済みにする。
+  - **人間が予告を解決済みにしても、削除の条件は変わらない。** 判定に使うのは、予告の項目が出たことと、その時刻（`at`）。解決済みにしても、早くは消えず、`noticeDays` 日たてば消える。
+  - 削除のあとも、予告を system が解決済みにする（受信箱に残り続けない）。
 - 最初の実行は、daemon の起動から 1 周期後（起動直後は消さない）。
 - 1 回の実行が前の実行と重ならない（実行中なら次は飛ばす）。1 本が失敗しても、記録（`autoPurge.failed`。同じ木・同じ原因は 1 日に 1 回まで）に残して次の木へ進み、次の周期で再試行する。
 - ログの整合が壊れた（`fatal`）後は動かさない。daemon の停止で止まる。
-- 記録の名前: `autoPurge.purged`・`autoPurge.failed`・`autoPurge.skipped`・`autoPurge.error`、監査は `purge.purgeStarting`・`purge.purged`・`purge.purgeFailed`（`origin: "auto"`）。
-- 事前の通知（受信箱に「N 日後に削除する」）は、まだない（T13f-n）。
+- 記録の名前: `autoPurge.noticePosted`・`autoPurge.noticeWithdrawn`・`autoPurge.noticeFailed`・`autoPurge.noticeResolveFailed`・`autoPurge.purged`・`autoPurge.failed`・`autoPurge.skipped`・`autoPurge.error`、監査は `purge.purgeStarting`・`purge.purged`・`purge.purgeFailed`（`origin: "auto"`）。
