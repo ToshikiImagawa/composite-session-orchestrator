@@ -162,6 +162,7 @@ describe("認証の失敗・制限の発動の集計（T10a）", () => {
         counts: {
           authFailed: { invalid: 5, missing: 1 },
           rateLimited: { principal: 1 },
+          deduped: {},
         },
       },
     ]);
