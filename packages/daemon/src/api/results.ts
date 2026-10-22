@@ -42,9 +42,13 @@ export const RESULT_KEYS: ResultKeys = {
     "purgeable",
     "blockers",
     "hold",
+    "discardedRefs",
   ],
   "node.purgeHold": ["held", "until"],
   "node.purgeRelease": ["released"],
+  "node.discardedList": ["items", "max"],
+  "node.discardedRestore": ["branch", "tip"],
+  "node.discardedDrop": ["dropped", "key", "tip"],
 };
 
 /** 結果のキーだけを写す。結果がオブジェクトでなければ `undefined`（ハンドラの不具合として扱う）。 */

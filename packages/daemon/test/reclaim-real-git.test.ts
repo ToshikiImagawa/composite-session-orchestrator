@@ -164,6 +164,15 @@ describe("破棄の判断を経た停止ノードの回収（実際の git）", 
     expect(s.log.state().nodes.find((x) => x.id === "c1")?.lastCommit).toBe(tip); // 墓標の lastCommit の情報源
     expect(existsSync(s.wt)).toBe(false);
     expect(git(s.repoRoot, "branch", "--list", "cso/*")).toBe("");
+    // T13f-r: 捨てた成果の先端は、refs/cso/discarded/<名前> に保管される（gc で消えない）
+    const kept = git(
+      s.repoRoot,
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      "refs/cso/discarded/",
+    );
+    expect(kept.split("\n")).toHaveLength(1);
+    expect(kept.endsWith(` ${tip}`)).toBe(true);
     expect(stateOf(s.log.state(), "c1")).toBe("archived");
   });
 
@@ -233,6 +242,10 @@ describe("破棄の判断を経た停止ノードの回収（実際の git）", 
     };
     expect((await s.call("node.reclaim", "integrator", "c1")).ok).toBe(true);
     expect(s.log.state().nodes.find((x) => x.id === "c1")?.lastCommit).toBe(moved);
+    // 保管も、実際に消えたブランチの先端（判定のあとで足されたコミットを含む）
+    expect(git(s.repoRoot, "for-each-ref", "--format=%(objectname)", "refs/cso/discarded/")).toBe(
+      moved,
+    );
   });
 
   it("T21r: 破棄を指示する前に、実際の git で、失われるもの（統合されていないコミットの件名・未保存の変更・未追跡のファイル）を事前確認できる。何も変えない", async () => {

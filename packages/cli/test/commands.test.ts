@@ -594,3 +594,144 @@ describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h�
     expect(ops(sent)).toContain("node.purge");
   });
 });
+
+describe("discarded（保管した、破棄した成果。T13f-r）", () => {
+  const LISTED = {
+    max: 200,
+    items: [
+      {
+        key: "k-c1",
+        tip: "a".repeat(40),
+        nodeId: "c1",
+        orphan: false,
+        committedAt: "2026-10-01T00:00:00+09:00",
+        untrustedSubject: "捨てる成果\u001b[2J",
+      },
+      { key: "k-gone", tip: "b".repeat(40), orphan: true },
+    ],
+  };
+
+  it("list: 一覧を出す（孤立も）。件名は信頼できない入力と分かる形で、制御文字を除く", async () => {
+    const { client, sent } = fakeClient({ "node.discardedList": ok(LISTED) });
+    const r = await runCommand(["discarded", "list"], deps(client));
+    expect(ops(sent)).toEqual(["node.discardedList"]);
+    expect(r.exitCode).toBe(0);
+    for (const s of [
+      "k-c1",
+      "c1",
+      "（孤立）",
+      "k-gone",
+      "信頼できない入力",
+      "捨てる成果",
+      "2 件",
+      "200",
+    ]) {
+      expect(r.stdout).toContain(s);
+    }
+    expect(r.stdout).not.toContain("\u001b");
+  });
+
+  it("list: 空なら「なし」。引数があれば終了コード 2", async () => {
+    const { client } = fakeClient({ "node.discardedList": ok({ items: [], max: 200 }) });
+    expect((await runCommand(["discarded", "list"], deps(client))).stdout).toContain("なし");
+    expect((await runCommand(["discarded", "list", "x"], deps(client))).exitCode).toBe(2);
+    expect((await runCommand(["discarded"], deps(client))).exitCode).toBe(2);
+    expect((await runCommand(["discarded", "nope"], deps(client))).exitCode).toBe(2);
+  });
+
+  it("restore: node.discardedRestore を送る（--branch つき）。ブランチと、保管が残ることを表示する", async () => {
+    const { client, sent } = fakeClient({
+      "node.discardedRestore": ok({ branch: "my/b", tip: "a".repeat(40) }),
+    });
+    const r = await runCommand(["discarded", "restore", "c1", "--branch", "my/b"], deps(client));
+    expect(sent).toEqual([
+      {
+        requestId: "req-1",
+        role: "human",
+        operation: "node.discardedRestore",
+        params: { target: "c1", branch: "my/b" },
+      },
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("my/b");
+    expect(r.stdout).toContain("保管は残っている");
+  });
+
+  it("restore: 失敗（既存のブランチ）は、原因と次の操作を出す", async () => {
+    const { client } = fakeClient({
+      "node.discardedRestore": err(
+        failure("branchExists", "ブランチがある", "--branch で別の名前"),
+      ),
+    });
+    const r = await runCommand(["discarded", "restore", "c1"], deps(client));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("ブランチがある");
+  });
+
+  it("drop: --yes がなければ、対象を表示して止まる（終了コード 2。消さない）。--yes で消す", async () => {
+    const { client, sent } = fakeClient({
+      "node.discardedList": ok(LISTED),
+      "node.discardedDrop": ok({ dropped: true, key: "k-c1", tip: "a".repeat(40) }),
+    });
+    const dry = await runCommand(["discarded", "drop", "c1"], deps(client));
+    expect(dry.exitCode).toBe(2);
+    expect(dry.stdout).toContain("k-c1");
+    expect(dry.stderr).toContain("--yes");
+    expect(ops(sent)).toEqual(["node.discardedList"]);
+    const done = await runCommand(["discarded", "drop", "c1", "--yes"], deps(client));
+    expect(done.exitCode).toBe(0);
+    expect(ops(sent)).toEqual(["node.discardedList", "node.discardedList", "node.discardedDrop"]);
+    expect(sent.at(-1)?.params).toEqual({ target: "k-c1", expectTip: "a".repeat(40) }); // 表示した先端を渡す。鍵で指定する
+  });
+
+  it("drop: 一覧にないものは、notFound（消す要求を送らない）", async () => {
+    const { client, sent } = fakeClient({ "node.discardedList": ok(LISTED) });
+    const r = await runCommand(["discarded", "drop", "zzz", "--yes"], deps(client));
+    expect(r.exitCode).toBe(1);
+    expect(ops(sent)).toEqual(["node.discardedList"]);
+  });
+
+  it("purge の対象表示に、一緒に消える、保管している成果の数を出す（0 件・なしのときは出さない）", async () => {
+    const { client } = fakeClient({
+      "node.purgePreview": ok({ ...PREVIEW, discardedRefs: 3 }),
+    });
+    const r = await runCommand(["purge", "n1", "--dry-run"], deps(client));
+    expect(r.stdout).toContain("保管している、破棄した成果");
+    expect(r.stdout).toContain("3 件");
+    const zero = fakeClient({ "node.purgePreview": ok({ ...PREVIEW, discardedRefs: 0 }) });
+    expect(
+      (await runCommand(["purge", "n1", "--dry-run"], deps(zero.client))).stdout,
+    ).not.toContain("保管している、破棄した成果");
+  });
+});
+
+describe("discarded（T13f-r レビュー）", () => {
+  const two = {
+    max: 5,
+    items: [
+      { key: "k-c1", tip: "a".repeat(40), nodeId: "c1", orphan: false },
+      { key: `k-c1.${"b".repeat(12)}`, tip: "b".repeat(40), nodeId: "c1", orphan: false },
+    ],
+  };
+
+  it("R3: 1 つのノードに保管が複数あるとき、ノード ID の drop は multipleKept で失敗する（消さない）。鍵を指定すれば消せる", async () => {
+    const { client, sent } = fakeClient({
+      "node.discardedList": ok(two),
+      "node.discardedDrop": ok({ dropped: true, key: "k-c1", tip: "a".repeat(40) }),
+    });
+    const many = await runCommand(["discarded", "drop", "c1", "--yes"], deps(client));
+    expect(many.exitCode).toBe(1);
+    expect(many.stderr).toContain("multipleKept");
+    expect(many.stderr).toContain("k-c1");
+    expect(ops(sent)).not.toContain("node.discardedDrop");
+    const byKey = await runCommand(["discarded", "drop", "k-c1", "--yes"], deps(client));
+    expect(byKey.exitCode).toBe(0);
+    expect(sent.at(-1)?.params).toEqual({ target: "k-c1", expectTip: "a".repeat(40) });
+  });
+
+  it("R5: list の末尾に、残りの件数（上限 − 現在の数）を出す", async () => {
+    const { client } = fakeClient({ "node.discardedList": ok(two) });
+    const r = await runCommand(["discarded", "list"], deps(client));
+    expect(r.stdout).toContain("残り 3 件");
+  });
+});
