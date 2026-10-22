@@ -35,8 +35,12 @@ export interface RelayOptions {
   /** 指定すると、全操作のタイムアウトをこの値にする（既定は操作ごと。`timeoutFor`）。 */
   readonly timeoutMs?: number;
   readonly maxBytes?: number;
-  /** 429 のあとの待ち（テストで差し替える）。既定は実時間。 */
+  /** 429・409 のあとの待ち（テストで差し替える）。既定は実時間。 */
   readonly sleep?: (ms: number) => Promise<void>;
+  /** 待ちに足すジッター（0〜500ms）の乱数（0 以上 1 未満。テストで差し替える）。既定は `Math.random`。 */
+  readonly random?: () => number;
+  /** 締め切りの計算に使う時計（ミリ秒。テストで差し替える）。既定は `performance.now`。 */
+  readonly now?: () => number;
 }
 
 /** 429 のあとに待つ秒数の上限。 */
@@ -60,6 +64,18 @@ const rateLimited = (sec: number): RateLimited =>
       "要求が多すぎる（回数の制限。daemon は実行していない）",
       `${sec} 秒ほど待ってから、同じ操作を呼び直す（実行されていないので、二重にならない）`,
       "続くときは、呼び出しの頻度を下げる",
+    ),
+    { retryAfterSec: sec },
+  );
+
+/** `in_progress`（daemon の 409。同じ要求を処理中で、この要求は実行していない）。 */
+const inProgressFailure = (sec: number): RateLimited =>
+  Object.assign(
+    failure(
+      "in_progress",
+      "同じ要求を処理中（この要求は実行していない）",
+      `${sec} 秒ほど待ってから、状態を確かめて、必要なら呼び直す`,
+      "tree_list などで、先の要求の結果を確かめる",
     ),
     { retryAfterSec: sec },
   );
@@ -112,6 +128,10 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
   const doFetch = opts.fetch ?? globalThis.fetch;
   const maxBytes = opts.maxBytes ?? MAX_RELAY_BYTES;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = opts.random ?? Math.random;
+  const nowMs = opts.now ?? (() => performance.now());
+  /** 429・409 のあとの待ち（Retry-After + 0〜500ms のジッター。同時に再送する呼び出しが、揃わないように）。 */
+  const waitMs = (sec: number): number => sec * 1000 + Math.floor(random() * 500);
   const origin = base.origin;
   const authorization = `Bearer ${opts.token}`;
   let counter = 0;
@@ -123,7 +143,7 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
     path: string,
     init: RequestInit,
     timeout: number,
-  ): Promise<{ result: Result<unknown>; transport: boolean; rateLimitedSec?: number }> {
+  ): Promise<{ result: Result<unknown>; transport: boolean; retrySec?: number }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     const done = (result: Result<unknown>) => ({ result, transport: false });
@@ -141,7 +161,7 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
         return {
           result: { ok: false, error: rateLimited(sec) },
           transport: false,
-          rateLimitedSec: sec,
+          retrySec: sec,
         };
       }
       const raw = await readLimited(res, maxBytes);
@@ -165,6 +185,15 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
       }
       if (isRec(body) && body.ok === true && "value" in body) return done(ok(body.value));
       if (isRec(body) && body.ok === false && isFailure(body.error)) {
+        if (res.status === 409 && body.error.code === "inProgress") {
+          // 同じ要求を処理中（daemon は、この要求を実行していない）。429 と同じ扱い。
+          const sec = parseRetryAfter(res.headers.get("retry-after"));
+          return {
+            result: { ok: false, error: inProgressFailure(sec) },
+            transport: false,
+            retrySec: sec,
+          };
+        }
         return done({ ok: false, error: bounded(body.error) });
       }
       return done(
@@ -194,12 +223,14 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
 
   return ok({
     async whoami() {
-      // 読み取りだけなので、失敗してもそのまま返す（再送しない）。
-      const { result: r } = await call(
-        "/v1/whoami",
-        { method: "GET", headers: { authorization } },
-        opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      );
+      // 読み取りだけなので、429 は Retry-After（上限 10 秒）だけ待って、1 度だけ再送する。
+      const timeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const send = () => call("/v1/whoami", { method: "GET", headers: { authorization } }, timeout);
+      let { result: r, retrySec } = await send();
+      if (!r.ok && retrySec !== undefined) {
+        await sleep(waitMs(retrySec));
+        ({ result: r } = await send());
+      }
       if (!r.ok) return r;
       if (!isRec(r.value) || typeof r.value.role !== "string") {
         return fail(
@@ -225,24 +256,35 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
         body,
       };
       const timeout = opts.timeoutMs ?? timeoutFor(operation);
-      // 同じ requestId で再送する（daemon が requestId で冪等に扱うので、二重に実行されない）。
+      // 同じ requestId で再送する（daemon が (主体, requestId) で重複を防ぐので、二重に実行されない）。
       // - 応答を受け取れなかった（接続の失敗・タイムアウト）: 1 度だけ。それでも失敗なら、結果は不明。
-      // - 429（回数の制限。daemon は実行していない）: Retry-After（上限 10 秒）だけ待って、1 度だけ。
-      // 送信は合計 3 回まで。401 の Retry-After では再送しない（待っても直らない）。
+      // - 429・409 inProgress（回数の制限・処理中。daemon は実行していない）: Retry-After（上限 10 秒）+ ジッターだけ待って、1 度だけ。
+      // 送信は合計 3 回まで。待ちを含めた全体に、締め切り（その操作のタイムアウト + 10 秒）がある。超えたら、新しい再送は始めない。
+      // 401 の Retry-After・422 requestIdConflict では再送しない。
+      const startedAt = nowMs();
+      const deadline = timeout + 10_000;
       let transportRetries = 0;
-      let rateRetries = 0;
+      let busyRetries = 0;
+      let last: Result<unknown> | undefined;
+      let lastDefinite = false;
       for (let sends = 0; sends < 3; sends++) {
         const r = await call("/v1/request", init, timeout);
+        last = r.result;
+        lastDefinite = !r.transport;
         if (r.transport) {
-          if (transportRetries++ < 1) continue;
+          if (transportRetries++ < 1 && nowMs() - startedAt < deadline) continue;
           break;
         }
-        if (r.rateLimitedSec !== undefined && rateRetries++ < 1) {
-          await sleep(r.rateLimitedSec * 1000);
+        if (r.retrySec !== undefined && busyRetries++ < 1) {
+          const wait = waitMs(r.retrySec);
+          if (nowMs() - startedAt + wait >= deadline) break;
+          await sleep(wait);
           continue;
         }
         return r.result;
       }
+      // 実行されていないと分かっている最後の結果（429・409）は、そのまま返す。応答を受け取れなかったときだけ、結果は不明。
+      if (last !== undefined && lastDefinite) return last;
       return fail(
         "daemon_result_unknown",
         "daemon から応答を受け取れず、結果は不明（操作は実行されたかもしれない）",

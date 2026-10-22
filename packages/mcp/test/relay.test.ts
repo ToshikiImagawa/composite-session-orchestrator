@@ -269,7 +269,7 @@ const idOf = (call: unknown): string =>
   JSON.parse(String((call as [string, RequestInit])[1].body)).requestId;
 
 describe("429（回数の制限。daemon は実行していない）", () => {
-  const rig = (responses: (() => Response | Promise<Response>)[]) => {
+  const rig = (responses: (() => Response | Promise<Response>)[], extra: object = {}) => {
     const sleeps: number[] = [];
     const queue = [...responses];
     const f = vi.fn(async () => {
@@ -281,6 +281,8 @@ describe("429（回数の制限。daemon は実行していない）", () => {
       sleep: async (ms: number) => {
         sleeps.push(ms);
       },
+      random: () => 0,
+      ...extra,
     });
     return { relay, f, sleeps };
   };
@@ -368,12 +370,161 @@ describe("429（回数の制限。daemon は実行していない）", () => {
     expect(!r.ok && r.error.code).toBe("daemon_result_unknown");
   });
 
-  it("whoami の 429 は、再送せず rate_limited を返す（Retry-After を持つ）", async () => {
-    const { relay, f, sleeps } = rig([() => tooMany("4")]);
+  it("whoami の 429 は、Retry-After（10 秒まで）だけ待って、1 度だけ再送する（読み取りなので安全）", async () => {
+    const { relay, f, sleeps } = rig([
+      () => tooMany("4"),
+      () => json(200, { ok: true, value: { role: "child" } }),
+    ]);
     const r = await relay.whoami();
+    expect(r.ok && r.value.role).toBe("child");
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([4000]);
+  });
+
+  it("whoami が 2 回続けて 429 なら、rate_limited を返す（retryAfterSec を持つ）", async () => {
+    const { relay, f } = rig([() => tooMany("4"), () => tooMany("99")]);
+    const r = await relay.whoami();
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(!r.ok && r.error.code).toBe("rate_limited");
+    if (!r.ok) expect((r.error as { retryAfterSec?: number }).retryAfterSec).toBe(10);
+  });
+});
+
+const inProgress = (retryAfter = "2") =>
+  new Response(
+    JSON.stringify({
+      ok: false,
+      error: { code: "inProgress", cause: "同じ要求を処理中", nextActions: ["待つ"] },
+    }),
+    { status: 409, headers: { "content-type": "application/json", "retry-after": retryAfter } },
+  );
+const conflict = () =>
+  new Response(
+    JSON.stringify({
+      ok: false,
+      error: { code: "requestIdConflict", cause: "別の内容", nextActions: ["新しい requestId"] },
+    }),
+    { status: 422, headers: { "content-type": "application/json" } },
+  );
+
+describe("409 inProgress（同じ要求を処理中。daemon は実行していない）", () => {
+  const rig2 = (responses: (() => Response)[], extra: object = {}) => {
+    const sleeps: number[] = [];
+    const queue = [...responses];
+    const f = vi.fn(async () => {
+      const next = queue.shift();
+      if (next === undefined) throw new Error("予定外の呼び出し");
+      return next();
+    });
+    const relay = relayWith(f as never, {
+      sleep: async (ms: number) => void sleeps.push(ms),
+      random: () => 0,
+      ...extra,
+    });
+    return { relay, f, sleeps };
+  };
+
+  it("429 と同じように、Retry-After だけ待って、同じ requestId で 1 回だけ再送する", async () => {
+    const { relay, f, sleeps } = rig2([() => inProgress("3"), okRes]);
+    const r = await relay.request("node.spawn", {});
+    expect(r.ok).toBe(true);
+    expect(sleeps).toEqual([3000]);
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(idOf(f.mock.calls[0])).toBe(idOf(f.mock.calls[1]));
+  });
+
+  it("2 回続けて 409 なら、in_progress を返す（実行されていない）", async () => {
+    const { relay, f } = rig2([() => inProgress(), () => inProgress()]);
+    const r = await relay.request("node.spawn", {});
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(!r.ok && r.error.code).toBe("in_progress");
+  });
+
+  it("429 と 409 を合わせて、再送は 1 回だけ（送信は合計 3 回まで）", async () => {
+    const { relay, f } = rig2([() => tooMany("1"), () => inProgress(), okRes]);
+    const r = await relay.request("tree.list", {});
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(!r.ok && r.error.code).toBe("in_progress");
+  });
+
+  it("422 requestIdConflict は再送しない", async () => {
+    const { relay, f, sleeps } = rig2([conflict]);
+    const r = await relay.request("tree.list", {});
     expect(f).toHaveBeenCalledTimes(1);
     expect(sleeps).toEqual([]);
+    expect(!r.ok && r.error.code).toBe("requestIdConflict");
+  });
+});
+
+describe("待ちの合計の締め切り（その操作のタイムアウト + 10 秒）と、ジッター", () => {
+  it("ジッター: 429 のあとの待ちに、0〜500ms を加える", async () => {
+    const mk = (random: number) => {
+      const sleeps: number[] = [];
+      const queue = [() => tooMany("2"), okRes];
+      const f = async () => (queue.shift() as () => Response)();
+      const relay = relayWith(f as never, {
+        sleep: async (ms: number) => void sleeps.push(ms),
+        random: () => random,
+      });
+      return { relay, sleeps };
+    };
+    const a = mk(0);
+    await a.relay.request("tree.list", {});
+    expect(a.sleeps).toEqual([2000]);
+    const b = mk(0.5);
+    await b.relay.request("tree.list", {});
+    expect(b.sleeps).toEqual([2250]);
+    const c = mk(0.999999);
+    await c.relay.request("tree.list", {});
+    expect(c.sleeps[0]).toBeLessThan(2500);
+    expect(c.sleeps[0]).toBeGreaterThanOrEqual(2000);
+  });
+
+  it("接続の失敗で締め切りを過ぎたら、新しい再送は始めずに daemon_result_unknown を返す", async () => {
+    let clock = 0;
+    const f = vi.fn(async () => {
+      clock += 12_000; // 1 回の呼び出しに、締め切り（1000 + 10000）を超える時間がかかった
+      throw new Error("down");
+    });
+    const relay = relayWith(f as never, { timeoutMs: 1000, now: () => clock, random: () => 0 });
+    const r = await relay.request("tree.list", {});
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(!r.ok && r.error.code).toBe("daemon_result_unknown");
+  });
+
+  it("429 の待ちで締め切りを過ぎるなら、再送せずに rate_limited を返す（実行されていないので、結果は不明にしない）", async () => {
+    let clock = 0;
+    const f = vi.fn(async () => {
+      clock += 5_000; // 1 回目の呼び出しに 5 秒かかり、このあと 10 秒待つと、締め切り（1000 + 10000）を超える
+      return tooMany("10");
+    });
+    const relay = relayWith(f as never, {
+      timeoutMs: 1000,
+      now: () => clock,
+      random: () => 0,
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+    });
+    const r = await relay.request("tree.list", {});
+    expect(f).toHaveBeenCalledTimes(1);
     expect(!r.ok && r.error.code).toBe("rate_limited");
-    if (!r.ok) expect((r.error as { retryAfterSec?: number }).retryAfterSec).toBe(4);
+  });
+
+  it("締め切りの内側なら、再送する", async () => {
+    let clock = 0;
+    const queue = [() => tooMany("2"), okRes];
+    const f = vi.fn(async () => (queue.shift() as () => Response)());
+    const relay = relayWith(f as never, {
+      timeoutMs: 1000,
+      now: () => clock,
+      random: () => 0,
+      sleep: async (ms: number) => {
+        clock += ms;
+      },
+    });
+    const r = await relay.request("tree.list", {});
+    expect(r.ok).toBe(true);
+    expect(f).toHaveBeenCalledTimes(2);
   });
 });

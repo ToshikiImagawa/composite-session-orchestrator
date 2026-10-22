@@ -73,6 +73,7 @@ const STATUS: Readonly<Record<string, number>> = {
   daemon_timeout: 504,
   tooManyRequests: 429,
   rate_limited: 429,
+  in_progress: 409,
 };
 
 function send(
@@ -252,12 +253,19 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
       log(session.error.code);
       const status = STATUS[session.error.code] ?? 502;
       const retryAfter = (session.error as { retryAfterSec?: unknown }).retryAfterSec;
-      return send(res, status, session.error, {
-        ...(status === 401 ? { "www-authenticate": "Bearer" } : {}),
-        ...(status === 429
-          ? { "retry-after": String(typeof retryAfter === "number" ? retryAfter : 1) }
-          : {}),
-      });
+      // 本文は code・cause・nextActions だけ（待つ秒数は、Retry-After ヘッダで伝える）。
+      const { code, cause, nextActions } = session.error;
+      return send(
+        res,
+        status,
+        { code, cause, nextActions },
+        {
+          ...(status === 401 ? { "www-authenticate": "Bearer" } : {}),
+          ...(status === 429
+            ? { "retry-after": String(typeof retryAfter === "number" ? retryAfter : 1) }
+            : {}),
+        },
+      );
     }
     const server = session.value;
     if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {

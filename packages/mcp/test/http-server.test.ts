@@ -459,20 +459,23 @@ describe("daemon の 429（回数の制限）", () => {
         { status: 429, headers: { "retry-after": retryAfter, "content-type": "application/json" } },
       )) as unknown as typeof fetch;
 
-  it("whoami が 429 なら、502 にせず 429 と Retry-After を返す", async () => {
-    const r = await start({ fetch: limited("7") });
+  it("whoami が（再送のあとも）429 なら、502 にせず 429 と Retry-After を返す。本文は code・cause・nextActions だけ", async () => {
+    const r = await start({ fetch: limited("1") });
     const res = await raw(r, { body: INIT, headers: { authorization: `Bearer ${r.tokens.a}` } });
     expect(res.status).toBe(429);
-    expect(res.headers.get("retry-after")).toBe("7");
-    expect(await res.text()).not.toContain(r.tokens.a);
-  });
+    expect(res.headers.get("retry-after")).toBe("1");
+    const text = await res.text();
+    expect(text).not.toContain(r.tokens.a);
+    const body = JSON.parse(text) as { error: Record<string, unknown> };
+    expect(Object.keys(body.error).sort()).toEqual(["cause", "code", "nextActions"]);
+  }, 15_000);
 
   it("Retry-After が不正・なしでも 429（待ち時間は 1 秒を伝える）", async () => {
     const r = await start({ fetch: limited("abc") });
     const res = await raw(r, { body: INIT, headers: { authorization: `Bearer ${r.tokens.a}` } });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("1");
-  });
+  }, 15_000);
 });
 
 describe("同時数による 429（daemon の窓口の maxInFlightPerPrincipal）", () => {
