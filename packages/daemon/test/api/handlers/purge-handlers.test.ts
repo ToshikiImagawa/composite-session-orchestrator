@@ -19,6 +19,7 @@ const rig = (
     defaultTombstone?: boolean;
     discarded?: boolean;
     lastCommit?: string;
+    onPurgedThrows?: boolean;
   } = {},
 ) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
@@ -79,6 +80,7 @@ const rig = (
     revoked: [] as string[],
     audit: [] as string[],
     failures: [] as string[],
+    purged: [] as string[][],
   };
   let nowMs = ARCHIVED_AT;
   const h = createPurgeHandlers({
@@ -89,6 +91,10 @@ const rig = (
     revokeNode: (id) => calls.revoked.push(id),
     audit: (event) => calls.audit.push(event),
     onFailure: (_id, cause) => calls.failures.push(cause),
+    onPurged: (ids) => {
+      calls.purged.push([...ids]);
+      if (over.onPurgedThrows === true) throw new Error("後始末の失敗");
+    },
   });
   const call = (
     op: "node.purge" | "node.purgePreview" | "node.purgeHold" | "node.purgeRelease",
@@ -414,5 +420,62 @@ describe("node.purgeHold・node.purgeRelease（自動の最終削除の保留。
     r.advance(90);
     r.call("node.purge", { nodeId: "t" });
     expect(r.calls.audit).not.toContain("purgeHoldIgnored");
+  });
+});
+
+describe("最終削除のあとの後始末（onPurged。T13f-r）", () => {
+  it("最終削除に成功したら、消えた木のノードを渡す（保管している破棄した成果の掃除に使う）。失敗した最終削除・事前確認では呼ばない", () => {
+    const r = rig();
+    r.call("node.purgePreview", { nodeId: "t" });
+    expect(r.calls.purged).toEqual([]);
+    expect(r.call("node.purge", { nodeId: "t" }).ok).toBe(false); // 保持期間が過ぎていない
+    expect(r.calls.purged).toEqual([]);
+    r.advance(90);
+    expect(r.call("node.purge", { nodeId: "t" }).ok).toBe(true);
+    expect(r.calls.purged).toEqual([["c", "t"]]);
+  });
+
+  it("後始末が例外を投げても、最終削除は成功のまま。原因は onFailure に残る", () => {
+    const r = rig({ onPurgedThrows: true });
+    r.advance(90);
+    expect(r.call("node.purge", { nodeId: "t" }).ok).toBe(true);
+    expect(r.calls.failures.join("\n")).toContain("後始末に失敗");
+  });
+});
+
+describe("事前確認の、保管している破棄した成果の数（discardedFor。T13f-r）", () => {
+  it("discardedFor があれば、事前確認に discardedRefs を出す。失敗したら出さないだけ（事前確認は成功のまま）", async () => {
+    const base = rig();
+    const mk = (f: (ids: readonly string[]) => Promise<number>) =>
+      createPurgeHandlers({
+        log: base.log,
+        nowMs: () => ARCHIVED_AT,
+        retentionDays: 90,
+        defaultTombstone: true,
+        revokeNode: () => {},
+        discardedFor: f,
+      });
+    const seen: string[][] = [];
+    const ok = await mk(async (ids) => {
+      seen.push([...ids]);
+      return 4;
+    })["node.purgePreview"]({
+      requestId: "q",
+      operation: "node.purgePreview",
+      role: "human",
+      params: { nodeId: "t" },
+    } as unknown as HandlerRequest<"node.purgePreview">);
+    expect(ok.ok && ok.value.discardedRefs).toBe(4);
+    expect(seen).toEqual([["c", "t"]]);
+    const bad = await mk(async () => {
+      throw new Error("git が壊れている");
+    })["node.purgePreview"]({
+      requestId: "q",
+      operation: "node.purgePreview",
+      role: "human",
+      params: { nodeId: "t" },
+    } as unknown as HandlerRequest<"node.purgePreview">);
+    expect(bad.ok).toBe(true);
+    expect(bad.ok && bad.value.discardedRefs).toBeUndefined();
   });
 });

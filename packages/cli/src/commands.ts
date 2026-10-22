@@ -6,6 +6,9 @@
  *   cso reclaim <nodeId> [--yes] [--request-id <id>]
  *   cso purge-hold <nodeId> [--until <ISO 8601 UTC>] [--reason <文>] [--request-id <id>]
  *   cso purge-release <nodeId> [--request-id <id>]
+ *   cso discarded list
+ *   cso discarded restore <nodeId|key> [--branch <名前>] [--request-id <id>]
+ *   cso discarded drop <nodeId|key> [--yes] [--request-id <id>]
  *
  * 結果が確認できないとき（接続不可・不正な応答）は、同じ requestId で再実行できる（冪等、NFR_003）。
  */
@@ -48,6 +51,13 @@ const USAGE = `使い方:
       --reason  理由（200 文字まで）
   cso purge-release <nodeId> [--request-id <id>]
       保留を解除する。解除のあとは、予告から出し直し、そこから noticeDays 日たつまで消えない
+  cso discarded list
+      強制の回収で破棄した成果の保管（refs/cso/discarded/*）の一覧: 名前・ノード・先端の SHA・日時・件名（コミットメッセージ由来の、信頼できない入力）。孤立（ノードがもうない）も出る。
+      保管は、最終削除（cso purge）のときに、その木のノードの分が消える。数の上限（daemon の設定 discardedRefsMax）に達すると、強制の回収は失敗する
+  cso discarded restore <nodeId|key> [--branch <名前>] [--request-id <id>]
+      保管している先端から、新しいブランチを作る（作成だけ。既存のブランチは上書きしない。保管は残る）。既定の名前は cso/restored/<key>
+  cso discarded drop <nodeId|key> [--yes] [--request-id <id>]
+      保管を 1 件消す（取り消せない）。--yes がなければ、対象の表示だけで止まる
   --request-id <id>  結果が確認できなかった要求を、同じ識別子で再実行する
   -h, --help         この使い方を表示する（終了コード 0）
 終了コード: 0 成功 / 1 失敗・結果が確認できない / 2 引数の誤り`;
@@ -57,9 +67,12 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   reclaim: ["--yes"],
   "purge-hold": ["--until", "--reason"],
   "purge-release": [],
+  "discarded-list": [],
+  "discarded-restore": ["--branch"],
+  "discarded-drop": ["--yes"],
 };
 /** 値を取るオプション。 */
-const VALUE_FLAGS: ReadonlySet<string> = new Set(["--until", "--reason"]);
+const VALUE_FLAGS: ReadonlySet<string> = new Set(["--until", "--reason", "--branch"]);
 
 export function formatFailure(f: Failure): string {
   return `失敗 [${f.code}]: ${f.cause}\n次の操作:\n${f.nextActions.map((a) => `  - ${a}`).join("\n")}\n`;
@@ -125,6 +138,8 @@ interface Preview {
   readonly blockers: readonly { readonly code: string; readonly cause: string }[];
   /** 自動の最終削除の保留（有効なもの）。 */
   readonly hold?: { readonly until?: string; readonly reason?: string };
+  /** 最終削除で一緒に消える、保管している破棄した成果の数。 */
+  readonly discardedRefs?: number;
 }
 const isPreview = (v: unknown): v is Preview =>
   isRecord(v) &&
@@ -138,6 +153,10 @@ const isPreview = (v: unknown): v is Preview =>
   v.blockers.every(
     (b) => isRecord(b) && typeof b.code === "string" && typeof b.cause === "string",
   ) &&
+  (v.discardedRefs === undefined ||
+    (typeof v.discardedRefs === "number" &&
+      Number.isInteger(v.discardedRefs) &&
+      v.discardedRefs >= 0)) &&
   (v.hold === undefined ||
     (isRecord(v.hold) &&
       (v.hold.until === undefined || typeof v.hold.until === "string") &&
@@ -179,6 +198,44 @@ const isReclaimPreview = (v: unknown): v is ReclaimPreview =>
   (v.loss === undefined || (Array.isArray(v.loss) && v.loss.every(isLossView)));
 /** シェルで安全に貼り付けられるように、単一引用符で囲む（中の `'` は `'\''` にする）。 */
 const shellQuote = (v: string): string => `'${v.replace(/'/g, "'\\''")}'`;
+interface DiscardedView {
+  readonly key: string;
+  readonly tip: string;
+  readonly nodeId?: string;
+  readonly orphan: boolean;
+  readonly committedAt?: string;
+  readonly untrustedSubject?: string;
+}
+const isDiscardedList = (v: unknown): v is { items: readonly DiscardedView[]; max: number } =>
+  isRecord(v) &&
+  typeof v.max === "number" &&
+  Array.isArray(v.items) &&
+  v.items.every(
+    (i) =>
+      isRecord(i) &&
+      typeof i.key === "string" &&
+      typeof i.tip === "string" &&
+      typeof i.orphan === "boolean" &&
+      (i.nodeId === undefined || typeof i.nodeId === "string") &&
+      (i.committedAt === undefined || typeof i.committedAt === "string") &&
+      (i.untrustedSubject === undefined || typeof i.untrustedSubject === "string"),
+  );
+const isRestored = (v: unknown): v is { branch: string; tip: string } =>
+  isRecord(v) && typeof v.branch === "string" && typeof v.tip === "string";
+const isDropped = (v: unknown): v is { dropped: true; key: string; tip: string } =>
+  isRecord(v) && v.dropped === true && typeof v.key === "string" && typeof v.tip === "string";
+function describeDiscarded(v: { items: readonly DiscardedView[]; max: number }): string {
+  if (v.items.length === 0) return `保管している、破棄した成果: なし（上限 ${v.max} 件）\n`;
+  const lines = v.items.map((i) => {
+    const subject =
+      i.untrustedSubject === undefined
+        ? ""
+        : `\n      件名（信頼できない入力）: 「${terminalSafe(i.untrustedSubject)}」`;
+    return `  ${terminalSafe(i.key, 128)}  ノード: ${i.nodeId === undefined ? "（孤立）" : terminalSafe(i.nodeId, 128)}  先端: ${i.tip}${i.committedAt === undefined ? "" : `  ${terminalSafe(i.committedAt, 40)}`}${subject}`;
+  });
+  const rest = Math.max(v.max - v.items.length, 0);
+  return `保管している、破棄した成果（${v.items.length} 件 / 上限 ${v.max} 件）:\n${lines.join("\n")}\n残り ${rest} 件（上限 ${v.max} − 現在 ${v.items.length}）。上限に達すると、強制の回収は失敗する\n`;
+}
 const isHeld = (v: unknown): v is { held: true; until?: string } =>
   isRecord(v) && v.held === true && (v.until === undefined || typeof v.until === "string");
 const isReleased = (v: unknown): v is { released: true } => isRecord(v) && v.released === true;
@@ -249,7 +306,7 @@ function describePreview(p: Preview, tombstone: boolean | undefined): string {
         : "墓標を残さない";
   const remains = keep
     ? `  墓標に残る内容: タイトル「${p.tombstoneTitle}」（目的の 1 行目）・結果（検証済みか破棄か）・最終コミットの SHA（記録があれば）・日付\n` +
-      "  最終コミットの SHA は、成果の保管ではなく、取り戻すための手がかり: ブランチを消した後も git が掃除（gc）するまでの間（到達できないオブジェクトは既定でおよそ 2 週間）は、git branch <名前> <SHA> で戻せることがある\n"
+      "  最終コミットの SHA は、成果の保管ではなく、取り戻すための手がかり（破棄した成果の保管は、最終削除で一緒に消える）: ブランチを消した後も git が掃除（gc）するまでの間（到達できないオブジェクトは既定でおよそ 2 週間）は、git branch <名前> <SHA> で戻せることがある\n"
     : "  墓標は残らない。標識として、削除した日時・木の根・ノード数・人間の操作だけが記録に残る\n";
   const blockers =
     p.blockers.length === 0
@@ -262,6 +319,9 @@ function describePreview(p: Preview, tombstone: boolean | undefined): string {
     (p.hold === undefined
       ? ""
       : `  自動の最終削除は保留中（${p.hold.until === undefined ? "無期限" : `${terminalSafe(p.hold.until, 40)} まで`}${p.hold.reason === undefined ? "" : `。理由: 「${terminalSafe(p.hold.reason, 200)}」`}）。人間のこのコマンドは、保留を無視して削除する（無視したことは監査に残る）\n`) +
+    (p.discardedRefs === undefined || p.discardedRefs === 0
+      ? ""
+      : `  保管している、破棄した成果（refs/cso/discarded/*）: ${p.discardedRefs} 件が、一緒に消える。取り出すなら、先に cso discarded restore（cso discarded list で確かめる）\n`) +
     "  物理削除の範囲: 対象のノードに関するイベントの行（本文を含む）を、ログのファイルから消す（取り消せない）。バックアップ・OS のコピーには残りうる\n" +
     blockers
   );
@@ -274,8 +334,16 @@ export async function runCommand(
   if (argv.includes("--help") || argv.includes("-h")) {
     return { exitCode: 0, stdout: `${USAGE}\n`, stderr: "" };
   }
-  const [command, ...rest] = argv;
+  let [command, ...rest] = argv;
   if (command === undefined) return usageError("コマンドを指定する");
+  if (command === "discarded") {
+    const sub = rest[0];
+    if (sub !== "list" && sub !== "restore" && sub !== "drop") {
+      return usageError("cso discarded には、list・restore・drop のどれかを指定する");
+    }
+    command = `discarded-${sub}`;
+    rest = rest.slice(1);
+  }
   const allowed = ALLOWED_FLAGS[command];
   if (allowed === undefined) return usageError(`不明なコマンド: ${command}`);
 
@@ -310,9 +378,25 @@ export async function runCommand(
       rerunArgs.push(a);
     }
   }
+  if (command === "discarded-list") {
+    if (positional.length !== 0) return usageError("cso discarded list に、引数はない");
+    const res = await invoke(
+      deps.client,
+      requestId ?? deps.newRequestId(),
+      "node.discardedList",
+      {},
+      isDiscardedList,
+    );
+    if (res.kind !== "ok") {
+      return res.kind === "failure"
+        ? failed(res.failure)
+        : unconfirmed(res.reason, "cso discarded list", requestId ?? "-");
+    }
+    return { exitCode: 0, stdout: describeDiscarded(res.value), stderr: "" };
+  }
   const [nodeId] = positional;
   if (nodeId === undefined || positional.length !== 1) {
-    return usageError(`${command} にはノード識別子を 1 つ指定する`);
+    return usageError(`${command} にはノード識別子（または保管の名前）を 1 つ指定する`);
   }
   if (!isSafeId(nodeId)) {
     return usageError(
@@ -329,6 +413,64 @@ export async function runCommand(
     o.kind === "failure"
       ? failed(o.failure)
       : unconfirmed((o as { reason: string }).reason, rerun, id);
+
+  if (command === "discarded-restore") {
+    const branch = values.get("--branch");
+    const res = await invoke(
+      deps.client,
+      id,
+      "node.discardedRestore",
+      { target: nodeId, ...(branch === undefined ? {} : { branch }) },
+      isRestored,
+    );
+    if (res.kind !== "ok") return fail(res);
+    return {
+      exitCode: 0,
+      stdout: `ブランチを作った: ${terminalSafe(res.value.branch, 200)}（先端 ${res.value.tip}）。保管は残っている\nrequestId: ${id}\n`,
+      stderr: "",
+    };
+  }
+  if (command === "discarded-drop") {
+    const listed = await invoke(deps.client, id, "node.discardedList", {}, isDiscardedList);
+    if (listed.kind !== "ok") return fail(listed);
+    const exact = listed.value.items.filter((i) => i.key === nodeId);
+    const matches =
+      exact.length > 0 ? exact : listed.value.items.filter((i) => i.nodeId === nodeId);
+    if (matches.length > 1) {
+      return failed({
+        code: "multipleKept",
+        cause: `ノード ${terminalSafe(nodeId, 128)} の保管が複数ある（${matches.map((m) => terminalSafe(m.key, 128)).join("、")}）`,
+        nextActions: ["cso discarded list で確かめて、鍵（key）を指定する"],
+      } as Failure);
+    }
+    const item = matches[0];
+    if (item === undefined) {
+      return failed({
+        code: "notFound",
+        cause: "その保管はない",
+        nextActions: ["cso discarded list で名前を確かめる"],
+      } as Failure);
+    }
+    const shown = `消す保管: ${terminalSafe(item.key, 128)}（ノード ${item.nodeId === undefined ? "孤立" : terminalSafe(item.nodeId, 128)}。先端 ${item.tip}）\n`;
+    if (!flags.has("--yes")) {
+      return {
+        exitCode: 2,
+        stdout: shown,
+        stderr:
+          "保管を消すと、取り戻せない（先に cso discarded restore で取り出せる）。上の対象でよければ --yes を付けて再実行する\n",
+      };
+    }
+    // 表示した先端を渡す（表示のあとで保管が変わっていたら、消さない）。鍵で指定する（ノード ID だと、複数あるときに曖昧）。
+    const res = await invoke(
+      deps.client,
+      id,
+      "node.discardedDrop",
+      { target: item.key, expectTip: item.tip },
+      isDropped,
+    );
+    if (res.kind !== "ok") return fail(res);
+    return { exitCode: 0, stdout: `${shown}消した\nrequestId: ${id}\n`, stderr: "" };
+  }
 
   if (command === "purge-hold") {
     const until = values.get("--until");

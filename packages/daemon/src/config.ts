@@ -45,6 +45,8 @@ export interface DaemonConfig {
    * `node_modules`・`dist`・`.turbo`。これ以外の gitignore の対象（`.env` など）が作業ツリーにあれば、回収は拒否される。
    */
   readonly regenerableIgnored?: readonly string[];
+  /** 保管する、破棄した成果（`refs/cso/discarded/*`）の数の上限（1〜10000）。上限に達したら、強制の回収は失敗する。省略すると 200。 */
+  readonly discardedRefsMax?: number;
   /** 最終削除の保持期間（木全体のアーカイブからの日数。0 以上）。省略すると 90。 */
   readonly retentionDays?: number;
   /** `node.purge` の `tombstone` を省略したときに、墓標を残すか。省略すると `DEFAULT_PURGE_TOMBSTONE`（残す）。 */
@@ -98,6 +100,7 @@ const KEYS = [
   "mcpUrl",
   "port",
   "regenerableIgnored",
+  "discardedRefsMax",
   "startLimits",
   "retentionDays",
   "purgeTombstone",
@@ -192,6 +195,15 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     return bad(
       "autoPurge を有効にするときは、retentionDays を 7 以上にする（短い保持期間で、自動の削除が早く進みすぎるのを防ぐ。省略した既定の 90 は可）",
     );
+  }
+  if (
+    raw.discardedRefsMax !== undefined &&
+    (typeof raw.discardedRefsMax !== "number" ||
+      !Number.isInteger(raw.discardedRefsMax) ||
+      raw.discardedRefsMax < 1 ||
+      raw.discardedRefsMax > 10000)
+  ) {
+    return bad("discardedRefsMax は 1〜10000 の整数");
   }
   if (raw.purgeTombstone !== undefined && typeof raw.purgeTombstone !== "boolean") {
     return bad("purgeTombstone は真偽値");
@@ -429,6 +441,9 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(raw.maxTurns === undefined ? {} : { maxTurns: raw.maxTurns as number }),
       ...(raw.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: raw.maxBudgetUsd as number }),
       ...(raw.retentionDays === undefined ? {} : { retentionDays: raw.retentionDays as number }),
+      ...(raw.discardedRefsMax === undefined
+        ? {}
+        : { discardedRefsMax: raw.discardedRefsMax as number }),
       ...(raw.purgeTombstone === undefined
         ? {}
         : { purgeTombstone: raw.purgeTombstone as boolean }),

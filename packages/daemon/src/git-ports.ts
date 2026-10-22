@@ -7,7 +7,8 @@
  * - 作成: 親のブランチ（根の子は、根の作業ツリーで今チェックアウト中のブランチ。detached HEAD は失敗）から、
  *   `git worktree add --track -b`。上流を親のブランチにするので、統合済みかの判定とブランチの削除（`-d`）が、親のブランチを基準にできる。
  *   同じノード ID の再要求は、同じ結果を返す（冪等）。登録されていない同名のディレクトリがあれば、上書きせずに失敗する。
- * - 削除: **`--force` を使わない**（`git worktree remove`）。ブランチは `git branch -d`（統合済みだけ。**`-D` は使わない**）。
+ * - 削除: **`--force` を使わない**（`git worktree remove`）。ブランチは `git branch -d`（統合済みだけ。**`-D` は、強制の回収〔破棄の判断を経たノード〕のときだけ**。
+ *   強制のときは、消す前に、先端を `refs/cso/discarded/<名前>` に付け替えて保管する。`docs/discarded-work.md`）。
  *   未保存の変更・未追跡のファイルがあれば作業ツリーを消さずに失敗し、未統合のコミットがあればブランチを残して失敗する
  *   （失うものがある場合は拒否する。NFR_006）。`expectedPath`（判定に使った実パス）が、そのノードの作業ツリーと違えば、何もしない。
  * - 事実: きれいか（`git status --porcelain --untracked-files=all` が空）、統合済みか（上流に含まれる）。調べられなければ、
@@ -20,6 +21,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { type Failure, failure, isCommitSha, isPathUnder, LIMITS, type Result } from "@cso/core";
+import { collisionKey, ownedBy } from "./discarded-keys.js";
 
 export interface GitResult {
   readonly code: number | null;
@@ -77,6 +79,20 @@ export interface GitPortsOptions {
    * `node_modules`・`dist`・`.turbo`。
    */
   readonly regenerableIgnored?: readonly string[];
+  /** 保管する、破棄した成果（`refs/cso/discarded/*`）の数の上限。上限に達したら、強制の回収は失敗する。省略すると 200。 */
+  readonly discardedRefsMax?: number;
+}
+
+export const DEFAULT_DISCARDED_REFS_MAX = 200;
+export const DISCARDED_REF_PREFIX = "refs/cso/discarded/";
+
+/** 保管している、破棄した成果（1 件）。`subject` は、コミットメッセージ由来の信頼できない入力（呼び出し側が整える）。 */
+export interface DiscardedItem {
+  /** `refs/cso/discarded/` の後ろ。 */
+  readonly key: string;
+  readonly tip: string;
+  readonly committedAt?: string;
+  readonly subject?: string;
 }
 
 export const DEFAULT_REGENERABLE_IGNORED: readonly string[] = ["node_modules", "dist", ".turbo"];
@@ -103,8 +119,31 @@ export interface GitPorts {
   >;
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
+    opts: {
+      expectedPath: string;
+      force?: boolean;
+      onTip?: (tip: string, ref?: string) => void;
+    },
   ): Promise<Result<undefined, Failure>>;
+  /** 保管している、破棄した成果の一覧（上限まで）と、保管の数の上限。 */
+  discardedList(): Promise<Result<{ items: readonly DiscardedItem[]; max: number }, Failure>>;
+  /** ノード ID から導く、保管の鍵（`<名前>`）。 */
+  discardedKeyOf(nodeId: string): string;
+  /** 保管している先端から、新しいブランチを作る（作成だけ。既存のブランチは上書きしない）。保管は残る。 */
+  discardedRestore(req: {
+    key: string;
+    branch?: string;
+  }): Promise<Result<{ branch: string; tip: string }, Failure>>;
+  /** 保管を 1 件消す（取り消せない）。`expectTip`（一覧で表示した先端）と、今の先端が一致したときだけ消す。 */
+  discardedDrop(
+    key: string,
+    expectTip: string,
+  ): Promise<Result<{ key: string; tip: string }, Failure>>;
+  /** 最終削除された木のノードの保管を消す（失敗は、消せたものと残ったものを返す）。 */
+  discardedDeleteFor(nodeIds: readonly string[]): Promise<{
+    deleted: readonly { key: string; tip: string }[];
+    failed: readonly { key: string; cause: string }[];
+  }>;
   provisionWorktree(req: {
     parentId: string;
     nodeId: string;
@@ -166,6 +205,22 @@ export function createGitPorts(
     return next;
   };
   const git = (args: readonly string[], cwd = repoRoot): Promise<GitResult> => run(args, { cwd });
+
+  const discardedMax = options.discardedRefsMax ?? DEFAULT_DISCARDED_REFS_MAX;
+  const NEXT_STORE = [
+    "cso discarded list で、保管している成果を確かめる",
+    "不要なものは cso discarded drop <nodeId> --yes で消す",
+    "必要なものは cso discarded restore <nodeId> でブランチに取り出してから消す",
+  ] as [string, ...string[]];
+  /** `refs/cso/discarded/<key>` の形（git の ref 名として正しいか）を、git で確かめる。 */
+  const validRef = async (ref: string): Promise<boolean> =>
+    (await git(["check-ref-format", ref])).code === 0;
+  const validBranch = async (name: string): Promise<boolean> =>
+    // `refs/` で始まる名前（`refs/heads/refs/...` になる）と、`@` だけの名前は、拒否する。
+    !name.startsWith("refs/") &&
+    name !== "@" &&
+    (await git(["check-ref-format", "--branch", name])).code === 0;
+  const zeros = (sha: string): string => "0".repeat(sha.length);
 
   const branchOf = (nodeId: string): string => `cso/${nameOf(nodeId)}`;
   const pathOf = (nodeId: string): string => join(worktreeRoot, nameOf(nodeId));
@@ -292,7 +347,159 @@ export function createGitPorts(
     return out;
   };
 
+  /** 保管の一覧（`refs/cso/discarded/*`）。 */
+  const listDiscarded = async (): Promise<Result<DiscardedItem[], Failure>> => {
+    const r = await git([
+      "for-each-ref",
+      "--format=%(refname)%09%(objectname)%09%(committerdate:iso-strict)%09%(contents:subject)",
+      DISCARDED_REF_PREFIX,
+    ]);
+    if (r.code !== 0) {
+      return fail("gitFailed", "保管の一覧を取得できなかった", "git の状態を確認する");
+    }
+    const items: DiscardedItem[] = [];
+    for (const line of r.stdout.split("\n")) {
+      if (line === "") continue;
+      const [ref, tip, at, ...subject] = line.split("\t");
+      if (ref === undefined || tip === undefined || !ref.startsWith(DISCARDED_REF_PREFIX)) continue;
+      items.push({
+        key: ref.slice(DISCARDED_REF_PREFIX.length),
+        tip,
+        ...(at === undefined || at === "" ? {} : { committedAt: at }),
+        ...(subject.length === 0 ? {} : { subject: subject.join("\t") }),
+      });
+    }
+    return { ok: true, value: items };
+  };
+
+  /**
+   * 強制の回収で消すブランチの先端を、`refs/cso/discarded/<名前>` に付け替えて保管する（`update-ref` の古い値の検査で、作成だけ。
+   * 原子的）。同じ名前があり、同じ先端なら成功（冪等）。違う先端なら、上書きせず、`<名前>-<先端の先頭 12 桁>` に置く。
+   * 上限に達していたら、失敗する（成果を黙って捨てない）。作れなければ失敗する（呼び出し側は、何も消さない）。
+   */
+  const keepDiscarded = async (
+    nodeId: string,
+    tip: string,
+  ): Promise<Result<{ ref: string }, Failure>> => {
+    const listed = await listDiscarded();
+    if (!listed.ok) return listed;
+    const base = nameOf(nodeId);
+    const mine = new Set([base]);
+    const owned = listed.value.filter((i) => ownedBy(i.key, mine));
+    const alreadyKept = owned.find((i) => i.tip === tip);
+    if (alreadyKept !== undefined) {
+      return { ok: true, value: { ref: `${DISCARDED_REF_PREFIX}${alreadyKept.key}` } };
+    }
+    if (listed.value.length >= discardedMax) {
+      return fail(
+        "discardedStoreFull",
+        `保管している破棄した成果が上限（${discardedMax} 件）に達している（何も消さなかった）`,
+        ...NEXT_STORE,
+      );
+    }
+    // 同じ名前の保管がすでにあれば（違う先端）、上書きせず、`<名前>.<先端の先頭 12 桁>` に置く（ほかのノードの名前と取り違えない形）。
+    const key = owned.some((i) => i.key === base) ? collisionKey(base, tip) : base;
+    const ref = `${DISCARDED_REF_PREFIX}${key}`;
+    if (!(await validRef(ref))) {
+      return fail(
+        "keepFailed",
+        "保管の ref の名前が、git の規則に合わない（何も消さなかった）",
+        "ノード ID を確認する",
+      );
+    }
+    const r = await git(["update-ref", ref, tip, zeros(tip)]);
+    if (r.code !== 0) {
+      return fail(
+        "keepFailed",
+        `破棄する成果を保管できなかった（何も消さなかった）: ${r.stderr.trim().slice(0, 200)}`,
+        "もう一度回収する",
+      );
+    }
+    return { ok: true, value: { ref } };
+  };
+
   const ports: GitPorts = {
+    discardedKeyOf: nameOf,
+    discardedList: () =>
+      serial(async () => {
+        const listed = await listDiscarded();
+        if (!listed.ok) return listed;
+        const items = listed.value.slice(0, discardedMax);
+        return { ok: true as const, value: { items, max: discardedMax } };
+      }),
+    discardedRestore: ({ key, branch }) =>
+      serial(async () => {
+        const ref = `${DISCARDED_REF_PREFIX}${key}`;
+        if (!(await validRef(ref))) {
+          return fail("invalidName", "保管の名前が不正", "cso discarded list で名前を確かめる");
+        }
+        const tipR = await git(["rev-parse", "--verify", "-q", `${ref}^{commit}`]);
+        const tip = tipR.stdout.trim();
+        if (tipR.code !== 0 || !isCommitSha(tip)) {
+          return fail("notFound", "その保管はない", "cso discarded list で名前を確かめる");
+        }
+        const name = branch ?? `cso/restored/${key}`;
+        if (name.startsWith("-") || !(await validBranch(name))) {
+          return fail(
+            "invalidName",
+            "ブランチの名前が、git の規則に合わない",
+            "--branch で、別の名前を指定する",
+          );
+        }
+        // 作成だけ（古い値が 0 の検査で、既存のブランチを上書きしない。原子的）。
+        const r = await git(["update-ref", `refs/heads/${name}`, tip, zeros(tip)]);
+        if (r.code !== 0) {
+          return fail(
+            "branchExists",
+            `ブランチ ${name} を作れなかった（既にある、または作れない）。上書きはしない`,
+            "--branch で、別の名前を指定する",
+          );
+        }
+        return { ok: true as const, value: { branch: name, tip } };
+      }),
+    discardedDrop: (key, expectTip) =>
+      serial(async () => {
+        const ref = `${DISCARDED_REF_PREFIX}${key}`;
+        if (!(await validRef(ref))) {
+          return fail("invalidName", "保管の名前が不正", "cso discarded list で名前を確かめる");
+        }
+        const tipR = await git(["rev-parse", "--verify", "-q", ref]);
+        const tip = tipR.stdout.trim();
+        if (tipR.code !== 0 || tip === "") {
+          return fail("notFound", "その保管はない", "cso discarded list で名前を確かめる");
+        }
+        if (tip !== expectTip) {
+          return fail(
+            "tipMismatch",
+            "表示した先端と、今の保管の先端が違う（消さなかった）",
+            "cso discarded list で、今の保管を確かめてから、もう一度消す",
+          );
+        }
+        const r = await git(["update-ref", "-d", ref, tip]); // 古い値の検査つき（途中で変わっていたら消さない）
+        if (r.code !== 0) {
+          return fail(
+            "dropFailed",
+            `保管を消せなかった: ${r.stderr.trim().slice(0, 200)}`,
+            "もう一度試す",
+          );
+        }
+        return { ok: true as const, value: { key, tip } };
+      }),
+    discardedDeleteFor: (nodeIds) =>
+      serial(async () => {
+        const deleted: { key: string; tip: string }[] = [];
+        const failed: { key: string; cause: string }[] = [];
+        const listed = await listDiscarded();
+        if (!listed.ok) return { deleted, failed: [{ key: "*", cause: listed.error.cause }] };
+        const bases = new Set(nodeIds.map(nameOf));
+        for (const item of listed.value) {
+          if (!ownedBy(item.key, bases)) continue;
+          const r = await git(["update-ref", "-d", `${DISCARDED_REF_PREFIX}${item.key}`, item.tip]);
+          if (r.code === 0) deleted.push({ key: item.key, tip: item.tip });
+          else failed.push({ key: item.key, cause: r.stderr.trim().slice(0, 200) });
+        }
+        return { deleted, failed };
+      }),
     lossFor: (nodeId) => serial(() => lossOf(nodeId)),
     provisionWorktree: ({ parentId, nodeId }) =>
       serial(async () => {
@@ -438,9 +645,22 @@ export function createGitPorts(
           );
         }
         // 強制で消す前に、ブランチの先端を残す（捨てる成果を、あとから辿れるように）。
-        if (force === true && onTip !== undefined && (await branchExists(branch))) {
-          const tip = await git(["rev-parse", branch]);
-          if (tip.code === 0 && tip.stdout.trim() !== "") onTip(tip.stdout.trim());
+        // 先端は、`refs/cso/discarded/<名前>` に付け替えて保管する（gc で消えない）。保管できなければ、何も消さずに失敗する。
+        if (force === true && (await branchExists(branch))) {
+          const tip = await git(["rev-parse", `refs/heads/${branch}`]);
+          const sha = tip.stdout.trim();
+          if (tip.code === 0 && isCommitSha(sha)) {
+            const kept = await keepDiscarded(nodeId, sha);
+            if (!kept.ok) return kept;
+            onTip?.(sha, kept.value.ref);
+          } else {
+            // どの経路でも、保管できなければ、何も消さずに失敗する（先端を取得できない・コミットの形でない、など）。
+            return fail(
+              "keepFailed",
+              "消すブランチの先端を取得できなかった（何も消さなかった）",
+              "git の状態を確認する",
+            );
+          }
         }
         if (registered) {
           // `--force` は、`force`（破棄の判断を経たノード）のときだけ。登録されていない場所は、強制でも消さない（下）。

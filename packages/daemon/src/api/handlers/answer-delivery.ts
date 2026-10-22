@@ -23,7 +23,6 @@ import {
   type Failure,
   LIMITS,
   type NodeState,
-  type OrchState,
   type Result,
   sanitizeText,
   stateOf,

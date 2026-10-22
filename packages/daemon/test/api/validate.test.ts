@@ -262,3 +262,24 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
     expect(ok.ok).toBe(true);
   });
 });
+
+describe("node.discardedDrop・node.discardedRestore の引数（T13f-r）", () => {
+  const ok = (op: string, params: unknown) => validateParams(op as never, params).ok;
+  const TIP = "a".repeat(40);
+  it("discardedDrop は、expectTip（小文字の 16 進で 40 桁か 64 桁）が必須。余計なキーは拒否", () => {
+    expect(ok("node.discardedDrop", { target: "c1", expectTip: TIP })).toBe(true);
+    expect(ok("node.discardedDrop", { target: "c1", expectTip: "a".repeat(64) })).toBe(true);
+    expect(ok("node.discardedDrop", { target: "c1" })).toBe(false);
+    expect(ok("node.discardedDrop", { target: "c1", expectTip: "A".repeat(40) })).toBe(false);
+    expect(ok("node.discardedDrop", { target: "c1", expectTip: "a".repeat(39) })).toBe(false);
+    expect(ok("node.discardedDrop", { target: "c1", expectTip: TIP, x: 1 })).toBe(false);
+  });
+  it("discardedRestore: branch は省略できる。空・先頭が - は拒否。discardedList は引数なし", () => {
+    expect(ok("node.discardedRestore", { target: "c1" })).toBe(true);
+    expect(ok("node.discardedRestore", { target: "c1", branch: "my/b" })).toBe(true);
+    expect(ok("node.discardedRestore", { target: "c1", branch: "" })).toBe(false);
+    expect(ok("node.discardedRestore", { target: "c1", branch: "-x" })).toBe(false);
+    expect(ok("node.discardedList", {})).toBe(true);
+    expect(ok("node.discardedList", { x: 1 })).toBe(false);
+  });
+});

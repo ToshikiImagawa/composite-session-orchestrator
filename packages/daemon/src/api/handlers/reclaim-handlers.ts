@@ -67,14 +67,18 @@ export interface ReclaimPorts {
   /** 作業ツリーを消す。失敗は `Failure` で返す（例外は、ハンドラが `Failure` に変える）。 */
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
+    opts: {
+      expectedPath: string;
+      force?: boolean;
+      onTip?: (tip: string, ref?: string) => void;
+    },
   ): Promise<Result<undefined, Failure>>;
   /** 強制の回収で失われるもの（T21r）。なければ、事前確認に `loss` を出さない。 */
   lossFor?(nodeId: string): Promise<LossFacts | undefined>;
   /** daemon の作業ツリー置き場（作業ツリーのパスがこの配下であることを検査する）。 */
   readonly worktreeRoot: string;
   /** 強制で消す直前の、ブランチの先端（捨てる成果の最後のコミット）の記録先。 */
-  readonly onForced?: (nodeId: string, tip: string) => void;
+  readonly onForced?: (nodeId: string, tip: string, ref?: string) => void;
 }
 
 export interface ReclaimHandlerDeps {
@@ -457,8 +461,8 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
         }
         // 強制のときは、`-D` の直前に、ポートが先端を渡す。判定から削除までの間に先端が動いていたら（手でコミットが足されたなど）、
         // 実際に消えるブランチの先端で、記録を上書きする。
-        const onTip = (tip: string): void => {
-          ports.onForced?.(n.id, tip);
+        const onTip = (tip: string, ref?: string): void => {
+          ports.onForced?.(n.id, tip, ref);
           if (!isCommitSha(tip) || tip === recorded) return;
           const upd = appendAtomically(
             log,
