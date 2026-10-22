@@ -31,7 +31,15 @@ const git = (cwd: string, ...args: string[]): string =>
     },
   }).trim();
 
-const setup = (options: { detached?: boolean; failBranchD?: boolean } = {}) => {
+const setup = (
+  options: {
+    detached?: boolean;
+    failBranchD?: boolean;
+    failBranchDOnce?: boolean;
+    failUpdateRef?: boolean;
+    discardedRefsMax?: number;
+  } = {},
+) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "cso-git-")));
   const repoRoot = join(base, "repo");
   const worktreeRoot = join(base, "worktrees");
@@ -45,13 +53,32 @@ const setup = (options: { detached?: boolean; failBranchD?: boolean } = {}) => {
   const calls: string[][] = [];
   const runner: GitRunner = (args, opts) => {
     calls.push([...args]);
+    if (
+      options.failUpdateRef === true &&
+      args[0] === "update-ref" &&
+      String(args[1]).startsWith("refs/cso/discarded/")
+    ) {
+      return Promise.resolve({ code: 1, stdout: "", stderr: "error: cannot lock ref" });
+    }
+    if (options.failBranchDOnce === true && args[0] === "branch" && args[1] === "-D") {
+      options.failBranchDOnce = false; // 最初の 1 回だけ失敗する
+      return Promise.resolve({ code: 1, stdout: "", stderr: "error: cannot delete branch" });
+    }
     if (options.failBranchD === true && args[0] === "branch" && args[1] === "-D") {
       return Promise.resolve({ code: 1, stdout: "", stderr: "error: cannot delete branch" });
     }
     return nodeGit(args, opts);
   };
   const made = createGitPorts(
-    { repoRoot, worktreeRoot, rootCwd: repoRoot, rootNodeId: "root" },
+    {
+      repoRoot,
+      worktreeRoot,
+      rootCwd: repoRoot,
+      rootNodeId: "root",
+      ...(options.discardedRefsMax === undefined
+        ? {}
+        : { discardedRefsMax: options.discardedRefsMax }),
+    },
     runner,
   );
   if (!made.ok) throw new Error(made.error.cause);
@@ -505,5 +532,193 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
       expect(loss?.subjects).toEqual([]);
       expect(await s.ports.lossFor("no-such")).toBeUndefined();
     });
+  });
+});
+
+describe("破棄した成果の保管（T13f-r）", () => {
+  const commitIn = (p: string, file: string, subject: string): string => {
+    writeFileSync(join(p, file), `${subject}\n`);
+    git(p, "add", "-A");
+    git(p, "commit", "-q", "-m", subject);
+    return git(p, "rev-parse", "HEAD");
+  };
+  const force = (
+    s: ReturnType<typeof setup>,
+    id: string,
+    p: string,
+    onTip?: (t: string, r?: string) => void,
+  ) =>
+    s.ports.removeWorktree(id, {
+      expectedPath: p,
+      force: true,
+      ...(onTip === undefined ? {} : { onTip }),
+    });
+  const refs = (s: ReturnType<typeof setup>): string[] =>
+    git(s.repoRoot, "for-each-ref", "--format=%(refname)", "refs/cso/discarded/")
+      .split("\n")
+      .filter((l) => l !== "");
+
+  it("強制の回収で、ブランチの先端を refs/cso/discarded/<名前> に保管してから、ブランチを消す。onTip に ref も渡す。gc のあとも残る", async () => {
+    const s = setup();
+    const p = await provision(s, "c1");
+    const tip = commitIn(p, "w.txt", "捨てる成果");
+    const seen: { tip: string; ref?: string }[] = [];
+    const r = await force(s, "c1", p, (t, ref) =>
+      seen.push({ tip: t, ...(ref === undefined ? {} : { ref }) }),
+    );
+    expect(r.ok).toBe(true);
+    const key = s.ports.discardedKeyOf("c1");
+    expect(seen).toEqual([{ tip, ref: `refs/cso/discarded/${key}` }]);
+    expect(git(s.repoRoot, "rev-parse", `refs/cso/discarded/${key}`)).toBe(tip);
+    expect(() => git(s.repoRoot, "rev-parse", "--verify", `refs/heads/cso/${key}`)).toThrow();
+    git(s.repoRoot, "reflog", "expire", "--expire=now", "--all");
+    git(s.repoRoot, "gc", "-q", "--prune=now");
+    expect(git(s.repoRoot, "cat-file", "-t", tip)).toBe("commit"); // gc で消えない
+  });
+
+  it("保管できなければ（ref を作れない）、何も消さずに失敗する（作業ツリーもブランチも残る）", async () => {
+    const s = setup({ failUpdateRef: true });
+    const p = await provision(s, "c1");
+    commitIn(p, "w.txt", "守る成果");
+    const r = await force(s, "c1", p);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("keepFailed");
+    expect(existsSync(p)).toBe(true);
+    expect(git(s.repoRoot, "branch", "--list", `cso/${s.ports.discardedKeyOf("c1")}`)).not.toBe("");
+  });
+
+  it("上限に達したら、強制の回収は discardedStoreFull で失敗する（何も消さない。nextActions に list・drop・restore の案内）。drop すれば、通る", async () => {
+    const s = setup({ discardedRefsMax: 1 });
+    const a = await provision(s, "c1");
+    commitIn(a, "a.txt", "一つ目");
+    expect((await force(s, "c1", a)).ok).toBe(true);
+    const b = await provision(s, "c2");
+    commitIn(b, "b.txt", "二つ目");
+    const full = await force(s, "c2", b);
+    expect(full.ok).toBe(false);
+    if (!full.ok) {
+      expect(full.error.code).toBe("discardedStoreFull");
+      const next = full.error.nextActions.join("\n");
+      expect(next).toContain("cso discarded list");
+      expect(next).toContain("cso discarded drop");
+      expect(next).toContain("cso discarded restore");
+    }
+    expect(existsSync(b)).toBe(true); // 何も消していない
+    expect((await s.ports.discardedDrop(s.ports.discardedKeyOf("c1"))).ok).toBe(true);
+    expect((await force(s, "c2", b)).ok).toBe(true);
+  });
+
+  it("ブランチの削除に失敗して回収をやり直しても、同じ先端なら、保管は 1 件のまま（冪等）", async () => {
+    const s = setup({ failBranchDOnce: true });
+    const p = await provision(s, "c1");
+    const tip = commitIn(p, "w.txt", "成果");
+    expect((await force(s, "c1", p)).ok).toBe(false); // 保管のあと、作業ツリーは消え、ブランチだけ残る
+    expect(refs(s)).toHaveLength(1);
+    const again = await force(s, "c1", p); // やり直し（残りのブランチを消す）
+    expect(again.ok).toBe(true);
+    expect(refs(s)).toHaveLength(1);
+    const key = s.ports.discardedKeyOf("c1");
+    expect(git(s.repoRoot, "rev-parse", `refs/cso/discarded/${key}`)).toBe(tip);
+  });
+
+  it("同じ名前で、違う先端の保管がすでにあれば、上書きせず、<名前>-<先頭 12 桁> に置く（両方残る）", async () => {
+    const s = setup();
+    const p1 = await provision(s, "c1");
+    const tip1 = commitIn(p1, "w.txt", "最初の成果");
+    expect((await force(s, "c1", p1)).ok).toBe(true);
+    const p2 = await provision(s, "c1"); // 同じ nodeId を再利用
+    const tip2 = commitIn(p2, "x.txt", "別の成果");
+    expect((await force(s, "c1", p2)).ok).toBe(true);
+    const key = s.ports.discardedKeyOf("c1");
+    expect(git(s.repoRoot, "rev-parse", `refs/cso/discarded/${key}`)).toBe(tip1);
+    expect(git(s.repoRoot, "rev-parse", `refs/cso/discarded/${key}-${tip2.slice(0, 12)}`)).toBe(
+      tip2,
+    );
+  });
+
+  it("一覧: 鍵・先端・日時・件名。上限も返す", async () => {
+    const s = setup({ discardedRefsMax: 7 });
+    const p = await provision(s, "c1");
+    const tip = commitIn(p, "w.txt", "一覧に出る件名");
+    await force(s, "c1", p);
+    const l = await s.ports.discardedList();
+    expect(l.ok).toBe(true);
+    if (l.ok) {
+      expect(l.value.max).toBe(7);
+      expect(l.value.items).toHaveLength(1);
+      expect(l.value.items[0]).toMatchObject({
+        key: s.ports.discardedKeyOf("c1"),
+        tip,
+        subject: "一覧に出る件名",
+      });
+      expect(l.value.items[0]?.committedAt).toMatch(/^\d{4}-/);
+    }
+  });
+
+  it("取り出し: 保管の先端から、新しいブランチを作る（作成だけ。保管は残る）。既存のブランチは上書きしない。不正な名前は拒否する", async () => {
+    const s = setup();
+    const p = await provision(s, "c1");
+    const tip = commitIn(p, "w.txt", "取り出す成果");
+    await force(s, "c1", p);
+    const key = s.ports.discardedKeyOf("c1");
+    const ok = await s.ports.discardedRestore({ key });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.value).toEqual({ branch: `cso/restored/${key}`, tip });
+      expect(git(s.repoRoot, "rev-parse", `refs/heads/${ok.value.branch}`)).toBe(tip);
+    }
+    expect(refs(s)).toHaveLength(1); // 保管は残る
+    // 既存のブランチ（main）を指定しても、上書きしない
+    const mainBefore = git(s.repoRoot, "rev-parse", "refs/heads/main");
+    const clash = await s.ports.discardedRestore({ key, branch: "main" });
+    expect(clash.ok).toBe(false);
+    if (!clash.ok) expect(clash.error.code).toBe("branchExists");
+    expect(git(s.repoRoot, "rev-parse", "refs/heads/main")).toBe(mainBefore);
+    // 同じ名前の 2 回目も、上書きしない
+    expect((await s.ports.discardedRestore({ key })).ok).toBe(false);
+    for (const bad of ["a..b", "-x", "x y", "a/", "x.lock", "a~b", "@{"]) {
+      const r = await s.ports.discardedRestore({ key, branch: bad });
+      expect(r.ok, bad).toBe(false);
+      if (!r.ok) expect(r.error.code, bad).toBe("invalidName");
+    }
+    const none = await s.ports.discardedRestore({ key: "no-such-key" });
+    expect(none.ok).toBe(false);
+    if (!none.ok) expect(none.error.code).toBe("notFound");
+    const badKey = await s.ports.discardedRestore({ key: "a..b" });
+    expect(badKey.ok).toBe(false);
+    if (!badKey.ok) expect(badKey.error.code).toBe("invalidName");
+  });
+
+  it("消去: 保管を 1 件消す。ないもの・不正な鍵は失敗する", async () => {
+    const s = setup();
+    const p = await provision(s, "c1");
+    const tip = commitIn(p, "w.txt", "成果");
+    await force(s, "c1", p);
+    const key = s.ports.discardedKeyOf("c1");
+    const bad = await s.ports.discardedDrop("a..b");
+    expect(bad.ok).toBe(false);
+    const none = await s.ports.discardedDrop("no-such");
+    expect(none.ok).toBe(false);
+    const r = await s.ports.discardedDrop(key);
+    expect(r).toEqual({ ok: true, value: { key, tip } });
+    expect(refs(s)).toEqual([]);
+  });
+
+  it("最終削除での掃除: 渡したノードの保管（名前違いの重複も）だけを消し、ほかは残す", async () => {
+    const s = setup();
+    const a = await provision(s, "c1");
+    commitIn(a, "a.txt", "c1 の成果");
+    await force(s, "c1", a);
+    const a2 = await provision(s, "c1");
+    commitIn(a2, "a2.txt", "c1 の別の成果");
+    await force(s, "c1", a2); // <名前>-<12 桁> が増える
+    const b = await provision(s, "c2");
+    commitIn(b, "b.txt", "c2 の成果");
+    await force(s, "c2", b);
+    expect(refs(s)).toHaveLength(3);
+    const r = await s.ports.discardedDeleteFor(["c1"]);
+    expect(r.deleted).toHaveLength(2);
+    expect(r.failed).toEqual([]);
+    expect(refs(s)).toEqual([`refs/cso/discarded/${s.ports.discardedKeyOf("c2")}`]);
   });
 });

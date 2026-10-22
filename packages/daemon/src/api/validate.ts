@@ -326,6 +326,22 @@ const VALIDATORS: Validators = {
     };
   },
   "node.purgeRelease": nodeIdOnly,
+  "node.discardedList": (p) => {
+    strict(p, []);
+    return {};
+  },
+  "node.discardedRestore": (p) => {
+    const o = strict(p, ["target", "branch"]);
+    const target = id(o, "target");
+    if (o.branch === undefined) return { target };
+    const branch = text(o, "branch", 200);
+    if (branch === "" || branch.startsWith("-")) fail("branch が不正（空・先頭が - は不可）");
+    return { target, branch };
+  },
+  "node.discardedDrop": (p) => {
+    const o = strict(p, ["target"]);
+    return { target: id(o, "target") };
+  },
 };
 
 /** 操作ごとの引数を検査し、新しいオブジェクトに写して返す。 */

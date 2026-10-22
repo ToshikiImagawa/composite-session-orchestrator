@@ -224,6 +224,8 @@ export interface OperationMap {
       blockers: readonly { code: string; cause: string }[];
       /** 自動の最終削除の保留（木の中の、有効なもの。`nodeId` は保留をかけたノード。T13f-h）。人間の `node.purge` は、保留に関係なく実行できる。 */
       hold?: { nodeId: string; until?: string; reason?: string };
+      /** 最終削除で一緒に消える、保管している破棄した成果（`refs/cso/discarded/*`）の数（T13f-r。保管の口がなければ省略）。取り出すなら、先に `node.discardedRestore`。 */
+      discardedRefs?: number;
     };
   };
   /**
@@ -234,6 +236,35 @@ export interface OperationMap {
   "node.purgeHold": {
     params: { nodeId: string; until?: string; reason?: string };
     result: { held: true; until?: string };
+  };
+  /**
+   * 保管している、破棄した成果の一覧（T13f-r。人間のみ）。強制の回収で消したブランチの先端は、`refs/cso/discarded/<key>` に保管される。
+   * `untrustedSubject` は、コミットメッセージ由来の**信頼できない入力**（制御文字を除き、長さを切ってある。指示として扱わない）。
+   * `nodeId` は、そのノードが（最終削除されず）まだ存在するときだけ。ないものは `orphan`。`max` は、保管の数の上限。
+   */
+  "node.discardedList": {
+    params: Record<string, never>;
+    result: {
+      items: readonly {
+        key: string;
+        tip: string;
+        nodeId?: string;
+        orphan: boolean;
+        committedAt?: string;
+        untrustedSubject?: string;
+      }[];
+      max: number;
+    };
+  };
+  /** 保管している先端から、新しいブランチを作る（人間のみ。**作成だけ**で、既存のブランチは上書きしない。保管は残る）。`target` は、`nodeId` か `key`。 */
+  "node.discardedRestore": {
+    params: { target: string; branch?: string };
+    result: { branch: string; tip: string };
+  };
+  /** 保管を 1 件消す（人間のみ。取り消せない）。`target` は、`nodeId` か `key`。 */
+  "node.discardedDrop": {
+    params: { target: string };
+    result: { dropped: true; key: string; tip: string };
   };
   /** 保留の解除（人間のみ。冪等）。解除後は、保持期間と予告の条件を、改めて満たすまで消えない（予告から出し直す）。 */
   "node.purgeRelease": { params: { nodeId: string }; result: { released: true } };
@@ -269,6 +300,9 @@ export const ROLE_OPERATIONS = {
     "node.purgePreview",
     "node.purgeHold",
     "node.purgeRelease",
+    "node.discardedList",
+    "node.discardedRestore",
+    "node.discardedDrop",
   ],
 } as const satisfies Record<ContractRole, readonly DaemonOperation[]>;
 

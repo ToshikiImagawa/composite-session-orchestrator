@@ -440,6 +440,34 @@ describe("createDaemon（最終削除）", () => {
     expect(r.logs.join("\n")).toContain("purge.purged");
   });
 
+  it("最終削除に成功したあとに、worktree の口の discardedDeleteFor を、消えた木のノードで呼ぶ（保管の掃除）。結果は記録に残る。失敗しても、最終削除は成功", async () => {
+    for (const failing of [false, true]) {
+      const r = rig({ retentionDays: 0 });
+      seedArchivedTree(r);
+      const deleted: string[][] = [];
+      r.deps = {
+        ...r.deps,
+        worktree: {
+          ...r.deps.worktree,
+          discardedDeleteFor: async (ids: readonly string[]) => {
+            deleted.push([...ids]);
+            if (failing) throw new Error("消せない");
+            return { deleted: [{ key: "k", tip: "a".repeat(40) }], failed: [] };
+          },
+        },
+      };
+      const d = await boot(r);
+      const done = await call(d.url, d.humanToken, "node.purge", { nodeId: "t" });
+      expect(done.json.ok).toBe(true);
+      await vi.waitFor(() => expect(deleted).toEqual([["c", "t"]]));
+      await vi.waitFor(() =>
+        expect(r.logs.join("\n")).toContain(
+          failing ? "purge.discardedRefsFailed" : "purge.discardedRefsDeleted",
+        ),
+      );
+    }
+  });
+
   it("保持期間（既定 90 日）の前は、拒否される", async () => {
     const r = rig();
     seedArchivedTree(r);
@@ -916,5 +944,52 @@ describe("createDaemon（daemon の身元確認。T10m-i）", () => {
       req.end();
     });
     expect(status).toBe(403);
+  });
+});
+
+describe("createDaemon（保管した成果の操作。T13f-r）", () => {
+  it("worktree の口が保管の操作を持てば、人間だけが実 HTTP から呼べる（統合ノードは 403）。持たなければ、操作は有効にならない", async () => {
+    const r = rig();
+    const calls: string[] = [];
+    r.deps = {
+      ...r.deps,
+      worktree: {
+        ...r.deps.worktree,
+        discardedKeyOf: (id: string) => `k-${id}`,
+        discardedList: async () =>
+          ok({ max: 5, items: [{ key: "k-x", tip: "a".repeat(40), subject: "件名\u001b[2J" }] }),
+        discardedRestore: async (q: { key: string; branch?: string }) => {
+          calls.push(`restore:${q.key}`);
+          return ok({ branch: q.branch ?? "b", tip: "a".repeat(40) });
+        },
+        discardedDrop: async (key: string) => {
+          calls.push(`drop:${key}`);
+          return ok({ key, tip: "a".repeat(40) });
+        },
+      },
+    };
+    const d = await boot(r);
+    const list = await call(d.url, d.humanToken, "node.discardedList", {});
+    expect(list.status).toBe(200);
+    expect(list.json.value.max).toBe(5);
+    expect(list.json.value.items[0]).toMatchObject({ key: "k-x", orphan: true });
+    expect(list.json.value.items[0].untrustedSubject).not.toContain("\u001b");
+    expect(
+      (await call(d.url, d.humanToken, "node.discardedRestore", { target: "k-x", branch: "nb" }))
+        .json.value,
+    ).toEqual({ branch: "nb", tip: "a".repeat(40) });
+    expect((await call(d.url, d.humanToken, "node.discardedDrop", { target: "k-x" })).status).toBe(
+      200,
+    );
+    expect(calls).toEqual(["restore:k-x", "drop:k-x"]);
+    for (const op of ["node.discardedList", "node.discardedRestore", "node.discardedDrop"]) {
+      expect(
+        (await call(d.url, d.rootToken, op, op === "node.discardedList" ? {} : { target: "x" }))
+          .status,
+      ).toBe(403);
+    }
+    expect((await call(d.url, d.humanToken, "node.discardedDrop", { target: "a b" })).status).toBe(
+      400,
+    );
   });
 });

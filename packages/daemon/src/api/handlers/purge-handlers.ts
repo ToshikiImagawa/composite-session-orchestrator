@@ -58,6 +58,10 @@ export interface PurgeHandlerDeps {
   readonly audit?: (event: string, data: Record<string, unknown>) => void;
   /** 応答に出さない原因の記録先。 */
   readonly onFailure?: (nodeId: string, cause: string) => void;
+  /** 最終削除に成功したあとに、消えた木のノードを渡す（保管している、破棄した成果の掃除に使う。T13f-r）。例外・失敗は、最終削除の成否に影響しない。 */
+  readonly onPurged?: (nodeIds: readonly string[]) => void;
+  /** 最終削除で一緒に消える、保管している破棄した成果の数（事前確認に出す。T13f-r）。なければ、事前確認に出さない。失敗は、出さないだけ。 */
+  readonly discardedFor?: (nodeIds: readonly string[]) => Promise<number>;
 }
 
 /** 標識のイベント（core の `node.purged`）。 */
@@ -208,6 +212,11 @@ export function createPurger(deps: PurgeHandlerDeps) {
       }
     }
     audit("purged", { nodeId, origin, nodeIds, deleted: r.value.deleted, seq: r.value.event.seq });
+    try {
+      deps.onPurged?.(nodeIds);
+    } catch (e) {
+      deps.onFailure?.(nodeId, `最終削除のあとの後始末に失敗: ${String(e)}`);
+    }
     return { ok: true, value: { purged: nodeIds } };
   }
 
@@ -227,7 +236,9 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
         );
 
   return {
-    "node.purgePreview": (req: HandlerRequest<"node.purgePreview">): R<"node.purgePreview"> => {
+    "node.purgePreview": (
+      req: HandlerRequest<"node.purgePreview">,
+    ): R<"node.purgePreview"> | Promise<R<"node.purgePreview">> => {
       const denied = humanOnly(req.role);
       if (denied) return denied;
       const state = log.state();
@@ -247,7 +258,7 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
         marker: purgeMarker({ rootId: req.params.nodeId, nodeIds, archivedAt }),
       });
       if (!dry.ok) blockers.push({ code: dry.error.code, cause: dry.error.cause });
-      return {
+      const build = (discardedRefs: number | undefined): R<"node.purgePreview"> => ({
         ok: true,
         value: {
           nodeIds,
@@ -257,6 +268,7 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
           tombstoneTitle: title,
           purgeable: blockers.length === 0,
           blockers,
+          ...(discardedRefs === undefined ? {} : { discardedRefs }),
           ...(holder === undefined
             ? {}
             : {
@@ -271,7 +283,10 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
                 },
               }),
         },
-      };
+      });
+      // 保管している、破棄した成果の数（取得に失敗したら、出さないだけ）。保管の口がなければ、同期のまま返す。
+      if (deps.discardedFor === undefined) return build(undefined);
+      return deps.discardedFor(nodeIds).then(build, () => build(undefined));
     },
 
     // 自動の最終削除の保留（T13f-h）。有効な予告は、同じトランザクションで取り下げる（次の周期を待たない）。

@@ -4,6 +4,13 @@ import { createReadHandlers } from "../read-handlers.js";
 import type { Handlers } from "../server.js";
 import { createInstructionDelivery } from "./instruction-delivery.js";
 import { createPauseHandlers } from "./pause-handlers.js";
+
+export {
+  createDiscardedHandlers,
+  type DiscardedHandlerDeps,
+  type DiscardedPorts,
+} from "./discarded-handlers.js";
+
 import { createPurgeHandlers, type PurgeHandlerDeps } from "./purge-handlers.js";
 import { createReclaimHandlers, type ReclaimPorts } from "./reclaim-handlers.js";
 import { createRuntimeHandlers, type RuntimeHandlerDeps } from "./runtime-handlers.js";

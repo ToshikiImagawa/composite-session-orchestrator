@@ -49,6 +49,7 @@ import {
   createApiServer,
   createBindCodes,
   createCredentialStore,
+  createDiscardedHandlers,
   createHandlersWithScheduler,
   DEFAULT_AUTH_FAILURE_BURST,
   DEFAULT_AUTH_FAILURE_PER_MINUTE,
@@ -62,7 +63,7 @@ import {
 import { createAutoPurger } from "./auto-purge.js";
 import type { DaemonConfig } from "./config.js";
 import { EventLog } from "./eventlog.js";
-import type { LossFacts } from "./git-ports.js";
+import type { GitPorts, LossFacts } from "./git-ports.js";
 import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
 import { createLsofProbe, nodeExec, type ProcessProbe } from "./sdk/lsof-probe.js";
@@ -85,8 +86,18 @@ export interface WorktreePorts {
   lossFor?(nodeId: string): Promise<LossFacts | undefined>;
   removeWorktree(
     nodeId: string,
-    opts: { expectedPath: string; force?: boolean; onTip?: (tip: string) => void },
+    opts: {
+      expectedPath: string;
+      force?: boolean;
+      onTip?: (tip: string, ref?: string) => void;
+    },
   ): Promise<Result<undefined, Failure>>;
+  /** 保管している、破棄した成果（T13f-r）。省略すると、保管の操作（`node.discarded*`）と最終削除での掃除は無効（`notSupported`）。 */
+  discardedList?: GitPorts["discardedList"];
+  discardedKeyOf?: GitPorts["discardedKeyOf"];
+  discardedRestore?: GitPorts["discardedRestore"];
+  discardedDrop?: GitPorts["discardedDrop"];
+  discardedDeleteFor?: GitPorts["discardedDeleteFor"];
   provisionWorktree(req: {
     parentId: string;
     nodeId: string;
@@ -409,7 +420,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     probe,
     removeWorktree: (id, opts) => deps.worktree.removeWorktree(id, opts),
     worktreeRoot: config.worktreeRoot,
-    onForced: (nodeId, tip) => note("reclaimForced", { nodeId, tip }),
+    onForced: (nodeId, tip, ref) =>
+      note("reclaimForced", { nodeId, tip, ...(ref === undefined ? {} : { ref }) }),
   };
   const spawn: SpawnPorts = {
     cwdOf,
@@ -428,6 +440,29 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     revokeNode: (id) => credentials.revokeNode(id),
     audit: (event, data) => note(`purge.${event}`, data),
     onFailure,
+    discardedFor: async (nodeIds) => {
+      const list = deps.worktree.discardedList;
+      const keyOf = deps.worktree.discardedKeyOf;
+      if (list === undefined || keyOf === undefined) throw new Error("保管の口がない");
+      const listed = await list.call(deps.worktree);
+      if (!listed.ok) throw new Error(listed.error.cause);
+      const bases = new Set(nodeIds.map((id) => keyOf.call(deps.worktree, id)));
+      return listed.value.items.filter(
+        (i) => bases.has(i.key) || bases.has(i.key.replace(/-[0-9a-f]{12}$/, "")),
+      ).length;
+    },
+    // 最終削除で、その木のノードの、保管している破棄した成果（refs/cso/discarded/*）も消す（T13f-r）。最終削除の成否には影響させない。
+    onPurged: (nodeIds) => {
+      const del = deps.worktree.discardedDeleteFor;
+      if (del === undefined) return;
+      void del
+        .call(deps.worktree, nodeIds)
+        .then((r) => {
+          if (r.deleted.length > 0) note("purge.discardedRefsDeleted", { refs: r.deleted });
+          if (r.failed.length > 0) note("purge.discardedRefsFailed", { refs: r.failed });
+        })
+        .catch((e) => note("purge.discardedRefsFailed", { cause: String(e) }));
+    },
   };
   const {
     handlers,
@@ -494,7 +529,27 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     identity: () => currentIdentity,
     credentials,
     getState: () => log.state(),
-    handlers,
+    handlers: {
+      ...handlers,
+      // 保管している、破棄した成果の操作（人間のみ。T13f-r）。git の口が、保管の操作を持つときだけ有効。
+      ...(deps.worktree.discardedList === undefined ||
+      deps.worktree.discardedKeyOf === undefined ||
+      deps.worktree.discardedRestore === undefined ||
+      deps.worktree.discardedDrop === undefined
+        ? {}
+        : createDiscardedHandlers({
+            state: () => log.state(),
+            ports: {
+              discardedList: () => (deps.worktree.discardedList as GitPorts["discardedList"])(),
+              discardedKeyOf: (id) =>
+                (deps.worktree.discardedKeyOf as GitPorts["discardedKeyOf"])(id),
+              discardedRestore: (r) =>
+                (deps.worktree.discardedRestore as GitPorts["discardedRestore"])(r),
+              discardedDrop: (k) => (deps.worktree.discardedDrop as GitPorts["discardedDrop"])(k),
+            },
+            audit: (event, data) => note(`discarded.${event}`, data),
+          })),
+    },
     logger,
     bind,
     clock,
