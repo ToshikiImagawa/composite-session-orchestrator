@@ -474,3 +474,58 @@ describe("daemon の 429（回数の制限）", () => {
     expect(res.headers.get("retry-after")).toBe("1");
   });
 });
+
+describe("同時数による 429（daemon の窓口の maxInFlightPerPrincipal）", () => {
+  it("上限を超えた分は 429 になり、relay が待って同じ要求を 1 回だけ再送する。実行は二重にならない", async () => {
+    const credentials = createCredentialStore({ humanToken: HUMAN });
+    const executed: string[] = [];
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const daemon = createApiServer({
+      credentials,
+      getState: () => state(),
+      rateLimit: { maxInFlightPerPrincipal: 2 },
+      handlers: {
+        "report.progress": async (req) => {
+          executed.push((req.params as { text: string }).text);
+          await gate;
+          return ok({ accepted: true });
+        },
+      },
+    });
+    const d = await daemon.listen(0);
+    const created = createMcpHttpServer({ daemonUrl: d.url });
+    if (!created.ok) throw new Error(created.error.cause);
+    const mcp = created.value;
+    const m = await mcp.listen(0);
+    const token = credentials.issueNodeToken("a", "child");
+    const connectTo = async () => {
+      const client = new Client({ name: "t", version: "0" });
+      const transport = new StreamableHTTPClientTransport(new URL(`${m.url}/mcp`), {
+        requestInit: { headers: { authorization: `Bearer ${token}` } },
+      });
+      await client.connect(transport as unknown as Transport);
+      return client;
+    };
+    try {
+      const clients = await Promise.all([1, 2, 3].map(connectTo));
+      // 3 つ同時に呼ぶ。2 つが処理中のあいだ、3 つめは 429 になる（実行されない）。
+      const calls = clients.map((c, i) =>
+        c.callTool({ name: "report_progress", arguments: { text: `p${i}` } }),
+      );
+      await new Promise((r) => setTimeout(r, 300));
+      expect(executed.length).toBe(2); // 3 つめは、まだ実行されていない（429 で待っている）
+      release?.();
+      const results = await Promise.all(calls);
+      expect(results.every((r) => !r.isError)).toBe(true);
+      // 3 つとも成功し、どれも二重には実行されていない
+      expect([...executed].sort()).toEqual(["p0", "p1", "p2"]);
+      await Promise.all(clients.map((c) => c.close()));
+    } finally {
+      await mcp.close();
+      await daemon.close();
+    }
+  }, 20_000);
+});
