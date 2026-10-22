@@ -71,6 +71,8 @@ const STATUS: Readonly<Record<string, number>> = {
   role_not_exposed: 403,
   invalid_config: 401,
   daemon_timeout: 504,
+  tooManyRequests: 429,
+  rate_limited: 429,
 };
 
 function send(
@@ -90,23 +92,8 @@ function send(
   res.end(json);
 }
 
-const hostnameOf = (hostHeader: string): string | undefined => {
-  try {
-    return new URL(`http://${hostHeader}`).hostname;
-  } catch {
-    return undefined;
-  }
-};
 const isLoopbackHost = (h: string | undefined): boolean =>
   h !== undefined && LOOPBACK_HOSTS.has(h.startsWith("[") || !h.includes(":") ? h : `[${h}]`);
-
-function loopbackOrigin(origin: string): boolean {
-  try {
-    return isLoopbackHost(new URL(origin).hostname);
-  } catch {
-    return false;
-  }
-}
 
 /** daemon の `parseBearer` と同じ規則（スキームは `Bearer` で大文字小文字を区別。トークンは 16〜512 文字の許可された文字）。 */
 const TOKEN_SHAPE = /^[A-Za-z0-9._~+/=-]{16,512}$/;
@@ -264,12 +251,13 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
       req.resume();
       log(session.error.code);
       const status = STATUS[session.error.code] ?? 502;
-      return send(
-        res,
-        status,
-        session.error,
-        status === 401 ? { "www-authenticate": "Bearer" } : {},
-      );
+      const retryAfter = (session.error as { retryAfterSec?: unknown }).retryAfterSec;
+      return send(res, status, session.error, {
+        ...(status === 401 ? { "www-authenticate": "Bearer" } : {}),
+        ...(status === 429
+          ? { "retry-after": String(typeof retryAfter === "number" ? retryAfter : 1) }
+          : {}),
+      });
     }
     const server = session.value;
     if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {

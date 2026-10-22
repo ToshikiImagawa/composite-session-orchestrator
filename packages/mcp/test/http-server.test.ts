@@ -447,3 +447,30 @@ describe("Bearer の形と daemon の失敗の状態", () => {
     expect(res.status).toBe(504);
   });
 });
+
+describe("daemon の 429（回数の制限）", () => {
+  const limited = (retryAfter: string): typeof fetch =>
+    (async () =>
+      new Response(
+        JSON.stringify({
+          ok: false,
+          error: { code: "tooManyRequests", cause: "x", nextActions: ["待つ"] },
+        }),
+        { status: 429, headers: { "retry-after": retryAfter, "content-type": "application/json" } },
+      )) as unknown as typeof fetch;
+
+  it("whoami が 429 なら、502 にせず 429 と Retry-After を返す", async () => {
+    const r = await start({ fetch: limited("7") });
+    const res = await raw(r, { body: INIT, headers: { authorization: `Bearer ${r.tokens.a}` } });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("7");
+    expect(await res.text()).not.toContain(r.tokens.a);
+  });
+
+  it("Retry-After が不正・なしでも 429（待ち時間は 1 秒を伝える）", async () => {
+    const r = await start({ fetch: limited("abc") });
+    const res = await raw(r, { body: INIT, headers: { authorization: `Bearer ${r.tokens.a}` } });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("1");
+  });
+});

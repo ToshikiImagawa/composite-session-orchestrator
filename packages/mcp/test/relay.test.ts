@@ -249,3 +249,131 @@ describe("その他の防御", () => {
     }
   });
 });
+
+const tooMany = (retryAfter?: string) =>
+  new Response(
+    JSON.stringify({
+      ok: false,
+      error: { code: "tooManyRequests", cause: "要求が多すぎる", nextActions: ["待つ"] },
+    }),
+    {
+      status: 429,
+      headers: {
+        "content-type": "application/json",
+        ...(retryAfter ? { "retry-after": retryAfter } : {}),
+      },
+    },
+  );
+const okRes = () => json(200, { ok: true, value: { accepted: true } });
+const idOf = (call: unknown): string =>
+  JSON.parse(String((call as [string, RequestInit])[1].body)).requestId;
+
+describe("429（回数の制限。daemon は実行していない）", () => {
+  const rig = (responses: (() => Response | Promise<Response>)[]) => {
+    const sleeps: number[] = [];
+    const queue = [...responses];
+    const f = vi.fn(async () => {
+      const next = queue.shift();
+      if (next === undefined) throw new Error("予定外の呼び出し");
+      return next();
+    });
+    const relay = relayWith(f as never, {
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+    });
+    return { relay, f, sleeps };
+  };
+
+  it("Retry-After の秒数だけ待ち、同じ requestId で 1 回だけ再送する", async () => {
+    const { relay, f, sleeps } = rig([() => tooMany("2"), okRes]);
+    const r = await relay.request("report.progress", { text: "t" });
+    expect(r.ok).toBe(true);
+    expect(sleeps).toEqual([2000]);
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(idOf(f.mock.calls[0])).toBe(idOf(f.mock.calls[1]));
+  });
+
+  it.each([
+    ["99", 10_000],
+    ["10", 10_000],
+    ["0", 0],
+    [undefined, 1000],
+    ["abc", 1000],
+    ["-3", 1000],
+    ["1.5", 1000],
+    ["Wed, 21 Oct 2026 07:28:00 GMT", 1000],
+  ])(
+    "Retry-After %j は、待つ時間 %i ms（上限 10 秒。不正・なしは 1 秒）",
+    async (header, expected) => {
+      const { relay, sleeps } = rig([() => tooMany(header), okRes]);
+      await relay.request("tree.list", {});
+      expect(sleeps).toEqual([expected]);
+    },
+  );
+
+  it("2 回目も 429 なら、rate_limited を返す（実行されていないので、呼び直してよい）。再送は 1 回だけ", async () => {
+    const { relay, f } = rig([() => tooMany("1"), () => tooMany("3")]);
+    const r = await relay.request("node.spawn", {});
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(!r.ok && r.error.code).toBe("rate_limited");
+    if (!r.ok) {
+      expect((r.error as { retryAfterSec?: number }).retryAfterSec).toBe(3);
+      expect(r.error.nextActions.join(" ")).toContain("実行されていない");
+    }
+  });
+
+  it("401 に付いた Retry-After では、再送しない", async () => {
+    const f = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ok: false,
+            error: { code: "unauthenticated", cause: "x", nextActions: ["n"] },
+          }),
+          { status: 401, headers: { "retry-after": "5" } },
+        ),
+    );
+    const sleeps: number[] = [];
+    const r = await relayWith(f as never, {
+      sleep: async (ms: number) => void sleeps.push(ms),
+    }).request("tree.list", {});
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+    expect(!r.ok && r.error.code).toBe("unauthenticated");
+  });
+
+  it("429 の後に接続が失敗しても、同じ requestId で再送する（送信は合計 3 回まで）", async () => {
+    const { relay, f } = rig([
+      () => tooMany("1"),
+      () => {
+        throw new Error("reset");
+      },
+      okRes,
+    ]);
+    const r = await relay.request("tree.list", {});
+    expect(r.ok).toBe(true);
+    expect(f).toHaveBeenCalledTimes(3);
+    const ids = new Set(f.mock.calls.map(idOf));
+    expect(ids.size).toBe(1);
+  });
+
+  it("429 の後に接続が 2 回失敗したら、結果は不明", async () => {
+    const boom = () => {
+      throw new Error("down");
+    };
+    const { relay, f } = rig([() => tooMany("1"), boom, boom]);
+    const r = await relay.request("tree.list", {});
+    expect(f).toHaveBeenCalledTimes(3);
+    expect(!r.ok && r.error.code).toBe("daemon_result_unknown");
+  });
+
+  it("whoami の 429 は、再送せず rate_limited を返す（Retry-After を持つ）", async () => {
+    const { relay, f, sleeps } = rig([() => tooMany("4")]);
+    const r = await relay.whoami();
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+    expect(!r.ok && r.error.code).toBe("rate_limited");
+    if (!r.ok) expect((r.error as { retryAfterSec?: number }).retryAfterSec).toBe(4);
+  });
+});

@@ -52,3 +52,13 @@ describe("接続ごとのロールの解決（whoami）", () => {
     expect(s.ok).toBe(false);
   });
 });
+
+describe("whoami が 429 のとき", () => {
+  it("失敗をそのまま返す（rate_limited。retryAfterSec を保つ）", async () => {
+    const e = Object.assign(failure("rate_limited", "要求が多すぎる", "待つ"), {
+      retryAfterSec: 3,
+    });
+    const s = await openSession(relayOf(async () => ({ ok: false, error: e })));
+    expect(!s.ok && s.error).toEqual(e);
+  });
+});

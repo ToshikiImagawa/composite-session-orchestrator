@@ -35,7 +35,34 @@ export interface RelayOptions {
   /** 指定すると、全操作のタイムアウトをこの値にする（既定は操作ごと。`timeoutFor`）。 */
   readonly timeoutMs?: number;
   readonly maxBytes?: number;
+  /** 429 のあとの待ち（テストで差し替える）。既定は実時間。 */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
+
+/** 429 のあとに待つ秒数の上限。 */
+export const MAX_RETRY_AFTER_SEC = 10;
+const DEFAULT_RETRY_AFTER_SEC = 1;
+
+/** `rate_limited`（daemon の 429。daemon は実行していない）。`retryAfterSec`: 待つ秒数の目安（Retry-After を丸めたもの）。 */
+export type RateLimited = Failure & { readonly retryAfterSec: number };
+
+/** `Retry-After`（整数の秒）を読む。なし・不正（日付・小数・負）は 1 秒。上限 10 秒。 */
+export function parseRetryAfter(header: string | null | undefined): number {
+  if (typeof header !== "string" || !/^[0-9]{1,6}$/.test(header.trim()))
+    return DEFAULT_RETRY_AFTER_SEC;
+  return Math.min(Number(header.trim()), MAX_RETRY_AFTER_SEC);
+}
+
+const rateLimited = (sec: number): RateLimited =>
+  Object.assign(
+    failure(
+      "rate_limited",
+      "要求が多すぎる（回数の制限。daemon は実行していない）",
+      `${sec} 秒ほど待ってから、同じ操作を呼び直す（実行されていないので、二重にならない）`,
+      "続くときは、呼び出しの頻度を下げる",
+    ),
+    { retryAfterSec: sec },
+  );
 
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const TOKEN_FORMAT = /^[\x21-\x7e]+$/;
@@ -84,6 +111,7 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
   }
   const doFetch = opts.fetch ?? globalThis.fetch;
   const maxBytes = opts.maxBytes ?? MAX_RELAY_BYTES;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const origin = base.origin;
   const authorization = `Bearer ${opts.token}`;
   let counter = 0;
@@ -95,7 +123,7 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
     path: string,
     init: RequestInit,
     timeout: number,
-  ): Promise<{ result: Result<unknown>; transport: boolean }> {
+  ): Promise<{ result: Result<unknown>; transport: boolean; rateLimitedSec?: number }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     const done = (result: Result<unknown>) => ({ result, transport: false });
@@ -106,6 +134,16 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
         redirect: "error",
         signal: controller.signal,
       });
+      if (res.status === 429) {
+        // 回数の制限。daemon は実行していない。本文は読まない。
+        await res.body?.cancel().catch(() => undefined);
+        const sec = parseRetryAfter(res.headers.get("retry-after"));
+        return {
+          result: { ok: false, error: rateLimited(sec) },
+          transport: false,
+          rateLimitedSec: sec,
+        };
+      }
       const raw = await readLimited(res, maxBytes);
       if (raw === undefined) {
         return done(
@@ -187,11 +225,24 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
         body,
       };
       const timeout = opts.timeoutMs ?? timeoutFor(operation);
-      // 応答を受け取れなかったときは、同じ requestId で 1 度だけ再送する（daemon が requestId で冪等に扱うので、二重に実行されない）。
-      const first = await call("/v1/request", init, timeout);
-      if (!first.transport) return first.result;
-      const second = await call("/v1/request", init, timeout);
-      if (!second.transport) return second.result;
+      // 同じ requestId で再送する（daemon が requestId で冪等に扱うので、二重に実行されない）。
+      // - 応答を受け取れなかった（接続の失敗・タイムアウト）: 1 度だけ。それでも失敗なら、結果は不明。
+      // - 429（回数の制限。daemon は実行していない）: Retry-After（上限 10 秒）だけ待って、1 度だけ。
+      // 送信は合計 3 回まで。401 の Retry-After では再送しない（待っても直らない）。
+      let transportRetries = 0;
+      let rateRetries = 0;
+      for (let sends = 0; sends < 3; sends++) {
+        const r = await call("/v1/request", init, timeout);
+        if (r.transport) {
+          if (transportRetries++ < 1) continue;
+          break;
+        }
+        if (r.rateLimitedSec !== undefined && rateRetries++ < 1) {
+          await sleep(r.rateLimitedSec * 1000);
+          continue;
+        }
+        return r.result;
+      }
       return fail(
         "daemon_result_unknown",
         "daemon から応答を受け取れず、結果は不明（操作は実行されたかもしれない）",
