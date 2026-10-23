@@ -322,12 +322,12 @@ describe("daemon の身元確認の設定（T10m-i2）", () => {
       return { r, x };
     };
 
-    it("既定で強制: 身元の失敗なら、待たずに終了コード 3（待ち受けない）。トークン類は出さない", async () => {
+    it("既定で強制: 身元の失敗なら、1 秒・2 秒の 2 回だけ確かめ直して、それでも失敗なら終了コード 3（待ち受けない）", async () => {
       const sleeps: number[] = [];
       const { r, x } = await run(404, [], sleeps);
       expect(r.exitCode).toBe(3);
       expect(r.server).toBeUndefined();
-      expect(sleeps).toEqual([]);
+      expect(sleeps).toEqual([1000, 2000]);
       const err = x.err.join("");
       expect(err).toContain("daemon_identity_failed");
       expect(err).toContain("identityCheckFailed");
@@ -355,11 +355,90 @@ describe("daemon の身元確認の設定（T10m-i2）", () => {
       await r.server?.close();
     });
 
-    it("一時的な失敗のあとで、身元の失敗に変わったら、待たずに終了コード 3", async () => {
+    it("一時的な失敗のあとで、身元の失敗に変わったら、身元の確かめ直し（1 秒・2 秒）だけして、終了コード 3", async () => {
       const sleeps: number[] = [];
       const { r } = await run(503, [], sleeps, [503, 404]);
       expect(r.exitCode).toBe(3);
+      expect(sleeps).toEqual([1000, 1000, 2000]);
+    });
+
+    it("身元の失敗が確かめ直しで直れば（daemon の起動し直しの直後など）、起動する", async () => {
+      const sleeps: number[] = [];
+      const { r } = await run(401, [], sleeps, [401, 401, 200]);
+      expect(r.exitCode).toBe(0);
       expect(sleeps).toEqual([1000]);
+      await r.server?.close();
+    });
+
+    it("R2: 到達確認の失敗（接続拒否）も、一時的な失敗として 1・2・4・8 秒待って確かめ直す。回復すれば起動する", async () => {
+      const sleeps: number[] = [];
+      let whoami = 0;
+      const fetchImpl = (async (u: string) => {
+        if (u.includes("/v1/whoami")) {
+          if (whoami++ < 2) throw new Error("ECONNREFUSED");
+          return new Response("{}", { status: 401 });
+        }
+        const nonce = new URL(u).searchParams.get("nonce") ?? "";
+        const proof = proofOf(
+          { daemonId: DID, secret: "ff".repeat(32) },
+          hostPortOf(URL1) ?? "",
+          nonce,
+        );
+        return Response.json({ ok: true, value: { daemonId: DID, proof } });
+      }) as unknown as typeof fetch;
+      const x = io();
+      const port = String(await freePort());
+      const r = await main(
+        ["--daemon-url", URL1, "--config", "/c.json", "--port", port],
+        {},
+        x.io,
+        {
+          fetch: fetchImpl,
+          readFile: cfg(port),
+          readIdentityFile: () =>
+            JSON.stringify({ version: 1, daemonId: DID, secret: "ff".repeat(32) }),
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+        },
+      );
+      expect(r.exitCode).toBe(0);
+      expect(sleeps).toEqual([1000, 2000]);
+      expect(x.err.join("")).toContain("startupRetry");
+      await r.server?.close();
+    });
+
+    it("R2: 到達できないまま尽きたら、終了コード 1（daemon_unreachable）。--no-strict-start は待たずに 1", async () => {
+      const refused = (async () => {
+        throw new Error("ECONNREFUSED");
+      }) as unknown as typeof fetch;
+      const go = async (extra: string[], sleeps: number[]) => {
+        const x = io();
+        const port = String(await freePort());
+        const r = await main(
+          ["--daemon-url", URL1, "--config", "/c.json", "--port", port, ...extra],
+          {},
+          x.io,
+          {
+            fetch: refused,
+            readFile: cfg(port),
+            readIdentityFile: () => "",
+            sleep: async (ms) => {
+              sleeps.push(ms);
+            },
+          },
+        );
+        return { r, err: x.err.join("") };
+      };
+      const strict: number[] = [];
+      const a = await go([], strict);
+      expect(a.r.exitCode).toBe(1);
+      expect(a.err).toContain("daemon_unreachable");
+      expect(strict).toEqual([1000, 2000, 4000, 8000]);
+      const relaxed: number[] = [];
+      const b = await go(["--no-strict-start"], relaxed);
+      expect(b.r.exitCode).toBe(1);
+      expect(relaxed).toEqual([]);
     });
 
     it("--no-strict-start は警告だけで起動する", async () => {

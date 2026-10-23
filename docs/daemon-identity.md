@@ -114,12 +114,30 @@ proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト
 - **429 の待ち**: `Retry-After`（整数の秒。なし・不正は 1 秒。上限 10 秒）+ 0〜500ms のジッターで、検証の中で 1 度だけやり直す。2 度目も 429 なら `rate_limited`（トークンは送らない）。
 - **身元の失敗のやり直し**: ファイルを読み直し、新しい nonce で 1 度だけ。それでも失敗なら `daemon_identity_failed`（HTTP では 502）。
 - **検証なしで動くとき**（`--config` なしで、環境変数 `CSO_MCP_ALLOW_UNVERIFIED` が**ちょうど `1`**）: `true`・空文字・ほかの値では有効にしない。起動のログ（標準エラーの `{"event":"identityUnverified",…}`）を 1 回と、**すべての応答**のヘッダー `x-cso-identity: unverified` で分かる。`--config` があるときは、この変数があっても検証する。
-- **起動時の検証（`--strict-start`。T10m-i3）**: 起動のときにも検証する。**`--config` があるときは、既定で強制**（失敗したら起動しない）。`--no-strict-start` で緩める。失敗のたびに、標準エラーに `{"event":"identityCheckFailed","code":…}` を出す。
-  - **身元の失敗**（不一致・ファイルが読めない・不正。`daemon_identity_failed`）: 待たずに失敗し、**終了コード 3**（daemon を起動し直して設定を確認するまで、再起動を繰り返しても直らない）。待ち受けない。
-  - **一時的な失敗**（429・503・タイムアウト・接続不可）: 1・2・4・8 秒待って、最大 5 回試す（標準エラーに `{"event":"identityCheckRetry",…}`）。尽きたら**終了コード 1**。途中で身元の失敗に変わったら、そこで終了コード 3。
-  - `--no-strict-start`: 1 回だけ検証し、失敗しても起動は続ける（最初のトークンつきの要求が、`daemon_identity_failed` などで失敗する）。
-  - **supervisor の設定例**: 終了コード 3（と 2）では再起動しない。1 のときだけ、間隔をあけて再起動する。systemd なら `Restart=on-failure` と `RestartPreventExitStatus=2 3`、launchd なら `KeepAlive` の `SuccessfulExit=false` に、起動の間隔（`ThrottleInterval`）をあわせる（3 を止めるには、ラッパーで終了コードを見る）。
-  - `--strict-start` と `--no-strict-start` の同時指定、`--config` なしの `--strict-start` は、終了コード 2。
+- **起動時の検証（`--strict-start`。T10m-i3）**: 起動のときに、daemon に届くか（到達確認）と、身元を検証する。**`--config` があるときは、既定で強制**（失敗したら起動しない）。`--no-strict-start` で緩める（到達確認・身元確認とも 1 回だけ。身元が失敗しても、警告 `identityCheckFailed` だけで起動を続ける）。
+  - **到達確認**（強制のとき）: 接続できない（接続拒否・タイムアウト。daemon がまだ起動していない）は一時的な失敗として、1・2・4・8 秒待って、最大 5 回試す。尽きたら**終了コード 1**（`daemon_unreachable`）。標準エラーに `{"event":"startupRetry","phase":"reachable",…}`。
+  - **一時的な身元確認の失敗**（429・503・タイムアウト・接続不可）: 1・2・4・8 秒待って、最大 5 回試す（`{"event":"identityCheckRetry",…}`）。尽きたら**終了コード 1**。
+  - **身元の失敗**（不一致・ファイルが読めない・不正。`daemon_identity_failed`）: 1 秒・2 秒の **2 回だけ**確かめ直す（daemon の起動し直しの直後に、秘密が入れ替わる間を見込む）。それでも失敗なら**終了コード 3**。待ち受けない。**3 は、人手での確認が要る**（再起動を繰り返しても直らない）。
+  - **終了コード**: 0 起動 / 1 一時的な失敗が尽きた（再起動してよい）/ 2 引数の誤り（`--strict-start` と `--no-strict-start` の同時指定、`--config` なしの `--strict-start` を含む）/ 3 身元の失敗（再起動しない）。
+  - **最悪の待ち時間**: 到達確認は最大 約 40 秒（待ち 15 秒＋接続の試行 5 秒 × 5）、身元確認は最大 約 2 分（待ち 15 秒＋ 1 回の検証が最大 約 20 秒〔試行 5 秒・429 の待ち 最大 10 秒余り・やり直し〕× 5）。合わせて**最悪 約 2 分半**。supervisor の起動の待ち（systemd の `TimeoutStartSec`）は、これより大きく（**180 秒以上**）する。
+  - **supervisor の設定例（systemd）**: 終了コード 2 と 3 では再起動せず、1 のときだけ間隔をあけて再起動する。daemon を先に起動する。
+    ```ini
+    [Unit]
+    Description=cso-mcp
+    After=cso-daemon.service
+    Requires=cso-daemon.service
+    StartLimitIntervalSec=300
+    StartLimitBurst=5
+
+    [Service]
+    ExecStart=/usr/local/bin/cso-mcp --daemon-url http://127.0.0.1:7777 --config /etc/cso/daemon.json
+    Restart=on-failure
+    RestartSec=5
+    RestartPreventExitStatus=2 3
+    TimeoutStartSec=180
+    ```
+    `StartLimitIntervalSec`・`StartLimitBurst` で、1 を繰り返し続けても、5 分に 5 回で止まる。`Requires=` により、daemon が止まれば cso-mcp も止まる。
+  - **終了コード 3 が出たときの運用の手順**: ①標準エラーの `daemon_identity_failed` と `identityCheckFailed` を確かめる。②daemon が動いているか、`--config` が、その daemon の設定か（`stateDir` の `daemon-identity` が同じ daemon のものか）を確かめる。③別のプロセスが窓口のポートを使っていないか確かめる（`ss -ltnp` など）。④daemon を起動し直し、`cso-mcp` を起動し直す（トークンは再発行される）。⑤直ったら `systemctl reset-failed cso-mcp` のうえ、起動する。直らなければ、原因を取り除くまで起動しない。
 - 検証の失敗では、トークンを送っていないので、操作は実行されていない（`daemon_result_unknown` にはしない）。
 
 ## 5. 脅威モデル（範囲）

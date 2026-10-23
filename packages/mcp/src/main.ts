@@ -166,8 +166,10 @@ export interface MainDeps extends ParseDeps {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
-/** 起動時の身元確認で、一時的な失敗のあとに待つ時間（最大 5 回試す。合計 15 秒）。 */
+/** 起動時の到達確認・身元確認で、一時的な失敗のあとに待つ時間（最大 5 回試す。待ちの合計 15 秒）。 */
 const STARTUP_RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
+/** 起動時の身元の失敗のあとに待つ時間（2 回だけ確認し直す。daemon の起動し直しの直後など、秘密が入れ替わる間を見込む）。 */
+const STARTUP_IDENTITY_RETRY_MS = [1_000, 2_000] as const;
 /** 身元の失敗の終了コード（daemon を起動し直して設定を確認するまで、再起動を繰り返しても直らない）。 */
 const EXIT_IDENTITY = 3;
 
@@ -222,7 +224,19 @@ export async function main(
     logger: (e) => io.stderr(`${JSON.stringify(e)}\n`),
   });
   if (!created.ok) return fail(created.error);
-  if (!(await daemonReachable(args.value.daemonUrl, deps.fetch ?? globalThis.fetch))) {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const doFetch = deps.fetch ?? globalThis.fetch;
+  const retryLog = (phase: string, attempt: number, waitMs: number) =>
+    io.stderr(`${JSON.stringify({ event: "startupRetry", phase, attempt, waitMs })}\n`);
+  // 到達確認。強制（既定）のときは、接続拒否など（daemon がまだ起動していない）を一時的な失敗として、待って確かめ直す。
+  let reachable = await daemonReachable(args.value.daemonUrl, doFetch);
+  for (let i = 0; !reachable && args.value.strictStart && i < STARTUP_RETRY_MS.length; i++) {
+    const wait = STARTUP_RETRY_MS[i] ?? 8_000;
+    retryLog("reachable", i + 1, wait);
+    await sleep(wait);
+    reachable = await daemonReachable(args.value.daemonUrl, doFetch);
+  }
+  if (!reachable) {
     return fail(
       failure(
         "daemon_unreachable",
@@ -233,22 +247,25 @@ export async function main(
     );
   }
   if (verifier !== undefined) {
-    // 起動時にも検証する。強制（既定）のときは、失敗したら起動しない。一時的な失敗は、待って最大 5 回試す。
+    // 起動時にも検証する。強制（既定）のときは、失敗したら起動しない。
+    // - 一時的な失敗: 待って最大 5 回試す（尽きたら終了コード 1）。
+    // - 身元の失敗: 1 秒・2 秒の 2 回だけ待って確かめ直す（それでも失敗なら終了コード 3。人手での確認が要る）。
     // 強制でないとき（`--no-strict-start`）は、1 回だけで、失敗しても警告にとどめる（最初の要求が、daemon_identity_failed で失敗する）。
-    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-    const tries = args.value.strictStart ? STARTUP_RETRY_MS.length + 1 : 1;
-    for (let attempt = 0; ; attempt++) {
+    let transientRetries = 0;
+    let identityRetries = 0;
+    for (;;) {
       const v = await verifier.verify();
       if (v.ok) break;
       io.stderr(
         `${JSON.stringify({ event: "identityCheckFailed", code: v.failure.code, at: new Date().toISOString() })}\n`,
       );
       if (!args.value.strictStart) break;
-      if (v.kind === "identity") return fail(v.failure); // 待っても直らない（終了コード 3）
-      if (attempt + 1 >= tries) return fail(v.failure); // 一時的な失敗が尽きた（終了コード 1）
-      const wait = STARTUP_RETRY_MS[attempt] ?? 8_000;
+      const schedule = v.kind === "identity" ? STARTUP_IDENTITY_RETRY_MS : STARTUP_RETRY_MS;
+      const used = v.kind === "identity" ? identityRetries++ : transientRetries++;
+      const wait = schedule[used];
+      if (wait === undefined) return fail(v.failure); // 身元の失敗は終了コード 3、一時的な失敗が尽きたら 1
       io.stderr(
-        `${JSON.stringify({ event: "identityCheckRetry", attempt: attempt + 1, waitMs: wait })}\n`,
+        `${JSON.stringify({ event: "identityCheckRetry", attempt: used + 1, waitMs: wait })}\n`,
       );
       await sleep(wait);
     }
