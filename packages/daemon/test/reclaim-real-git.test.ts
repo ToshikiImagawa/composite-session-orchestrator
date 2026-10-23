@@ -123,19 +123,30 @@ const setup = async (mode: "discard" | "verified" = "discard") => {
       worktreeRoot,
     },
   });
-  const call = async (op: "node.reclaim" | "node.reclaimInstruct", role: string, nodeId: string) =>
+  /** `expectTips` を省略した破棄の指示は、直前のプレビューの tips を、そのまま渡す（`cso reclaim` と同じ）。 */
+  const call = async (
+    op: "node.reclaim" | "node.reclaimInstruct",
+    role: string,
+    nodeId: string,
+    expectTips?: Record<string, string>,
+  ) => {
+    const tips =
+      op === "node.reclaimInstruct"
+        ? (expectTips ?? ((await humanPreview(nodeId)).value?.tips as Record<string, string>) ?? {})
+        : undefined;
     // biome-ignore lint/suspicious/noExplicitAny: 操作ごとの型は呼び出し側で保証
-    (await (h[op] as any)({
+    return (await (h[op] as any)({
       requestId: `q-${++n}`,
       operation: op,
       role,
       caller: role === "human" ? undefined : { nodeId: "root" },
-      params: { nodeId },
+      params: tips === undefined ? { nodeId } : { nodeId, expectTips: tips },
     } as unknown as HandlerRequest<never>)) as {
       ok: boolean;
       error?: { code: string };
       value?: unknown;
     };
+  };
   const humanPreview = async (nodeId: string) =>
     // biome-ignore lint/suspicious/noExplicitAny: 操作ごとの型は呼び出し側で保証
     (await (h["node.reclaimPreview"] as any)({
@@ -270,5 +281,43 @@ describe("破棄の判断を経た停止ノードの回収（実際の git）", 
     const s = await setup("verified");
     const preview = await s.humanPreview("c1");
     expect(preview.value.loss).toEqual([]);
+  });
+
+  it("T21r-e: プレビューの tips が、実際のブランチの先端と一致する。プレビューのあとにコミットが足されると、指示は tipMismatch で何も記録しない", async () => {
+    const s = await setup();
+    const preview = await s.humanPreview("c1");
+    const tip = git(s.wt, "rev-parse", "HEAD");
+    expect(preview.value.tips).toEqual({ c1: tip });
+    // プレビューのあとに、手でコミットが足された
+    writeFileSync(join(s.wt, "after.txt"), "after\n");
+    git(s.wt, "add", "after.txt");
+    git(s.wt, "commit", "-q", "-m", "after preview");
+    const before = s.log.state().lastSeq;
+    const res = await s.call("node.reclaimInstruct", "human", "c1", preview.value.tips);
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("tipMismatch");
+    expect(JSON.stringify(res.error)).not.toContain(tip);
+    expect(s.log.state().lastSeq).toBe(before);
+    expect(s.log.state().nodes.find((x) => x.id === "c1")?.discarded).toBeUndefined();
+    // 見直したあと（新しいプレビューの先端）なら通る
+    expect((await s.call("node.reclaimInstruct", "human", "c1")).ok).toBe(true);
+  });
+
+  it("T21r-e: 判断のあとに先端が動いたら、回収は tipMismatch で、作業ツリーもブランチも消さない。保管もしない", async () => {
+    const s = await setup();
+    expect((await s.call("node.reclaimInstruct", "human", "c1")).ok).toBe(true);
+    expect(s.log.state().nodes.find((x) => x.id === "c1")?.discarded?.expectTip).toBe(
+      git(s.wt, "rev-parse", "HEAD"),
+    );
+    writeFileSync(join(s.wt, "late2.txt"), "late\n");
+    git(s.wt, "add", "late2.txt");
+    git(s.wt, "commit", "-q", "-m", "after decision");
+    const res = await s.call("node.reclaim", "integrator", "c1");
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("tipMismatch");
+    expect(existsSync(s.wt)).toBe(true);
+    expect(git(s.repoRoot, "branch", "--list", "cso/*")).not.toBe("");
+    expect(git(s.repoRoot, "for-each-ref", "refs/cso/discarded/")).toBe("");
+    expect(stateOf(s.log.state(), "c1")).toBe("stopped");
   });
 });

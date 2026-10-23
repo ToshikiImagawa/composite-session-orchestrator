@@ -434,7 +434,11 @@ describe("node.reclaimPreview（回収の事前確認。何も変えない）", 
         requestId: `ri-${id}`,
         operation: "node.reclaimInstruct",
         role: "human",
-        params: { nodeId: id },
+        // 表示した先端（プレビューの tips）を、そのまま渡す
+        params: {
+          nodeId: id,
+          expectTips: r.state.facts[id]?.headCommit ? { [id]: r.state.facts[id]?.headCommit } : {},
+        },
       })) as { ok: boolean };
 
     const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -731,6 +735,238 @@ describe("node.reclaim（回収の実行。実行時に再判定し、配下か�
     r2.ev("m1", { type: "stop", mode: "immediate" }); // m1 自体は対象外。a を停止して確かめる代わりに root から m1 を見る
     const res = await r2.call("node.reclaim", { nodeId: "m1" }, "root");
     expect(res.ok).toBe(false);
+  });
+});
+
+/** 人間のロールで、node.reclaimInstruct を呼ぶ（T21r-e）。 */
+const humanInstruct = async (
+  r: ReturnType<typeof rig>,
+  nodeId: string,
+  expectTips: Record<string, string>,
+  requestId = `hi-${++n}`,
+) =>
+  // biome-ignore lint/suspicious/noExplicitAny: テスト用に緩く扱う
+  (await (r.handlers["node.reclaimInstruct"] as any)({
+    requestId,
+    operation: "node.reclaimInstruct",
+    role: "human",
+    params: { nodeId, expectTips },
+    // biome-ignore lint/suspicious/noExplicitAny: テスト用に緩く扱う
+  } as unknown as HandlerRequest<never>)) as { ok: boolean; value?: any; error?: Failure };
+
+describe("先端の照合（expectTips。T21r-e）", () => {
+  const T1 = "1".repeat(40);
+  const T2 = "2".repeat(40);
+  const T3 = "3".repeat(40);
+  /** m1（統合。停止）─ d（実装。停止）・e（実装。停止）。 */
+  const stoppedTree = (tips: Record<string, string | undefined> = { d: T1, e: T2 }) => {
+    const r = rig();
+    const add = (id: string, role: "integrator" | "implement", parent: string) => {
+      const c = r.log.append({
+        requestId: `c-${id}-${++n}`,
+        actor: SYS,
+        body: {
+          type: "node.created",
+          payload: { nodeId: id, role, parentId: parent, dependsOn: [] },
+        },
+      });
+      if (!c.ok) throw new Error(`${c.error.code}: ${c.error.cause}`);
+      r.ev(id, { type: "start" });
+    };
+    add("sm", "integrator", "root");
+    add("d", "implement", "sm");
+    add("e", "implement", "sm");
+    for (const id of ["d", "e", "sm"]) {
+      r.ev(id, { type: "stop", mode: "immediate" });
+      r.ev(id, { type: "confirmStopped" });
+    }
+    for (const id of ["sm", "d", "e"]) {
+      const tip = tips[id];
+      r.state.facts[id] = {
+        merged: false,
+        clean: false,
+        worktreePath: `${WT}/${id}`,
+        ...(tip === undefined ? {} : { headCommit: tip }),
+      };
+    }
+    return r;
+  };
+
+  it("プレビュー: 人間のロールにだけ、対象と配下の、先端を取れたノードの先端（tips）を返す。取れなかったノードは載せない", async () => {
+    const r = stoppedTree({ d: T1, e: undefined, sm: T3 });
+    const human = await humanPreview(r, "sm");
+    expect(human.value.tips).toEqual({ sm: T3, d: T1 });
+    const integrator = await r.call("node.reclaimPreview", { nodeId: "d" }, "sm");
+    expect(integrator.value).not.toHaveProperty("tips");
+  });
+
+  it("指示: 表示した先端が、今の先端と一致すれば、記録する（expectTip つき）。同じ指示の再送は、何も変えない", async () => {
+    const r = stoppedTree();
+    const res = await humanInstruct(r, "d", { d: T1 }, "same");
+    expect(res.ok).toBe(true);
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded?.expectTip).toBe(T1);
+    const seq = r.s().lastSeq;
+    expect((await humanInstruct(r, "d", { d: T1 }, "same")).ok).toBe(true);
+    expect(r.s().lastSeq).toBe(seq);
+  });
+
+  it("指示: 先端が違えば、何も記録せず tipMismatch。原因にノード ID だけを出し、SHA は出さない", async () => {
+    const r = stoppedTree();
+    const before = r.s().lastSeq;
+    const res = await humanInstruct(r, "d", { d: T3 });
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("tipMismatch");
+    const text = JSON.stringify(res.error);
+    expect(text).toContain("d");
+    for (const sha of [T1, T2, T3]) expect(text).not.toContain(sha);
+    expect(r.s().lastSeq).toBe(before);
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded).toBeUndefined();
+    expect(r.failures.join(" ")).not.toMatch(/[0-9a-f]{40}/); // 監査のログにも SHA を出さない
+  });
+
+  it("指示: 配下の停止したノードの先端が違うときも、拒否する（画面の内容が全体として古い）。配下の先端が合っていれば、通る", async () => {
+    const r = stoppedTree();
+    const bad = await humanInstruct(r, "sm", { sm: T3, d: T1, e: T1 }); // e が違う
+    expect(bad.error?.code).toBe("tipMismatch");
+    expect(bad.error?.cause).toContain("e");
+    expect(bad.error?.cause).not.toContain("d,");
+    r.state.facts.sm = { merged: false, clean: false, worktreePath: `${WT}/sm`, headCommit: T3 };
+    const ok1 = await humanInstruct(r, "sm", { sm: T3, d: T1, e: T2 });
+    expect(ok1.ok).toBe(true);
+    // 記録するのは、対象だけ（配下は別の指示）
+    expect(r.s().nodes.find((x) => x.id === "sm")?.discarded?.expectTip).toBe(T3);
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded).toBeUndefined();
+  });
+
+  it("指示: 部分木の外のキーは invalidRequest。形の不正な SHA も", async () => {
+    const r = stoppedTree();
+    const out = await humanInstruct(r, "d", { d: T1, e: T2 });
+    expect(out.error?.code).toBe("invalidRequest");
+    const bad = await humanInstruct(r, "d", { d: "xyz" });
+    expect(bad.error?.code).toBe("invalidRequest");
+  });
+
+  it("指示: 先端がなかった（表示になかった）ノードの先端が、今は取れるなら tipMismatch。今も取れなければ、expectTip なしで記録する", async () => {
+    const withTip = stoppedTree({ d: T1, e: T2 });
+    const miss = await humanInstruct(withTip, "d", {});
+    expect(miss.error?.code).toBe("tipMismatch");
+    const none = stoppedTree({ d: undefined, e: T2 });
+    const okNone = await humanInstruct(none, "d", {});
+    expect(okNone.ok).toBe(true);
+    const rec = none.s().nodes.find((x) => x.id === "d")?.discarded;
+    expect(rec).toBeDefined();
+    expect(rec).not.toHaveProperty("expectTip");
+  });
+
+  it("実行: 判断のあとに先端が動いていたら、何も消さずに tipMismatch（強制の直前の照合）。元に戻せば通る", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    expect((await humanInstruct(r, "d", { d: T1 })).ok).toBe(true);
+    expect((await humanInstruct(r, "e", { e: T2 })).ok).toBe(true);
+    // d の先端が動いた
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T3 };
+    const res = await r.call("node.reclaim", { nodeId: "d" }, "root");
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("tipMismatch");
+    expect(JSON.stringify(res.error)).not.toMatch(/[0-9a-f]{40}/);
+    expect(r.removed).toEqual([]);
+    expect(stateOf(r.s(), "d")).not.toBe("archived");
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T1 };
+    const done = await r.call("node.reclaim", { nodeId: "d" }, "root");
+    expect(done.ok).toBe(true);
+    expect(r.removed).toEqual(["d"]);
+  });
+
+  it("実行: 強制になる全ノードを、最初の削除の前にまとめて照合する（途中のノードが動いていたら、先のノードも消さない）", async () => {
+    const r = stoppedTree({ d: T1, e: T2, sm: undefined });
+    expect((await humanInstruct(r, "d", { d: T1 })).ok).toBe(true);
+    expect((await humanInstruct(r, "e", { e: T2 })).ok).toBe(true);
+    expect((await humanInstruct(r, "sm", {})).ok).toBe(true);
+    r.state.facts.e = { merged: false, clean: false, worktreePath: `${WT}/e`, headCommit: T3 };
+    const res = await r.call("node.reclaim", { nodeId: "sm" }, "root");
+    expect(res.error?.code).toBe("tipMismatch");
+    expect(res.error?.cause).toContain("e");
+    expect(r.removed).toEqual([]); // d も消えていない
+  });
+
+  it("実行: 先端がなかった判断（noTip）は、いま先端が取れるなら tipMismatch。取れなければ、これまでどおり回収できる", async () => {
+    const r = stoppedTree({ d: undefined, e: T2 });
+    expect((await humanInstruct(r, "d", {})).ok).toBe(true);
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded?.noTip).toBe(true);
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T1 };
+    const bad = await r.call("node.reclaim", { nodeId: "d" }, "root");
+    expect(bad.error?.code).toBe("tipMismatch");
+    expect(r.removed).toEqual([]);
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d` };
+    expect((await r.call("node.reclaim", { nodeId: "d" }, "root")).ok).toBe(true);
+  });
+
+  it("実行: 先端の記録がない判断（この機能の前の記録）は、照合しない（これまでどおり回収できる）", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    const legacy = r.log.append({
+      requestId: "legacy-d",
+      actor: { human: true },
+      body: { type: "node.discardDecided", payload: { nodeId: "d" } },
+    });
+    expect(legacy.ok).toBe(true);
+    const d = r.s().nodes.find((x) => x.id === "d")?.discarded;
+    expect(d).not.toHaveProperty("expectTip");
+    expect(d).not.toHaveProperty("noTip");
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T3 };
+    expect((await r.call("node.reclaim", { nodeId: "d" }, "root")).ok).toBe(true);
+  });
+
+  it("M1: 回収が tipMismatch になったあと、指示し直せば、先端の記録を更新して、回収できる（デッドロックしない）", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    expect((await humanInstruct(r, "d", { d: T1 })).ok).toBe(true);
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T3 };
+    expect((await r.call("node.reclaim", { nodeId: "d" }, "root")).error?.code).toBe("tipMismatch");
+    // 古い表示（T1）での指示し直しは、冪等の分岐より前に照合されて、拒否される
+    const stale = await humanInstruct(r, "d", { d: T1 });
+    expect(stale.error?.code).toBe("tipMismatch");
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded?.expectTip).toBe(T1);
+    // 見直した先端（T3）で指示し直す: 更新される
+    const again = await humanInstruct(r, "d", { d: T3 });
+    expect(again.ok).toBe(true);
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded?.expectTip).toBe(T3);
+    // 同じ指示の再送は、何も変えない
+    const seq = r.s().lastSeq;
+    expect((await humanInstruct(r, "d", { d: T3 })).ok).toBe(true);
+    expect(r.s().lastSeq).toBe(seq);
+    const done = await r.call("node.reclaim", { nodeId: "d" }, "root");
+    expect(done.ok).toBe(true);
+    expect(r.removed).toEqual(["d"]);
+  });
+
+  it("R2: 先端の取得に失敗した（headUnknown）ノードは、「先端なし」と取り違えず、不明として拒否する（指示・回収の両方）。プレビューの tips には載せない", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headUnknown: true };
+    const pv = await humanPreview(r, "d");
+    expect(pv.value).not.toHaveProperty("tips");
+    const res = await humanInstruct(r, "d", {});
+    expect(res.error?.code).toBe("tipUnknown");
+    expect(res.error?.cause).toContain("d");
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded).toBeUndefined();
+    // 判断のあとに取得が失敗したら、回収も拒否する（何も消さない）
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T1 };
+    expect((await humanInstruct(r, "d", { d: T1 })).ok).toBe(true);
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headUnknown: true };
+    const exec = await r.call("node.reclaim", { nodeId: "d" }, "root");
+    expect(exec.error?.code).toBe("tipUnknown");
+    expect(r.removed).toEqual([]);
+  });
+
+  it("R2: ポートが例外を投げたときも、不明として拒否する", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    const original = r.state.facts.d;
+    expect(original).toBeDefined();
+    Object.defineProperty(r.state.facts, "d", {
+      get() {
+        throw new Error("git が壊れた");
+      },
+      configurable: true,
+    });
+    const res = await humanInstruct(r, "d", {});
+    expect(res.error?.code).toBe("tipUnknown");
   });
 });
 

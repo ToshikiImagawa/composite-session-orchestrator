@@ -110,6 +110,122 @@ describe("node.discardDecided（破棄の判断。停止したノードだけ）
     expect(s.nodes.find((n) => n.id === "a")?.state).toBe("stopped");
   });
 
+  it("判断のときに確かめた先端（expectTip）を、記録に残す。なければ、記録しない（T21r-e）", () => {
+    const sha = "a".repeat(40);
+    const withTip = ev(
+      { type: "node.discardDecided", payload: { nodeId: "a", expectTip: sha } } as never,
+      { actor: HUMAN, at: "2026-10-21T01:00:00Z", seq: 9001 },
+    );
+    const s = must(foldEvents([...stopped(), withTip]));
+    expect(s.nodes.find((n) => n.id === "a")?.discarded).toEqual({
+      seq: 9001,
+      at: "2026-10-21T01:00:00Z",
+      by: HUMAN,
+      expectTip: sha,
+    });
+    const s64 = must(
+      foldEvents([
+        ...stopped(),
+        ev(
+          {
+            type: "node.discardDecided",
+            payload: { nodeId: "a", expectTip: "b".repeat(64) },
+          } as never,
+          { actor: HUMAN },
+        ),
+      ]),
+    );
+    expect(s64.nodes.find((n) => n.id === "a")?.discarded?.expectTip).toBe("b".repeat(64));
+    const without = must(foldEvents([...stopped(), discard("a")]));
+    expect(without.nodes.find((n) => n.id === "a")?.discarded).not.toHaveProperty("expectTip");
+  });
+
+  it.each([
+    ["短い", "abc"],
+    ["大文字", "A".repeat(40)],
+    ["16 進でない", "g".repeat(40)],
+    ["桁数が違う", "a".repeat(41)],
+    ["文字列でない", 5],
+    ["空", ""],
+  ])("expectTip が不正（%s）なら、記録しない（invalidPayload）", (_n, bad) => {
+    const e = ev(
+      { type: "node.discardDecided", payload: { nodeId: "a", expectTip: bad } } as never,
+      { actor: HUMAN },
+    );
+    expect(code(foldEvents([...stopped(), e]))).toBe("invalidPayload");
+  });
+
+  it("先端がなかったことの記録（noTip: true）。noTip は true だけ。expectTip と同時には書けない（T21r-e）", () => {
+    const e = (payload: Record<string, unknown>) =>
+      ev({ type: "node.discardDecided", payload: { nodeId: "a", ...payload } } as never, {
+        actor: HUMAN,
+      });
+    const s = must(foldEvents([...stopped(), e({ noTip: true })]));
+    expect(s.nodes.find((n) => n.id === "a")?.discarded?.noTip).toBe(true);
+    expect(s.nodes.find((n) => n.id === "a")?.discarded).not.toHaveProperty("expectTip");
+    for (const bad of [false, "true", 1, null]) {
+      expect(code(foldEvents([...stopped(), e({ noTip: bad })])), JSON.stringify(bad)).toBe(
+        "invalidPayload",
+      );
+    }
+    expect(code(foldEvents([...stopped(), e({ noTip: true, expectTip: "a".repeat(40) })]))).toBe(
+      "invalidPayload",
+    );
+  });
+
+  describe("判断の指示し直し（先端の記録の更新。T21r-e）", () => {
+    const T1 = "1".repeat(40);
+    const T2 = "2".repeat(40);
+    const dec = (payload: Record<string, unknown>) =>
+      ev({ type: "node.discardDecided", payload: { nodeId: "a", ...payload } } as never, {
+        actor: HUMAN,
+      });
+    const tipOf = (s: OrchState) => s.nodes.find((n) => n.id === "a")?.discarded;
+
+    it("すでに判断済みでも、先端の記録が違う判断は受け付け、記録を置き換える（判断した者・時刻・seq も新しいもの）", () => {
+      const s = must(
+        foldEvents([
+          ...stopped(),
+          dec({ expectTip: T1 }),
+          dec({ expectTip: T2 }),
+          dec({ noTip: true }),
+        ]),
+      );
+      expect(tipOf(s)?.noTip).toBe(true);
+      expect(tipOf(s)).not.toHaveProperty("expectTip");
+      const s2 = must(foldEvents([...stopped(), dec({ expectTip: T1 }), dec({ expectTip: T2 })]));
+      expect(tipOf(s2)?.expectTip).toBe(T2);
+      // 先端の記録のない古い判断も、更新できる
+      const s3 = must(foldEvents([...stopped(), dec({}), dec({ expectTip: T1 })]));
+      expect(tipOf(s3)?.expectTip).toBe(T1);
+    });
+
+    it("同じ先端の記録の再判断は、これまでどおり alreadyDiscarded（冪等の再送は、何も変えない）", () => {
+      expect(code(foldEvents([...stopped(), dec({ expectTip: T1 }), dec({ expectTip: T1 })]))).toBe(
+        "alreadyDiscarded",
+      );
+      expect(code(foldEvents([...stopped(), dec({ noTip: true }), dec({ noTip: true })]))).toBe(
+        "alreadyDiscarded",
+      );
+      expect(code(foldEvents([...stopped(), dec({}), dec({})]))).toBe("alreadyDiscarded");
+    });
+
+    it("更新できるのは、停止（stopped）または回収可能（reclaimable）のノードだけ", () => {
+      const reclaimable = [
+        ...stopped(),
+        dec({ expectTip: T1 }),
+        changed("a", { type: "markReclaimable", discarded: true }),
+      ];
+      const s = must(foldEvents([...reclaimable, dec({ expectTip: T2 })]));
+      expect(tipOf(s)?.expectTip).toBe(T2);
+      expect(
+        code(
+          foldEvents([...reclaimable, changed("a", { type: "archive" }), dec({ expectTip: T2 })]),
+        ),
+      ).toBe("invalidTransition");
+    });
+  });
+
   it("停止していないノード・存在しないノード・不正な識別子は拒否する", () => {
     expect(code(foldEvents([...base(), discard("a")]))).toBe("invalidTransition");
     expect(code(foldEvents([...stopped(), discard("zz")]))).toBe("unknownNode");
@@ -248,13 +364,14 @@ describe("契約（node.send・node.spawn・node.reclaimPreview・scope.decide�
     >();
   });
 
-  it("node.reclaimPreview の結果は assessReclaim の結果の構造（reclaimable・unmet・blockers）と、任意の loss（T21r）", () => {
+  it("node.reclaimPreview の結果は assessReclaim の結果の構造（reclaimable・unmet・blockers）と、任意の loss（T21r）・tips（T21r-e）", () => {
     expectTypeOf<DaemonResponse<"node.reclaimPreview">>().toEqualTypeOf<
       Result<{
         reclaimable: boolean;
         unmet: readonly UnmetReason[];
         blockers: readonly Blocker[];
         loss?: readonly NodeLoss[];
+        tips?: Readonly<Record<string, string>>;
       }>
     >();
   });
