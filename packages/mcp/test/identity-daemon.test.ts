@@ -7,12 +7,15 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { foldEvents, type OrchEvent, type OrchState } from "@cso/core";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createCredentialStore } from "../../daemon/src/api/credentials.js";
 import { type ApiServer, createApiServer } from "../../daemon/src/api/server.js";
 import { createMcpHttpServer, type McpHttpServer } from "../src/http-server.js";
 import { createIdentityVerifier } from "../src/identity.js";
 import { createRelay } from "../src/relay.js";
+import { createToolServer } from "../src/server.js";
 
 const DAEMON_ID = "00112233445566778899aabbccddeeff";
 const SECRET = "ab".repeat(32);
@@ -120,6 +123,37 @@ const relayFor = (url: string, token: string, path: string) => {
   if (!r.ok) throw new Error(r.error.cause);
   return r.value;
 };
+
+describe("whoami ツール（T10m-wh）と身元の検証", () => {
+  it("whoami ツールを 2 回呼ぶと、検証（verifier）も 2 回走る（キャッシュしない）。どちらも、本物の daemon が返した nodeId が出る", async () => {
+    const { url, token } = await startDaemon();
+    const path = identityFile();
+    const real = createIdentityVerifier({ daemonUrl: url, identityPath: path });
+    let verifies = 0;
+    const verifier = {
+      verify: async () => {
+        verifies++;
+        return real.verify();
+      },
+    };
+    const relay = createRelay({ daemonUrl: url, token, verifier });
+    if (!relay.ok) throw new Error(relay.error.cause);
+    const server = createToolServer({ role: "child", relay: relay.value });
+    const client = new Client({ name: "t", version: "0" });
+    const [x, y] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(x), client.connect(y)]);
+    const call = async () =>
+      JSON.parse(
+        (
+          (await client.callTool({ name: "whoami", arguments: {} })).content as { text: string }[]
+        )[0]?.text ?? "null",
+      );
+    expect(await call()).toEqual({ nodeId: "a", role: "child" });
+    expect(verifies).toBe(1);
+    expect(await call()).toEqual({ nodeId: "a", role: "child" });
+    expect(verifies).toBe(2);
+  });
+});
 
 describe("本物の daemon（createApiServer）", () => {
   it("本物なら、検証に成功して、トークンつきの whoami・request が通る", async () => {

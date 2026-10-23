@@ -17,6 +17,7 @@ describe("selfIntroLines（起動の指示の先頭。自分のノード ID・ro
     expect(text).toContain("親: root");
     expect(text).toContain("省略・短縮せず");
     expect(text).toContain("作業ツリーのディレクトリ名は、ID ではない");
+    expect(text).toContain("whoami ツール"); // 確かめる手段（T10m-wh）
     // 切り詰めた ID（作業ツリーの名前の形）は、含めない
     expect(text).not.toContain("node-a4cf56b90c29ee7587b58ad14a6 ");
   });

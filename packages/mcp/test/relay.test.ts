@@ -59,6 +59,17 @@ describe("whoami", () => {
     expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${TOKEN}`);
   });
 
+  it("T10m-wh: nodeId があれば、{ role, nodeId } を返す。ID の形でない nodeId・文字列でない nodeId は、なしとして扱う（role だけ）", async () => {
+    const ok1 = await relayWith((async () =>
+      json(200, { ok: true, value: { role: "integrator", nodeId: "m1" } })) as never).whoami();
+    expect(ok1.ok && ok1.value).toEqual({ role: "integrator", nodeId: "m1" });
+    for (const bad of ["../x", "a b", "", 5, null, "a".repeat(200)]) {
+      const r = await relayWith((async () =>
+        json(200, { ok: true, value: { role: "child", nodeId: bad } })) as never).whoami();
+      expect(r.ok && r.value, JSON.stringify(bad)).toEqual({ role: "child" });
+    }
+  });
+
   it.each([401, 403])("daemon が %s を返したら、そのまま失敗にする", async (status) => {
     const err = { code: "unauthenticated", cause: "x", nextActions: ["資格情報を再発行する"] };
     const r = await relayWith((async () =>

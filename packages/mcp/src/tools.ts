@@ -64,6 +64,14 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
     "作業範囲の拡張を親へ要求する。target は { kind: write（書き込み可能な場所の追加）か command（許可するコマンドの追加）, value } で、理由（reason）を添える。未判定の要求は 10 件まで。結果の extensionId は、親の判定（scope_decide）の対象になる",
 };
 
+/**
+ * 固定のメタツール `whoami`（T10m-wh）: 自分の nodeId と role を返す。daemon の操作ではない（core の `ROLE_OPERATIONS` に入らない）。
+ * 統合・子の両ロールに公開する。呼ぶたびに daemon に尋ねる（キャッシュしない）。
+ */
+export const WHOAMI_TOOL = "whoami";
+export const whoamiDescription = (role: McpRole): string =>
+  `自分の nodeId と role を返す（{ nodeId, role }）。起動の指示の先頭に書かれた ID の確認に使える${role === "integrator" ? "（tree_list の self 列でも分かる）" : ""}。引数はない`;
+
 /** 操作名から MCP のツール名への変換（`.` を `_` にする）。ツール名を扱う箇所はすべてこれを使う。 */
 export const toolName = (op: DaemonOperation): string => op.replaceAll(".", "_");
 

@@ -721,7 +721,7 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
   });
 });
 
-describe("GET /v1/whoami（認証したロールだけを返す）", () => {
+describe("GET /v1/whoami（認証したロールと、ノードのトークンの nodeId を返す）", () => {
   const get = async (r: Rig, headers: Record<string, string> = {}, path = "/v1/whoami") => {
     const res = await fetch(`${r.url}${path}`, { method: "GET", headers });
     return {
@@ -735,18 +735,20 @@ describe("GET /v1/whoami（認証したロールだけを返す）", () => {
     };
   };
 
-  it("Bearer で認証し、ロールだけを返す（nodeId は返さない）", async () => {
+  it("Bearer で認証し、ロールを返す。ノードのトークン（統合・子）には、自分の nodeId も返す。人間には nodeId がない（T10m-wh）", async () => {
     const r = await start();
-    const cases: [string, string][] = [
-      [r.tokens.human, "human"],
-      [r.tokens.m1, "integrator"],
-      [r.tokens.root, "integrator"],
-      [r.tokens.a, "child"],
+    const cases: [string, Record<string, string>][] = [
+      [r.tokens.human, { role: "human" }],
+      [r.tokens.m1, { role: "integrator", nodeId: "m1" }],
+      [r.tokens.root, { role: "integrator", nodeId: "root" }],
+      [r.tokens.a, { role: "child", nodeId: "a" }],
     ];
-    for (const [token, role] of cases) {
+    for (const [token, value] of cases) {
       const res = await get(r, bearer(token));
       expect(res.status).toBe(200);
-      expect(res.json).toEqual({ ok: true, value: { role } });
+      expect(res.json).toEqual({ ok: true, value });
+      // 返すのは、role と nodeId だけ（トークン・秘密の文字列を含まない）
+      expect(JSON.stringify(res.json)).not.toContain(token);
       expect(res.headers.get("cache-control")).toBe("no-store");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     }
@@ -757,6 +759,7 @@ describe("GET /v1/whoami（認証したロールだけを返す）", () => {
     const r = await start();
     expect((await get(r, bearer(r.tokens.a), "/v1/whoami?x=1")).json.value).toEqual({
       role: "child",
+      nodeId: "a",
     });
     const res = await get(r, {}, `/v1/whoami?token=${r.tokens.a}`);
     expect(res.status).toBe(401);

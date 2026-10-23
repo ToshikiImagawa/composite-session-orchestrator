@@ -19,7 +19,7 @@ export function selfIntroLines(
     ok: true,
     value: [
       `あなたのノード ID: ${nodeId}（role: ${role}、親: ${parentId ?? "なし"}）`,
-      "ID を引数に取る操作（node_spawn の parentId など）には、この ID（または子孫の ID）を、省略・短縮せず、そのまま使う。作業ツリーのディレクトリ名は、ID ではない（切り詰めてあり、ハッシュがついている）。",
+      "ID を引数に取る操作（node_spawn の parentId など）には、この ID（または子孫の ID）を、省略・短縮せず、そのまま使う。作業ツリーのディレクトリ名は、ID ではない（切り詰めてあり、ハッシュがついている）。自分の ID を確かめるときは、whoami ツールを呼ぶ（{ nodeId, role } を返す）。",
     ],
   };
 }

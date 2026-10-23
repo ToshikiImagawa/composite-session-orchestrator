@@ -5,7 +5,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCredentialStore } from "../../daemon/src/api/credentials.js";
 import { type ApiServer, createApiServer } from "../../daemon/src/api/server.js";
-import { createMcpHttpServer, type McpHttpServer, toolsFor } from "../src/index.js";
+import { createMcpHttpServer, type McpHttpServer, toolsFor, WHOAMI_TOOL } from "../src/index.js";
 
 let n = 0;
 const ev = (body: EventBody): OrchEvent =>
@@ -134,9 +134,10 @@ describe("実 HTTP の統合（MCP クライアント ↔ cso-mcp ↔ daemon の
   it("子のトークン: 子のツールだけを公開し、呼び出しを窓口へ中継する（ロールは窓口が認証から決める）", async () => {
     const r = await start();
     const c = await connect(r, r.tokens.a);
-    expect((await c.listTools()).tools.map((t) => t.name)).toEqual(
-      toolsFor("child").map((t) => t.name),
-    );
+    expect((await c.listTools()).tools.map((t) => t.name)).toEqual([
+      ...toolsFor("child").map((t) => t.name),
+      WHOAMI_TOOL,
+    ]);
     const res = await c.callTool({ name: "report_progress", arguments: { text: "進捗" } });
     expect(res.isError).toBeFalsy();
     expect(r.calls).toEqual([
@@ -148,9 +149,10 @@ describe("実 HTTP の統合（MCP クライアント ↔ cso-mcp ↔ daemon の
   it("統合のトークン: 統合のツールを公開し、inbox 以外の読み取りも通る", async () => {
     const r = await start();
     const c = await connect(r, r.tokens.root);
-    expect((await c.listTools()).tools.map((t) => t.name)).toEqual(
-      toolsFor("integrator").map((t) => t.name),
-    );
+    expect((await c.listTools()).tools.map((t) => t.name)).toEqual([
+      ...toolsFor("integrator").map((t) => t.name),
+      WHOAMI_TOOL,
+    ]);
     const res = await c.callTool({ name: "tree_list", arguments: {} });
     expect(res.isError).toBeFalsy();
     expect(r.calls[0]?.role).toBe("integrator");

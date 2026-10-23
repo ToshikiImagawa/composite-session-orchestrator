@@ -173,3 +173,23 @@ describe("接続エラー（EPIPE など）", () => {
     expect(executed).toBe(1);
   });
 });
+
+describe("whoami（T10m-wh）: 本物の daemon の窓口が、ノードのトークンの nodeId を返す", () => {
+  it("子は { role: child, nodeId: a }、統合は { role: integrator, nodeId: root }。whoami ツール（createToolServer）も、同じ値を返す", async () => {
+    const { url, credentials, token } = await start({});
+    const child = await relayFor(url, token).whoami();
+    expect(child.ok && child.value).toEqual({ role: "child", nodeId: "a" });
+    const root = await relayFor(url, credentials.issueNodeToken("root", "integrator")).whoami();
+    expect(root.ok && root.value).toEqual({ role: "integrator", nodeId: "root" });
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { createToolServer } = await import("../src/index.js");
+    const server = createToolServer({ role: "child", relay: relayFor(url, token) });
+    const client = new Client({ name: "t", version: "0" });
+    const [x, y] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(x), client.connect(y)]);
+    const r = await client.callTool({ name: "whoami", arguments: {} });
+    const body = JSON.parse(((r.content as { text: string }[])[0] as { text: string }).text);
+    expect(body).toEqual({ nodeId: "a", role: "child" });
+  });
+});

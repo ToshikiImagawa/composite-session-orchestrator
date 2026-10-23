@@ -8,7 +8,14 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { renderInbox } from "./inbox-response.js";
 import type { Relay } from "./relay.js";
 import { inputSchemaFor, parseToolInput } from "./schemas.js";
-import { isMcpRole, MCP_ROLES, type McpRole, toolsFor } from "./tools.js";
+import {
+  isMcpRole,
+  MCP_ROLES,
+  type McpRole,
+  toolsFor,
+  WHOAMI_TOOL,
+  whoamiDescription,
+} from "./tools.js";
 
 export interface ToolServerDeps {
   readonly role: McpRole;
@@ -28,17 +35,59 @@ const asValue = (v: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(v ?? null) }],
 });
 
+/** `whoami`: 引数なし。呼ぶたびに daemon に尋ねる。nodeId がない（古い daemon）・ロールが接続のロールと違うときは、失敗にする。 */
+async function whoamiTool(deps: ToolServerDeps, args: unknown) {
+  if (
+    args !== undefined &&
+    (typeof args !== "object" || args === null || Object.keys(args).length > 0)
+  ) {
+    return asError(failure("invalid_argument", "whoami に引数はない", "引数なしで呼び直す"));
+  }
+  const who = await deps.relay.whoami();
+  if (!who.ok) return asError(who.error);
+  if (who.value.role !== deps.role) {
+    return asError(
+      failure(
+        "whoami_role_mismatch",
+        "daemon が返したロールが、この接続のロールと違う",
+        "接続のトークンを確認する（別のロールのトークンで接続していないか）",
+        "daemon → cso-mcp → 子の順に起動し直す",
+      ),
+    );
+  }
+  if (who.value.nodeId === undefined) {
+    return asError(
+      failure(
+        "whoami_failed",
+        "daemon が nodeId を返さなかった（古い daemon の可能性）",
+        "daemon を更新して、起動し直す",
+        "接続のトークンを確認する（daemon → cso-mcp → 子の順に起動する）",
+      ),
+    );
+  }
+  return asValue({ nodeId: who.value.nodeId, role: who.value.role });
+}
+
 export function createToolServer(deps: ToolServerDeps): Server {
   const server = new Server({ name: "cso-mcp", version: "0.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: toolsFor(deps.role).map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: inputSchemaFor(t.operation),
-    })),
+    tools: [
+      ...toolsFor(deps.role).map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: inputSchemaFor(t.operation),
+      })),
+      // 固定のメタツール（daemon の操作ではない）。入力はなし
+      {
+        name: WHOAMI_TOOL,
+        description: whoamiDescription(deps.role),
+        inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
+      },
+    ],
   }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     try {
+      if (req.params.name === WHOAMI_TOOL) return await whoamiTool(deps, req.params.arguments);
       const parsed = parseToolInput(deps.role, req.params.name, req.params.arguments ?? {});
       if (!parsed.ok) return asError(parsed.error);
       const { operation, forward, view } = parsed.value;
