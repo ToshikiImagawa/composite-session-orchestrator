@@ -123,6 +123,7 @@ describe("画面の資産（走査）", () => {
       "indexOf",
       "slice",
       "min",
+      "max",
       "floor",
       "random",
       "now",

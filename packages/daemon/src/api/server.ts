@@ -55,6 +55,7 @@ import {
   operationWeight,
 } from "./rate-limit.js";
 import { pickResult } from "./results.js";
+import { createSseHub, responseSink } from "./sse-hub.js";
 import { UI_CSS, UI_HEADERS, UI_HTML, UI_HTML_HEADERS, UI_JS } from "./ui-assets.js";
 import { parseEnvelope, validateParams } from "./validate.js";
 
@@ -172,12 +173,15 @@ export interface ApiDeps {
     /** 表の項目の数の上限。既定 1,024。 */
     readonly maxEntries?: number;
   };
-  /** SSE（`GET /v1/events`）の上限と周期。既定は、同時 4 本・250ms にまとめる・15 秒ごとに heartbeat・16 KiB 溜まったら切る。試験で小さくする。 */
+  /** SSE（`GET /v1/events`）の上限と周期。既定は、同時 4 本・250ms にまとめる・15 秒ごとに heartbeat・`drain` を 10 秒待って来なければ切る・寿命 1 時間。試験で小さくする。 */
   readonly sse?: {
     readonly maxConnections?: number;
     readonly coalesceMs?: number;
     readonly heartbeatMs?: number;
-    readonly maxBufferedBytes?: number;
+    /** `write()` が `false` を返してから、`drain` を待つ上限（超えたら切る）。既定 10 秒。 */
+    readonly drainTimeoutMs?: number;
+    /** 1 つの接続の最大の寿命（超えたら閉じる。画面は再接続する）。既定 1 時間。 */
+    readonly maxLifetimeMs?: number;
   };
   /** 接続の上限と、遅い要求への対策（slowloris）。既定は、要求 30 秒・ヘッダ 10 秒・keep-alive 5 秒・接続 256。試験で小さくする。 */
   readonly connection?: {
@@ -856,61 +860,28 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     res.end(uiCache.json);
   }
 
-  // --- SSE（`GET /v1/events`。T23 PR2）---
-  // 送るのは `lastSeq` の通知だけ（中身は、画面が `/v1/ui/state` で取り直す。権限の判定は 1 か所）。
-  // 1 つの周期（`coalesceMs`）で、全ての接続を見る: 変わっていれば通知（変化は、周期でまとめられる）、
-  // 変わっていなくても `heartbeatMs` ごとに、コメント行（接続の維持と、切れた相手の検知）。
-  // 書き込みが詰まった（遅い）接続は切る。トークンが使えなくなった接続は、次の heartbeat で切る。
-  const sseSpec = {
-    maxConnections: deps.sse?.maxConnections ?? 4,
-    coalesceMs: deps.sse?.coalesceMs ?? 250,
-    heartbeatMs: deps.sse?.heartbeatMs ?? 15_000,
-    maxBufferedBytes: deps.sse?.maxBufferedBytes ?? 16 * 1024,
-  };
-  interface SseConn {
-    readonly res: ServerResponse;
-    readonly token: string;
-    sentSeq: number;
-    lastWriteMs: number;
-  }
-  const sseConns = new Set<SseConn>();
-  let sseTimer: ReturnType<typeof setInterval> | undefined;
-
-  const sseEvent = (seq: number): string =>
-    `id: ${seq}\nevent: seq\ndata: ${JSON.stringify({ lastSeq: seq })}\n\n`;
-
-  function sseTick(): void {
-    const seq = deps.getState().lastSeq;
-    const at = hrtimeMs();
-    for (const c of [...sseConns]) {
-      if (c.res.destroyed || c.res.writableLength > sseSpec.maxBufferedBytes) {
-        c.res.destroy(); // 遅い（書き込みが詰まった）接続は切る
-        continue;
-      }
-      if (c.sentSeq !== seq) {
-        c.res.write(sseEvent(seq));
-        c.sentSeq = seq;
-        c.lastWriteMs = at;
-      } else if (at - c.lastWriteMs >= sseSpec.heartbeatMs) {
-        if (deps.credentials.authenticate(c.token) === undefined) {
-          c.res.end();
-          continue;
-        }
-        c.res.write(": heartbeat\n\n");
-        c.lastWriteMs = at;
-      }
-    }
-  }
+  // --- SSE（`GET /v1/events`。T23 PR2。接続の管理は `sse-hub.ts`）---
+  const sseHub = createSseHub({
+    spec: {
+      maxConnections: deps.sse?.maxConnections ?? 4,
+      coalesceMs: deps.sse?.coalesceMs ?? 250,
+      heartbeatMs: deps.sse?.heartbeatMs ?? 15_000,
+      drainTimeoutMs: deps.sse?.drainTimeoutMs ?? 10_000,
+      maxLifetimeMs: deps.sse?.maxLifetimeMs ?? 3_600_000,
+    },
+    getSeq: () => deps.getState().lastSeq,
+    isTokenValid: (token) => deps.credentials.authenticate(token) !== undefined,
+    nowMs: hrtimeMs,
+  });
 
   function handleEvents(req: IncomingMessage, res: ServerResponse): void {
     const token = authenticateHuman(req, res);
     if (token === undefined) return;
-    if (sseConns.size >= sseSpec.maxConnections) {
+    if (sseHub.size >= (deps.sse?.maxConnections ?? 4)) {
       counters.count("rateLimited", "sse");
       tooMany(res, 5);
       return;
     }
-    const seq = deps.getState().lastSeq;
     res.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store",
@@ -918,22 +889,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       "cross-origin-resource-policy": "same-origin",
       connection: "keep-alive",
     });
-    // 最初に、今の `lastSeq` を送る（画面は、これで状態を取る）。再接続の間の変化も、これで拾う。
-    res.write(`retry: 3000\n${sseEvent(seq)}`);
-    const conn: SseConn = { res, token, sentSeq: seq, lastWriteMs: hrtimeMs() };
-    sseConns.add(conn);
-    if (sseTimer === undefined) {
-      sseTimer = setInterval(sseTick, sseSpec.coalesceMs);
-      sseTimer.unref();
-    }
-    const done = (): void => {
-      sseConns.delete(conn);
-      if (sseConns.size === 0 && sseTimer !== undefined) {
-        clearInterval(sseTimer);
-        sseTimer = undefined;
-      }
-    };
-    res.once("close", done);
+    sseHub.add(responseSink(res), token);
   }
 
   /** `GET /v1/ui/state` の直近の 1 件（`lastSeq` が鍵）。 */

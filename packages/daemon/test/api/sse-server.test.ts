@@ -43,7 +43,8 @@ const start = async (
     maxConnections?: number;
     coalesceMs?: number;
     heartbeatMs?: number;
-    maxBufferedBytes?: number;
+    drainTimeoutMs?: number;
+    maxLifetimeMs?: number;
   } = {},
 ): Promise<Rig> => {
   const credentials = createCredentialStore({ humanToken: HUMAN });
@@ -188,9 +189,9 @@ describe("GET /v1/events（SSE。T23 PR2）", () => {
     b.close();
   });
 
-  it("書き込みが詰まった接続は切る（溜まった量が上限を超えたら）。実際に詰まらせるのは難しいので、上限を負にして、切る経路を確かめる", async () => {
-    const r = await start({ maxBufferedBytes: -1, coalesceMs: 10, heartbeatMs: 60_000 });
-    const closed = new Promise<void>((resolve, reject) => {
+  it("寿命（maxLifetimeMs）が来たら、サーバーが接続を閉じる（画面は再接続する）", async () => {
+    const r = await start({ maxLifetimeMs: 150, coalesceMs: 20, heartbeatMs: 10_000 });
+    const closed = new Promise<void>((resolve) => {
       const req = httpRequest(
         {
           host: "127.0.0.1",
@@ -200,17 +201,16 @@ describe("GET /v1/events（SSE。T23 PR2）", () => {
         },
         (res) => {
           res.resume();
+          res.on("end", () => resolve());
           res.on("close", () => resolve());
-          res.on("error", () => resolve());
         },
       );
       req.on("error", () => resolve());
-      req.on("timeout", () => reject(new Error("timeout")));
       req.end();
     });
     await Promise.race([
       closed,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("切られなかった")), 3000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("閉じなかった")), 3000)),
     ]);
   });
 

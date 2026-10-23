@@ -72,6 +72,7 @@ export const UI_JS = `'use strict';
   var PRIORITY_NAMES = { blocking: '要判断', failed: '失敗', completed: '完了', progress: '進捗', info: '情報' };
   var POLL_MS = 2000;
   var SAFETY_MS = 30000;
+  var THROTTLE_MS = 1000;
   var BACKOFF_MIN = 1000;
   var BACKOFF_MAX = 30000;
 
@@ -87,6 +88,8 @@ export const UI_JS = `'use strict';
   var refreshing = false;
   var again = false;
   var controller = null;
+  var throttleTimer = null;
+  var retryMs = 0;
 
   function name(table, key) { return Object.hasOwn(table, key) ? table[key] : key; }
   function el(tag, cls, text) {
@@ -222,6 +225,14 @@ export const UI_JS = `'use strict';
     });
   }
 
+  // 通知が続いても、状態を取り直すのは、最短 THROTTLE_MS ごと（先頭で 1 回、間に来たものは末尾で 1 回）。
+  function requestRefresh() {
+    if (throttleTimer !== null) return;
+    var wait = THROTTLE_MS - (Date.now() - lastRefreshAt);
+    if (wait <= 0) { refresh(); return; }
+    throttleTimer = window.setTimeout(function () { throttleTimer = null; refresh(); }, wait);
+  }
+
   // SSE（変更の通知）。fetch の ReadableStream で読む（EventSource は header を付けられない）。切れたら、指数バックオフで再接続する。
   // 使えない間（接続できない・未対応）は、下の loop が、ETag つきのポーリングで取る。
   function connectEvents(gen) {
@@ -232,6 +243,10 @@ export const UI_JS = `'use strict';
       .then(function (res) {
         if (res.status === 401) { rejectToken('トークンが正しくありません'); return null; }
         if (res.status === 403) { rejectToken('人間のトークンが必要です'); return null; }
+        if (res.status === 429) {
+          var seconds = parseInt(res.headers.get('retry-after') || '', 10);
+          retryMs = seconds > 0 ? Math.min(seconds, 300) * 1000 : 0;
+        }
         if (!res.ok || !res.body || !res.body.getReader) throw new Error('sse');
         var reader = res.body.getReader();
         var decoder = new TextDecoder();
@@ -247,7 +262,7 @@ export const UI_JS = `'use strict';
             while (end >= 0) {
               var block = buf.slice(0, end);
               buf = buf.slice(end + 2);
-              if (block.indexOf('event: seq') >= 0) refresh();
+              if (block.indexOf('event: seq') >= 0) requestRefresh();
               end = buf.indexOf('\\n\\n');
             }
             if (buf.length > 4096) buf = '';
@@ -261,7 +276,9 @@ export const UI_JS = `'use strict';
         sseUp = false;
         showConnected();
         if (gen !== generation || !token) return;
-        var wait = backoff + Math.floor(Math.random() * 500);
+        // 429 のときは、Retry-After の秒数より前には、再接続しない
+        var wait = Math.max(backoff, retryMs) + Math.floor(Math.random() * 500);
+        retryMs = 0;
         backoff = Math.min(backoff * 2, BACKOFF_MAX);
         window.setTimeout(function () { connectEvents(gen); }, wait);
       });
