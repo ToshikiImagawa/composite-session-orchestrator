@@ -76,6 +76,17 @@ export interface DaemonConfig {
     /** 予告（受信箱の項目）を出してから、削除するまでの日数（1〜30。既定 7）。予告の後にだけ削除する。 */
     readonly noticeDays?: number;
   };
+  /**
+   * 配下の要約（T24-d。`docs/digest.md`）。**既定で有効**（既存の受信箱の項目に追加で 1 件出すだけで、隠さない）。`enabled: false` で無効にできる。
+   * `intervalSec`: 周期（5〜3600 秒。既定 30）。`minIntervalSec`: 中間統合ノードごとの、要約の最短の間隔（10〜3600 秒。既定 60）。
+   * `maxPerRun`: 1 周期に出す要約の数の上限（1〜100。既定 20）。
+   */
+  readonly digest?: {
+    readonly enabled?: boolean;
+    readonly intervalSec?: number;
+    readonly minIntervalSec?: number;
+    readonly maxPerRun?: number;
+  };
   /** 子に渡す環境変数の、既定（PATH・HOME・認証・プロキシなど）に加える名前（完全一致）。 */
   readonly childEnvAllow?: readonly string[];
   /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
@@ -105,6 +116,7 @@ const KEYS = [
   "retentionDays",
   "purgeTombstone",
   "autoPurge",
+  "digest",
   "rateLimit",
   "maxTurns",
   "maxBudgetUsd",
@@ -262,6 +274,33 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
   let autoPurge:
     | { enabled: boolean; intervalMinutes?: number; maxTreesPerRun?: number; noticeDays?: number }
     | undefined;
+  let digest: DaemonConfig["digest"];
+  if (raw.digest !== undefined) {
+    const v = raw.digest;
+    const okRange = (x: unknown, min: number, max: number): boolean =>
+      x === undefined || (typeof x === "number" && Number.isInteger(x) && x >= min && x <= max);
+    if (
+      !isRec(v) ||
+      Object.keys(v).some(
+        (k) =>
+          k !== "enabled" && k !== "intervalSec" && k !== "minIntervalSec" && k !== "maxPerRun",
+      ) ||
+      (v.enabled !== undefined && typeof v.enabled !== "boolean") ||
+      !okRange(v.intervalSec, 5, 3600) ||
+      !okRange(v.minIntervalSec, 10, 3600) ||
+      !okRange(v.maxPerRun, 1, 100)
+    ) {
+      return bad(
+        "digest は、enabled（真偽値。任意）・intervalSec（5〜3600 の整数。任意）・minIntervalSec（10〜3600 の整数。任意）・maxPerRun（1〜100 の整数。任意）だけを持つオブジェクト",
+      );
+    }
+    digest = {
+      ...(v.enabled === undefined ? {} : { enabled: v.enabled as boolean }),
+      ...(v.intervalSec === undefined ? {} : { intervalSec: v.intervalSec as number }),
+      ...(v.minIntervalSec === undefined ? {} : { minIntervalSec: v.minIntervalSec as number }),
+      ...(v.maxPerRun === undefined ? {} : { maxPerRun: v.maxPerRun as number }),
+    };
+  }
   if (raw.autoPurge !== undefined) {
     const v = raw.autoPurge;
     const okInt = (x: unknown, max: number): boolean =>
@@ -434,6 +473,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(startLimits === undefined ? {} : { startLimits }),
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
       ...(autoPurge === undefined ? {} : { autoPurge }),
+      ...(digest === undefined ? {} : { digest }),
       ...(rateLimit === undefined ? {} : { rateLimit }),
       ...(raw.childHome === undefined
         ? {}

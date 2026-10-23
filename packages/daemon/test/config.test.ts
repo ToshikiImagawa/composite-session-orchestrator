@@ -91,6 +91,40 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("digest（配下の要約。T24-d）は、省略できる（既定で有効）。enabled・intervalSec（5〜3600）・minIntervalSec（10〜3600）・maxPerRun（1〜100）だけを持つ", () => {
+    const d = parseConfig(JSON.stringify(base));
+    expect(d.ok && d.value.digest).toBeUndefined();
+    const on = parseConfig(
+      JSON.stringify({
+        ...base,
+        digest: { enabled: true, intervalSec: 5, minIntervalSec: 10, maxPerRun: 3 },
+      }),
+    );
+    expect(on.ok && on.value.digest).toEqual({
+      enabled: true,
+      intervalSec: 5,
+      minIntervalSec: 10,
+      maxPerRun: 3,
+    });
+    const off = parseConfig(JSON.stringify({ ...base, digest: { enabled: false } }));
+    expect(off.ok && off.value.digest).toEqual({ enabled: false });
+    expect(parseConfig(JSON.stringify({ ...base, digest: {} })).ok).toBe(true);
+    for (const v of [
+      true,
+      "on",
+      { enabled: "yes" },
+      { intervalSec: 4 },
+      { intervalSec: 3601 },
+      { intervalSec: 1.5 },
+      { minIntervalSec: 9 },
+      { maxPerRun: 0 },
+      { maxPerRun: 101 },
+      { unknown: 1 },
+    ]) {
+      expect(parseConfig(JSON.stringify({ ...base, digest: v })).ok, JSON.stringify(v)).toBe(false);
+    }
+  });
+
   it("autoPurge（自動の最終削除）は、省略するとオフ。enabled（必須）・intervalMinutes（1〜1440）・maxTreesPerRun（1〜100）だけを持つ", () => {
     const d = parseConfig(JSON.stringify(base));
     expect(d.ok && d.value.autoPurge).toBeUndefined();
