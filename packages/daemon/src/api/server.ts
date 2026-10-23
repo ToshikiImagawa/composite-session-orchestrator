@@ -172,6 +172,13 @@ export interface ApiDeps {
     /** 表の項目の数の上限。既定 1,024。 */
     readonly maxEntries?: number;
   };
+  /** SSE（`GET /v1/events`）の上限と周期。既定は、同時 4 本・250ms にまとめる・15 秒ごとに heartbeat・16 KiB 溜まったら切る。試験で小さくする。 */
+  readonly sse?: {
+    readonly maxConnections?: number;
+    readonly coalesceMs?: number;
+    readonly heartbeatMs?: number;
+    readonly maxBufferedBytes?: number;
+  };
   /** 接続の上限と、遅い要求への対策（slowloris）。既定は、要求 30 秒・ヘッダ 10 秒・keep-alive 5 秒・接続 256。試験で小さくする。 */
   readonly connection?: {
     readonly requestTimeoutMs?: number;
@@ -442,6 +449,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     if (path === "/v1/bind" && deps.bind !== undefined) return handleBind(req, res, deps.bind);
     if (path === "/v1/whoami") return handleWhoami(req, res);
     if (path === "/v1/ui/state") return handleUiState(req, res);
+    if (path === "/v1/events") return handleEvents(req, res);
     const asset =
       path !== undefined && Object.hasOwn(UI_ASSETS, path) ? UI_ASSETS[path] : undefined;
     if (asset !== undefined) return handleUiAsset(req, res, asset);
@@ -769,19 +777,22 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     res.end(asset.body);
   }
 
-  /** 画面の表示モデル。人間のトークンだけ（それ以外は 403）。認証・失効・回数の制限は、`whoami` と同じ。 */
-  function handleUiState(req: IncomingMessage, res: ServerResponse): void {
+  /**
+   * 画面の入口（`/v1/ui/state`・`/v1/events`）の認証。人間のトークンだけ（それ以外は 403）。認証・失効・回数の制限は、`whoami` と同じ。
+   * 通らなければ、応答を返して `undefined`。
+   */
+  function authenticateHuman(req: IncomingMessage, res: ServerResponse): string | undefined {
     if (req.method !== "GET") {
       reject(res, failure("methodNotAllowed", "GET だけを受け付ける", "GET で呼び出す"), {
         allow: "GET",
       });
-      return;
+      return undefined;
     }
     const token = parseBearer(req.headers.authorization);
     const principal = deps.credentials.authenticate(token);
-    if (principal === undefined) {
+    if (principal === undefined || token === undefined) {
       authFailed(req, res, token === undefined ? "missing" : "invalid");
-      return;
+      return undefined;
     }
     if (!checkPrincipal(principal, deps.getState()).ok) {
       counters.count("authFailed", "principalRejected");
@@ -795,21 +806,27 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         ),
         { "www-authenticate": "Bearer" },
       );
-      return;
+      return undefined;
     }
     const used = principalLimiter.tryConsume(principalKey(principal), 1);
     if (!used.ok) {
       counters.count("rateLimited", "principal");
       tooMany(res, used.retryAfterSec);
-      return;
+      return undefined;
     }
     if (principal.role !== "human") {
       reject(
         res,
         failure("forbidden", "画面の状態は人間のトークンだけが読める", "人間のトークンで呼び出す"),
       );
-      return;
+      return undefined;
     }
+    return token;
+  }
+
+  /** 画面の表示モデル。 */
+  function handleUiState(req: IncomingMessage, res: ServerResponse): void {
+    if (authenticateHuman(req, res) === undefined) return;
     // 表示モデルは、`lastSeq` が同じなら同じ（直近の 1 件だけ持つ）。`If-None-Match` が一致すれば 304（本文なし）。
     const current = deps.getState();
     if (uiCache === undefined || uiCache.seq !== current.lastSeq) {
@@ -838,6 +855,87 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     });
     res.end(uiCache.json);
   }
+
+  // --- SSE（`GET /v1/events`。T23 PR2）---
+  // 送るのは `lastSeq` の通知だけ（中身は、画面が `/v1/ui/state` で取り直す。権限の判定は 1 か所）。
+  // 1 つの周期（`coalesceMs`）で、全ての接続を見る: 変わっていれば通知（変化は、周期でまとめられる）、
+  // 変わっていなくても `heartbeatMs` ごとに、コメント行（接続の維持と、切れた相手の検知）。
+  // 書き込みが詰まった（遅い）接続は切る。トークンが使えなくなった接続は、次の heartbeat で切る。
+  const sseSpec = {
+    maxConnections: deps.sse?.maxConnections ?? 4,
+    coalesceMs: deps.sse?.coalesceMs ?? 250,
+    heartbeatMs: deps.sse?.heartbeatMs ?? 15_000,
+    maxBufferedBytes: deps.sse?.maxBufferedBytes ?? 16 * 1024,
+  };
+  interface SseConn {
+    readonly res: ServerResponse;
+    readonly token: string;
+    sentSeq: number;
+    lastWriteMs: number;
+  }
+  const sseConns = new Set<SseConn>();
+  let sseTimer: ReturnType<typeof setInterval> | undefined;
+
+  const sseEvent = (seq: number): string =>
+    `id: ${seq}\nevent: seq\ndata: ${JSON.stringify({ lastSeq: seq })}\n\n`;
+
+  function sseTick(): void {
+    const seq = deps.getState().lastSeq;
+    const at = hrtimeMs();
+    for (const c of [...sseConns]) {
+      if (c.res.destroyed || c.res.writableLength > sseSpec.maxBufferedBytes) {
+        c.res.destroy(); // 遅い（書き込みが詰まった）接続は切る
+        continue;
+      }
+      if (c.sentSeq !== seq) {
+        c.res.write(sseEvent(seq));
+        c.sentSeq = seq;
+        c.lastWriteMs = at;
+      } else if (at - c.lastWriteMs >= sseSpec.heartbeatMs) {
+        if (deps.credentials.authenticate(c.token) === undefined) {
+          c.res.end();
+          continue;
+        }
+        c.res.write(": heartbeat\n\n");
+        c.lastWriteMs = at;
+      }
+    }
+  }
+
+  function handleEvents(req: IncomingMessage, res: ServerResponse): void {
+    const token = authenticateHuman(req, res);
+    if (token === undefined) return;
+    if (sseConns.size >= sseSpec.maxConnections) {
+      counters.count("rateLimited", "sse");
+      tooMany(res, 5);
+      return;
+    }
+    const seq = deps.getState().lastSeq;
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "cross-origin-resource-policy": "same-origin",
+      connection: "keep-alive",
+    });
+    // 最初に、今の `lastSeq` を送る（画面は、これで状態を取る）。再接続の間の変化も、これで拾う。
+    res.write(`retry: 3000\n${sseEvent(seq)}`);
+    const conn: SseConn = { res, token, sentSeq: seq, lastWriteMs: hrtimeMs() };
+    sseConns.add(conn);
+    if (sseTimer === undefined) {
+      sseTimer = setInterval(sseTick, sseSpec.coalesceMs);
+      sseTimer.unref();
+    }
+    const done = (): void => {
+      sseConns.delete(conn);
+      if (sseConns.size === 0 && sseTimer !== undefined) {
+        clearInterval(sseTimer);
+        sseTimer = undefined;
+      }
+    };
+    res.once("close", done);
+  }
+
   /** `GET /v1/ui/state` の直近の 1 件（`lastSeq` が鍵）。 */
   let uiCache: { readonly seq: number; readonly etag: string; readonly json: string } | undefined;
 

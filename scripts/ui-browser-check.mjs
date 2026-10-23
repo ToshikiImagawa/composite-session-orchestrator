@@ -127,7 +127,12 @@ page.on("response", (res) => {
 await page.fill("#token", HUMAN);
 await page.click("button[type=submit]");
 await page.waitForSelector("#view:not([hidden])", { timeout: 8000 });
-out.pasteOk = await page.locator("#status").innerText();
+await page.waitForFunction(
+  () => document.getElementById("status").innerText.includes("SSE"),
+  null,
+  { timeout: 8000 },
+);
+out.pasteOk = await page.locator("#status").innerText(); // SSE で接続している
 // 変化がない間は、304（描き直さない）
 await page.waitForTimeout(5000);
 out.statusesBeforeChange = [...statuses];
@@ -157,6 +162,45 @@ await page.waitForFunction(
 );
 out.reflectMs = Date.now() - t0;
 out.statusesAfterChange = [...statuses]; // 変わった直後は 200（新しい ETag）、そのあとは 304
+// SSE が使えないとき（上限 0 で、429）は、ポーリング（ETag）に切り替わる
+const poll = createApiServer({
+  credentials,
+  getState: () => state,
+  handlers: {},
+  sse: { maxConnections: 0 },
+});
+const pollUrl = (await poll.listen(0)).url;
+const page2 = await (await browser.newContext()).newPage();
+const pollStatuses = [];
+page2.on("response", (res) => {
+  if (res.url().endsWith("/v1/ui/state")) pollStatuses.push(res.status());
+});
+await page2.goto(`${pollUrl}/ui#token=${HUMAN}`);
+await page2.waitForFunction(
+  () => document.getElementById("status").innerText.includes("ポーリング"),
+  null,
+  { timeout: 8000 },
+);
+out.fallbackStatus = await page2.locator("#status").innerText();
+await page2.waitForTimeout(5000);
+out.fallbackStatuses = [...pollStatuses]; // 200 のあと 304
+// 切れたら、指数バックオフで再接続する（1 回目を中断させる）
+let eventRequests = 0;
+const page3 = await (await browser.newContext()).newPage();
+await page3.route("**/v1/events", (route) => {
+  eventRequests += 1;
+  return eventRequests === 1 ? route.abort() : route.continue();
+});
+await page3.goto(`${url}/ui#token=${HUMAN}`);
+const t1 = Date.now();
+await page3.waitForFunction(
+  () => document.getElementById("status").innerText.includes("SSE"),
+  null,
+  { timeout: 10000 },
+);
+out.reconnectMs = Date.now() - t1;
+out.eventRequests = eventRequests;
 await browser.close();
+await poll.close();
 await server.close();
 console.log(JSON.stringify(out, null, 1));

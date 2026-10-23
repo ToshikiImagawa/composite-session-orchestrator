@@ -1,6 +1,6 @@
 # HTML 画面（T23。FR_021・IR_003・NFR_008）
 
-daemon の窓口が、状態を見るための HTML 画面を配る。**PR1 は読み取りだけ**（操作は T23 の PR3 で、PR1・PR2 のあとに決める）。依存は増やさない（素の JavaScript。資産は TS の文字列として埋め込む）。
+daemon の窓口が、状態を見るための HTML 画面を配る。**読み取りだけ**（操作は T23 の PR3 で、PR1・PR2 のあとに決める）。依存は増やさない（素の JavaScript。資産は TS の文字列として埋め込む）。
 
 ## 入口
 
@@ -9,6 +9,7 @@ daemon の窓口が、状態を見るための HTML 画面を配る。**PR1 は�
 | `GET /ui` | なし | HTML（状態を含まない） |
 | `GET /ui/app.js`・`GET /ui/app.css` | なし | 画面の JS・CSS |
 | `GET /v1/ui/state` | 人間のトークンだけ（それ以外は 403） | 表示モデル（`uiViewOf`。`{ok:true,value}`） |
+| `GET /v1/events` | 人間のトークンだけ（それ以外は 403） | SSE（変更の通知。下の「更新（SSE）」） |
 
 **静的な資産（`/ui`・`/ui/app.js`・`/ui/app.css`）には、回数の制限をかけない**（状態を含まず、認証もないため。`/v1/ui/state` は、主体ごとの回数の制限（T10l）の対象）。
 
@@ -35,9 +36,14 @@ daemon の窓口が、状態を見るための HTML 画面を配る。**PR1 は�
 - 画面は、`textContent` と `createElement`（タグは `div`・`span`・`p` の許可リストだけ。実行時にも拒む）だけで描く。`innerHTML`・`outerHTML`・`insertAdjacentHTML`・`document.write`・`eval`・`new Function`・`setAttribute`・`on*` への代入・`location` への代入・`srcdoc`・storage・cookie・`postMessage`・`window.open`・動的 import は使わない（`ui-assets.test.ts` が走査で守らせる）。ブラケット記法の文字列キー、HTML を解釈する API（`setHTMLUnsafe`・`parseHTMLUnsafe`・`setHTML`・`createContextualFragment`・`DOMParser`）、`.href`・`.src`・`.action`・`.formAction` への代入、危ないタグ（`script`・`iframe`・`a`・`img`・`link`・`object`・`embed`・`form` など）の生成も禁じる。さらに、**許可リスト**として、`.` の後ろのプロパティ名を抜き出し、安全な集合にあるものだけを許す（新しい API を使うと、試験が落ちるので、意識して足す）。HTML にインラインの script・style・イベント属性を置かない。
 - 応答のヘッダー: `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`、`X-Frame-Options: DENY`、`Cross-Origin-Resource-Policy: same-origin`（資産と `/v1/ui/state`）。HTML には、さらに `Cross-Origin-Opener-Policy: same-origin` と `Permissions-Policy`（カメラ・マイクなどを許さない）。
 
-## 更新（PR1）
+## 更新（SSE。T23 PR2。NFR_008）
 
-2 秒ごとのポーリング（`/v1/ui/state`）。NFR_008（2 秒以内）には届かないことがあるので、PR2 で SSE（変更の通知）に置き換える。ポーリングは、SSE が切れたときの代わりとしても残す。
+- **通知だけを送る。** `GET /v1/events`（人間のトークンだけ。`Authorization: Bearer`）は、`text/event-stream` で、`event: seq`・`data: {"lastSeq":N}` だけを送る（状態の中身は送らない）。画面が、通知を受けたら `/v1/ui/state` を取り直す（権限の判定・ETag・304 は、そこの 1 か所）。接続した直後に、今の `lastSeq` を 1 件送る（再接続の間の変化も、これで拾う）。
+- **周期でまとめる。** daemon は、1 つの周期（既定 250ms）で、全ての接続を見て、`lastSeq` が変わっていれば通知する（短い間の連続した変化は、最新の 1 件）。接続がなければ、周期は止まる。変化から画面が変わるまでは、手元で約 0.2 秒（目標 2 秒以内）。
+- **heartbeat。** 変化がなくても、15 秒ごとに、コメント行（`: heartbeat`）を送る（接続の維持と、切れた相手の検知）。このとき、トークンが使えなくなっていれば、接続を閉じる。
+- **上限。** 同時の接続は 4 本まで（超えたら 429・`Retry-After`）。書き込みが詰まった（溜まりが 16 KiB を超えた）遅い接続は切る。接続の開始は、主体ごとの回数の制限（T10l）の 1 要求として数える。認証の失敗は、既存の失敗の回数制限に数える。通知そのものは数えない。
+- **画面（fetch の ReadableStream。EventSource は header を付けられないので使わない）。** 切れたら、1 秒から 30 秒の指数バックオフ（揺らぎつき）で再接続する。再接続のたびに状態を取り直す（Last-Event-ID は要らない）。
+- **SSE が使えない間は、ポーリングに切り替わる。** 接続できない・429・未対応のときは、2 秒ごとに `/v1/ui/state` を ETag つきで取る（変化がなければ 304）。SSE が上がっている間も、安全のために、30 秒ごとに取り直す。表示は「SSE」か「ポーリング」。
 
 ## 確かめ方
 

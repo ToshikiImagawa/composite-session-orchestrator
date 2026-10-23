@@ -71,11 +71,22 @@ export const UI_JS = `'use strict';
   var STATE_NAMES = { pending: '未起動', running: '実行', waiting: '待機', done: '完了報告', verified: '受理', stopping: '停止中', stopIncomplete: '停止未完了', stopped: '停止', reclaimable: '回収可', archived: 'アーカイブ' };
   var PRIORITY_NAMES = { blocking: '要判断', failed: '失敗', completed: '完了', progress: '進捗', info: '情報' };
   var POLL_MS = 2000;
+  var SAFETY_MS = 30000;
+  var BACKOFF_MIN = 1000;
+  var BACKOFF_MAX = 30000;
 
   var statusEl = document.getElementById('status');
   var authEl = document.getElementById('auth');
   var viewEl = document.getElementById('view');
   var timer = null;
+  var lastView = null;
+  var sseUp = false;
+  var generation = 0;
+  var backoff = BACKOFF_MIN;
+  var lastRefreshAt = 0;
+  var refreshing = false;
+  var again = false;
+  var controller = null;
 
   function name(table, key) { return Object.hasOwn(table, key) ? table[key] : key; }
   function el(tag, cls, text) {
@@ -164,33 +175,114 @@ export const UI_JS = `'use strict';
     var drawn = renderTree(view.nodes);
     showAuth(false);
     var partial = view.truncated.length > 0 || drawn < view.nodes.length;
-    setStatus('接続中（seq ' + view.lastSeq + (partial ? '・一部省略' : '') + '）');
+    lastView = { seq: view.lastSeq, partial: partial };
+    showConnected();
   }
 
   var etag = '';
-  function refresh() {
-    if (!token) { showAuth(true); setStatus('未接続'); return Promise.resolve(); }
+
+  function showConnected() {
+    if (!lastView) return;
+    setStatus('接続中（' + (sseUp ? 'SSE' : 'ポーリング') + '・seq ' + lastView.seq + (lastView.partial ? '・一部省略' : '') + '）');
+  }
+  function rejectToken(message) {
+    token = ''; etag = ''; lastView = null; generation += 1; sseUp = false;
+    if (controller) controller.abort();
+    showAuth(true); setStatus(message);
+  }
+
+  function fetchState() {
     var headers = etag
       ? { authorization: 'Bearer ' + token, 'if-none-match': etag }
       : { authorization: 'Bearer ' + token };
     return fetch('/v1/ui/state', { headers: headers })
       .then(function (res) {
         if (res.status === 304) { return { unchanged: true }; }
-        if (res.status === 401) { token = ''; etag = ''; showAuth(true); setStatus('トークンが正しくありません'); return null; }
-        if (res.status === 403) { token = ''; etag = ''; showAuth(true); setStatus('人間のトークンが必要です'); return null; }
+        if (res.status === 401) { rejectToken('トークンが正しくありません'); return null; }
+        if (res.status === 403) { rejectToken('人間のトークンが必要です'); return null; }
         if (!res.ok) { setStatus('取得に失敗（' + res.status + '）。再試行します'); return null; }
         etag = res.headers.get('etag') || '';
         return res.json();
       })
       .then(function (body) {
-        if (body && body.unchanged) return;
         if (body && body.ok) render(body.value);
       })
       .catch(function () { setStatus('daemon に接続できません。再試行します'); });
   }
 
-  function loop() {
-    refresh().then(function () { timer = window.setTimeout(loop, POLL_MS); });
+  // 同時に 1 回だけ取る。取っている間に通知が来たら、終わってからもう 1 回取る。
+  function refresh() {
+    if (!token) { showAuth(true); setStatus('未接続'); return Promise.resolve(); }
+    if (refreshing) { again = true; return Promise.resolve(); }
+    refreshing = true;
+    lastRefreshAt = Date.now();
+    return fetchState().then(function () {
+      refreshing = false;
+      if (again) { again = false; return refresh(); }
+    });
+  }
+
+  // SSE（変更の通知）。fetch の ReadableStream で読む（EventSource は header を付けられない）。切れたら、指数バックオフで再接続する。
+  // 使えない間（接続できない・未対応）は、下の loop が、ETag つきのポーリングで取る。
+  function connectEvents(gen) {
+    if (!token || gen !== generation) return;
+    if (typeof TextDecoder === 'undefined') return;
+    controller = new AbortController();
+    fetch('/v1/events', { headers: { authorization: 'Bearer ' + token }, signal: controller.signal })
+      .then(function (res) {
+        if (res.status === 401) { rejectToken('トークンが正しくありません'); return null; }
+        if (res.status === 403) { rejectToken('人間のトークンが必要です'); return null; }
+        if (!res.ok || !res.body || !res.body.getReader) throw new Error('sse');
+        var reader = res.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = '';
+        sseUp = true;
+        backoff = BACKOFF_MIN;
+        showConnected();
+        function pump() {
+          return reader.read().then(function (r) {
+            if (r.done) throw new Error('closed');
+            buf += decoder.decode(r.value, { stream: true });
+            var end = buf.indexOf('\\n\\n');
+            while (end >= 0) {
+              var block = buf.slice(0, end);
+              buf = buf.slice(end + 2);
+              if (block.indexOf('event: seq') >= 0) refresh();
+              end = buf.indexOf('\\n\\n');
+            }
+            if (buf.length > 4096) buf = '';
+            return pump();
+          });
+        }
+        return pump();
+      })
+      .catch(function () {})
+      .then(function () {
+        sseUp = false;
+        showConnected();
+        if (gen !== generation || !token) return;
+        var wait = backoff + Math.floor(Math.random() * 500);
+        backoff = Math.min(backoff * 2, BACKOFF_MAX);
+        window.setTimeout(function () { connectEvents(gen); }, wait);
+      });
+  }
+
+  // SSE が上がっている間は、安全のために、まれに取り直す。上がっていない間は、POLL_MS ごと（ETag で、変化がなければ 304）。
+  function loop(gen) {
+    if (gen !== generation) return;
+    var due = !sseUp || Date.now() - lastRefreshAt >= SAFETY_MS;
+    (due ? refresh() : Promise.resolve()).then(function () { timer = window.setTimeout(function () { loop(gen); }, POLL_MS); });
+  }
+
+  function start() {
+    generation += 1;
+    if (controller) controller.abort();
+    sseUp = false;
+    backoff = BACKOFF_MIN;
+    if (timer !== null) window.clearTimeout(timer);
+    var gen = generation;
+    // 取れなかった（トークンが拒まれた）ときは、世代が進むので、接続も周期も始めない（表示を上書きしない）。
+    refresh().then(function () { connectEvents(gen); loop(gen); });
   }
 
   document.getElementById('auth-form').addEventListener('submit', function (ev) {
@@ -198,11 +290,10 @@ export const UI_JS = `'use strict';
     var input = document.getElementById('token');
     token = input.value.trim();
     input.value = '';
-    if (timer !== null) window.clearTimeout(timer);
-    loop();
+    start();
   });
 
-  loop();
+  start();
 })();
 `;
 
