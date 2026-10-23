@@ -90,6 +90,9 @@ function readConfig(
   return ok({ port: Number(url.port), stateDir });
 }
 
+/** 値を取らないフラグ。 */
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["--strict-start", "--no-strict-start"]);
+
 export function parseArgs(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>>,
@@ -103,10 +106,10 @@ export function parseArgs(
   let relaxed = false;
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i];
-    if (flag === "--strict-start" || flag === "--no-strict-start") {
+    if (typeof flag === "string" && BOOLEAN_FLAGS.has(flag)) {
       if (flag === "--strict-start") strict = true;
       else relaxed = true;
-      i -= 1; // 値を取らない
+      i -= 1; // 値を取らない（次の反復で、次の引数に進む）
       continue;
     }
     const value = argv[i + 1];
@@ -230,11 +233,13 @@ export async function main(
     io.stderr(`${JSON.stringify({ event: "startupRetry", phase, attempt, waitMs })}\n`);
   // 到達確認。強制（既定）のときは、接続拒否など（daemon がまだ起動していない）を一時的な失敗として、待って確かめ直す。
   let reachable = await daemonReachable(args.value.daemonUrl, doFetch);
-  for (let i = 0; !reachable && args.value.strictStart && i < STARTUP_RETRY_MS.length; i++) {
-    const wait = STARTUP_RETRY_MS[i] ?? 8_000;
-    retryLog("reachable", i + 1, wait);
-    await sleep(wait);
-    reachable = await daemonReachable(args.value.daemonUrl, doFetch);
+  if (args.value.strictStart) {
+    for (const [i, wait] of STARTUP_RETRY_MS.entries()) {
+      if (reachable) break;
+      retryLog("reachable", i + 1, wait);
+      await sleep(wait);
+      reachable = await daemonReachable(args.value.daemonUrl, doFetch);
+    }
   }
   if (!reachable) {
     return fail(
