@@ -53,8 +53,26 @@ daemon の窓口（`POST /v1/request`・`GET /v1/whoami`。認証なしの `GET 
 | `authFailures.burst` | 認証の失敗の容量（接続元ごと） | 20 | 5〜10000 |
 | `authFailures.perMinute` | 認証の失敗の毎分の補充 | 30 | 5〜100000 |
 | `maxKeys` | 表のキーの数の上限（超えたら、最も古く使われたものを捨てる） | 10000 | 100〜1000000 |
+| `maxInFlightPerPrincipal` | 主体ごとに同時に処理中の要求の数の上限（超えたら、本文を読まずに 429。T10l-f） | 8 | 1〜64 |
 
 整数だけ。未知のキー・範囲外は、設定の検査で起動に失敗する。`{ "enabled": false }` のような無効化の指定もできない。
+
+### 接続（`connection`。T10l-f）
+
+遅い要求への対策（slowloris）の、接続の上限とタイムアウト。省略した項目は既定。
+
+| 項目 | 意味 | 既定 | 範囲 |
+| --- | --- | --- | --- |
+| `requestTimeoutMs` | 要求全体（本文まで）を受け取る上限 | 30000 | 1000〜600000 |
+| `headersTimeoutMs` | ヘッダを受け取る上限。**実効の `requestTimeoutMs`（省略は 30000）以下**（Node の制約。違えば起動に失敗する） | 10000 | 1000〜600000 |
+| `keepAliveTimeoutMs` | keep-alive の接続を保つ時間 | 5000 | 1000〜120000 |
+| `maxConnections` | 同時の接続の数の上限 | 256 | 16〜10000 |
+
+処理中の重複の扱い（`inProgress`）は、`docs/request-dedup.md`。
+
+### bind の失敗の数え方（T10l-f）
+
+`POST /v1/bind` の失敗（コードが無効・拒否・本文の誤り）は、全体のスロットル（1 秒に 10 回）に加えて、**接続元ごとの、認証の失敗の bucket**（`authFailures`。トークンの認証の失敗と同じ bucket）でも数える。この bucket が尽きている間は、bind の入口は、**本文を読まずに 429**（`Retry-After` つき。有効なコードも、その間は通らない。記録は `bindThrottled` の `reason: "origin"`、件数は `rateLimited` の `origin`）。成功は数えない。トークンの認証の失敗（401）は、これまでどおり、尽きても 401 のまま（`Retry-After` つき）。接続元は、窓口が `127.0.0.1` だけで待ち受けるので、実質 1 つ。
 
 ## 既定値の見積もり（通常の操作で超えない範囲）
 

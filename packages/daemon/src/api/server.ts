@@ -99,7 +99,12 @@ export type ApiLogEvent =
       readonly reason: "invalid" | "rejected" | "malformed";
       readonly at: string;
     }
-  | { readonly event: "bindThrottled"; readonly reason: "global"; readonly at: string }
+  | {
+      readonly event: "bindThrottled";
+      /** `global`: 全体のスロットル。`origin`: 接続元ごとの、認証の失敗の bucket が尽きている（T10l-f）。 */
+      readonly reason: "global" | "origin";
+      readonly at: string;
+    }
   /** 認証の失敗（窓の最初の 1 件。理由の種類だけ）。`reason`: missing・invalid・principalRejected。 */
   | { readonly event: "apiAuthFailed"; readonly reason: string; readonly at: string }
   /** 回数の制限の発動（窓の最初の 1 件）。`key`: principal（主体）・origin（認証の失敗の接続元）。 */
@@ -923,6 +928,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     res: ServerResponse,
     bind: BindCodes,
   ): Promise<void> {
+    const origin = req.socket.remoteAddress ?? "unknown";
     // 失敗は、どれも全体のスロットルで数える（不正な本文・型違いも）。
     const denied = (
       error: Failure,
@@ -932,6 +938,8 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       throttle.fail();
       log({ event: "bindFailed", reason, at: now() });
       counters.count("authFailed", "bindFailed");
+      // 接続元ごとの、認証の失敗の bucket でも数える（トークンの認証の失敗と同じ bucket。T10l-f）。
+      if (!failureLimiter.tryConsume(origin, 1).ok) counters.count("rateLimited", "origin");
       reject(res, error, extra);
     };
     const wait = throttle.blocked();
@@ -946,6 +954,22 @@ export function createApiServer(deps: ApiDeps): ApiServer {
           "しばらく待って、もう一度試す",
         ),
         { "retry-after": String(Math.max(1, Math.ceil(wait / 1000))) },
+      );
+    }
+    // 失敗が続いている接続元は、本文を読まずに 429（トークンの認証の失敗と共有する bucket が尽きている間）。成功は数えない。
+    const source = failureLimiter.canConsume(origin, 1);
+    if (!source.ok) {
+      log({ event: "bindThrottled", reason: "origin", at: now() });
+      counters.count("rateLimited", "origin");
+      req.resume();
+      return reject(
+        res,
+        failure(
+          "tooManyRequests",
+          "この接続元からの失敗が続いたため、しばらく受け付けない",
+          "Retry-After の秒数を待ってから、もう一度試す",
+        ),
+        { "retry-after": String(source.retryAfterSec), ...CLOSE },
       );
     }
     if (req.method !== "POST") {

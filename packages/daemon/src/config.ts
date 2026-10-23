@@ -22,7 +22,13 @@ import {
   type Scope,
   validateScope,
 } from "@cso/core";
-import { RATE_LIMIT_BOUNDS } from "./api/rate-limit.js";
+import {
+  CONNECTION_BOUNDS,
+  CONNECTION_DEFAULTS,
+  IN_PROGRESS_BOUNDS,
+  IN_PROGRESS_DEFAULTS,
+  RATE_LIMIT_BOUNDS,
+} from "./api/rate-limit.js";
 import { isForbiddenChildEnvName } from "./sdk/child-env.js";
 
 export interface DaemonConfig {
@@ -61,6 +67,30 @@ export interface DaemonConfig {
     readonly perPrincipal?: { readonly burst?: number; readonly perSecond?: number };
     readonly authFailures?: { readonly burst?: number; readonly perMinute?: number };
     readonly maxKeys?: number;
+    /** 主体ごとの、同時に処理中の要求の数の上限（T10l-f。1〜64。既定 8）。超えたら、本文を読まずに 429。 */
+    readonly maxInFlightPerPrincipal?: number;
+  };
+  /**
+   * 接続の上限とタイムアウト（T10l-f。遅い要求への対策）。省略した項目は既定: `requestTimeoutMs` 30,000（1,000〜600,000）・
+   * `headersTimeoutMs` 10,000（1,000〜600,000。実効の `requestTimeoutMs` 以下）・`keepAliveTimeoutMs` 5,000（1,000〜120,000）・
+   * `maxConnections` 256（16〜10,000）。
+   */
+  readonly connection?: {
+    readonly requestTimeoutMs?: number;
+    readonly headersTimeoutMs?: number;
+    readonly keepAliveTimeoutMs?: number;
+    readonly maxConnections?: number;
+  };
+  /**
+   * 同じ要求（同じ主体・同じ requestId）の処理中の重複の扱い（T10l-f。`docs/request-dedup.md`）。省略した項目は既定: `waitMs` 20,000
+   * （1,000〜60,000。実効の `staleMs` 以下。最初の結果を待つ上限）・`maxWaiters` 16（1〜256。1 つの項目に同時に待てる重複の数）・
+   * `staleMs` 300,000（30,000〜3,600,000。古いと見なして外す時間）・`maxEntries` 1,024（64〜100,000。表の大きさ）。
+   */
+  readonly inProgress?: {
+    readonly waitMs?: number;
+    readonly maxWaiters?: number;
+    readonly staleMs?: number;
+    readonly maxEntries?: number;
   };
   /**
    * 自動の最終削除。省略すると、オフ。**有効にすると、保持期間（`retentionDays`）を過ぎた、アーカイブ済みの最上位の木が、
@@ -133,6 +163,8 @@ const KEYS = [
   "digest",
   "wake",
   "rateLimit",
+  "connection",
+  "inProgress",
   "maxTurns",
   "maxBudgetUsd",
   "childEnvAllow",
@@ -245,7 +277,8 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     const pp = isRec(v) ? v.perPrincipal : undefined;
     const af = isRec(v) ? v.authFailures : undefined;
     if (
-      !onlyKeys(v, ["perPrincipal", "authFailures", "maxKeys"]) ||
+      !onlyKeys(v, ["perPrincipal", "authFailures", "maxKeys", "maxInFlightPerPrincipal"]) ||
+      !inRange(v.maxInFlightPerPrincipal, RATE_LIMIT_BOUNDS.maxInFlightPerPrincipal) ||
       (pp !== undefined && !onlyKeys(pp, ["burst", "perSecond"])) ||
       (af !== undefined && !onlyKeys(af, ["burst", "perMinute"])) ||
       !inRange(v.maxKeys, RATE_LIMIT_BOUNDS.maxKeys) ||
@@ -257,7 +290,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
           !inRange(af.perMinute, RATE_LIMIT_BOUNDS.authFailurePerMinute)))
     ) {
       return bad(
-        `rateLimit は、perPrincipal（burst ${RATE_LIMIT_BOUNDS.principalBurst.min}〜${RATE_LIMIT_BOUNDS.principalBurst.max}・perSecond ${RATE_LIMIT_BOUNDS.principalPerSecond.min}〜${RATE_LIMIT_BOUNDS.principalPerSecond.max}）・authFailures（burst ${RATE_LIMIT_BOUNDS.authFailureBurst.min}〜${RATE_LIMIT_BOUNDS.authFailureBurst.max}・perMinute ${RATE_LIMIT_BOUNDS.authFailurePerMinute.min}〜${RATE_LIMIT_BOUNDS.authFailurePerMinute.max}）・maxKeys（${RATE_LIMIT_BOUNDS.maxKeys.min}〜${RATE_LIMIT_BOUNDS.maxKeys.max}）だけを持つオブジェクト（整数。制限は無効にできない）`,
+        `rateLimit は、perPrincipal（burst ${RATE_LIMIT_BOUNDS.principalBurst.min}〜${RATE_LIMIT_BOUNDS.principalBurst.max}・perSecond ${RATE_LIMIT_BOUNDS.principalPerSecond.min}〜${RATE_LIMIT_BOUNDS.principalPerSecond.max}）・authFailures（burst ${RATE_LIMIT_BOUNDS.authFailureBurst.min}〜${RATE_LIMIT_BOUNDS.authFailureBurst.max}・perMinute ${RATE_LIMIT_BOUNDS.authFailurePerMinute.min}〜${RATE_LIMIT_BOUNDS.authFailurePerMinute.max}）・maxKeys（${RATE_LIMIT_BOUNDS.maxKeys.min}〜${RATE_LIMIT_BOUNDS.maxKeys.max}）・maxInFlightPerPrincipal（${RATE_LIMIT_BOUNDS.maxInFlightPerPrincipal.min}〜${RATE_LIMIT_BOUNDS.maxInFlightPerPrincipal.max}）だけを持つオブジェクト（整数。制限は無効にできない）`,
       );
     }
     const num = (o: unknown, k: string): number | undefined =>
@@ -284,7 +317,61 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
             },
           }),
       ...(v.maxKeys === undefined ? {} : { maxKeys: v.maxKeys as number }),
+      ...(v.maxInFlightPerPrincipal === undefined
+        ? {}
+        : { maxInFlightPerPrincipal: v.maxInFlightPerPrincipal as number }),
     };
+  }
+  // 接続・処理中の重複の設定（T10l-f）。範囲・型・未知のキーを検査し、実効の値（省略は既定）の組み合わせも検査する。
+  const boundedGroup = <K extends string>(
+    name: string,
+    v: unknown,
+    bounds: Readonly<Record<K, { min: number; max: number }>>,
+  ): { ok: true; value: Partial<Record<K, number>> } | { ok: false; cause: string } => {
+    const keys = Object.keys(bounds) as K[];
+    if (!isRec(v) || Object.keys(v).some((k) => !(keys as string[]).includes(k))) {
+      return {
+        ok: false,
+        cause: `${name} は、${keys.join("・")} だけを持つオブジェクト`,
+      };
+    }
+    const out: Partial<Record<K, number>> = {};
+    for (const k of keys) {
+      const x = v[k];
+      if (x === undefined) continue;
+      const b = bounds[k];
+      if (typeof x !== "number" || !Number.isInteger(x) || x < b.min || x > b.max) {
+        return { ok: false, cause: `${name}.${k} は ${b.min}〜${b.max} の整数` };
+      }
+      out[k] = x;
+    }
+    return { ok: true, value: out };
+  };
+  let connection: DaemonConfig["connection"];
+  if (raw.connection !== undefined) {
+    const g = boundedGroup("connection", raw.connection, CONNECTION_BOUNDS);
+    if (!g.ok) return bad(g.cause);
+    const headers = g.value.headersTimeoutMs ?? CONNECTION_DEFAULTS.headersTimeoutMs;
+    const request = g.value.requestTimeoutMs ?? CONNECTION_DEFAULTS.requestTimeoutMs;
+    if (headers > request) {
+      return bad(
+        `connection.headersTimeoutMs（${headers}。省略すると ${CONNECTION_DEFAULTS.headersTimeoutMs}）は、requestTimeoutMs（${request}。省略すると ${CONNECTION_DEFAULTS.requestTimeoutMs}）以下にする`,
+      );
+    }
+    connection = g.value;
+  }
+  let inProgress: DaemonConfig["inProgress"];
+  if (raw.inProgress !== undefined) {
+    const g = boundedGroup("inProgress", raw.inProgress, IN_PROGRESS_BOUNDS);
+    if (!g.ok) return bad(g.cause);
+    const wait = g.value.waitMs ?? IN_PROGRESS_DEFAULTS.waitMs;
+    const stale = g.value.staleMs ?? IN_PROGRESS_DEFAULTS.staleMs;
+    if (wait > stale) {
+      return bad(
+        `inProgress.waitMs（${wait}。省略すると ${IN_PROGRESS_DEFAULTS.waitMs}）は、staleMs（${stale}。省略すると ${IN_PROGRESS_DEFAULTS.staleMs}）以下にする`,
+      );
+    }
+    inProgress = g.value;
   }
   let autoPurge:
     | { enabled: boolean; intervalMinutes?: number; maxTreesPerRun?: number; noticeDays?: number }
@@ -524,6 +611,8 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(digest === undefined ? {} : { digest }),
       ...(wake === undefined ? {} : { wake }),
       ...(rateLimit === undefined ? {} : { rateLimit }),
+      ...(connection === undefined ? {} : { connection }),
+      ...(inProgress === undefined ? {} : { inProgress }),
       ...(raw.childHome === undefined
         ? {}
         : { childHome: raw.childHome as "isolated" | "inherit" }),

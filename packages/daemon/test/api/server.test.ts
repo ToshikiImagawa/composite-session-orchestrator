@@ -486,6 +486,7 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
       logger?: ApiLogger;
       bindOptions?: Parameters<typeof createBindCodes>[0];
       throttle?: ReturnType<typeof createThrottle>;
+      authFailures?: { burst: number; perSecond: number };
     } = {},
   ) => {
     const credentials = createCredentialStore({ humanToken: HUMAN });
@@ -495,6 +496,9 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
       bind,
       ...(over.logger ? { logger: over.logger } : {}),
       ...(over.throttle ? { bindThrottle: over.throttle } : {}),
+      ...(over.authFailures
+        ? { rateLimit: { authFailures: over.authFailures, monotonicMs: () => 0 } }
+        : {}),
       clock: () => "2026-10-20T00:00:00.000Z",
       getState: () => (typeof over.state === "function" ? over.state() : (over.state ?? state())),
       handlers: { "report.progress": () => ok({ accepted: true }) },
@@ -561,7 +565,11 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
   });
 
   it("ノードごとのロックはない。同じノードの失敗が続いても、正しいコードで紐付けられる（nodeId は誰でも申告できる）", async () => {
-    const r = await rigBind({ throttle: createThrottle({ perSecond: 1000 }) });
+    // 接続元ごとの bucket（T10l-f）は、ここでは確かめない（大きくしておく）。確かめるのは、ノードごとのロックがないこと
+    const r = await rigBind({
+      throttle: createThrottle({ perSecond: 1000 }),
+      authFailures: { burst: 1000, perSecond: 1000 },
+    });
     for (let i = 0; i < 20; i++)
       await r.call({ nodeId: "a", bindCode: `${String((i % 9) + 1).repeat(26)}` });
     const res = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
@@ -664,6 +672,48 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     await t.call("{bad");
     await t.call("{bad");
     expect(logs.at(-1)).toMatchObject({ event: "bindThrottled", reason: "global" });
+  });
+
+  it("T10l-f: bind の失敗も、接続元ごとの、認証の失敗の bucket で数える。尽きたら、本文を読まずに 429（Retry-After つき）。有効なコードも、その間は通らない", async () => {
+    const logs: Record<string, unknown>[] = [];
+    const r = await rigBind({
+      authFailures: { burst: 3, perSecond: 0.01 },
+      logger: (e) => {
+        if (e.event.startsWith("bind")) logs.push(e as unknown as Record<string, unknown>);
+      },
+    });
+    const code = r.bind.issue("a");
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      statuses.push((await r.call({ nodeId: "a", bindCode: `wrong-${i}` })).status);
+    }
+    expect(statuses).toEqual([401, 401, 401]);
+    const blocked = await r.call({ nodeId: "a", bindCode: code });
+    expect(blocked.status).toBe(429);
+    expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(blocked.json.error?.code).toBe("tooManyRequests");
+    expect(logs.at(-1)).toMatchObject({ event: "bindThrottled", reason: "origin" });
+    // コードは消費されていない（429 は、本文を読まずに断った）
+    expect(JSON.stringify(logs)).not.toContain(code);
+  });
+
+  it("T10l-f: bind の成功は、bucket を使わない（正しいコードの bind を何度でも）。トークンの認証の失敗と、同じ bucket を共有する", async () => {
+    const r = await rigBind({ authFailures: { burst: 3, perSecond: 0.01 } });
+    for (let i = 0; i < 8; i++) {
+      const res = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
+      expect(res.status, String(i)).toBe(200);
+    }
+    // トークンの認証の失敗（Bearer が無効）を 3 回 → bind も断られる（同じ接続元の bucket）
+    for (let i = 0; i < 3; i++) {
+      const bad = await fetch(`${r.url}/v1/request`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${"z".repeat(43)}`, "content-type": "application/json" },
+        body: JSON.stringify({ requestId: `x${i}`, operation: "report.progress", params: {} }),
+      });
+      expect(bad.status).toBe(401);
+    }
+    const res = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
+    expect(res.status).toBe(429);
   });
 
   it("形の検査: 余計なキー・不正なコード・JSON でない・大きすぎる本文・GET・Content-Type", async () => {

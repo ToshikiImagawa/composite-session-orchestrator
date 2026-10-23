@@ -19,6 +19,7 @@ import { deriveId } from "../src/api/handlers/context.js";
 import { parseIdentityFile, proofOf } from "../src/api/identity.js";
 import { FileTokenRepository } from "../src/api/token-repository.js";
 import {
+  apiLimitsOf,
   createDaemon,
   type Daemon,
   type DaemonDeps,
@@ -745,6 +746,41 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     await d.daemon.stop();
     await m.advance(10 * 60_000);
     expect(d.daemon.log.state().nodes.some((n) => n.id === "t")).toBe(true);
+  });
+});
+
+describe("apiLimitsOf（設定から窓口の制限・接続・処理中の重複の deps。T10l-f）", () => {
+  const cfg = (over: Partial<DaemonConfig> = {}): DaemonConfig => rig(over).config;
+
+  it("設定がなければ、いまの既定と同じ（connection・inProgress・maxInFlightPerPrincipal は渡さない。窓口の既定が働く）", () => {
+    const l = apiLimitsOf(cfg());
+    expect(l.rateLimit).toEqual({
+      perPrincipal: { burst: 60, perSecond: 20 },
+      authFailures: { burst: 20, perSecond: 0.5 },
+    });
+    expect(l).not.toHaveProperty("connection");
+    expect(l).not.toHaveProperty("inProgress");
+  });
+
+  it("設定した値は、そのまま渡る（同時数・接続・処理中の重複。省略した項目は、足さない）", () => {
+    const l = apiLimitsOf(
+      cfg({
+        rateLimit: { maxInFlightPerPrincipal: 3 },
+        connection: { requestTimeoutMs: 5000, headersTimeoutMs: 4000, maxConnections: 32 },
+        inProgress: { waitMs: 2000, maxEntries: 100 },
+      }),
+      () => 7,
+    );
+    expect(l.rateLimit).toMatchObject({
+      maxInFlightPerPrincipal: 3,
+      monotonicMs: expect.any(Function),
+    });
+    expect(l.connection).toEqual({
+      requestTimeoutMs: 5000,
+      headersTimeoutMs: 4000,
+      maxConnections: 32,
+    });
+    expect(l.inProgress).toEqual({ waitMs: 2000, maxEntries: 100 });
   });
 });
 
