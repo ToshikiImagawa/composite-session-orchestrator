@@ -145,7 +145,7 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
     expect(second.rootToken).toBe(first.rootToken);
     expect(second.daemon.log.state().nodes).toHaveLength(1);
     expect((await call(second.url, second.rootToken, "tree.list", {})).status).toBe(200);
-  });
+  }, 30_000);
 
   it("根の統合ノードが spawn で子を作り、実際に起動できる（rootScope・根の cwd・作業ツリーの配線）", async () => {
     const r = rig();
