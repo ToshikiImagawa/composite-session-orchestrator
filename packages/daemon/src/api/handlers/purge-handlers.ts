@@ -358,6 +358,23 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
     "node.purge": (req: HandlerRequest<"node.purge">): R<"node.purge"> => {
       const denied = humanOnly(req.role);
       if (denied) return denied;
+      // 事前確認で見せた木と、いまの木が違えば、何も消さない（見せたあとで、ノードが増えた・減った）。
+      // 木がもうない（消えた）ときは、照合しない（同じ requestId の再送は、最初の結果を返す）。
+      const expected = req.params.expectNodeIds;
+      if (expected !== undefined) {
+        const plan = planPurge(log.state(), req.params.nodeId, deps.nowMs());
+        if (plan.ok) {
+          const now = [...plan.value.nodeIds].sort();
+          const shown = [...expected].sort();
+          if (now.length !== shown.length || now.some((x, i) => x !== shown[i])) {
+            return fail(
+              "purgeStale",
+              `事前確認で見せた木（${shown.length} ノード）と、いまの木（${now.length} ノード）が違う。何も消していない`,
+              "もう一度、事前確認で、削除される木を確かめ直す",
+            );
+          }
+        }
+      }
       return purgeTreeOf({
         nodeId: req.params.nodeId,
         requestId: req.requestId,

@@ -324,11 +324,28 @@ const VALIDATORS: Validators = {
     return { nodeId, expectTips: out };
   },
   "node.purge": (p) => {
-    const o = strict(p, ["nodeId", "tombstone"]);
+    const o = strict(p, ["nodeId", "tombstone", "expectNodeIds"]);
     const nodeId = id(o, "nodeId");
-    if (o.tombstone === undefined) return { nodeId };
-    if (typeof o.tombstone !== "boolean") fail("tombstone が真偽値でない");
-    return { nodeId, tombstone: o.tombstone as boolean };
+    if (o.tombstone !== undefined && typeof o.tombstone !== "boolean") {
+      fail("tombstone が真偽値でない");
+    }
+    let expectNodeIds: string[] | undefined;
+    if (o.expectNodeIds !== undefined) {
+      const ids = o.expectNodeIds;
+      if (!Array.isArray(ids) || ids.length === 0 || ids.length > LIMITS.expectNodeIds) {
+        fail(`expectNodeIds は、ノード ID の配列（1〜${LIMITS.expectNodeIds} 件）`);
+      }
+      const list = ids as unknown[];
+      if (!list.every((x) => isSafeId(x)) || new Set(list).size !== list.length) {
+        fail("expectNodeIds の要素が、ノード ID の形式でない（または重複している）");
+      }
+      expectNodeIds = [...(list as string[])];
+    }
+    return {
+      nodeId,
+      ...(o.tombstone === undefined ? {} : { tombstone: o.tombstone as boolean }),
+      ...(expectNodeIds === undefined ? {} : { expectNodeIds }),
+    };
   },
   "node.purgePreview": nodeIdOnly,
   "node.purgeHold": (p) => {

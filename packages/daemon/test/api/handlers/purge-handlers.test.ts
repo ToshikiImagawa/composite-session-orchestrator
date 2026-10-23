@@ -201,6 +201,40 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
     expect(d.log.state().tombstones[0]?.tombstone?.title).toBe("木の目的");
   });
 
+  it("expectNodeIds（事前確認で見せた木）: 順序が違っても、集合が一致すれば消す。違えば、何も消さずに purgeStale（T23-d）", () => {
+    const stale = rig();
+    stale.advance(90);
+    const before = stale.log.state();
+    for (const wrong of [["t"], ["c"], ["t", "c", "o"], ["t", "x"]]) {
+      const res = stale.call("node.purge", { nodeId: "t", expectNodeIds: wrong });
+      expect(res.ok, JSON.stringify(wrong)).toBe(false);
+      expect(res.error?.code).toBe("purgeStale");
+    }
+    expect(stale.log.state()).toEqual(before);
+    expect(stale.calls.revoked).toEqual([]);
+    expect(stale.calls.audit).toEqual([]);
+    const ok = stale.call("node.purge", { nodeId: "t", expectNodeIds: ["t", "c"] });
+    expect(ok.ok).toBe(true);
+    expect(ok.value.purged).toEqual(["c", "t"]);
+  });
+
+  it("expectNodeIds: 木がもうないときの同じ requestId の再送は、照合せずに最初の結果を返す。expectNodeIds なしは、これまでどおり", () => {
+    const r = rig();
+    r.advance(90);
+    const first = r.call("node.purge", { nodeId: "t", expectNodeIds: ["c", "t"] }, "human", "same");
+    const second = r.call(
+      "node.purge",
+      { nodeId: "t", expectNodeIds: ["c", "t"] },
+      "human",
+      "same",
+    );
+    expect(second.ok).toBe(true);
+    expect(second.value).toEqual(first.value);
+    const plain = rig();
+    plain.advance(90);
+    expect(plain.call("node.purge", { nodeId: "t" }).ok).toBe(true);
+  });
+
   it("設定で保持期間を 0 にすれば、すぐ消せる", () => {
     const r = rig({ retentionDays: 0 });
     expect(r.call("node.purge", { nodeId: "t" }).ok).toBe(true);

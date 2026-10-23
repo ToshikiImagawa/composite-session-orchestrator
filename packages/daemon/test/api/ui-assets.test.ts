@@ -73,6 +73,7 @@ describe("画面の資産（走査）", () => {
       "truncated",
       "decisions",
       "extensions",
+      "expectNodeIds",
       "blocked",
       "typed",
       "rows",
@@ -398,6 +399,81 @@ describe("画面の資産（走査）", () => {
       expect(api.cleanText("a\u001b[31mb\nc\u202ed", 100)).toBe("a [31mb c d");
       expect(api.cleanText("あ".repeat(10), 5)).toBe("ああああ…");
       expect(api.cleanText("  x   y  ", 10)).toBe("x y");
+    });
+  });
+
+  describe("sendPending（vm で評価する。打ち込みが一致しないと、通信しない）", () => {
+    const fn = (name: string): string => {
+      const i = UI_JS.indexOf(`  function ${name}(`);
+      expect(i, name).toBeGreaterThan(-1);
+      return UI_JS.slice(i, UI_JS.indexOf("\n  }\n", i) + 5);
+    };
+    type Pending = {
+      operation: string;
+      params: unknown;
+      requestId: string;
+      sending: boolean;
+      error: string;
+      retryAt: number;
+      typed?: string;
+      typedValue: string;
+      blocked: string;
+      done: string;
+    };
+    const run = (p: Pending) => {
+      const sent: { operation: string; params: unknown; requestId: string }[] = [];
+      const ctx = {
+        __pending: p,
+        __sent: sent,
+        __callOperation: (operation: string, params: unknown, requestId: string) => {
+          sent.push({ operation, params, requestId });
+          return new Promise(() => {}); // 返さない（送った、までを見る）
+        },
+      };
+      const source = [
+        "var pending = __pending;",
+        "function callOperation(o, p, r) { return __callOperation(o, p, r); }",
+        "function renderConfirm() {}",
+        "function notice() {}",
+        "function refresh() {}",
+        "function describeFailure() { return ''; }",
+        "function waitSecondsOf() { return 0; }",
+        fn("typedMatches"),
+        fn("sendPending"),
+        "sendPending();",
+      ].join("\n");
+      runInNewContext(source, ctx);
+      return sent;
+    };
+    const base = (over: Partial<Pending>): Pending => ({
+      operation: "node.purge",
+      params: { nodeId: "r1" },
+      requestId: "req-1",
+      sending: false,
+      error: "",
+      retryAt: 0,
+      typedValue: "",
+      blocked: "",
+      done: "ok",
+      ...over,
+    });
+
+    it("打ち込みが一致しなければ、通信しない（画面の無効化を迂回されても）", () => {
+      for (const typedValue of ["", "r", "r1 ", " r1", "R1", "ｒ１"]) {
+        expect(run(base({ typed: "r1", typedValue })), JSON.stringify(typedValue)).toEqual([]);
+      }
+    });
+
+    it("打ち込みが一致すれば、1 回だけ通信する（同じ requestId・params）", () => {
+      expect(run(base({ typed: "r1", typedValue: "r1" }))).toEqual([
+        { operation: "node.purge", params: { nodeId: "r1" }, requestId: "req-1" },
+      ]);
+    });
+
+    it("送れない理由（blocked）があれば、一致していても通信しない。typed がない（取り消せる）操作は、そのまま送る。送信中は送らない", () => {
+      expect(run(base({ typed: "r1", typedValue: "r1", blocked: "実行できない" }))).toEqual([]);
+      expect(run(base({}))).toHaveLength(1);
+      expect(run(base({ sending: true }))).toEqual([]);
     });
   });
 

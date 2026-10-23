@@ -39,6 +39,8 @@ export const LIMITS = {
   lossSubjectLength: 100,
   /** 破棄の指示（`node.reclaimInstruct`）の `expectTips` の件数の上限（対象と配下のノード数の上限。プレビューの `tips` も同じ。T21r-e）。 */
   expectTips: 256,
+  /** 最終削除（`node.purge`）の `expectNodeIds` の件数の上限（削除される木のノード数の上限。事前確認の `nodeIds` も同じ。T23-d）。 */
+  expectNodeIds: 2000,
   /** 子が入れる報告（`progress`・`outOfScope`）の、ノードあたりの件数。直近の start・restart より後だけを数える。完了・失敗・差し戻しの報告は数えない。 */
   reportsPerNode: 200,
   /** 判断要求（`decision.requested`）で、判断待ちの間に止める子の件数。 */

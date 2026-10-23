@@ -64,7 +64,7 @@ button.primary{background:var(--blocking);color:#fff;border-color:var(--blocking
 textarea{display:block;width:100%;min-height:64px;margin:6px 0;font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 .confirm{border:2px solid var(--blocking);border-radius:6px;padding:4px 12px 12px;margin:16px 0;background:var(--card)}
 .confirm-title{font-weight:600;margin:10px 0 6px}.confirm-line{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}
-.error{color:var(--blocking);margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.notice{color:var(--ok);margin:12px 0}
+.error{color:var(--blocking);margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.notice{color:var(--ok);margin:12px 0}.notice.bad{color:var(--blocking)}
 input,button{font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 form{display:flex;gap:8px;flex-wrap:wrap}input{flex:1;min-width:200px}
 `;
@@ -134,9 +134,11 @@ export const UI_JS = `'use strict';
     if (hasForbidden(text)) return '使えない文字（制御文字・書式制御文字）を含んでいます';
     return '';
   }
-  function notice(text) {
+  // 通知。bad が真なら、失敗として赤で出す。
+  function notice(text, bad) {
     var n = document.getElementById('notice');
     n.textContent = text;
+    n.className = bad ? 'notice bad' : 'notice';
     n.hidden = !text;
   }
   // 429 のとき、送り直すまで待つ秒数（Retry-After。なければ 5 秒）。それ以外は 0。
@@ -206,7 +208,7 @@ export const UI_JS = `'use strict';
   // opts.typed: 打ち込ませる文字列（取り消せない操作）。opts.blocked: 送れない理由（出して、送らせない）。opts.after: 成功のあとに呼ぶ関数。
   function openConfirm(title, lines, operation, params, done, opts) {
     if (pending && pending.sending) return;
-    if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）'); return; }
+    if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）', true); return; }
     notice('');
     var o = opts || {};
     pending = { title: title, lines: lines, operation: operation, params: params, done: done, requestId: window.crypto.randomUUID(), sending: false, error: '', retryAt: 0, typed: o.typed, typedValue: '', blocked: o.blocked || '', after: o.after };
@@ -232,18 +234,27 @@ export const UI_JS = `'use strict';
         );
       });
   }
-  // 読み取りの操作（事前確認・一覧）。成功なら値、失敗なら通知に理由を出して null。
-  function readOperation(operation, params) {
-    if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）'); return Promise.resolve(null); }
+  // 読み取りの操作（事前確認・一覧）の結果。{ ok: true, value } か { ok: false, error: { code, cause, status } }（通知は出さない。
+  // 失敗の種類（tipMismatch など）を、呼び出し側が区別できる）。ネットワークの失敗は code が 'network'、401 はトークンを破棄して null。
+  function readOperationResult(operation, params) {
+    if (!window.crypto || !window.crypto.randomUUID) return Promise.resolve({ ok: false, error: { code: 'unsupported', cause: 'このブラウザでは、操作できません（crypto.randomUUID がありません）', status: 0 } });
     return callOperation(operation, params, window.crypto.randomUUID())
       .then(function (r) {
         if (r === null) return null;
-        if (r.status === 200 && r.body && r.body.ok === true) return r.body.value;
+        if (r.status === 200 && r.body && r.body.ok === true) return { ok: true, value: r.body.value };
         var e = r.body && r.body.error;
-        notice('失敗: ' + (e && typeof e.code === 'string' ? e.code + ': ' + String(e.cause || '').slice(0, 300) : 'HTTP ' + r.status));
-        return null;
+        return { ok: false, error: { code: e && typeof e.code === 'string' ? e.code : 'http', cause: e ? String(e.cause || '').slice(0, 300) : 'HTTP ' + r.status, status: r.status } };
       })
-      .catch(function () { notice('daemon に接続できません'); return null; });
+      .catch(function () { return { ok: false, error: { code: 'network', cause: 'daemon に接続できません', status: 0 } }; });
+  }
+  // 読み取りの操作。成功なら値、失敗なら通知（赤）に理由を出して null。
+  function readOperation(operation, params) {
+    return readOperationResult(operation, params).then(function (r) {
+      if (r === null) return null;
+      if (r.ok) return r.value;
+      notice('失敗: ' + r.error.code + ': ' + r.error.cause, true);
+      return null;
+    });
   }
   function sendPending() {
     var p = pending;
@@ -417,6 +428,9 @@ export const UI_JS = `'use strict';
   var REASON_MAX = 200;
   var HOLD_CHOICES = [{ label: '無期限', days: 0 }, { label: '30 日', days: 30 }, { label: '90 日', days: 90 }];
   var NODE_LIST_MAX = 20;
+  var EXPECT_NODE_IDS_MAX = 2000;
+  var ID_RE = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/;
+  var reasonDrafts = new Map();
   var keptList = null;
   var purgeSignature = null;
   var keptLoading = false;
@@ -471,12 +485,26 @@ export const UI_JS = `'use strict';
     });
     return lines;
   }
+  // 今の保留の状態（事前確認の hold）。取れなければ、取れなかったと出す（なし、とは言わない）。
+  function holdStatusLine(rootId) {
+    return readOperationResult('node.purgePreview', { nodeId: rootId }).then(function (r) {
+      if (r === null || !r.ok) return '（取得できなかった）';
+      var h = r.value && r.value.hold;
+      if (!h || typeof h !== 'object') return 'なし';
+      var until = typeof h.until === 'string' ? cleanText(h.until, 40) + ' まで' : '無期限';
+      var reason = typeof h.reason === 'string' && h.reason !== '' ? '。理由: ' + cleanText(h.reason, 200) : '';
+      return '保留中（ノード ' + cleanText(String(h.nodeId || ''), 128) + '。' + until + reason + '）';
+    });
+  }
   function startPurge(rootId, tombstone) {
     readOperation('node.purgePreview', { nodeId: rootId }).then(function (v) {
       if (v === null) return;
-      if (!isPurgePreview(v)) { notice('事前確認の結果の形が不正です'); return; }
+      if (!isPurgePreview(v)) { notice('事前確認の結果の形が不正です', true); return; }
+      // 見せた木（削除されるノード）を渡す。見せたあとで木が変わっていたら、daemon が消さない（purgeStale）。
       var params = tombstone === undefined ? { nodeId: rootId } : { nodeId: rootId, tombstone: tombstone };
+      params.expectNodeIds = v.nodeIds;
       var blocked = v.purgeable ? '' : 'この木は、いま最終削除できません（上の理由を取り除いてから、もう一度確認してください）';
+      if (v.nodeIds.length > EXPECT_NODE_IDS_MAX) blocked = '木のノードが多すぎて、安全に確認できません（' + v.nodeIds.length + ' 件。' + EXPECT_NODE_IDS_MAX + ' 件まで）';
       openConfirm('最終削除', purgeLines(rootId, v, tombstone), 'node.purge', params, '最終削除しました（' + rootId + '）', { typed: rootId, blocked: blocked });
     });
   }
@@ -485,6 +513,7 @@ export const UI_JS = `'use strict';
     var signature = roots.join('\\n');
     if (signature === purgeSignature) return; // 根の集合が変わらなければ、描き直さない（入力中の理由を消さない）
     purgeSignature = signature;
+    reasonDrafts.forEach(function (_v, key) { if (roots.indexOf(key) < 0) reasonDrafts.delete(key); });
     var box = document.getElementById('purge');
     clear(box);
     if (!roots.length) { box.appendChild(el('p', 'empty', '最終削除の対象になりうる、アーカイブ済みの木はありません')); return; }
@@ -503,6 +532,8 @@ export const UI_JS = `'use strict';
       var area = el('textarea', '');
       area.maxLength = REASON_MAX;
       area.placeholder = '自動の最終削除を保留する理由（任意。' + REASON_MAX + ' 文字まで）';
+      area.value = reasonDrafts.get(id) || '';
+      area.addEventListener('input', function () { reasonDrafts.set(id, area.value); });
       card.appendChild(area);
       var problem = el('p', 'error', '');
       problem.hidden = true;
@@ -518,13 +549,18 @@ export const UI_JS = `'use strict';
           var params = { nodeId: id };
           if (until !== undefined) params.until = until;
           if (area.value.trim() !== '') params.reason = area.value;
-          openConfirm('自動の最終削除の保留', [['木の根', id], ['期限', until === undefined ? '無期限' : until + ' まで（' + c.label + '）'], ['理由', area.value.trim() === '' ? '（なし）' : area.value]], 'node.purgeHold', params, '保留しました（' + id + '）');
+          var reason = area.value;
+          holdStatusLine(id).then(function (current) {
+            openConfirm('自動の最終削除の保留', [['木の根', id], ['今の保留', current], ['新しい期限', until === undefined ? '無期限' : until + ' まで（' + c.label + '）。今の保留は、置き換わる'], ['理由', reason.trim() === '' ? '（なし）' : reason]], 'node.purgeHold', params, '保留しました（' + id + '）');
+          });
         });
         hold.appendChild(b);
       });
       var rel = el('button', '', '保留を解除…');
       rel.addEventListener('click', function () {
-        openConfirm('保留の解除', [['木の根', id], ['内容', '保留を解除する（解除後は、保持期間と予告の条件を、改めて満たすまで消えない）']], 'node.purgeRelease', { nodeId: id }, '保留を解除しました（' + id + '）');
+        holdStatusLine(id).then(function (current) {
+          openConfirm('保留の解除', [['木の根', id], ['今の保留', current], ['内容', '保留を解除する（解除後は、保持期間と予告の条件を、改めて満たすまで消えない）']], 'node.purgeRelease', { nodeId: id }, '保留を解除しました（' + id + '）');
+        });
       });
       hold.appendChild(rel);
       card.appendChild(hold);
@@ -538,7 +574,7 @@ export const UI_JS = `'use strict';
     readOperation('node.discardedList', {}).then(function (v) {
       keptLoading = false;
       if (v === null) return;
-      if (!v || !Array.isArray(v.items) || typeof v.max !== 'number') { notice('保管の一覧の形が不正です'); return; }
+      if (!v || !Array.isArray(v.items) || typeof v.max !== 'number') { notice('保管の一覧の形が不正です', true); return; }
       keptList = v;
       renderKept();
     });
@@ -553,24 +589,29 @@ export const UI_JS = `'use strict';
     box.appendChild(el('p', 'empty', '保管: ' + keptList.items.length + ' 件 / 上限 ' + keptList.max + ' 件（自動では更新しません。取り出す・消すのあとは、読み込み直します）'));
     keptList.items.forEach(function (i) {
       if (typeof i.key !== 'string' || typeof i.tip !== 'string') return;
+      var keyOk = ID_RE.test(i.key); // ID の形でない key には、操作を出さない（daemon も、ID の形でない target を拒む）
       var card = el('div', 'card');
       card.appendChild(el('span', 'tag', cleanText(i.key, 128)));
       card.appendChild(el('span', 'tag', i.nodeId ? 'ノード ' + cleanText(i.nodeId, 128) : '孤立'));
-      card.appendChild(el('span', 'tag', '先端 ' + i.tip.slice(0, 12)));
+      card.appendChild(el('span', 'tag', '先端 ' + cleanText(i.tip.slice(0, 12), 12)));
       if (i.committedAt) card.appendChild(el('span', 'tag', cleanText(i.committedAt, 40)));
       if (i.untrustedSubject) card.appendChild(el('div', '', '件名（信頼できない入力）: 「' + cleanText(i.untrustedSubject, 100) + '」'));
       var opts = el('div', 'opts');
       var restore = el('button', '', 'ブランチに取り出す…');
       restore.addEventListener('click', function () {
-        openConfirm('保管の取り出し', [['保管', i.key], ['先端', i.tip.slice(0, 12)], ['内容', '新しいブランチ（cso/restored/<保管の名前>）を作る。既存のブランチは上書きしない。保管は残る']], 'node.discardedRestore', { target: i.key }, 'ブランチを作りました', { after: loadKept });
+        openConfirm('保管の取り出し', [['保管', cleanText(i.key, 128)], ['先端', cleanText(i.tip.slice(0, 12), 12)], ['内容', '新しいブランチ（cso/restored/<保管の名前>）を作る。既存のブランチは上書きしない。保管は残る']], 'node.discardedRestore', { target: i.key }, 'ブランチを作りました', { after: loadKept });
       });
       var drop = el('button', '', '保管を消す…');
       drop.addEventListener('click', function () {
-        openConfirm('保管の削除', [['保管', i.key], ['ノード', i.nodeId ? cleanText(i.nodeId, 128) : '孤立'], ['先端', i.tip.slice(0, 12) + '（一覧で見た先端と今の先端が違えば、消さない）']], 'node.discardedDrop', { target: i.key, expectTip: i.tip }, '保管を消しました', { typed: i.key, after: loadKept });
+        openConfirm('保管の削除', [['保管', cleanText(i.key, 128)], ['ノード', i.nodeId ? cleanText(i.nodeId, 128) : '孤立'], ['先端', cleanText(i.tip.slice(0, 12), 12) + '（一覧で見た先端と今の先端が違えば、消さない）']], 'node.discardedDrop', { target: i.key, expectTip: i.tip }, '保管を消しました', { typed: i.key, after: loadKept });
       });
-      opts.appendChild(restore);
-      opts.appendChild(drop);
-      card.appendChild(opts);
+      if (keyOk) {
+        opts.appendChild(restore);
+        opts.appendChild(drop);
+        card.appendChild(opts);
+      } else {
+        card.appendChild(el('p', 'error', 'この保管の名前は、ID の形でないため、画面からは操作できません（cso discarded で操作してください）'));
+      }
       box.appendChild(card);
     });
   }

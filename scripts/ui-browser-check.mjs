@@ -70,6 +70,7 @@ let kept = [
     committedAt: "2026-10-01T00:00:00Z",
     untrustedSubject: `件名 \u001b[31m${XSS}`,
   },
+  { key: "bad key!", tip: "b".repeat(40), orphan: true },
 ];
 state = {
   ...state,
@@ -166,6 +167,9 @@ handlers["node.purgePreview"] = async (req) => {
       purgeable: !blocked,
       blockers: blocked ? [{ code: "dependedOn", cause: "木の外のノードが依存している" }] : [],
       discardedRefs: blocked ? 0 : 1,
+      ...(blocked
+        ? { hold: { nodeId: "arch2", until: "2027-01-01T00:00:00Z", reason: "調査中の保留" } }
+        : {}),
     },
   };
 };
@@ -468,6 +472,17 @@ for (const wrong of ["arch", "arch1 ", " arch1", "ARCH1", "ａｒｃｈ１"]) {
   if (!(await sendBtn().isDisabled())) ops.purgeWrongTypedEnabled = wrong;
 }
 ops.purgeWrongTypedStayDisabled = ops.purgeWrongTypedEnabled === undefined;
+// 画面の無効化を迂回して（disabled を外して）クリックしても、要求は出ない
+await typedArea().fill("arch");
+await pageO.evaluate(() => {
+  const b = document.querySelector("#confirm button.primary");
+  b.disabled = false;
+  b.click();
+});
+await pageO.waitForTimeout(400);
+ops.purgeForcedClickNoRequest = calls.filter((c) => c.operation === "node.purge").length === 0;
+// 別の木（arch2）の保留の理由を入力しておく（あとで、arch1 が消えて描き直されても、残る）
+await pageO.locator("#purge .card", { hasText: "arch2" }).locator("textarea").fill("調査中");
 await typedArea().fill("arch1");
 ops.purgeSendEnabledWhenTyped = await sendBtn().isEnabled();
 ops.purgeNoRequestBeforeSend = calls.filter((c) => c.operation === "node.purge").length === 0;
@@ -480,7 +495,8 @@ await pageO.waitForFunction(
 const purgeCalls = calls.filter((c) => c.operation === "node.purge");
 ops.purgeSentOnce =
   purgeCalls.length === 1 &&
-  JSON.stringify(purgeCalls[0].params) === JSON.stringify({ nodeId: "arch1" });
+  JSON.stringify(purgeCalls[0].params) ===
+    JSON.stringify({ nodeId: "arch1", expectNodeIds: ["arch1", "arch1c"] });
 await pageO.waitForFunction(
   () => !document.getElementById("purge").innerText.includes("arch1"),
   null,
@@ -489,6 +505,24 @@ await pageO.waitForFunction(
   },
 );
 ops.purgeCardGone = true;
+ops.reasonDraftKeptAfterRerender =
+  (await pageO.locator("#purge .card", { hasText: "arch2" }).locator("textarea").inputValue()) ===
+  "調査中";
+// 通信に失敗したら、通知は赤（.notice.bad）で出る
+await pageO.route("**/v1/request", (route) => route.abort());
+await pageO
+  .locator("#purge .card", { hasText: "arch2" })
+  .getByRole("button", { name: "最終削除…（墓標は既定）" })
+  .click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").className === "notice bad",
+  null,
+  { timeout: 5000 },
+);
+ops.failureNoticeIsRed =
+  (await pageO.locator("#notice").innerText()).includes("失敗") &&
+  (await pageO.locator("#notice.bad").count()) === 1;
+await pageO.unroute("**/v1/request");
 // 実行できない木（arch2）: 理由が出て、打ち込みの欄もなく、送れない
 await pageO
   .locator("#purge .card", { hasText: "arch2" })
@@ -509,6 +543,11 @@ await pageO
   .click();
 await pageO.locator("#confirm").waitFor();
 ops.holdNoTypedArea = (await typedArea().count()) === 0;
+const holdConfirm = await confirmText();
+ops.holdConfirmShowsCurrentHold =
+  holdConfirm.includes("今の保留") &&
+  holdConfirm.includes("調査中の保留") &&
+  holdConfirm.includes("2027-01-01");
 await sendBtn().click();
 await pageO.waitForFunction(
   () => document.getElementById("notice").innerText.includes("保留しました"),
@@ -518,6 +557,7 @@ await pageO.waitForFunction(
 const holdCalls = calls.filter((c) => c.operation === "node.purgeHold");
 ops.holdUntilIsIso30Days =
   holdCalls.length === 1 &&
+  holdCalls[0].params.reason === "調査中" &&
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(holdCalls[0].params.until) &&
   Math.abs(Date.parse(holdCalls[0].params.until) - (Date.now() + 30 * 86400000)) < 120000;
 // (i) 保管（T23-d）: 一覧は、読み込みボタンで取る。件名は信頼できない入力（制御文字を除き、実行されない）
@@ -531,6 +571,8 @@ ops.keptShowsFields =
   keptText.includes("先端 aaaaaaaaaaaa");
 ops.keptSubjectCleaned = !keptText.includes("\u001b");
 ops.keptTipNotFull = !keptText.includes("a".repeat(13));
+ops.badKeyHasNoActions =
+  (await pageO.locator("#kept .card", { hasText: "bad key!" }).getByRole("button").count()) === 0;
 await pageO.locator("#kept .card").first().getByRole("button", { name: "保管を消す…" }).click();
 await pageO.locator("#confirm").waitFor();
 ops.dropSendDisabledAtFirst = await sendBtn().isDisabled();
@@ -549,7 +591,7 @@ ops.dropSentWithExpectTip =
   JSON.stringify(dropCalls[0].params) ===
     JSON.stringify({ target: "k1-aaaaaaaaaaaa", expectTip: "a".repeat(40) });
 await pageO.waitForFunction(
-  () => document.getElementById("kept").innerText.includes("保管: 0 件"),
+  () => document.getElementById("kept").innerText.includes("保管: 1 件"),
   null,
   {
     timeout: 5000,
