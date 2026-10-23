@@ -58,9 +58,11 @@ import {
   loadOrCreateHumanToken,
   type ReclaimPorts,
   type SpawnPorts,
+  type SummaryScheduler,
   type WorktreeFacts,
 } from "./api/index.js";
 import {
+  ALERT_ID_PREFIX,
   createApiAlert,
   DEFAULT_ALERT_INTERVAL_MINUTES,
   DEFAULT_ALERT_THRESHOLD,
@@ -129,6 +131,8 @@ export interface DaemonDeps {
   readonly timers?: Timers;
   /** 単調時計（ミリ秒）。既定は `process.hrtime`。自動の最終削除が、時計が飛んだことを検知するのに使う（試験で差し替える）。 */
   readonly monotonicMs?: () => number;
+  /** 窓口の件数のまとめを、窓の終わりに出す予約（試験で差し替える。既定は、`unref` したタイマー）。 */
+  readonly summaryScheduler?: SummaryScheduler | null;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
@@ -240,6 +244,7 @@ function realOverlap(config: DaemonConfig): string | undefined {
 export function apiLimitsOf(
   config: DaemonConfig,
   monotonicMs?: () => number,
+  summaryScheduler?: SummaryScheduler | null,
 ): Pick<Parameters<typeof createApiServer>[0], "rateLimit" | "connection" | "inProgress"> {
   return {
     rateLimit: {
@@ -257,6 +262,7 @@ export function apiLimitsOf(
         ? {}
         : { maxInFlightPerPrincipal: config.rateLimit.maxInFlightPerPrincipal }),
       ...(monotonicMs === undefined ? {} : { monotonicMs }),
+      ...(summaryScheduler === undefined ? {} : { summaryScheduler }),
     },
     ...(config.connection === undefined ? {} : { connection: config.connection }),
     ...(config.inProgress === undefined ? {} : { inProgress: config.inProgress }),
@@ -607,6 +613,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           rootNodeId: config.rootNodeId,
           monoMs: deps.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n)),
           record: (requestId, body) => log.append({ requestId, actor: { system: true }, body }),
+          openAlertIds: () =>
+            log
+              .state()
+              .inbox.filter((i) => i.id.startsWith(ALERT_ID_PREFIX) && i.resolved === undefined)
+              .map((i) => i.id),
           note,
         });
   const logger: ApiLogger = (e) => {
@@ -652,7 +663,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     logger,
     bind,
     clock,
-    ...apiLimitsOf(config, deps.monotonicMs),
+    ...apiLimitsOf(config, deps.monotonicMs, deps.summaryScheduler),
   });
 
   let running: RunningDaemon | undefined;

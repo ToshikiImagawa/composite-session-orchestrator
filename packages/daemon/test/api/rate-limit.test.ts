@@ -186,6 +186,89 @@ describe("認証の失敗・制限の発動の集計（T10a）", () => {
     expect(r.firsts.at(-1)).toBe("authFailed:invalid");
   });
 
+  describe("窓の終わりの予約（T10l-f PR-B。静かになっても、まとめを出し損ねない）", () => {
+    const scheduled = () => {
+      const timers: { fn: () => void; ms: number; cancelled: boolean }[] = [];
+      return {
+        timers,
+        schedule: (fn: () => void, ms: number) => {
+          const t = { fn, ms, cancelled: false };
+          timers.push(t);
+          return { cancel: () => (t.cancelled = true) };
+        },
+      };
+    };
+    const make = (sched: ReturnType<typeof scheduled>) => {
+      const c = clockOf();
+      const summaries: { windowSec: number; counts: unknown; window: unknown }[] = [];
+      const counters = createApiCounters({
+        nowMs: c.now,
+        windowMs: 60_000,
+        wallMs: () => 1_000_000 + c.now(),
+        schedule: sched.schedule,
+        sink: {
+          first: () => undefined,
+          summary: (windowSec, counts, window) => summaries.push({ windowSec, counts, window }),
+        },
+      });
+      return { c, counters, summaries };
+    };
+
+    it("窓の最初の記録で、窓の長さ（60 秒）の予約を 1 つ作る。予約が来たら、次の記録がなくても、まとめを出す。窓の開始・終了の時刻つき", () => {
+      const sched = scheduled();
+      const r = make(sched);
+      r.counters.count("authFailed", "invalid");
+      r.counters.count("authFailed", "invalid");
+      expect(sched.timers.map((t) => t.ms)).toEqual([60_000]); // 窓の中の記録では、予約を増やさない
+      expect(r.summaries).toEqual([]);
+      sched.timers[0]?.fn(); // 窓が終わった（静かになった。次の記録は、来ない）
+      expect(r.summaries).toEqual([
+        {
+          windowSec: 60,
+          counts: { authFailed: { invalid: 2 }, rateLimited: {}, deduped: {} },
+          window: { startMs: 1_000_000, endMs: 1_060_000 },
+        },
+      ]);
+      // そのあとの記録は、新しい窓（新しい予約）
+      r.c.advance(5_000);
+      r.counters.count("rateLimited", "principal");
+      expect(sched.timers).toHaveLength(2);
+    });
+
+    it("次の記録で窓がまとめられたら、古い予約は取り消され、二重に出さない。flush も、予約を取り消す", () => {
+      const sched = scheduled();
+      const r = make(sched);
+      r.counters.count("authFailed", "invalid");
+      r.c.advance(60_000);
+      r.counters.count("authFailed", "invalid"); // 前の窓をまとめて、新しい窓を始める
+      expect(r.summaries).toHaveLength(1);
+      expect(sched.timers[0]?.cancelled).toBe(true);
+      sched.timers[0]?.fn(); // 取り消し損ねた古い予約が来ても、何も出さない
+      expect(r.summaries).toHaveLength(1);
+      r.counters.flush();
+      expect(r.summaries).toHaveLength(2);
+      expect(sched.timers[1]?.cancelled).toBe(true);
+      sched.timers[1]?.fn();
+      expect(r.summaries).toHaveLength(2);
+    });
+
+    it("schedule: null なら、予約しない（次の記録・flush のときだけ）。既定の予約は、unref したタイマー（止まるのを妨げない）", () => {
+      const c = clockOf();
+      const summaries: unknown[] = [];
+      const counters = createApiCounters({
+        nowMs: c.now,
+        schedule: null,
+        sink: { first: () => undefined, summary: (_w, counts) => summaries.push(counts) },
+      });
+      counters.count("authFailed", "invalid");
+      expect(summaries).toEqual([]);
+      // 既定（unref のタイマー）: 呼んでも、プロセスの終了を妨げない。flush で取り消す
+      const def = createApiCounters({ sink: { first: () => undefined, summary: () => undefined } });
+      def.count("authFailed", "invalid");
+      def.flush();
+    });
+  });
+
   it("flush で、溜まっている件数を今すぐ 1 行にまとめる。何もなければ出さない", () => {
     const r = rig();
     r.counters.flush();

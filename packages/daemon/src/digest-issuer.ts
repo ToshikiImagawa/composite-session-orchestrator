@@ -16,7 +16,6 @@
 
 import { createHash } from "node:crypto";
 import {
-  type Actor,
   digestOf,
   digestTargets,
   type EventBody,
@@ -26,8 +25,6 @@ import {
 } from "@cso/core";
 import { deriveId } from "./api/handlers/context.js";
 import type { Timers } from "./sdk/runtime.js";
-
-const SYSTEM: Actor = { system: true };
 
 export interface DigestIssuerDeps {
   readonly state: () => OrchState;

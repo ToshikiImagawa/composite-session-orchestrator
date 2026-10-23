@@ -26,7 +26,6 @@ import {
   CONNECTION_BOUNDS,
   CONNECTION_DEFAULTS,
   IN_PROGRESS_BOUNDS,
-  IN_PROGRESS_DEFAULTS,
   RATE_LIMIT_BOUNDS,
 } from "./api/rate-limit.js";
 import { isForbiddenChildEnvName } from "./sdk/child-env.js";

@@ -10,6 +10,8 @@ const summary = (
 ): ApiLogEvent => ({
   event: "apiSummary",
   windowSec: 60,
+  windowStart: "2026-10-23T11:59:00.000Z",
+  windowEnd: "2026-10-23T12:00:00.000Z",
   authFailed,
   rateLimited,
   deduped: {},
@@ -22,6 +24,9 @@ const rig = (over: { threshold?: number; minIntervalMs?: number } = {}) => {
     [];
   const notes: string[] = [];
   let failNext = false;
+  const resolved: string[] = [];
+  /** 未解決の警告（人間が解決したものは、ここから外す）。 */
+  const open = new Set<string>();
   const alert = createApiAlert({
     threshold: over.threshold ?? 30,
     minIntervalMs: over.minIntervalMs ?? 600_000,
@@ -33,14 +38,25 @@ const rig = (over: { threshold?: number; minIntervalMs?: number } = {}) => {
         return { ok: false, error: { code: "boom", cause: "x", nextActions: ["y"] } } as never;
       }
       records.push({ requestId, body: body as never });
+      const b = body as { type: string; payload: { id?: string; itemId?: string } };
+      if (b.type === "inbox.added" && b.payload.id !== undefined) open.add(b.payload.id);
+      if (b.type === "inbox.resolved" && b.payload.itemId !== undefined) {
+        open.delete(b.payload.itemId);
+        resolved.push(b.payload.itemId);
+      }
       return ok(undefined);
     },
+    openAlertIds: () => [...open],
+    defer: (fn) => fn(),
     note: (event) => notes.push(event),
   });
   return {
     alert,
     records,
     notes,
+    resolved,
+    open,
+    added: () => records.filter((x) => x.body.type === "inbox.added"),
     advance: (ms: number) => {
       mono += ms;
     },
@@ -61,7 +77,9 @@ describe("createApiAlert（窓口の 429・401 の件数の見える化。T10l-f
     const text = String(item?.payload.summary);
     expect(text).toContain("認証の失敗 37 件");
     expect(text).toContain("invalid 25・missing 10・bindFailed 2"); // 件数の多い順
-    expect(text).toContain("直近 60 秒");
+    // 窓の開始・終了の時刻（UTC）を出す。「直近 60 秒」という言い方はしない（窓の終わりと、記録の時刻はずれうる）
+    expect(text).toContain("2026-10-23T11:59:00〜2026-10-23T12:00:00 UTC（60 秒間）");
+    expect(text).not.toContain("直近");
     expect(text).not.toContain("制限の発動"); // 閾値未満の種類は、書かない
     expect(r.notes).toEqual(["apiAlert.posted"]);
   });
@@ -91,15 +109,111 @@ describe("createApiAlert（窓口の 429・401 の件数の見える化。T10l-f
     r.alert(summary({ invalid: 40 }, {}, "2026-10-23T12:01:00.000Z"));
     r.advance(60_000);
     r.alert(summary({ invalid: 99 }, {}, "2026-10-23T12:02:00.000Z"));
-    expect(r.records).toHaveLength(1); // 間隔の内は、出さない
+    expect(r.added()).toHaveLength(1); // 間隔の内は、出さない
     // 別の種類（制限の発動）は、別に数える
     r.alert(summary({}, { principal: 40 }, "2026-10-23T12:02:30.000Z"));
-    expect(r.records).toHaveLength(2);
+    expect(r.added()).toHaveLength(2);
     r.advance(600_000);
     r.alert(summary({ invalid: 40 }, {}, "2026-10-23T12:12:30.000Z"));
-    expect(r.records).toHaveLength(3);
+    expect(r.added()).toHaveLength(3);
     // 項目の ID は、窓の時刻から決まる（同じ ID が重ならない）
-    expect(new Set(r.records.map((x) => x.body.payload.id)).size).toBe(3);
+    expect(new Set(r.added().map((x) => x.body.payload.id)).size).toBe(3);
+  });
+
+  it("R2: 新しい警告を出すとき、同じ種類の前の未解決の警告を system が解決済みにする。未解決の警告は、種類ごとに高々 1 件", () => {
+    const r = rig({ minIntervalMs: 0 });
+    r.alert(summary({ invalid: 40 }, {}, "2026-10-23T12:00:00.000Z"));
+    const first = [...r.open];
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatch(/^api-alert-a-/);
+    r.alert(summary({ invalid: 40 }, {}, "2026-10-23T12:01:00.000Z"));
+    r.alert(summary({ invalid: 40 }, {}, "2026-10-23T12:02:00.000Z"));
+    expect([...r.open]).toHaveLength(1); // 積み上がらない
+    expect(r.resolved).toHaveLength(2);
+    expect(r.resolved).toContain(first[0]);
+    // 別の種類は、別（制限の発動の警告は、認証の失敗の警告を解決済みにしない）
+    r.alert(summary({}, { principal: 40 }, "2026-10-23T12:03:00.000Z"));
+    expect([...r.open].map((x) => x.slice(0, 12)).sort()).toEqual(["api-alert-a-", "api-alert-r-"]);
+    // 両方の種類を含む警告は、両方の前の警告を解決済みにする
+    r.alert(summary({ invalid: 40 }, { principal: 40 }, "2026-10-23T12:04:00.000Z"));
+    expect([...r.open]).toHaveLength(1);
+    expect([...r.open][0]).toMatch(/^api-alert-ar-/);
+    // 解決の要求は、system の記録（inbox.resolved）
+    expect(r.records.filter((x) => x.body.type === "inbox.resolved").length).toBe(
+      r.resolved.length,
+    );
+  });
+
+  it("R2: 人間が先に解決した警告は、解決の要求を出さない（open にない）。解決に失敗しても、新しい警告は残り、記録に出す", () => {
+    const r = rig({ minIntervalMs: 0 });
+    r.alert(summary({ invalid: 40 }, {}, "2026-10-23T12:00:00.000Z"));
+    const first = [...r.open][0] as string;
+    r.open.delete(first); // 人間が解決済みにした
+    r.alert(summary({ invalid: 40 }, {}, "2026-10-23T12:01:00.000Z"));
+    expect(r.resolved).toEqual([]);
+    expect([...r.open]).toHaveLength(1);
+  });
+
+  it("R3: 記録は defer で窓口の処理から切り離す（既定は setImmediate。defer の中で、初めて記録する）", async () => {
+    const records: string[] = [];
+    let queued: (() => void) | undefined;
+    const alert = createApiAlert({
+      threshold: 5,
+      minIntervalMs: 0,
+      rootNodeId: "root",
+      monoMs: () => 0,
+      record: (requestId) => {
+        records.push(requestId);
+        return ok(undefined);
+      },
+      openAlertIds: () => [],
+      defer: (fn) => {
+        queued = fn;
+      },
+      note: () => undefined,
+    });
+    alert(summary({ invalid: 40 }));
+    expect(records).toEqual([]); // 呼び出しの中では、記録しない
+    queued?.();
+    expect(records).toHaveLength(1);
+    // 既定の defer（setImmediate）: 同期では記録せず、次のターンで記録する
+    const seen: string[] = [];
+    const def = createApiAlert({
+      threshold: 5,
+      minIntervalMs: 0,
+      rootNodeId: "root",
+      monoMs: () => 0,
+      record: (requestId) => {
+        seen.push(requestId);
+        return ok(undefined);
+      },
+      openAlertIds: () => [],
+      note: () => undefined,
+    });
+    def(summary({ invalid: 40 }));
+    expect(seen).toEqual([]);
+    await new Promise((res) => setImmediate(res));
+    await new Promise((res) => setImmediate(res));
+    expect(seen).toHaveLength(1);
+  });
+
+  it("窓の時刻がないイベント（壁時計がない）・形の崩れた時刻は、窓の長さだけを書く（不正な文字列を本文に出さない）", () => {
+    const r = rig();
+    r.alert({
+      ...(summary({ invalid: 40 }) as object),
+      windowStart: undefined,
+      windowEnd: undefined,
+    } as never);
+    expect(String(r.records[0]?.body.payload.summary)).toContain("窓（60 秒間）");
+    const r2 = rig();
+    r2.alert({
+      ...(summary({ invalid: 40 }) as object),
+      windowStart: "<script>",
+      windowEnd: "x",
+    } as never);
+    const t = String(r2.records[0]?.body.payload.summary);
+    expect(t).toContain("窓（60 秒間）");
+    expect(t).not.toContain("<script>");
   });
 
   it("記録できなかったときは、間隔を消費しない（次の窓で、また試す）。例外にしない", () => {

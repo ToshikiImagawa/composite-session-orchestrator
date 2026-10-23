@@ -172,17 +172,40 @@ export interface ApiCounters {
 
 export interface CounterSink {
   first(kind: CounterKind, name: string): void;
-  summary(windowSec: number, counts: Record<CounterKind, Record<string, number>>): void;
+  /** `window`: 窓の開始と終了（壁時計のミリ秒。`wallMs` を渡したときだけ。終了は、開始 + 窓の長さ）。 */
+  summary(
+    windowSec: number,
+    counts: Record<CounterKind, Record<string, number>>,
+    window?: { readonly startMs: number; readonly endMs: number },
+  ): void;
 }
+
+/** 窓の終わりに、まとめを出すための予約（T10l-f PR-B）。`cancel` で取り消す。既定は、`unref` したタイマー（止まるのを妨げない）。 */
+export type SummaryScheduler = (fn: () => void, ms: number) => { readonly cancel: () => void };
+const defaultScheduler: SummaryScheduler = (fn, ms) => {
+  const t = setTimeout(fn, ms);
+  t.unref();
+  return { cancel: () => clearTimeout(t) };
+};
 
 export function createApiCounters(options: {
   readonly sink: CounterSink;
   readonly nowMs?: () => number;
   readonly windowMs?: number;
+  /** 壁時計（ミリ秒）。窓の開始・終了の時刻を、まとめに付ける。 */
+  readonly wallMs?: () => number;
+  /**
+   * 窓の終わりに、まとめを出す予約。**静かになっても、まとめを出し損ねない**（次の記録・停止を待たない）。省略すると、`unref` したタイマー。
+   * `null` なら、予約しない（次の記録・`flush` のときだけ）。
+   */
+  readonly schedule?: SummaryScheduler | null;
 }): ApiCounters {
   const now = options.nowMs ?? hrtimeMs;
   const windowMs = options.windowMs ?? 60_000;
+  const schedule = options.schedule === null ? undefined : (options.schedule ?? defaultScheduler);
   let start: number | undefined;
+  let startWall: number | undefined;
+  let pending: { cancel: () => void } | undefined;
   const empty = (): Record<CounterKind, Record<string, number>> => ({
     authFailed: {},
     rateLimited: {},
@@ -195,7 +218,15 @@ export function createApiCounters(options: {
       0,
     );
   const emit = (): void => {
-    if (total() > 0) options.sink.summary(Math.round(windowMs / 1000), counts);
+    pending?.cancel();
+    pending = undefined;
+    if (total() > 0) {
+      options.sink.summary(
+        Math.round(windowMs / 1000),
+        counts,
+        startWall === undefined ? undefined : { startMs: startWall, endMs: startWall + windowMs },
+      );
+    }
     counts = empty();
   };
   return {
@@ -204,6 +235,17 @@ export function createApiCounters(options: {
       if (start === undefined || t - start >= windowMs) {
         emit();
         start = t;
+        startWall = options.wallMs?.();
+        // 窓の終わりに、まとめを出す（次の記録を待たない）。窓が変わっていれば（その前に、次の記録でまとめた）、何もしない。
+        const mine = start;
+        const handle: { cancel: () => void } | undefined = schedule?.(() => {
+          if (pending === handle) pending = undefined; // 取り消し損ねた古い予約が、新しい予約の手がかりを消さない
+          if (start !== mine) return;
+          emit();
+          start = undefined;
+          startWall = undefined;
+        }, windowMs);
+        pending = handle;
       }
       const bucket = counts[kind];
       const isFirst = bucket[name] === undefined;
@@ -213,6 +255,7 @@ export function createApiCounters(options: {
     flush() {
       emit();
       start = undefined;
+      startWall = undefined;
     },
   };
 }

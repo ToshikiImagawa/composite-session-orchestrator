@@ -53,6 +53,7 @@ import {
   DEFAULT_PRINCIPAL_SPEC,
   hrtimeMs,
   operationWeight,
+  type SummaryScheduler,
 } from "./rate-limit.js";
 import { pickResult } from "./results.js";
 import { createSseHub, responseSink } from "./sse-hub.js";
@@ -113,6 +114,9 @@ export type ApiLogEvent =
   | {
       readonly event: "apiSummary";
       readonly windowSec: number;
+      /** 窓の開始・終了（ISO 8601 UTC。T10l-f PR-B）。 */
+      readonly windowStart?: string;
+      readonly windowEnd?: string;
       readonly authFailed: Readonly<Record<string, number>>;
       readonly rateLimited: Readonly<Record<string, number>>;
       /** 同じ要求の重複（`coalesced`: 最初の結果を待って返した、`inProgress`: 待ちきれず 409、`conflict`: 本文が違う）。 */
@@ -166,6 +170,8 @@ export interface ApiDeps {
     readonly summaryWindowMs?: number;
     /** 主体ごとに同時に処理中の要求の数の上限（超えたら、本文を読まずに 429）。既定 8。 */
     readonly maxInFlightPerPrincipal?: number;
+    /** 件数のまとめを、窓の終わりに出す予約（T10l-f PR-B）。既定は、`unref` したタイマー。試験で差し替える（`null` なら予約しない）。 */
+    readonly summaryScheduler?: SummaryScheduler | null;
   };
   /** 同じ要求（同じ主体・同じ requestId）の処理中の重複の扱い（T10l-d。試験で小さくする）。 */
   readonly inProgress?: {
@@ -343,6 +349,11 @@ export function createApiServer(deps: ApiDeps): ApiServer {
   const counters: ApiCounters = createApiCounters({
     ...(mono === undefined ? {} : { nowMs: mono }),
     ...(rl.summaryWindowMs === undefined ? {} : { windowMs: rl.summaryWindowMs }),
+    wallMs: () => {
+      const t = Date.parse(now());
+      return Number.isFinite(t) ? t : Date.now();
+    },
+    ...(rl.summaryScheduler === undefined ? {} : { schedule: rl.summaryScheduler }),
     sink: {
       first: (kind, name) =>
         log(
@@ -352,10 +363,16 @@ export function createApiServer(deps: ApiDeps): ApiServer {
               ? { event: "apiRateLimited", key: name, at: now() }
               : { event: "apiDeduped", kind: name, at: now() },
         ),
-      summary: (windowSec, c) =>
+      summary: (windowSec, c, window) =>
         log({
           event: "apiSummary",
           windowSec,
+          ...(window === undefined
+            ? {}
+            : {
+                windowStart: new Date(window.startMs).toISOString(),
+                windowEnd: new Date(window.endMs).toISOString(),
+              }),
           authFailed: c.authFailed,
           rateLimited: c.rateLimited,
           deduped: c.deduped,
