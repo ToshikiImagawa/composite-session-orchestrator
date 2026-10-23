@@ -304,6 +304,40 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("T10l-f PR-B: rateLimit.alert（運用の見える化）の範囲・型・未知のキーを検査する。省略すると何も足さない", () => {
+    const ok1 = parseConfig(
+      JSON.stringify({
+        ...base,
+        rateLimit: { alert: { enabled: false, threshold: 5, minIntervalMinutes: 1 } },
+      }),
+    );
+    expect(ok1.ok && ok1.value.rateLimit).toEqual({
+      alert: { enabled: false, threshold: 5, minIntervalMinutes: 1 },
+    });
+    const max = parseConfig(
+      JSON.stringify({
+        ...base,
+        rateLimit: { alert: { threshold: 100000, minIntervalMinutes: 1440 } },
+      }),
+    );
+    expect(max.ok).toBe(true);
+    for (const v of [
+      true,
+      [],
+      null,
+      "off",
+      { unknown: 1 },
+      { enabled: "yes" },
+      { threshold: 4 },
+      { threshold: 100001 },
+      { threshold: 5.5 },
+      { minIntervalMinutes: 0 },
+      { minIntervalMinutes: 1441 },
+    ]) {
+      bad({ rateLimit: { alert: v } }, "rateLimit");
+    }
+  });
+
   it("T10l-f: 実効の値の組み合わせを検査する（headersTimeoutMs ＞ requestTimeoutMs は、省略した既定の値とも照合して拒否する）", () => {
     // requestTimeoutMs だけ小さくすると、既定の headersTimeoutMs（10 秒）が上回る
     bad({ connection: { requestTimeoutMs: 5000 } }, "headersTimeoutMs");

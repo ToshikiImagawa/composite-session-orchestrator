@@ -60,6 +60,11 @@ import {
   type SpawnPorts,
   type WorktreeFacts,
 } from "./api/index.js";
+import {
+  createApiAlert,
+  DEFAULT_ALERT_INTERVAL_MINUTES,
+  DEFAULT_ALERT_THRESHOLD,
+} from "./api-alert.js";
 import { createAutoPurger } from "./auto-purge.js";
 import type { DaemonConfig } from "./config.js";
 import { createDigestIssuer } from "./digest-issuer.js";
@@ -590,6 +595,20 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         })
       : undefined;
 
+  // 窓口の 429・401 の件数の見える化（T10l-f PR-B。既定で有効）。件数のまとめ（apiSummary）が閾値以上なら、根の受信箱に info を 1 件出す。
+  const apiAlert =
+    config.rateLimit?.alert?.enabled === false
+      ? undefined
+      : createApiAlert({
+          threshold: config.rateLimit?.alert?.threshold ?? DEFAULT_ALERT_THRESHOLD,
+          minIntervalMs:
+            (config.rateLimit?.alert?.minIntervalMinutes ?? DEFAULT_ALERT_INTERVAL_MINUTES) *
+            60_000,
+          rootNodeId: config.rootNodeId,
+          monoMs: deps.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n)),
+          record: (requestId, body) => log.append({ requestId, actor: { system: true }, body }),
+          note,
+        });
   const logger: ApiLogger = (e) => {
     // 秘密（コード・トークン）は、イベントに含まれない（`ApiLogEvent` の規則）。
     if (e.event === "internalError")
@@ -599,6 +618,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         error: String(e.error),
       });
     else note(e.event, e as unknown as Record<string, unknown>);
+    apiAlert?.(e);
   };
   const bind: BindCodes = createBindCodes();
   const identityPath = join(config.stateDir, IDENTITY_FILE);

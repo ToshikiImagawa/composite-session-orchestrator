@@ -1,0 +1,97 @@
+/**
+ * 窓口の 429・401 の件数の運用の見える化（T10l-f PR-B。`docs/rate-limit.md`）。窓口の件数のまとめ（`apiSummary`。窓は既定 1 分）の
+ * 認証の失敗・制限の発動の件数が、閾値以上のとき、根の受信箱に `info` の項目を 1 件出す（人間が、画面・受信箱で気づけるように）。
+ *
+ * - 文面は固定の形で、**種類ごとの件数と、理由・種類の名前**だけを書く（トークン・nodeId・要求の内容・接続元は出さない。名前は、窓口が数える
+ *   固定の語〔`missing`・`invalid`・`principalRejected`・`bindFailed`・`principal`・`origin` など〕だけ。形が違うものは捨てる）。
+ * - 出しすぎない: 種類（`authFailed`・`rateLimited`）ごとに、最短 `minIntervalMs`（単調時計。既定 10 分）あける。閾値未満の窓は、何も出さない。
+ * - 失敗（記録できない）は、daemon の記録（`note`）に出すだけで、窓口の動作を変えない。
+ */
+
+import type { EventBody, Failure, Result } from "@cso/core";
+import type { ApiLogEvent } from "./api/server.js";
+
+/** 閾値の既定（1 つの窓の、種類ごとの件数）。認証の失敗の bucket の毎分の補充（30）と同じ。 */
+export const DEFAULT_ALERT_THRESHOLD = 30;
+/** 同じ種類の項目を出す最短の間隔（分）の既定。 */
+export const DEFAULT_ALERT_INTERVAL_MINUTES = 10;
+
+export interface ApiAlertDeps {
+  /** 閾値（種類ごとの、1 つの窓の件数）。 */
+  readonly threshold: number;
+  /** 同じ種類の項目を出す最短の間隔（ミリ秒。単調時計）。 */
+  readonly minIntervalMs: number;
+  /** 項目の持ち主（根のノード）。 */
+  readonly rootNodeId: string;
+  readonly monoMs: () => number;
+  readonly record: (requestId: string, body: EventBody) => Result<unknown, Failure>;
+  readonly note: (event: string, data?: Record<string, unknown>) => void;
+}
+
+const KINDS = [
+  { key: "authFailed", label: "認証の失敗" },
+  { key: "rateLimited", label: "制限の発動" },
+] as const;
+type KindKey = (typeof KINDS)[number]["key"];
+
+const SAFE_NAME = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
+const MAX_NAMES = 8;
+
+/** 件数の表（名前 → 件数）の合計と、内訳の文（固定の語だけ。件数の多い順）。 */
+function summarize(counts: Readonly<Record<string, number>>): { total: number; detail: string } {
+  let total = 0;
+  const named: { name: string; n: number }[] = [];
+  for (const [name, n] of Object.entries(counts)) {
+    if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) continue;
+    total += n;
+    if (SAFE_NAME.test(name)) named.push({ name, n });
+  }
+  named.sort((a, b) => b.n - a.n || (a.name < b.name ? -1 : 1));
+  const detail = named
+    .slice(0, MAX_NAMES)
+    .map((x) => `${x.name} ${x.n}`)
+    .join("・");
+  return { total, detail };
+}
+
+export function createApiAlert(deps: ApiAlertDeps): (event: ApiLogEvent) => void {
+  const last = new Map<KindKey, number>();
+  return (event) => {
+    if (event.event !== "apiSummary") return;
+    try {
+      const now = deps.monoMs();
+      const parts: string[] = [];
+      const fired: KindKey[] = [];
+      for (const k of KINDS) {
+        const s = summarize(event[k.key]);
+        if (s.total < deps.threshold) continue;
+        const prev = last.get(k.key);
+        if (prev !== undefined && now - prev < deps.minIntervalMs) continue; // 出しすぎない
+        parts.push(`${k.label} ${s.total} 件${s.detail === "" ? "" : `（${s.detail}）`}`);
+        fired.push(k.key);
+      }
+      if (fired.length === 0) return;
+      const digits = String(event.at)
+        .replace(/[^0-9]/g, "")
+        .slice(0, 24);
+      const id = `api-alert-${digits === "" ? String(Math.trunc(now)) : digits}`;
+      const r = deps.record(`api-alert:${id}`, {
+        type: "inbox.added",
+        payload: {
+          id,
+          kind: "info",
+          nodeId: deps.rootNodeId,
+          summary: `窓口の警告: 直近 ${Math.trunc(Number(event.windowSec)) || 0} 秒に、${parts.join("・")}。トークンの総当たりや、暴走した呼び出しの可能性がある（daemon の記録の apiSummary に、内訳がある）`,
+        },
+      } as EventBody);
+      if (r.ok) {
+        for (const k of fired) last.set(k, now);
+        deps.note("apiAlert.posted", { kinds: fired.join(",") });
+      } else {
+        deps.note("apiAlert.failed", { code: r.error.code });
+      }
+    } catch (e) {
+      deps.note("apiAlert.failed", { code: "exception", cause: String(e) });
+    }
+  };
+}

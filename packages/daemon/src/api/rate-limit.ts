@@ -122,6 +122,9 @@ export const RATE_LIMIT_BOUNDS = {
   maxKeys: { min: 100, max: 1_000_000 },
   /** 主体ごとの同時に処理中の要求の数（T10l-f）。 */
   maxInFlightPerPrincipal: { min: 1, max: 64 },
+  /** 運用の見える化（T10l-f PR-B）: 閾値（1 つの窓の、種類ごとの件数）と、同じ種類の項目を出す最短の間隔（分）。 */
+  alertThreshold: { min: 5, max: 100_000 },
+  alertIntervalMinutes: { min: 1, max: 1_440 },
 } as const;
 
 /** 接続の上限とタイムアウトの設定の範囲（T10l-f。ミリ秒）。`headersTimeoutMs` は、実効の `requestTimeoutMs` 以下（Node の制約）。 */

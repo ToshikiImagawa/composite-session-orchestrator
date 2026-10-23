@@ -840,6 +840,46 @@ describe("createDaemon（窓口の回数の制限。T10l）", () => {
     ).toBe(200);
   });
 
+  it("T10l-f PR-B: 認証の失敗が閾値を超えた窓のあと、根の受信箱に info が 1 件出る。本文にトークンを出さない。間隔の内は、重ねて出さない", async () => {
+    const r = rig({ rateLimit: { alert: { threshold: 5, minIntervalMinutes: 10 } } });
+    let mono = 1_000;
+    r.deps = { ...r.deps, monotonicMs: () => mono };
+    const d = await boot(r);
+    const bogus = "z".repeat(43);
+    for (let i = 0; i < 8; i++) await call(d.url, bogus, "tree.list", {});
+    const alerts = () => d.daemon.log.state().inbox.filter((i) => i.id.startsWith("api-alert-"));
+    expect(alerts()).toEqual([]); // 窓（1 分）が終わるまでは、まとめは出ない
+    mono += 61_000;
+    await call(d.url, bogus, "tree.list", {}); // 次の記録が、前の窓のまとめを出す
+    expect(alerts()).toHaveLength(1);
+    const item = alerts()[0];
+    expect(item).toMatchObject({ kind: "info", nodeId: "root" });
+    expect(item?.summary).toContain("認証の失敗");
+    expect(JSON.stringify(item)).not.toContain(bogus);
+    // 間隔（10 分）の内の、次の窓では、出さない。間隔のあとなら、出す
+    for (let i = 0; i < 8; i++) await call(d.url, bogus, "tree.list", {});
+    mono += 61_000;
+    await call(d.url, bogus, "tree.list", {});
+    expect(alerts()).toHaveLength(1);
+    mono += 600_000;
+    for (let i = 0; i < 8; i++) await call(d.url, bogus, "tree.list", {});
+    mono += 61_000;
+    await call(d.url, bogus, "tree.list", {});
+    expect(alerts().length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("T10l-f PR-B: alert.enabled が false なら、閾値を超えても、受信箱に出さない（件数のまとめは、記録に出る）", async () => {
+    const r = rig({ rateLimit: { alert: { enabled: false, threshold: 5 } } });
+    let mono = 1_000;
+    r.deps = { ...r.deps, monotonicMs: () => mono };
+    const d = await boot(r);
+    for (let i = 0; i < 8; i++) await call(d.url, "z".repeat(43), "tree.list", {});
+    mono += 61_000;
+    await call(d.url, "z".repeat(43), "tree.list", {});
+    expect(d.daemon.log.state().inbox.filter((i) => i.id.startsWith("api-alert-"))).toEqual([]);
+    expect(r.logs.join("\n")).toContain("apiSummary");
+  });
+
   it("設定を省かなければ、既定（容量 60）で動く: 通常の操作の頻度では、制限に当たらない", async () => {
     const r = rig();
     const d = await boot(r);
