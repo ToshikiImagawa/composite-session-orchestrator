@@ -175,7 +175,13 @@ interface ReclaimPreview {
   readonly unmet: readonly string[];
   /** 失われるもの。daemon が対応していなければ、なし（不明）。 */
   readonly loss?: readonly LossView[];
+  /** 対象と配下のブランチの先端（nodeId → SHA。T21r-e）。破棄の指示（`expectTips`）に、そのまま渡す。 */
+  readonly tips?: Readonly<Record<string, string>>;
 }
+const isTips = (v: unknown): v is Readonly<Record<string, string>> =>
+  isRecord(v) &&
+  !Array.isArray(v) &&
+  Object.values(v).every((x) => typeof x === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(x));
 const isLossView = (v: unknown): v is LossView =>
   isRecord(v) &&
   typeof v.nodeId === "string" &&
@@ -195,7 +201,8 @@ const isReclaimPreview = (v: unknown): v is ReclaimPreview =>
   typeof v.reclaimable === "boolean" &&
   isStringArray(v.unmet) &&
   Array.isArray(v.blockers) &&
-  (v.loss === undefined || (Array.isArray(v.loss) && v.loss.every(isLossView)));
+  (v.loss === undefined || (Array.isArray(v.loss) && v.loss.every(isLossView))) &&
+  (v.tips === undefined || isTips(v.tips));
 /** シェルで安全に貼り付けられるように、単一引用符で囲む（中の `'` は `'\''` にする）。 */
 const shellQuote = (v: string): string => `'${v.replace(/'/g, "'\\''")}'`;
 interface DiscardedView {
@@ -263,7 +270,14 @@ const terminalSafe = (s: string, max = 100): string => {
 };
 
 function describeReclaim(nodeId: string, p: ReclaimPreview): string {
-  const head = `回収（破棄）の対象: ${terminalSafe(nodeId, 128)}\n`;
+  const tipLines = Object.entries(p.tips ?? {}).map(
+    ([id, tip]) => `  ${terminalSafe(id, 128)}: ${tip.slice(0, 12)}`,
+  );
+  const head = `回収（破棄）の対象: ${terminalSafe(nodeId, 128)}\n${
+    tipLines.length === 0
+      ? ""
+      : `ブランチの先端（この先端と照合して、破棄を指示する。違っていたら、拒否する）:\n${tipLines.join("\n")}\n`
+  }`;
   if (p.loss === undefined) {
     return `${head}失われるものの情報が得られない（daemon が対応していない）。作業ツリーとブランチを、強制して消す。\n`;
   }
@@ -522,7 +536,14 @@ export async function runCommand(
           "破棄の判断は取り消せない（停止したノードの作業ツリーとブランチが、強制して消える）。上の内容でよければ --yes を付けて再実行する\n",
       };
     }
-    const res = await invoke(deps.client, id, "node.reclaimInstruct", { nodeId }, isAccepted);
+    // 表示した先端（プレビューの tips）を、そのまま渡す。daemon が、今の先端と照合する（違えば tipMismatch）。
+    const res = await invoke(
+      deps.client,
+      id,
+      "node.reclaimInstruct",
+      { nodeId, expectTips: preview.value.tips ?? {} },
+      isAccepted,
+    );
     if (res.kind !== "ok") return fail(res);
     return {
       exitCode: 0,

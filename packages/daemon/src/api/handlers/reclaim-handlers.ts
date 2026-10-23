@@ -163,6 +163,28 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     }
   };
 
+  /** 今のブランチの先端。取れなければ `undefined`（不明）。 */
+  const currentTip = async (nodeId: string): Promise<string | undefined> => {
+    const f = await safely(nodeId, () => ports.factsFor(nodeId), undefined);
+    return isCommitSha(f?.headCommit) ? f?.headCommit : undefined;
+  };
+
+  /** 強制の対象になりうるノード（停止した、または、そこから回収可能にした）。 */
+  const forceCandidate = (n: NodeRecord | undefined): n is NodeRecord =>
+    n !== undefined && (n.state === "stopped" || n.state === "reclaimable");
+
+  /**
+   * 先端の不一致。原因・次の操作・監査のログに出すのは、ノード ID だけ（SHA は出さない）。
+   * 何が違ったのかは、再確認（`cso reclaim`）で人間が見る。
+   */
+  const tipMismatch = (ids: readonly string[], when: string) =>
+    fail(
+      "tipMismatch",
+      `${when}、ブランチの先端が、表示した内容（判断のときに確かめた内容）と違う（または、表示になかった）ノード: ${ids.join("、")}`,
+      "もう一度 cso reclaim で、失われるものを確かめ直す",
+      "変わった成果を確かめてから、改めて破棄を指示する",
+    );
+
   /** 1 ノードの判定。事実とプロセスは、注入されたもの（なければ取り直す）。取得の失敗は回収不可（安全側）。 */
   async function assessNode(
     nodes: readonly ReclaimNode[],
@@ -226,6 +248,17 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
       }
     }
     return { plan, unmet };
+  }
+
+  /** 対象と配下の、作業ツリーを持ち、ブランチの先端を取れたノードの先端（nodeId → SHA）。 */
+  async function tipsOf(plan: readonly NodeRecord[]): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    for (const n of plan) {
+      if (n.state === "archived") continue;
+      const tip = await currentTip(n.id);
+      if (tip !== undefined) out[n.id] = tip;
+    }
+    return out;
   }
 
   /**
@@ -294,10 +327,11 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
   return {
     // 人間の破棄の判断の記録（core の `node.discardDecided`。T13e）ができるまで、受け付けない。
     // 破棄の判断（人間）。停止したノードの成果を捨ててよいという判断を記録する。回収は、別に実行する。
-    "node.reclaimInstruct": (
+    "node.reclaimInstruct": async (
       req: HandlerRequest<"node.reclaimInstruct">,
-    ): Result<{ accepted: true }, Failure> => {
+    ): Promise<Result<{ accepted: true }, Failure>> => {
       const { nodeId } = req.params;
+      const expectTips: Readonly<Record<string, string>> = req.params.expectTips ?? {};
       const node = log.state().nodes.find((n) => n.id === nodeId);
       if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
       if (node.discarded !== undefined) return { ok: true, value: { accepted: true } }; // 記録済み（冪等）
@@ -309,8 +343,36 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
           "統合済みで検証済みのノードは、破棄でなく、通常の回収（node.reclaim）を使う",
         );
       }
+      // 表示した先端（expectTips）のキーは、対象と配下だけ。値は、コミットの識別子の形。
+      const subtree = postOrder(log.state().nodes, nodeId);
+      const inSubtree = new Set(subtree.map((n) => n.id));
+      for (const [k, v] of Object.entries(expectTips)) {
+        if (!inSubtree.has(k) || !isCommitSha(v)) {
+          return fail(
+            "invalidRequest",
+            "expectTips は、対象と配下のノード ID から、先端（小文字の 16 進で 40 桁か 64 桁）への対応だけ",
+            "node.reclaimPreview の tips を、そのまま渡す",
+          );
+        }
+      }
+      // 先端の照合。対象は、表示した先端と今の先端が（どちらもなしを含めて）一致すること。配下は、表示したもののうち、強制になりうる
+      // ノード（停止したノード）だけ（画面の内容が、全体として古くないことの確認）。
+      const mismatched: string[] = [];
+      for (const n of subtree) {
+        if (n.state === "archived") continue;
+        const expected = expectTips[n.id];
+        if (n.id !== nodeId && (expected === undefined || !forceCandidate(n))) continue;
+        if (n.id === nodeId || forceCandidate(n)) {
+          if ((await currentTip(n.id)) !== expected) mismatched.push(n.id);
+        }
+      }
+      if (mismatched.length > 0) return tipMismatch(mismatched, "判断の記録の前に");
+      const expectTip = expectTips[nodeId];
       const r = appendAtomically(log, deps.clock, req.requestId, { human: true }, [
-        { type: "node.discardDecided", payload: { nodeId } },
+        {
+          type: "node.discardDecided",
+          payload: { nodeId, ...(expectTip === undefined ? {} : { expectTip }) },
+        },
       ]);
       return r.ok ? { ok: true, value: { accepted: true } } : r;
     },
@@ -354,6 +416,8 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
       // 強制の回収で失われるもの（T21r）。対象と配下のうち、作業ツリーがあって、失われるものがあるノードだけ。
       // 人間のロールにだけ返す（統合ノードの呼び出しでは、git の負荷を避けるため、計算もしない）。
       const loss = req.role === "human" ? await lossOf(plan) : undefined;
+      // 破棄を指示するときに照合する、ブランチの先端（人間にだけ。取れたノードだけ。T21r-e）。
+      const tips = req.role === "human" ? await tipsOf(plan) : undefined;
       return {
         ok: true,
         value: {
@@ -361,6 +425,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
           unmet: reasons,
           blockers,
           ...(loss === undefined ? {} : { loss }),
+          ...(tips === undefined || Object.keys(tips).length === 0 ? {} : { tips }),
         },
       };
     },
@@ -392,6 +457,19 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
   ): Promise<Result<{ reclaimed: readonly string[] }, Failure>> {
     const { plan, unmet } = await assess(log.state(), nodeId);
     if (unmet.length > 0) return notReclaimable(unmet);
+
+    // 強制になるノードの先端を、最初の削除の前に、まとめて照合する（判断のときに確かめた先端と違えば、何も消さない）。
+    {
+      const now = log.state();
+      const moved: string[] = [];
+      for (const n of plan) {
+        const rec = now.nodes.find((x) => x.id === n.id);
+        const expected = rec?.discarded?.expectTip;
+        if (!forceCandidate(rec) || rec.discarded === undefined || expected === undefined) continue;
+        if ((await currentTip(n.id)) !== expected) moved.push(n.id);
+      }
+      if (moved.length > 0) return tipMismatch(moved, "回収の前に");
+    }
 
     const actor = { nodeId: caller };
     const reclaimed: string[] = [];
@@ -426,6 +504,24 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
               ...(f.error.nextActions as [string, ...string[]]),
             ),
           };
+        }
+        // 強制の直前にも、もう一度照合する（事実を取り直した、いまの先端。何かを変える前に）。
+        {
+          const rec = log.state().nodes.find((x) => x.id === n.id);
+          const expected = rec?.discarded?.expectTip;
+          if (forceCandidate(rec) && rec.discarded !== undefined && expected !== undefined) {
+            if (again.facts.headCommit !== expected) {
+              const f = tipMismatch([n.id], "回収の直前に");
+              return {
+                ok: false,
+                error: failure(
+                  f.error.code,
+                  `${f.error.cause}（回収済み: ${done()}）`,
+                  ...(f.error.nextActions as [string, ...string[]]),
+                ),
+              };
+            }
+          }
         }
         if (current?.state !== "reclaimable") {
           const marked = appendAtomically(log, deps.clock, `${requestId}/${n.id}/mark`, actor, [

@@ -25,6 +25,9 @@ import {
   type Result,
 } from "@cso/core";
 
+/** `node.reclaimInstruct` の `expectTips` の件数の上限（対象と配下のノード数の上限）。 */
+const EXPECT_TIPS_MAX = 256;
+
 type Rec = Record<string, unknown>;
 type Failure = ReturnType<typeof failure>;
 
@@ -305,7 +308,21 @@ const VALIDATORS: Validators = {
       ? { decisionId, choice: text(o, "choice", LIMITS.optionLength) }
       : { decisionId, text: text(o, "text", LIMITS.reportText) };
   },
-  "node.reclaimInstruct": nodeIdOnly,
+  "node.reclaimInstruct": (p) => {
+    const o = strict(p, ["nodeId", "expectTips"]);
+    const nodeId = id(o, "nodeId");
+    const tips = o.expectTips;
+    if (!isRec(tips)) fail("expectTips（ノード ID から先端への対応）が必要");
+    const entries = Object.entries(tips as Rec);
+    if (entries.length > EXPECT_TIPS_MAX) fail(`expectTips は ${EXPECT_TIPS_MAX} 件まで`);
+    const out: Record<string, string> = {};
+    for (const [k, v] of entries) {
+      if (!isSafeId(k)) fail("expectTips のキーが、ノード ID の形式でない");
+      if (!isCommitSha(v)) fail("expectTips の値が不正（小文字の 16 進で 40 桁か 64 桁）");
+      out[k] = v as string;
+    }
+    return { nodeId, expectTips: out };
+  },
   "node.purge": (p) => {
     const o = strict(p, ["nodeId", "tombstone"]);
     const nodeId = id(o, "nodeId");

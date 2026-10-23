@@ -110,6 +110,51 @@ describe("node.discardDecided（破棄の判断。停止したノードだけ）
     expect(s.nodes.find((n) => n.id === "a")?.state).toBe("stopped");
   });
 
+  it("判断のときに確かめた先端（expectTip）を、記録に残す。なければ、記録しない（T21r-e）", () => {
+    const sha = "a".repeat(40);
+    const withTip = ev(
+      { type: "node.discardDecided", payload: { nodeId: "a", expectTip: sha } } as never,
+      { actor: HUMAN, at: "2026-10-21T01:00:00Z", seq: 9001 },
+    );
+    const s = must(foldEvents([...stopped(), withTip]));
+    expect(s.nodes.find((n) => n.id === "a")?.discarded).toEqual({
+      seq: 9001,
+      at: "2026-10-21T01:00:00Z",
+      by: HUMAN,
+      expectTip: sha,
+    });
+    const s64 = must(
+      foldEvents([
+        ...stopped(),
+        ev(
+          {
+            type: "node.discardDecided",
+            payload: { nodeId: "a", expectTip: "b".repeat(64) },
+          } as never,
+          { actor: HUMAN },
+        ),
+      ]),
+    );
+    expect(s64.nodes.find((n) => n.id === "a")?.discarded?.expectTip).toBe("b".repeat(64));
+    const without = must(foldEvents([...stopped(), discard("a")]));
+    expect(without.nodes.find((n) => n.id === "a")?.discarded).not.toHaveProperty("expectTip");
+  });
+
+  it.each([
+    ["短い", "abc"],
+    ["大文字", "A".repeat(40)],
+    ["16 進でない", "g".repeat(40)],
+    ["桁数が違う", "a".repeat(41)],
+    ["文字列でない", 5],
+    ["空", ""],
+  ])("expectTip が不正（%s）なら、記録しない（invalidPayload）", (_n, bad) => {
+    const e = ev(
+      { type: "node.discardDecided", payload: { nodeId: "a", expectTip: bad } } as never,
+      { actor: HUMAN },
+    );
+    expect(code(foldEvents([...stopped(), e]))).toBe("invalidPayload");
+  });
+
   it("停止していないノード・存在しないノード・不正な識別子は拒否する", () => {
     expect(code(foldEvents([...base(), discard("a")]))).toBe("invalidTransition");
     expect(code(foldEvents([...stopped(), discard("zz")]))).toBe("unknownNode");
@@ -248,13 +293,14 @@ describe("契約（node.send・node.spawn・node.reclaimPreview・scope.decide�
     >();
   });
 
-  it("node.reclaimPreview の結果は assessReclaim の結果の構造（reclaimable・unmet・blockers）と、任意の loss（T21r）", () => {
+  it("node.reclaimPreview の結果は assessReclaim の結果の構造（reclaimable・unmet・blockers）と、任意の loss（T21r）・tips（T21r-e）", () => {
     expectTypeOf<DaemonResponse<"node.reclaimPreview">>().toEqualTypeOf<
       Result<{
         reclaimable: boolean;
         unmet: readonly UnmetReason[];
         blockers: readonly Blocker[];
         loss?: readonly NodeLoss[];
+        tips?: Readonly<Record<string, string>>;
       }>
     >();
   });

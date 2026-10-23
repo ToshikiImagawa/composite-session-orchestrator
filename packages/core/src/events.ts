@@ -164,9 +164,13 @@ export type EventBody =
       readonly payload: { readonly instructedSeq: number };
     }
   | {
-      /** 停止したノードの破棄の判断（spec 5.8。成果を捨てることを含む）。判断した者は封筒の `actor`。状態は変えない。 */
+      /**
+       * 停止したノードの破棄の判断（spec 5.8。成果を捨てることを含む）。判断した者は封筒の `actor`。状態は変えない。
+       * `expectTip`: 判断のときに、人間が確かめた（表示した）ブランチの先端（`isCommitSha`）。強制の回収（`-D`）の直前に、今の先端と照合する
+       * （T21r-e）。確かめられる先端がなかったときは省略する。
+       */
       readonly type: "node.discardDecided";
-      readonly payload: { readonly nodeId: string };
+      readonly payload: { readonly nodeId: string; readonly expectTip?: string };
     }
   | {
       /**
@@ -303,7 +307,13 @@ export interface NodeRecord {
   readonly acceptanceCriteria?: readonly string[];
   readonly scope?: Scope;
   /** 破棄の判断（停止したノードだけ。再開すると消える）。回収の再判定の入力 `facts.discarded` の情報源。 */
-  readonly discarded?: { readonly seq: number; readonly at: string; readonly by: Actor };
+  readonly discarded?: {
+    readonly seq: number;
+    readonly at: string;
+    readonly by: Actor;
+    /** 判断のときに確かめた先端（強制の直前の照合に使う。T21r-e）。 */
+    readonly expectTip?: string;
+  };
   /** 自動の最終削除の保留（`node.purgeHeld`。T13f-h）。`until` がなければ無期限。 */
   readonly purgeHold?: {
     readonly seq: number;
@@ -1672,8 +1682,11 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     }
 
     case "node.discardDecided": {
-      const { nodeId } = p;
+      const { nodeId, expectTip } = p;
       if (!isId(nodeId)) return invalid(seq, "node.discardDecided の nodeId");
+      if (expectTip !== undefined && !isCommitSha(expectTip)) {
+        return invalid(seq, "node.discardDecided の expectTip（小文字の 16 進で 40 桁か 64 桁）");
+      }
       const node = nodeAt(d, nodeId);
       if (node === undefined) return unknownNode(seq, nodeId);
       if (node.state !== "stopped") {
@@ -1694,7 +1707,12 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       }
       d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({
         ...node,
-        discarded: Object.freeze({ seq, at: raw.at as string, by: actor }),
+        discarded: Object.freeze({
+          seq,
+          at: raw.at as string,
+          by: actor,
+          ...(expectTip === undefined ? {} : { expectTip }),
+        }),
       });
       return commit();
     }

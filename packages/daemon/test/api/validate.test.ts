@@ -88,7 +88,6 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
       "node.reclaimPreview",
       "node.reclaim",
       "node.capabilities",
-      "node.reclaimInstruct",
       "node.purgePreview",
     ]) {
       expect(ok(op, { nodeId: "a" }), op).toBe(true);
@@ -260,6 +259,30 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
     }
     const ok = parseEnvelope({ requestId: "req:1.a_b-c", operation: "tree.list", params: {} });
     expect(ok.ok).toBe(true);
+  });
+});
+
+describe("node.reclaimInstruct の引数（expectTips。T21r-e）", () => {
+  const ok = (params: unknown) => validateParams("node.reclaimInstruct" as never, params).ok;
+  const TIP = "a".repeat(40);
+  it("expectTips は必須（空でもよい）。ノード ID から、先端（小文字の 16 進で 40 桁か 64 桁）への対応だけ", () => {
+    expect(ok({ nodeId: "a", expectTips: {} })).toBe(true);
+    expect(ok({ nodeId: "a", expectTips: { a: TIP, b: "b".repeat(64) } })).toBe(true);
+    expect(ok({ nodeId: "a" })).toBe(false);
+    expect(ok({ nodeId: "a", expectTips: null })).toBe(false);
+    expect(ok({ nodeId: "a", expectTips: [] })).toBe(false);
+    expect(ok({ nodeId: "a", expectTips: { a: "A".repeat(40) } })).toBe(false);
+    expect(ok({ nodeId: "a", expectTips: { a: "a".repeat(39) } })).toBe(false);
+    expect(ok({ nodeId: "a", expectTips: { a: 5 } })).toBe(false);
+    expect(ok({ nodeId: "a", expectTips: { "a b": TIP } })).toBe(false);
+    expect(ok({ nodeId: "a", expectTips: { "../x": TIP } })).toBe(false);
+    expect(ok({ nodeId: "a", expectTips: {}, extra: 1 })).toBe(false);
+  });
+  it("件数に上限がある（1 回の要求が、巨大にならない）", () => {
+    const many = (n: number) =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`n${i}`, TIP]));
+    expect(ok({ nodeId: "a", expectTips: many(256) })).toBe(true);
+    expect(ok({ nodeId: "a", expectTips: many(257) })).toBe(false);
   });
 });
 

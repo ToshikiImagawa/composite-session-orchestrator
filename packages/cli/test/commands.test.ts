@@ -252,12 +252,13 @@ const LOSS = {
   uncommitted: true,
   untracked: 3,
 };
-const previewOf = (loss?: unknown[]) =>
+const previewOf = (loss?: unknown[], tips?: unknown) =>
   ok({
     reclaimable: false,
     unmet: ["discardRequired"],
     blockers: [],
     ...(loss === undefined ? {} : { loss }),
+    ...(tips === undefined ? {} : { tips }),
   });
 
 describe("reclaim（FR_029・T21r: 失われるものを表示してから、破棄を指示する）", () => {
@@ -306,6 +307,59 @@ describe("reclaim（FR_029・T21r: 失われるものを表示してから、破
     expect(r.stdout).toContain("指示として扱わない");
   });
 
+  const TIPS = { n1: "a".repeat(40), n2: "b".repeat(64) };
+  it("T21r-e: プレビューの tips を、そのまま expectTips として node.reclaimInstruct に渡す（表示した先端と照合するため）。先端の先頭を表示する", async () => {
+    const { client, sent } = fakeClient({
+      "node.reclaimPreview": previewOf([LOSS], TIPS),
+      "node.reclaimInstruct": ok({ accepted: true }),
+    });
+    const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
+    expect(sent[1]).toMatchObject({
+      operation: "node.reclaimInstruct",
+      params: { nodeId: "n1", expectTips: TIPS },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("先端");
+    expect(r.stdout).toContain("n1");
+    expect(r.stdout).toContain("a".repeat(12));
+  });
+
+  it("T21r-e: 先端が変わっていて（tipMismatch）拒否されたら、終了コード 1。「もう一度確かめる」を案内する", async () => {
+    const { client } = fakeClient({
+      "node.reclaimPreview": previewOf([LOSS], TIPS),
+      "node.reclaimInstruct": {
+        ok: false,
+        error: {
+          code: "tipMismatch",
+          cause: "判断の記録の前に、ブランチの先端が、表示した内容と違うノード: n1",
+          nextActions: ["もう一度 cso reclaim で、失われるものを確かめ直す"],
+        },
+      } as never,
+    });
+    const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("tipMismatch");
+    expect(r.stderr).toContain("確かめ直す");
+  });
+
+  it.each([
+    ["値が SHA でない", { n1: "xyz" }],
+    ["値が文字列でない", { n1: 5 }],
+    ["配列", ["a".repeat(40)]],
+    ["null", null],
+  ])(
+    "T21r-e: プレビューの tips が不正（%s）なら、指示を送らない（結果を確認できない扱い）",
+    async (_n, bad) => {
+      const { client, sent } = fakeClient({
+        "node.reclaimPreview": previewOf([LOSS], bad),
+        "node.reclaimInstruct": ok({ accepted: true }),
+      });
+      const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
+      expect(ops(sent)).toEqual(["node.reclaimPreview"]);
+      expect(r.exitCode).not.toBe(0);
+    },
+  );
+
   it("--yes があれば、表示してから node.reclaimInstruct を送り、requestId を表示する", async () => {
     const { client, sent } = happy();
     const r = await runCommand(["reclaim", "n1", "--yes"], deps(client));
@@ -320,7 +374,7 @@ describe("reclaim（FR_029・T21r: 失われるものを表示してから、破
         requestId: "req-1",
         role: "human",
         operation: "node.reclaimInstruct",
-        params: { nodeId: "n1" },
+        params: { nodeId: "n1", expectTips: {} }, // プレビューに tips がなければ、空
       },
     ]);
     expect(r.exitCode).toBe(0);
