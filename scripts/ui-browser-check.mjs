@@ -76,6 +76,14 @@ state = {
       options: [],
       rejected: [],
     },
+    {
+      decisionId: "d3",
+      nodeId: "a",
+      status: "open",
+      question: `長い質問。${"問".repeat(2500)}`,
+      options: ["短い選択肢", "長".repeat(600)],
+      rejected: [],
+    },
   ],
 };
 // 操作の呼び出しの記録（画面の操作の確認用）。d2 の最初の回答は、失敗させる（失敗の表示と、同じ要求 ID での再送の確認）
@@ -279,7 +287,53 @@ await pageO.waitForFunction(
 const d2Calls = calls.filter((c) => c.params.decisionId === "d2");
 ops.retrySameRequestId = d2Calls.length === 2 && d2Calls[0].requestId === d2Calls[1].requestId;
 ops.requestIdIsUuid = /^[0-9a-f-]{36}$/.test(d2Calls[0]?.requestId ?? "");
-// (d) 子が書いた質問・選択肢の XSS 文字列は、実行されない（確認画面でも）
+// (d) 長い質問・長い選択肢: 質問は 2,000 文字まで読め、超えたら印。長い選択肢のボタンは無効（自由入力を促す）
+const card3 = pageO.locator("#decisions .card", { hasText: "長い質問" });
+const q3 = await card3.innerText();
+ops.longQuestionShownUpTo2000 = q3.includes("問".repeat(1990)) && q3.includes("…（省略）");
+ops.shortOptionEnabled = await card3.getByRole("button", { name: "短い選択肢" }).isEnabled();
+ops.longOptionDisabled = await card3.locator("button:disabled", { hasText: "…（省略）" }).count();
+ops.longOptionNote = q3.includes("自由入力で回答してください");
+// (e) 429: Retry-After の秒数のあいだ、送れない。時間が来たら、同じ requestId で送れる
+let n429 = 0;
+await pageO.route("**/v1/request", (route) => {
+  n429 += 1;
+  if (n429 > 1) return route.continue();
+  return route.fulfill({
+    status: 429,
+    headers: { "retry-after": "2", "content-type": "application/json" },
+    body: JSON.stringify({
+      ok: false,
+      error: { code: "tooManyRequests", cause: "要求が多すぎる" },
+    }),
+  });
+});
+await card3.getByRole("button", { name: "短い選択肢" }).click();
+ops.longQuestionInConfirm = (await confirmText()).includes("問".repeat(1990));
+await pageO.getByRole("button", { name: "この内容で送る" }).click();
+await pageO.waitForFunction(
+  () => document.getElementById("confirm").innerText.includes("tooManyRequests"),
+  null,
+  { timeout: 5000 },
+);
+ops.sendDisabledWhile429 = await pageO.locator("#confirm button.primary").isDisabled();
+ops.sendLabelWhile429 = await pageO.locator("#confirm button.primary").innerText();
+await pageO.waitForFunction(
+  () => !document.querySelector("#confirm button.primary").disabled,
+  null,
+  { timeout: 6000 },
+);
+ops.sendEnabledAfterWait = await pageO.locator("#confirm button.primary").isEnabled();
+await pageO.getByRole("button", { name: "この内容で送る" }).click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("回答を送りました"),
+  null,
+  { timeout: 5000 },
+);
+await pageO.unroute("**/v1/request");
+const d3Calls = calls.filter((c) => c.params.decisionId === "d3");
+ops.answeredOnceAfter429 = d3Calls.length === 1; // 429 は、サーバーに届いていない（route で止めた）。待ったあとの 1 回だけが届く
+// (f) 子が書いた質問・選択肢の XSS 文字列は、実行されない（確認画面でも）
 ops.xssNotExecuted = (await pageO.evaluate(() => window.__xss ?? null)) === null;
 ops.errors = opErrors;
 out.operations = ops;

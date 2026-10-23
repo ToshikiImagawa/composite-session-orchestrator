@@ -122,7 +122,7 @@ export const UI_JS = `'use strict';
   function hasForbidden(text) {
     return Array.from(text).some(function (ch) { return ch !== '\\t' && ch !== '\\n' && FORBIDDEN.test(ch); });
   }
-  // 自由入力の回答の検査（サーバーの検証と同じ規則。空・長すぎる・制御文字）。問題がなければ ''。
+  // 自由入力の回答の検査。制御文字・書式制御文字は、サーバーの検証と同じ規則（タブ・改行は可）。上限（TEXT_MAX）は、サーバー（64 KiB）より厳しい。問題がなければ ''。
   function checkAnswer(text) {
     if (text.trim() === '') return '回答が空です（空白だけは送れません）';
     var n = Array.from(text).length;
@@ -134,6 +134,10 @@ export const UI_JS = `'use strict';
     var n = document.getElementById('notice');
     n.textContent = text;
     n.hidden = !text;
+  }
+  // 429 のとき、送り直すまで待つ秒数（Retry-After。なければ 5 秒）。それ以外は 0。
+  function waitSecondsOf(r) {
+    return r.status === 429 ? (r.retry > 0 ? r.retry : 5) : 0;
   }
   function describeFailure(r) {
     var e = r.body && r.body.error;
@@ -155,8 +159,15 @@ export const UI_JS = `'use strict';
     });
     if (pending.error) box.appendChild(el('p', 'error', pending.error));
     var actions = el('div', 'actions');
-    var send = el('button', 'primary', pending.sending ? '送信中…' : 'この内容で送る');
-    send.disabled = pending.sending;
+    // 429 のときは、Retry-After の秒数のあいだ、送れない（時間が来たら、自動で、押せるようになる）
+    var left = pending.retryAt ? Math.ceil((pending.retryAt - Date.now()) / 1000) : 0;
+    var waiting = left > 0;
+    var send = el('button', 'primary', pending.sending ? '送信中…' : waiting ? 'あと ' + left + ' 秒待つ' : 'この内容で送る');
+    send.disabled = pending.sending || waiting;
+    if (waiting) {
+      var shown = pending;
+      window.setTimeout(function () { if (pending === shown) renderConfirm(); }, 500);
+    }
     send.addEventListener('click', sendPending);
     var back = el('button', '', '戻る');
     back.disabled = pending.sending;
@@ -170,7 +181,7 @@ export const UI_JS = `'use strict';
     if (pending && pending.sending) return;
     if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）'); return; }
     notice('');
-    pending = { title: title, lines: lines, operation: operation, params: params, done: done, requestId: window.crypto.randomUUID(), sending: false, error: '' };
+    pending = { title: title, lines: lines, operation: operation, params: params, done: done, requestId: window.crypto.randomUUID(), sending: false, error: '', retryAt: 0 };
     renderConfirm();
   }
   function sendPending() {
@@ -203,6 +214,8 @@ export const UI_JS = `'use strict';
           return;
         }
         p.error = describeFailure(r);
+        var wait = waitSecondsOf(r);
+        p.retryAt = wait > 0 ? Date.now() + wait * 1000 : 0;
         if (pending === p) renderConfirm();
       })
       .catch(function () {
@@ -227,14 +240,19 @@ export const UI_JS = `'use strict';
       var question = d.question || '（質問の記録なし）';
       card.appendChild(el('div', '', question));
       var opts = el('div', 'opts');
+      var anyCut = d.optionsCut;
       d.options.forEach(function (o) {
-        var b = el('button', '', o);
+        var b = el('button', '', o.text);
+        // 切った・文字を除いた選択肢は、そのままでは choice に送れない（別の文字列を送ってしまう）。ボタンを無効にして、自由入力を促す
+        b.disabled = o.truncated;
+        if (o.truncated) anyCut = true;
         b.addEventListener('click', function () {
-          openConfirm('判断への回答', [['ノード', d.nodeId], ['判断', question], ['回答（選択肢）', o]], 'decision.answer', { decisionId: d.id, choice: o }, '回答を送りました');
+          openConfirm('判断への回答', [['ノード', d.nodeId], ['判断', question], ['回答（選択肢）', o.text]], 'decision.answer', { decisionId: d.id, choice: o.text }, '回答を送りました');
         });
         opts.appendChild(b);
       });
       card.appendChild(opts);
+      if (anyCut) card.appendChild(el('p', 'error', '長すぎる（または、表示できない文字を含む・数が多い）選択肢があります。長すぎるため、自由入力で回答してください'));
       var area = el('textarea', '');
       area.maxLength = TEXT_MAX;
       area.placeholder = '自由入力で回答（' + TEXT_MAX + ' 文字まで）';
