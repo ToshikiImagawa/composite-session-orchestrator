@@ -124,21 +124,24 @@ function uiOption(x: unknown): UiOption {
 }
 
 const ABSOLUTE_PATH = /^(?:[/\\~]|[A-Za-z][A-Za-z0-9+.-]*:)/;
-// コマンドの中の絶対パス: 先頭・空白・引用符・`=`・リダイレクトや区切り（`<>|&;(:`）のあとの、`/`・`\`・`~`・ドライブ
-const ABSOLUTE_IN_COMMAND = /(?:^|[\s='"<>|&;(:])(?:[/\\~]|[A-Za-z]:[/\\])/;
-const PARENT_SEGMENT = /(?:^|[\s='"<>|&;(:/\\])\.\.(?:$|[\s'"<>|&;):/\\])/;
+// command は許可リスト（これ以外の文字を含むものは隠す。`$`・バッククォート・`{}`・引用符・`~`・`\`・`;|&<>()` など）。
+const COMMAND_ALLOWED = /^[A-Za-z0-9._:@%+=,/ -]+$/;
+// 単語の先頭の `/`（先頭・空白・`=`・`,`・`:` の直後。絶対パス）と、`-I/usr/lib` のような、短いオプションに続く `/`
+const COMMAND_ABSOLUTE_WORD = /(?:^|[\s=,:])\//;
+const COMMAND_OPTION_SLASH = /(?:^|\s)-[A-Za-z]\//;
+const PARENT_SEGMENT = /(?:^|[\s=,:/\\])\.\.(?:$|[\s,:/\\])/;
 
 /**
  * 拡張要求の対象の表示（T23-b）。表示してよいのは、作業ツリー内の相対パス（write）と、絶対パス・`..` を含まないコマンド（command）だけ。
- * 絶対パス・`..`・制御文字（タブ・改行も）・書式制御文字・空・長すぎる（`UI_TARGET_MAX` コードポイント超）ものは、**切らずに隠す**
- * （切った値を承認すると、別の対象を許可してしまう）。承認は、daemon が記録済みの対象をそのまま許可するので、画面の表示と実際の許可は一致する。
+ * 絶対パス・`..`・制御文字（タブ・改行も）・書式制御文字・空・先頭か末尾に空白がある・長すぎる（`UI_TARGET_MAX` コードポイント超）ものは、**切らずに隠す**
+ * （切った値を承認すると、別の対象を許可してしまう）。command は**許可リスト**（`COMMAND_ALLOWED`）に合うものだけを表示し、それ以外の文字を含むものは隠す。承認は、daemon が記録済みの対象をそのまま許可するので、画面の表示と実際の許可は一致する。
  */
 export function uiTargetOf(t: unknown): Pick<UiExtension, "kind" | "target" | "targetHidden"> {
   if (typeof t !== "object" || t === null) return { targetHidden: true };
   const { kind, value } = t as { kind?: unknown; value?: unknown };
   if (kind !== "write" && kind !== "command") return { targetHidden: true };
   const hidden = { kind, targetHidden: true } as const;
-  if (typeof value !== "string" || value.trim() === "") return hidden;
+  if (typeof value !== "string" || value.trim() === "" || value !== value.trim()) return hidden;
   let length = 0;
   for (const ch of value) {
     const cp = ch.codePointAt(0) ?? 0;
@@ -149,7 +152,10 @@ export function uiTargetOf(t: unknown): Pick<UiExtension, "kind" | "target" | "t
   const bad =
     kind === "write"
       ? ABSOLUTE_PATH.test(value) || PARENT_SEGMENT.test(value)
-      : ABSOLUTE_IN_COMMAND.test(value) || PARENT_SEGMENT.test(value);
+      : !COMMAND_ALLOWED.test(value) ||
+        COMMAND_ABSOLUTE_WORD.test(value) ||
+        COMMAND_OPTION_SLASH.test(value) ||
+        PARENT_SEGMENT.test(value);
   return bad ? hidden : { kind, target: value, targetHidden: false };
 }
 

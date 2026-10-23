@@ -287,6 +287,7 @@ export const UI_JS = `'use strict';
   // 拡張要求の判定（scope.decide）。許可する対象は、daemon が記録済みの対象をそのまま使う（画面の表示と一致する）。
   // 対象が隠れている（絶対パス・.. ・制御文字・長すぎる、など）ときは、承認・切り出しをさせない（却下だけ）。
   var DECISION_LABELS = { approve: '承認', reject: '却下', split: '切り出し' };
+  var DECISION_NOTES = { split: 'この対象は許可しない。子には、作業を切り出して進めるよう通知される' };
   var KIND_LABELS = { write: '書き込みの場所', command: 'コマンド' };
   function renderExtensions(list, box) {
     list.forEach(function (x) {
@@ -303,7 +304,7 @@ export const UI_JS = `'use strict';
         b.addEventListener('click', function () {
           openConfirm(
             '拡張要求の' + DECISION_LABELS[decision],
-            [['ノード', x.nodeId], ['種類', x.kind ? name(KIND_LABELS, x.kind) : '（不明）'], ['対象', x.targetHidden ? '（表示できない）' : x.target], ['理由', x.reason], ['判定', DECISION_LABELS[decision]]],
+            [['ノード', x.nodeId], ['種類', x.kind ? name(KIND_LABELS, x.kind) : '（不明）'], ['対象', x.targetHidden ? '（表示できない）' : x.target], ['理由', x.reason], ['判定', DECISION_LABELS[decision] + (Object.hasOwn(DECISION_NOTES, decision) ? '（' + DECISION_NOTES[decision] + '）' : '')]],
             'scope.decide',
             { extensionId: x.id, decision: decision },
             '拡張要求を' + DECISION_LABELS[decision] + 'しました'
@@ -312,7 +313,7 @@ export const UI_JS = `'use strict';
         opts.appendChild(b);
       });
       card.appendChild(opts);
-      if (x.targetHidden) card.appendChild(el('p', 'error', '対象に、表示できない文字・絶対パス・.. ・長すぎる値などが含まれるため、承認・切り出しはできません（却下だけできます）。'));
+      if (x.targetHidden) card.appendChild(el('p', 'error', '対象に、表示できない文字・絶対パス・.. ・長すぎる値などが含まれるため、承認・切り出しはできません（却下だけできます）。子に、相対パス・単純なコマンドで要求し直すよう依頼してください。'));
       box.appendChild(card);
     });
   }
