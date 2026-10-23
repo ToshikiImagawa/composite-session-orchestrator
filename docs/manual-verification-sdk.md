@@ -182,3 +182,7 @@
 | 統合ノードが `inbox_fetch` を呼ぶ | 合格 | `mcp__node__inbox_fetch` を呼び、`done` の項目 1 件を読んで、1 行で述べて終えた |
 
 起こした指示の本文は定数で、子の文字列・ID・件数を含まない。`node.instructed`（system）と配送の記録が残った。
+
+#### 再確認（束ねる・`maxPerHour` を足したあと。2026-10-23）
+
+#69 のレビュー対応（束ねる・全体の上限 `maxPerHour`）のあと、同じ手順を、`wake: { enabled: true, intervalSec: 5, minIntervalSec: 10, maxPerHour: 5 }`・`maxTurns: 12`・`maxBudgetUsd: 1` でもう一度行った（実 SDK 0.3.292）: 統合ノードが `tree_list` で自分の ID を調べて `node_spawn`（今回は、1 回で成功）→ 「待機する」→ 子が `report_done` → `wake.woken` が 1 回 → 統合ノードに固定の 1 行が届き、新しいターンで `inbox_fetch` を呼んだ。**合格**。束ねる・全体の上限は、実 SDK では確かめていない（自動テストで確かめた）。
