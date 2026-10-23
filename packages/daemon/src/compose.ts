@@ -62,6 +62,7 @@ import {
 } from "./api/index.js";
 import { createAutoPurger } from "./auto-purge.js";
 import type { DaemonConfig } from "./config.js";
+import { createDigestIssuer } from "./digest-issuer.js";
 import { ownedBy } from "./discarded-keys.js";
 import { EventLog } from "./eventlog.js";
 import type { GitPorts, LossFacts } from "./git-ports.js";
@@ -76,6 +77,9 @@ import { openSqliteStore } from "./sqlite-store.js";
 
 /** 最終削除の保持期間の既定（日。spec 5.8）。 */
 const DEFAULT_RETENTION_DAYS = 90;
+const DEFAULT_DIGEST_INTERVAL_SEC = 30;
+const DEFAULT_DIGEST_MIN_INTERVAL_SEC = 60;
+const DEFAULT_DIGEST_MAX_PER_RUN = 20;
 const DEFAULT_AUTO_PURGE_INTERVAL_MINUTES = 60;
 const DEFAULT_AUTO_PURGE_MAX_TREES = 2;
 const DEFAULT_AUTO_PURGE_NOTICE_DAYS = 7;
@@ -511,6 +515,23 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         })
       : undefined;
 
+  // 配下の要約（T24-d。既定で有効。`digest.enabled: false` で無効）。文面は、core の `digestOf` の結果だけ。
+  const digestIssuer =
+    config.digest?.enabled === false
+      ? undefined
+      : createDigestIssuer({
+          state: () => log.state(),
+          nowMs: purgeDeps.nowMs,
+          monoMs: deps.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n)),
+          intervalMs: (config.digest?.intervalSec ?? DEFAULT_DIGEST_INTERVAL_SEC) * 1000,
+          minIntervalMs: (config.digest?.minIntervalSec ?? DEFAULT_DIGEST_MIN_INTERVAL_SEC) * 1000,
+          maxPerRun: config.digest?.maxPerRun ?? DEFAULT_DIGEST_MAX_PER_RUN,
+          record: (requestId, body) => log.append({ requestId, actor: { system: true }, body }),
+          timers,
+          note,
+          isStopped: () => fatalSeen,
+        });
+
   const logger: ApiLogger = (e) => {
     // 秘密（コード・トークン）は、イベントに含まれない（`ApiLogEvent` の規則）。
     if (e.event === "internalError")
@@ -619,10 +640,12 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         // 待ち受けの後で、前回から残った、依存の揃った pending の子を起動する（子が窓口へ接続できるように）。
         void schedule();
         autoPurger?.start();
+        digestIssuer?.start();
         note("started", { port, rootNodeId: config.rootNodeId });
         return running;
       },
       async stop() {
+        await digestIssuer?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await autoPurger?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await server.close();
         if (currentIdentity !== undefined) removeIdentityFile(identityPath, currentIdentity);
