@@ -213,9 +213,11 @@ export interface OperationMap {
   /**
    * 最終削除（FR_031）。最上位の木単位。`tombstone`: 削除後に 1 行の墓標（タイトル、結果、最終コミット、日付）を残すか。
    * 省略時は保持ポリシーの既定に従う（`DEFAULT_PURGE_TOMBSTONE` = 残す。daemon の設定で変えられる）。
+   * `expectNodeIds`: 事前確認（`node.purgePreview`）で見せた、削除される木のノード（T23-d）。省略すると照合しない。指定したとき、いま
+   * 削除される木のノードの集合と違えば（見せたあとで、木が変わった）、何も消さずに `purgeStale` で失敗する。
    */
   "node.purge": {
-    params: { nodeId: string; tombstone?: boolean };
+    params: { nodeId: string; tombstone?: boolean; expectNodeIds?: readonly string[] };
     result: { purged: readonly string[] };
   };
   /**

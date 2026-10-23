@@ -110,6 +110,10 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
     expect(ok("decision.answer", { decisionId: "d", text: "自由入力" })).toBe(true);
     expect(ok("node.purge", { nodeId: "root" })).toBe(true);
     expect(ok("node.purge", { nodeId: "root", tombstone: false })).toBe(true);
+    expect(ok("node.purge", { nodeId: "root", expectNodeIds: ["root", "c1"] })).toBe(true);
+    expect(ok("node.purge", { nodeId: "root", tombstone: true, expectNodeIds: ["root"] })).toBe(
+      true,
+    );
   });
 
   it("余計なキー・欠けたキー・型の違い・列挙外の値は invalidRequest", () => {
@@ -177,6 +181,15 @@ describe("validateParams（操作ごとの引数。余計なキーは拒否）",
       ["decision.answer", { decisionId: "d" }],
       ["decision.answer", { decisionId: "d", choice: "A", text: "B" }],
       ["node.purge", { nodeId: "root", tombstone: "yes" }],
+      ["node.purge", { nodeId: "root", expectNodeIds: [] }],
+      ["node.purge", { nodeId: "root", expectNodeIds: "root" }],
+      ["node.purge", { nodeId: "root", expectNodeIds: ["../x"] }],
+      ["node.purge", { nodeId: "root", expectNodeIds: ["a", "a"] }],
+      ["node.purge", { nodeId: "root", expectNodeIds: [5] }],
+      [
+        "node.purge",
+        { nodeId: "root", expectNodeIds: Array.from({ length: 2001 }, (_, i) => `n${i}`) },
+      ],
       ["report.done", { evidence: [{ criterion: "c" }] }],
       ["report.done", { evidence: [{ criterion: "c", evidence: "   " }] }],
       ["report.done", { evidence: [{ criterion: " ", evidence: "e" }] }],

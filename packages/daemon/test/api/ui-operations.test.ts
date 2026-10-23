@@ -56,6 +56,43 @@ const start = async () => {
         await gate;
         return ok({ accepted: true });
       },
+      "node.purgePreview": async (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        return ok({
+          nodeIds: ["root"],
+          archivedAt: "2026-10-01T00:00:00Z",
+          elapsedDays: 20,
+          retentionDays: 14,
+          tombstoneTitle: "t",
+          purgeable: true,
+          blockers: [],
+        });
+      },
+      "node.purge": async (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        await new Promise((x) => setTimeout(x, 30));
+        return ok({ purged: ["root"] });
+      },
+      "node.purgeHold": async (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        return ok({ held: true });
+      },
+      "node.purgeRelease": async (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        return ok({ released: true });
+      },
+      "node.discardedList": async (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        return ok({ items: [], max: 200 });
+      },
+      "node.discardedRestore": async (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        return ok({ branch: "cso/restored/k", tip: "a".repeat(40) });
+      },
+      "node.discardedDrop": async (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        return ok({ dropped: true, key: "k", tip: "a".repeat(40) });
+      },
       "scope.decide": async (req) => {
         calls.push({ operation: req.operation, params: req.params, role: req.role });
         await new Promise((x) => setTimeout(x, 30));
@@ -277,5 +314,100 @@ describe("画面からの操作（scope.decide。T23-b）の要求", () => {
     expect([a.status, b.status]).toEqual([200, 200]);
     expect(await a.json()).toEqual(await b.json());
     expect(r.calls).toHaveLength(1);
+  });
+});
+
+const TIP = "a".repeat(40);
+let rid = 0;
+const op = (operation: string, params: unknown) => ({
+  requestId: `ffffffff-0000-4000-8000-${String(++rid).padStart(12, "0")}`,
+  operation,
+  params,
+});
+
+describe("画面からの操作（最終削除・保留・保管。T23-d）の要求", () => {
+  it("人間のトークンで、各操作が通る。画面が送る形の params（余計なキーなし）で、ロールは human", async () => {
+    const r = await start();
+    const origin = new URL(r.url).origin;
+    const cases: [string, unknown][] = [
+      ["node.purgePreview", { nodeId: "root" }],
+      ["node.purge", { nodeId: "root" }],
+      ["node.purge", { nodeId: "root", tombstone: false }],
+      ["node.purgeHold", { nodeId: "root" }],
+      ["node.purgeHold", { nodeId: "root", until: "2026-11-22T12:00:00Z", reason: "調査中" }],
+      ["node.purgeRelease", { nodeId: "root" }],
+      ["node.discardedList", {}],
+      ["node.discardedRestore", { target: "k" }],
+      ["node.discardedDrop", { target: "k", expectTip: TIP }],
+    ];
+    for (const [operation, params] of cases) {
+      const res = await send(r.url, HUMAN, op(operation, params), { origin });
+      expect(res.status, operation).toBe(200);
+    }
+    expect(r.calls.map((c) => [c.operation, c.role, c.params])).toEqual(
+      cases.map(([o, p]) => [o, "human", p]),
+    );
+  });
+
+  it("子・統合ノードのトークンでは、どれも 403（実行しない）", async () => {
+    const r = await start();
+    const bodies: [string, unknown][] = [
+      ["node.purge", { nodeId: "root" }],
+      ["node.purgePreview", { nodeId: "root" }],
+      ["node.purgeHold", { nodeId: "root" }],
+      ["node.purgeRelease", { nodeId: "root" }],
+      ["node.discardedList", {}],
+      ["node.discardedRestore", { target: "k" }],
+      ["node.discardedDrop", { target: "k", expectTip: TIP }],
+    ];
+    for (const token of [r.child, r.root]) {
+      for (const [operation, params] of bodies) {
+        expect((await send(r.url, token, op(operation, params))).status, operation).toBe(403);
+      }
+    }
+    expect(r.calls).toEqual([]);
+  });
+
+  it("不正な params は 400（実行しない）: 余計なキー・形の違うノード ID・tombstone の型・不正な期限・空の理由・不正な expectTip・expectTip なしの削除", async () => {
+    const r = await start();
+    const bad: [string, unknown][] = [
+      ["node.purge", { nodeId: "root", extra: 1 }],
+      ["node.purge", { nodeId: "../x" }],
+      ["node.purge", { nodeId: "root", tombstone: "no" }],
+      ["node.purgeHold", { nodeId: "root", until: "tomorrow" }],
+      ["node.purgeHold", { nodeId: "root", reason: "   " }],
+      ["node.discardedList", { x: 1 }],
+      ["node.discardedDrop", { target: "k" }],
+      ["node.discardedDrop", { target: "k", expectTip: "abc" }],
+      ["node.discardedRestore", { target: "../k" }],
+    ];
+    for (const [operation, params] of bad) {
+      expect((await send(r.url, HUMAN, op(operation, params))).status, JSON.stringify(params)).toBe(
+        400,
+      );
+    }
+    expect(r.calls).toEqual([]);
+  });
+
+  it("CSRF: 誤った Origin は 403、JSON でない Content-Type は 415（最終削除を、ほかのページから送れない）", async () => {
+    const r = await start();
+    const body = op("node.purge", { nodeId: "root" });
+    expect((await send(r.url, HUMAN, body, { origin: "http://evil.example" })).status).toBe(403);
+    for (const type of ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"]) {
+      expect((await send(r.url, HUMAN, JSON.stringify(body), {}, type)).status, type).toBe(415);
+    }
+    expect(r.calls).toEqual([]);
+  });
+
+  it("二重送信: 同じ requestId・同じ本文の最終削除を同時に 2 回送っても、ハンドラは 1 回だけ", async () => {
+    const r = await start();
+    const origin = new URL(r.url).origin;
+    const body = op("node.purge", { nodeId: "root" });
+    const [a, b] = await Promise.all([
+      send(r.url, HUMAN, body, { origin }),
+      send(r.url, HUMAN, body, { origin }),
+    ]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(r.calls.filter((c) => c.operation === "node.purge")).toHaveLength(1);
   });
 });
