@@ -5,6 +5,8 @@
  * - 文字列は `textContent` と `createElement` だけで描く。`innerHTML`・`outerHTML`・`insertAdjacentHTML`・`document.write`・`eval`・`new Function`・
  *   `setAttribute`・`on*` への代入・`location` への代入・`srcdoc` は使わない。
  * - インラインの script・style・イベント属性は置かない（CSP が `'self'` だけを許す）。
+ * - 取り消せない操作（最終削除・保管の削除。T23-d）は、確認の表示で、対象の ID を打ち込ませ、完全に一致するまで送れない（`typedMatches`）。
+ *   通信は `callOperation` の 1 か所だけ（事前確認・一覧の読み取りも同じ）。
  * - 操作（判断への回答・拡張要求の判定）は、`<form>` を使わず、ボタンの click で、`POST /v1/request`（`Authorization: Bearer`。cookie は使わない）で送る。
  *   送る前に、必ず確認の表示（内容と回答）を挟む。確認のたびに `requestId` を新しく作り、その確認の間は同じ ID で再送する。
  * - 人間のトークンは、読み込んだらすぐ `history.replaceState` でフラグメントを消し、メモリにだけ持つ（storage・cookie には置かない）。
@@ -33,6 +35,8 @@ export const UI_HTML = `<!doctype html>
 <h2>判断待ち</h2><div id="decisions"></div>
 <h2>受信箱</h2><div id="inbox"></div>
 <h2>木</h2><div id="tree"></div>
+<h2>最終削除（アーカイブ済みの木）</h2><div id="purge"></div>
+<h2>破棄した成果の保管</h2><div id="kept"></div>
 </section>
 </main>
 <script src="/ui/app.js"></script>
@@ -157,13 +161,35 @@ export const UI_JS = `'use strict';
       row.appendChild(el('span', '', line[1]));
       box.appendChild(row);
     });
+    if (pending.blocked) box.appendChild(el('p', 'error', pending.blocked));
+    var typedBox = null;
+    if (pending.typed !== undefined && !pending.blocked) {
+      box.appendChild(el('p', '', '取り消せません。確認のため、次の文字列を、そのまま打ち込んでください: ' + pending.typed));
+      typedBox = el('textarea', '');
+      typedBox.rows = 1;
+      typedBox.maxLength = 300;
+      typedBox.value = pending.typedValue;
+      typedBox.disabled = pending.sending;
+      box.appendChild(typedBox);
+    }
     if (pending.error) box.appendChild(el('p', 'error', pending.error));
     var actions = el('div', 'actions');
     // 429 のときは、Retry-After の秒数のあいだ、送れない（時間が来たら、自動で、押せるようになる）
     var left = pending.retryAt ? Math.ceil((pending.retryAt - Date.now()) / 1000) : 0;
     var waiting = left > 0;
     var send = el('button', 'primary', pending.sending ? '送信中…' : waiting ? 'あと ' + left + ' 秒待つ' : 'この内容で送る');
-    send.disabled = pending.sending || waiting;
+    var refreshSend = function () {
+      send.disabled = pending.sending || waiting || Boolean(pending.blocked) || (pending.typed !== undefined && !typedMatches(pending.typed, pending.typedValue));
+    };
+    refreshSend();
+    if (typedBox) {
+      var current = pending;
+      typedBox.addEventListener('input', function () {
+        if (pending !== current) return;
+        current.typedValue = typedBox.value;
+        refreshSend();
+      });
+    }
     if (waiting) {
       var shown = pending;
       window.setTimeout(function () { if (pending === shown) renderConfirm(); }, 500);
@@ -177,23 +203,25 @@ export const UI_JS = `'use strict';
     box.appendChild(actions);
   }
   // 確認を出す。確認のたびに requestId を新しく作る（その確認の間は、同じ ID で再送する）。
-  function openConfirm(title, lines, operation, params, done) {
+  // opts.typed: 打ち込ませる文字列（取り消せない操作）。opts.blocked: 送れない理由（出して、送らせない）。opts.after: 成功のあとに呼ぶ関数。
+  function openConfirm(title, lines, operation, params, done, opts) {
     if (pending && pending.sending) return;
     if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）'); return; }
     notice('');
-    pending = { title: title, lines: lines, operation: operation, params: params, done: done, requestId: window.crypto.randomUUID(), sending: false, error: '', retryAt: 0 };
+    var o = opts || {};
+    pending = { title: title, lines: lines, operation: operation, params: params, done: done, requestId: window.crypto.randomUUID(), sending: false, error: '', retryAt: 0, typed: o.typed, typedValue: '', blocked: o.blocked || '', after: o.after };
     renderConfirm();
   }
-  function sendPending() {
-    var p = pending;
-    if (!p || p.sending) return;
-    p.sending = true;
-    p.error = '';
-    renderConfirm();
-    fetch('/v1/request', {
+  // 打ち込みの確認: 打ち込む文字列が決まっていて、入力が完全に一致するときだけ（前後の空白・大文字小文字・全角の違いは、すべて不一致）。
+  function typedMatches(typed, input) {
+    return typeof typed === 'string' && typed !== '' && typeof input === 'string' && input === typed;
+  }
+  // 通信は、ここだけ。要求の識別子は、呼び出し側が決める（確認の間は同じ ID で再送する）。401 はトークンを破棄して null。
+  function callOperation(operation, params, requestId) {
+    return fetch('/v1/request', {
       method: 'POST',
       headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
-      body: JSON.stringify({ requestId: p.requestId, operation: p.operation, params: p.params })
+      body: JSON.stringify({ requestId: requestId, operation: operation, params: params })
     })
       .then(function (res) {
         if (res.status === 401) { rejectToken('トークンが正しくありません'); return null; }
@@ -202,7 +230,29 @@ export const UI_JS = `'use strict';
           function (body) { return { status: res.status, body: body, retry: retry }; },
           function () { return { status: res.status, body: null, retry: retry }; }
         );
+      });
+  }
+  // 読み取りの操作（事前確認・一覧）。成功なら値、失敗なら通知に理由を出して null。
+  function readOperation(operation, params) {
+    if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）'); return Promise.resolve(null); }
+    return callOperation(operation, params, window.crypto.randomUUID())
+      .then(function (r) {
+        if (r === null) return null;
+        if (r.status === 200 && r.body && r.body.ok === true) return r.body.value;
+        var e = r.body && r.body.error;
+        notice('失敗: ' + (e && typeof e.code === 'string' ? e.code + ': ' + String(e.cause || '').slice(0, 300) : 'HTTP ' + r.status));
+        return null;
       })
+      .catch(function () { notice('daemon に接続できません'); return null; });
+  }
+  function sendPending() {
+    var p = pending;
+    if (!p || p.sending) return;
+    if (p.blocked || (p.typed !== undefined && !typedMatches(p.typed, p.typedValue))) return; // 打ち込みが一致しない・送れない理由があるときは、送らない
+    p.sending = true;
+    p.error = '';
+    renderConfirm();
+    callOperation(p.operation, p.params, p.requestId)
       .then(function (r) {
         p.sending = false;
         if (r === null) { pending = null; renderConfirm(); return; }
@@ -210,6 +260,7 @@ export const UI_JS = `'use strict';
           pending = null;
           renderConfirm();
           notice(p.done);
+          if (p.after) p.after();
           refresh();
           return;
         }
@@ -362,12 +413,175 @@ export const UI_JS = `'use strict';
     return seen.size;
   }
 
+  // ---- 最終削除・保留・保管（T23-d。取り消せない操作は、対象の ID を打ち込ませる）----
+  var REASON_MAX = 200;
+  var HOLD_CHOICES = [{ label: '無期限', days: 0 }, { label: '30 日', days: 30 }, { label: '90 日', days: 90 }];
+  var NODE_LIST_MAX = 20;
+  var keptList = null;
+  var purgeSignature = null;
+  var keptLoading = false;
+  // 最終削除の対象になりうる木の根: アーカイブ済みで、親がないか、親がアーカイブされていないノード。
+  function purgeRoots(nodes) {
+    var byId = new Map();
+    nodes.forEach(function (n) { byId.set(n.id, n); });
+    return nodes.filter(function (n) {
+      if (n.state !== 'archived') return false;
+      if (n.parentId === null) return true;
+      var parent = byId.get(n.parentId);
+      return !parent || parent.state !== 'archived';
+    });
+  }
+  // 保留の期限（ISO 8601 UTC。ミリ秒なし）。days が 0 なら、期限なし（undefined）。
+  function holdUntil(days, nowMs) {
+    if (!(days > 0)) return undefined;
+    return new Date(nowMs + days * 86400000).toISOString().replace(/\\.\\d{3}Z$/, 'Z');
+  }
+  // 保留の理由の検査（任意。空は可）。問題がなければ ''。
+  function checkReason(text) {
+    if (text.trim() === '') return '';
+    if (Array.from(text).length > REASON_MAX) return '理由が長すぎます（' + REASON_MAX + ' 文字以下）';
+    if (Array.from(text).some(function (ch) { return FORBIDDEN.test(ch); })) return '理由に、使えない文字（制御文字・書式制御文字）が含まれています';
+    return '';
+  }
+  // 信頼できない文字列（コミットの件名・タイトル）を、端末・画面に出す前に整える（制御文字・書式制御文字を空白に。1 行。長さを切る）。
+  function cleanText(text, max) {
+    var flat = Array.from(String(text)).map(function (ch) { return FORBIDDEN.test(ch) ? ' ' : ch; }).join('').replace(/\\s+/g, ' ').trim();
+    var chars = Array.from(flat);
+    return chars.length <= max ? flat : chars.slice(0, max - 1).join('') + '…';
+  }
+  function isPurgePreview(v) {
+    return v && typeof v === 'object' && Array.isArray(v.nodeIds) && v.nodeIds.every(function (x) { return typeof x === 'string'; }) &&
+      typeof v.archivedAt === 'string' && typeof v.elapsedDays === 'number' && typeof v.retentionDays === 'number' &&
+      typeof v.tombstoneTitle === 'string' && typeof v.purgeable === 'boolean' && Array.isArray(v.blockers);
+  }
+  // 最終削除の確認の表示（事前確認の結果）。
+  function purgeLines(rootId, v, tombstone) {
+    var ids = v.nodeIds.slice(0, NODE_LIST_MAX).map(function (x) { return cleanText(x, 128); }).join('、');
+    var more = v.nodeIds.length > NODE_LIST_MAX ? '、ほか ' + (v.nodeIds.length - NODE_LIST_MAX) + ' 件' : '';
+    var lines = [
+      ['木の根', rootId],
+      ['削除されるノード', v.nodeIds.length + ' 件（' + ids + more + '）'],
+      ['アーカイブ日', cleanText(v.archivedAt, 40) + '（経過 ' + v.elapsedDays + ' 日 / 保持期間 ' + v.retentionDays + ' 日）'],
+      ['墓標', (tombstone === false ? '残さない' : tombstone === true ? '残す' : '保持ポリシーの既定に従う') + '（タイトル: ' + cleanText(v.tombstoneTitle, 100) + '）']
+    ];
+    if (typeof v.discardedRefs === 'number' && v.discardedRefs > 0) lines.push(['一緒に消える保管', v.discardedRefs + ' 件の、破棄した成果（取り出すなら、先に保管の一覧から）']);
+    if (v.hold && typeof v.hold === 'object') lines.push(['保留', '保留中（ノード ' + cleanText(String(v.hold.nodeId || ''), 128) + (v.hold.until ? '。' + cleanText(String(v.hold.until), 40) + ' まで' : '。無期限') + '）。保留は自動の削除だけを止める。この最終削除は、保留を無視して消す']);
+    v.blockers.slice(0, 10).forEach(function (b) {
+      lines.push(['実行できない理由', cleanText(String(b && b.code), 60) + ': ' + cleanText(String(b && b.cause), 300)]);
+    });
+    return lines;
+  }
+  function startPurge(rootId, tombstone) {
+    readOperation('node.purgePreview', { nodeId: rootId }).then(function (v) {
+      if (v === null) return;
+      if (!isPurgePreview(v)) { notice('事前確認の結果の形が不正です'); return; }
+      var params = tombstone === undefined ? { nodeId: rootId } : { nodeId: rootId, tombstone: tombstone };
+      var blocked = v.purgeable ? '' : 'この木は、いま最終削除できません（上の理由を取り除いてから、もう一度確認してください）';
+      openConfirm('最終削除', purgeLines(rootId, v, tombstone), 'node.purge', params, '最終削除しました（' + rootId + '）', { typed: rootId, blocked: blocked });
+    });
+  }
+  function renderPurge(nodes) {
+    var roots = purgeRoots(nodes).map(function (n) { return n.id; });
+    var signature = roots.join('\\n');
+    if (signature === purgeSignature) return; // 根の集合が変わらなければ、描き直さない（入力中の理由を消さない）
+    purgeSignature = signature;
+    var box = document.getElementById('purge');
+    clear(box);
+    if (!roots.length) { box.appendChild(el('p', 'empty', '最終削除の対象になりうる、アーカイブ済みの木はありません')); return; }
+    roots.forEach(function (id) {
+      var card = el('div', 'card');
+      card.appendChild(el('span', 'tag', 'アーカイブ済みの木'));
+      card.appendChild(el('span', '', id));
+      var del = el('div', 'opts');
+      var b1 = el('button', '', '最終削除…（墓標は既定）');
+      b1.addEventListener('click', function () { startPurge(id, undefined); });
+      var b2 = el('button', '', '墓標を残さずに最終削除…');
+      b2.addEventListener('click', function () { startPurge(id, false); });
+      del.appendChild(b1);
+      del.appendChild(b2);
+      card.appendChild(del);
+      var area = el('textarea', '');
+      area.maxLength = REASON_MAX;
+      area.placeholder = '自動の最終削除を保留する理由（任意。' + REASON_MAX + ' 文字まで）';
+      card.appendChild(area);
+      var problem = el('p', 'error', '');
+      problem.hidden = true;
+      var hold = el('div', 'opts');
+      HOLD_CHOICES.forEach(function (c) {
+        var b = el('button', '', '自動削除を保留（' + c.label + '）…');
+        b.addEventListener('click', function () {
+          var why = checkReason(area.value);
+          problem.textContent = why;
+          problem.hidden = why === '';
+          if (why !== '') return;
+          var until = holdUntil(c.days, Date.now());
+          var params = { nodeId: id };
+          if (until !== undefined) params.until = until;
+          if (area.value.trim() !== '') params.reason = area.value;
+          openConfirm('自動の最終削除の保留', [['木の根', id], ['期限', until === undefined ? '無期限' : until + ' まで（' + c.label + '）'], ['理由', area.value.trim() === '' ? '（なし）' : area.value]], 'node.purgeHold', params, '保留しました（' + id + '）');
+        });
+        hold.appendChild(b);
+      });
+      var rel = el('button', '', '保留を解除…');
+      rel.addEventListener('click', function () {
+        openConfirm('保留の解除', [['木の根', id], ['内容', '保留を解除する（解除後は、保持期間と予告の条件を、改めて満たすまで消えない）']], 'node.purgeRelease', { nodeId: id }, '保留を解除しました（' + id + '）');
+      });
+      hold.appendChild(rel);
+      card.appendChild(hold);
+      card.appendChild(problem);
+      box.appendChild(card);
+    });
+  }
+  function loadKept() {
+    if (keptLoading) return;
+    keptLoading = true;
+    readOperation('node.discardedList', {}).then(function (v) {
+      keptLoading = false;
+      if (v === null) return;
+      if (!v || !Array.isArray(v.items) || typeof v.max !== 'number') { notice('保管の一覧の形が不正です'); return; }
+      keptList = v;
+      renderKept();
+    });
+  }
+  function renderKept() {
+    var box = document.getElementById('kept');
+    clear(box);
+    var load = el('button', '', keptList ? '一覧を読み込み直す' : '一覧を読み込む');
+    load.addEventListener('click', loadKept);
+    box.appendChild(load);
+    if (!keptList) return;
+    box.appendChild(el('p', 'empty', '保管: ' + keptList.items.length + ' 件 / 上限 ' + keptList.max + ' 件（自動では更新しません。取り出す・消すのあとは、読み込み直します）'));
+    keptList.items.forEach(function (i) {
+      if (typeof i.key !== 'string' || typeof i.tip !== 'string') return;
+      var card = el('div', 'card');
+      card.appendChild(el('span', 'tag', cleanText(i.key, 128)));
+      card.appendChild(el('span', 'tag', i.nodeId ? 'ノード ' + cleanText(i.nodeId, 128) : '孤立'));
+      card.appendChild(el('span', 'tag', '先端 ' + i.tip.slice(0, 12)));
+      if (i.committedAt) card.appendChild(el('span', 'tag', cleanText(i.committedAt, 40)));
+      if (i.untrustedSubject) card.appendChild(el('div', '', '件名（信頼できない入力）: 「' + cleanText(i.untrustedSubject, 100) + '」'));
+      var opts = el('div', 'opts');
+      var restore = el('button', '', 'ブランチに取り出す…');
+      restore.addEventListener('click', function () {
+        openConfirm('保管の取り出し', [['保管', i.key], ['先端', i.tip.slice(0, 12)], ['内容', '新しいブランチ（cso/restored/<保管の名前>）を作る。既存のブランチは上書きしない。保管は残る']], 'node.discardedRestore', { target: i.key }, 'ブランチを作りました', { after: loadKept });
+      });
+      var drop = el('button', '', '保管を消す…');
+      drop.addEventListener('click', function () {
+        openConfirm('保管の削除', [['保管', i.key], ['ノード', i.nodeId ? cleanText(i.nodeId, 128) : '孤立'], ['先端', i.tip.slice(0, 12) + '（一覧で見た先端と今の先端が違えば、消さない）']], 'node.discardedDrop', { target: i.key, expectTip: i.tip }, '保管を消しました', { typed: i.key, after: loadKept });
+      });
+      opts.appendChild(restore);
+      opts.appendChild(drop);
+      card.appendChild(opts);
+      box.appendChild(card);
+    });
+  }
+
   function render(view) {
     renderDecisions(view.decisions);
     renderExtensions(view.extensions, document.getElementById('decisions'));
     if (!view.decisions.length && !view.extensions.length) document.getElementById('decisions').appendChild(el('p', 'empty', '判断待ちはありません'));
     renderInbox(view.inbox);
     var drawn = renderTree(view.nodes);
+    renderPurge(view.nodes);
     showAuth(false);
     var partial = view.truncated.length > 0 || drawn < view.nodes.length;
     lastView = { seq: view.lastSeq, partial: partial };
@@ -381,7 +595,7 @@ export const UI_JS = `'use strict';
     setStatus('接続中（' + (sseUp ? 'SSE' : 'ポーリング') + '・seq ' + lastView.seq + (lastView.partial ? '・一部省略' : '') + '）');
   }
   function rejectToken(message) {
-    token = ''; etag = ''; lastView = null; generation += 1; sseUp = false;
+    token = ''; etag = ''; lastView = null; generation += 1; sseUp = false; keptList = null; purgeSignature = null; pending = null;
     if (controller) controller.abort();
     showAuth(true); setStatus(message);
   }
@@ -502,6 +716,7 @@ export const UI_JS = `'use strict';
     start();
   });
 
+  renderKept();
   start();
 })();
 `;

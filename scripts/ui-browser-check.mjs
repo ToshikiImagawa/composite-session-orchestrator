@@ -55,8 +55,22 @@ state = {
   nodes: [
     ...state.nodes,
     { id: "constructor", role: "implement", parentId: "m1", state: "running", dependsOn: [] },
+    // アーカイブ済みの木（T23-d。最終削除の対象）: arch1（削除できる）と arch2（できない）
+    { id: "arch1", role: "integrator", parentId: null, state: "archived", dependsOn: [] },
+    { id: "arch1c", role: "implement", parentId: "arch1", state: "archived", dependsOn: [] },
+    { id: "arch2", role: "integrator", parentId: null, state: "archived", dependsOn: [] },
   ],
 };
+let kept = [
+  {
+    key: "k1-aaaaaaaaaaaa",
+    tip: "a".repeat(40),
+    nodeId: "arch1c",
+    orphan: false,
+    committedAt: "2026-10-01T00:00:00Z",
+    untrustedSubject: `件名 \u001b[31m${XSS}`,
+  },
+];
 state = {
   ...state,
   decisions: [
@@ -137,6 +151,42 @@ const handlers = {
     bump({ decisions: state.decisions.filter((d) => d.decisionId !== req.params.decisionId) });
     return { ok: true, value: { accepted: true } };
   },
+};
+handlers["node.purgePreview"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  const blocked = req.params.nodeId === "arch2";
+  return {
+    ok: true,
+    value: {
+      nodeIds: blocked ? ["arch2"] : ["arch1", "arch1c"],
+      archivedAt: "2026-10-01T00:00:00Z",
+      elapsedDays: 22,
+      retentionDays: 14,
+      tombstoneTitle: "削除する木",
+      purgeable: !blocked,
+      blockers: blocked ? [{ code: "dependedOn", cause: "木の外のノードが依存している" }] : [],
+      discardedRefs: blocked ? 0 : 1,
+    },
+  };
+};
+handlers["node.purge"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  await new Promise((r) => setTimeout(r, 100));
+  bump({ nodes: state.nodes.filter((n) => !["arch1", "arch1c"].includes(n.id)) });
+  return { ok: true, value: { purged: ["arch1", "arch1c"] } };
+};
+handlers["node.purgeHold"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  return { ok: true, value: { held: true } };
+};
+handlers["node.discardedList"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  return { ok: true, value: { items: kept, max: 200 } };
+};
+handlers["node.discardedDrop"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  kept = kept.filter((k) => k.key !== req.params.target);
+  return { ok: true, value: { dropped: true, key: req.params.target, tip: req.params.expectTip } };
 };
 handlers["scope.decide"] = async (req) => {
   calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
@@ -400,6 +450,112 @@ ops.ext2RejectEnabled = await ext2.getByRole("button", { name: "却下", exact: 
 // 子が書いた理由の XSS 文字列（x3）は、実行されない
 ops.ext3Rendered =
   (await pageO.locator("#decisions .card", { hasText: "pnpm test" }).count()) === 1;
+// (h) 最終削除（T23-d）: 打ち込むまで送れない。一致したら送れる。送る params は nodeId だけ
+const sendBtn = () => pageO.locator("#confirm button.primary");
+const typedArea = () => pageO.locator("#confirm textarea");
+const arch1 = pageO.locator("#purge .card", { hasText: "arch1" }).first();
+await arch1.waitFor();
+await arch1.getByRole("button", { name: "最終削除…（墓標は既定）" }).click();
+await pageO.locator("#confirm").waitFor();
+const purgeConfirm = await confirmText();
+ops.purgeConfirmShowsPreview =
+  purgeConfirm.includes("2 件") &&
+  purgeConfirm.includes("削除する木") &&
+  purgeConfirm.includes("1 件の、破棄した成果");
+ops.purgeSendDisabledAtFirst = await sendBtn().isDisabled();
+for (const wrong of ["arch", "arch1 ", " arch1", "ARCH1", "ａｒｃｈ１"]) {
+  await typedArea().fill(wrong);
+  if (!(await sendBtn().isDisabled())) ops.purgeWrongTypedEnabled = wrong;
+}
+ops.purgeWrongTypedStayDisabled = ops.purgeWrongTypedEnabled === undefined;
+await typedArea().fill("arch1");
+ops.purgeSendEnabledWhenTyped = await sendBtn().isEnabled();
+ops.purgeNoRequestBeforeSend = calls.filter((c) => c.operation === "node.purge").length === 0;
+await sendBtn().click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("最終削除しました"),
+  null,
+  { timeout: 5000 },
+);
+const purgeCalls = calls.filter((c) => c.operation === "node.purge");
+ops.purgeSentOnce =
+  purgeCalls.length === 1 &&
+  JSON.stringify(purgeCalls[0].params) === JSON.stringify({ nodeId: "arch1" });
+await pageO.waitForFunction(
+  () => !document.getElementById("purge").innerText.includes("arch1"),
+  null,
+  {
+    timeout: 5000,
+  },
+);
+ops.purgeCardGone = true;
+// 実行できない木（arch2）: 理由が出て、打ち込みの欄もなく、送れない
+await pageO
+  .locator("#purge .card", { hasText: "arch2" })
+  .getByRole("button", { name: "最終削除…（墓標は既定）" })
+  .click();
+await pageO.locator("#confirm").waitFor();
+const blockedText = await confirmText();
+ops.blockedShowsReason =
+  blockedText.includes("木の外のノードが依存している") &&
+  blockedText.includes("いま最終削除できません");
+ops.blockedSendDisabled = await sendBtn().isDisabled();
+ops.blockedNoTypedArea = (await typedArea().count()) === 0;
+await pageO.getByRole("button", { name: "戻る" }).click();
+// 保留（取り消せる操作。打ち込みなしの通常の確認）
+await pageO
+  .locator("#purge .card", { hasText: "arch2" })
+  .getByRole("button", { name: "自動削除を保留（30 日）…" })
+  .click();
+await pageO.locator("#confirm").waitFor();
+ops.holdNoTypedArea = (await typedArea().count()) === 0;
+await sendBtn().click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("保留しました"),
+  null,
+  { timeout: 5000 },
+);
+const holdCalls = calls.filter((c) => c.operation === "node.purgeHold");
+ops.holdUntilIsIso30Days =
+  holdCalls.length === 1 &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(holdCalls[0].params.until) &&
+  Math.abs(Date.parse(holdCalls[0].params.until) - (Date.now() + 30 * 86400000)) < 120000;
+// (i) 保管（T23-d）: 一覧は、読み込みボタンで取る。件名は信頼できない入力（制御文字を除き、実行されない）
+ops.keptNotLoadedAtFirst = (await pageO.locator("#kept .card").count()) === 0;
+await pageO.getByRole("button", { name: "一覧を読み込む" }).click();
+await pageO.locator("#kept .card").first().waitFor();
+const keptText = await pageO.locator("#kept").innerText();
+ops.keptShowsFields =
+  keptText.includes("k1-aaaaaaaaaaaa") &&
+  keptText.includes("arch1c") &&
+  keptText.includes("先端 aaaaaaaaaaaa");
+ops.keptSubjectCleaned = !keptText.includes("\u001b");
+ops.keptTipNotFull = !keptText.includes("a".repeat(13));
+await pageO.locator("#kept .card").first().getByRole("button", { name: "保管を消す…" }).click();
+await pageO.locator("#confirm").waitFor();
+ops.dropSendDisabledAtFirst = await sendBtn().isDisabled();
+await typedArea().fill("k1-aaaaaaaaaaa");
+ops.dropShortStillDisabled = await sendBtn().isDisabled();
+await typedArea().fill("k1-aaaaaaaaaaaa");
+await sendBtn().click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("保管を消しました"),
+  null,
+  { timeout: 5000 },
+);
+const dropCalls = calls.filter((c) => c.operation === "node.discardedDrop");
+ops.dropSentWithExpectTip =
+  dropCalls.length === 1 &&
+  JSON.stringify(dropCalls[0].params) ===
+    JSON.stringify({ target: "k1-aaaaaaaaaaaa", expectTip: "a".repeat(40) });
+await pageO.waitForFunction(
+  () => document.getElementById("kept").innerText.includes("保管: 0 件"),
+  null,
+  {
+    timeout: 5000,
+  },
+);
+ops.keptReloadedAfterDrop = true;
 ops.errors = opErrors;
 out.operations = ops;
 

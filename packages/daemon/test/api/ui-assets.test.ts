@@ -73,6 +73,35 @@ describe("画面の資産（走査）", () => {
       "truncated",
       "decisions",
       "extensions",
+      "blocked",
+      "typed",
+      "rows",
+      "typedValue",
+      "after",
+      "filter",
+      "toISOString",
+      "replace",
+      "map",
+      "join",
+      "isArray",
+      "nodeIds",
+      "every",
+      "archivedAt",
+      "elapsedDays",
+      "retentionDays",
+      "tombstoneTitle",
+      "purgeable",
+      "blockers",
+      "discardedRefs",
+      "hold",
+      "until",
+      "label",
+      "days",
+      "items",
+      "key",
+      "tip",
+      "committedAt",
+      "untrustedSubject",
       "target",
       "targetHidden",
       "inbox",
@@ -246,17 +275,28 @@ describe("画面の資産（走査）", () => {
       [
         line("var TEXT_MAX ="),
         line("var FORBIDDEN ="),
+        line("var REASON_MAX ="),
+        fn("typedMatches"),
+        fn("purgeRoots"),
+        fn("holdUntil"),
+        fn("checkReason"),
+        fn("cleanText"),
         fn("hasForbidden"),
         fn("checkAnswer"),
         fn("waitSecondsOf"),
         fn("describeFailure"),
-        "({ checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure })",
+        "({ checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdUntil: holdUntil, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
       checkAnswer(text: string): string;
       waitSecondsOf(r: { status: number; retry: number }): number;
       describeFailure(r: { status: number; body: unknown; retry: number }): string;
+      typedMatches(typed: unknown, input: unknown): boolean;
+      purgeRoots(nodes: { id: string; parentId: string | null; state: string }[]): { id: string }[];
+      holdUntil(days: number, nowMs: number): string | undefined;
+      checkReason(text: string): string;
+      cleanText(text: string, max: number): string;
     };
 
     it("checkAnswer: 空・空白だけ・長すぎる・制御文字・書式制御文字を拒む。タブ・改行は使える。長さは、コードポイントで数える", () => {
@@ -308,5 +348,73 @@ describe("画面の資産（走査）", () => {
       expect(api.describeFailure({ status: 429, body: null, retry: 7 })).toContain("7 秒");
       expect(api.describeFailure({ status: 429, body: null, retry: 0 })).toContain("しばらく");
     });
+
+    it("typedMatches: 打ち込む文字列と完全に一致するときだけ。前後の空白・大文字小文字・全角・空・型の違いは、すべて不一致", () => {
+      expect(api.typedMatches("root-1", "root-1")).toBe(true);
+      expect(api.typedMatches("root-1", "root-1 ")).toBe(false);
+      expect(api.typedMatches("root-1", " root-1")).toBe(false);
+      expect(api.typedMatches("root-1", "ROOT-1")).toBe(false);
+      expect(api.typedMatches("root-1", "ｒｏｏｔ-1")).toBe(false);
+      expect(api.typedMatches("root-1", "root-")).toBe(false);
+      expect(api.typedMatches("root-1", "")).toBe(false);
+      expect(api.typedMatches("", "")).toBe(false); // 打ち込む文字列が空なら、決して一致しない
+      expect(api.typedMatches(undefined, "")).toBe(false);
+      expect(api.typedMatches(undefined, undefined)).toBe(false);
+      expect(api.typedMatches("1", 1)).toBe(false);
+    });
+
+    it("purgeRoots: アーカイブ済みで、親がないか、親がアーカイブされていないノードだけ", () => {
+      const nodes = [
+        { id: "r", parentId: null, state: "archived" },
+        { id: "c", parentId: "r", state: "archived" },
+        { id: "m", parentId: null, state: "running" },
+        { id: "a", parentId: "m", state: "archived" },
+        { id: "o", parentId: "gone", state: "archived" },
+        { id: "x", parentId: "m", state: "stopped" },
+      ];
+      expect(api.purgeRoots(nodes).map((n) => n.id)).toEqual(["r", "a", "o"]);
+      expect(api.purgeRoots([])).toEqual([]);
+    });
+
+    it("holdUntil: 0 日は期限なし。日数は、ミリ秒なしの ISO 8601 UTC（サーバーの検証に合う形）", () => {
+      const now = Date.UTC(2026, 9, 23, 12, 0, 0, 345);
+      expect(api.holdUntil(0, now)).toBeUndefined();
+      expect(api.holdUntil(30, now)).toBe("2026-11-22T12:00:00Z");
+      expect(api.holdUntil(90, now)).toBe("2027-01-21T12:00:00Z");
+    });
+
+    it("checkReason: 空は可（任意）。長すぎる・制御文字・書式制御文字は拒む", () => {
+      expect(api.checkReason("")).toBe("");
+      expect(api.checkReason("   ")).toBe("");
+      expect(api.checkReason("調査が済んだ")).toBe("");
+      expect(api.checkReason("a".repeat(200))).toBe("");
+      expect(api.checkReason("a".repeat(201))).toContain("長すぎ");
+      expect(api.checkReason("a\u0007b")).toContain("使えない文字");
+      expect(api.checkReason("a\u202eb")).toContain("使えない文字");
+      expect(api.checkReason("a\nb")).toContain("使えない文字");
+    });
+
+    it("cleanText: 制御文字・書式制御文字を空白にして 1 行にし、長さを切る（信頼できない文字列）", () => {
+      expect(api.cleanText("a\u001b[31mb\nc\u202ed", 100)).toBe("a [31mb c d");
+      expect(api.cleanText("あ".repeat(10), 5)).toBe("ああああ…");
+      expect(api.cleanText("  x   y  ", 10)).toBe("x y");
+    });
+  });
+
+  it("T23-d: 通信は callOperation の 1 か所だけ。最終削除・保管の削除は、打ち込みの確認（typed）を経る。保管の削除は一覧で見た先端を渡す", () => {
+    expect([...UI_JS.matchAll(/\bfetch\(\s*'\/v1\/request'/g)]).toHaveLength(1);
+    // 取り消せない操作の openConfirm は、typed を指定している
+    for (const op of ["'node.purge'", "'node.discardedDrop'"]) {
+      const i = UI_JS.indexOf(`openConfirm(`, UI_JS.indexOf(op) - 600);
+      expect(UI_JS.slice(i, UI_JS.indexOf(op) + 400), op).toContain("typed:");
+    }
+    expect(UI_JS).toContain("expectTip: i.tip");
+    // 送る側にも、打ち込みの検査がある（画面の無効化を迂回されても送らない）
+    expect(UI_JS).toContain("typedMatches(p.typed, p.typedValue)");
+    // 取り出しのブランチ名は、入力させない（既定だけ）
+    expect(UI_JS).not.toContain("branch:");
+    // 読み取りの操作は、確認なしで呼ぶのは事前確認と一覧だけ
+    const reads = [...UI_JS.matchAll(/readOperation\('([^']+)'/g)].map((m) => m[1]);
+    expect(new Set(reads)).toEqual(new Set(["node.purgePreview", "node.discardedList"]));
   });
 });
