@@ -164,9 +164,19 @@ export type EventBody =
       readonly payload: { readonly instructedSeq: number };
     }
   | {
-      /** 停止したノードの破棄の判断（spec 5.8。成果を捨てることを含む）。判断した者は封筒の `actor`。状態は変えない。 */
+      /**
+       * 停止したノードの破棄の判断（spec 5.8。成果を捨てることを含む）。判断した者は封筒の `actor`。状態は変えない。
+       * 先端の記録（T21r-e。新しい判断は、どちらか一方を必ず持つ）: `expectTip` は、判断のときに、人間が確かめた（表示した）ブランチの先端
+       * （`isCommitSha`）。強制の回収（`-D`）の直前に、今の先端と照合する。`noTip: true` は、判断のときに、先端がなかった（ブランチがなかった）こと。
+       * 両方は書けない。どちらもない判断は、この機能の前の記録（回収のときに照合しない）。
+       * すでに判断済みのノード（停止または回収可能）への、先端の記録が違う判断は、記録を置き換える（照合に失敗したあとの指示し直し）。
+       */
       readonly type: "node.discardDecided";
-      readonly payload: { readonly nodeId: string };
+      readonly payload: {
+        readonly nodeId: string;
+        readonly expectTip?: string;
+        readonly noTip?: true;
+      };
     }
   | {
       /**
@@ -303,7 +313,15 @@ export interface NodeRecord {
   readonly acceptanceCriteria?: readonly string[];
   readonly scope?: Scope;
   /** 破棄の判断（停止したノードだけ。再開すると消える）。回収の再判定の入力 `facts.discarded` の情報源。 */
-  readonly discarded?: { readonly seq: number; readonly at: string; readonly by: Actor };
+  readonly discarded?: {
+    readonly seq: number;
+    readonly at: string;
+    readonly by: Actor;
+    /** 判断のときに確かめた先端（強制の直前の照合に使う。T21r-e）。 */
+    readonly expectTip?: string;
+    /** 判断のときに、先端がなかった（ブランチがなかった）。今の先端が取れるなら、回収のときに拒否する。 */
+    readonly noTip?: true;
+  };
   /** 自動の最終削除の保留（`node.purgeHeld`。T13f-h）。`until` がなければ無期限。 */
   readonly purgeHold?: {
     readonly seq: number;
@@ -1672,11 +1690,39 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     }
 
     case "node.discardDecided": {
-      const { nodeId } = p;
+      const { nodeId, expectTip, noTip } = p;
       if (!isId(nodeId)) return invalid(seq, "node.discardDecided の nodeId");
+      if (expectTip !== undefined && !isCommitSha(expectTip)) {
+        return invalid(seq, "node.discardDecided の expectTip（小文字の 16 進で 40 桁か 64 桁）");
+      }
+      if (noTip !== undefined && noTip !== true) {
+        return invalid(seq, "node.discardDecided の noTip（true だけ）");
+      }
+      if (expectTip !== undefined && noTip !== undefined) {
+        return invalid(seq, "node.discardDecided は、expectTip と noTip を同時に持てない");
+      }
       const node = nodeAt(d, nodeId);
       if (node === undefined) return unknownNode(seq, nodeId);
-      if (node.state !== "stopped") {
+      const prev = node.discarded;
+      if (prev !== undefined) {
+        // 判断済み。先端の記録が同じなら、先に確定した判断を残す。違えば、置き換える（停止か、回収可能のノードだけ）。
+        if (prev.expectTip === expectTip && (prev.noTip === true) === (noTip === true)) {
+          return reject(
+            seq,
+            "alreadyDiscarded",
+            `ノード ${nodeId} の破棄は判断済み`,
+            "判断の結果を確認する",
+          );
+        }
+        if (node.state !== "stopped" && node.state !== "reclaimable") {
+          return reject(
+            seq,
+            "invalidTransition",
+            `状態 ${node.state} のノードの破棄の判断は、更新できない（stopped・reclaimable のときだけ）`,
+            "ノードの状態を確認する",
+          );
+        }
+      } else if (node.state !== "stopped") {
         return reject(
           seq,
           "invalidTransition",
@@ -1684,17 +1730,15 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           "ノードの状態を確認する",
         );
       }
-      if (node.discarded !== undefined) {
-        return reject(
-          seq,
-          "alreadyDiscarded",
-          `ノード ${nodeId} の破棄は判断済み`,
-          "判断の結果を確認する",
-        );
-      }
       d.nodes[d.nodeIdx.get(nodeId) as number] = freezeRecord({
         ...node,
-        discarded: Object.freeze({ seq, at: raw.at as string, by: actor }),
+        discarded: Object.freeze({
+          seq,
+          at: raw.at as string,
+          by: actor,
+          ...(expectTip === undefined ? {} : { expectTip }),
+          ...(noTip === undefined ? {} : { noTip }),
+        }),
       });
       return commit();
     }

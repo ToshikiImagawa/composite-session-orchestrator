@@ -112,10 +112,15 @@ export interface LossFacts {
 export interface GitPorts {
   /** 強制の回収で失われるもの。作業ツリーが登録されていなければ（調べられなければ）`undefined`。 */
   lossFor(nodeId: string): Promise<LossFacts | undefined>;
-  factsFor(
-    nodeId: string,
-  ): Promise<
-    { merged: boolean; clean: boolean; worktreePath: string; headCommit?: string } | undefined
+  factsFor(nodeId: string): Promise<
+    | {
+        merged: boolean;
+        clean: boolean;
+        worktreePath: string;
+        headCommit?: string;
+        headUnknown?: true;
+      }
+    | undefined
   >;
   removeWorktree(
     nodeId: string,
@@ -283,11 +288,18 @@ export function createGitPorts(
     );
   };
 
-  /** ブランチの先端（最終コミット）。SHA の形でなければ（取れなければ）、省略する。 */
-  const headFields = async (nodeId: string): Promise<{ headCommit?: string }> => {
+  /**
+   * ブランチの先端（最終コミット）。取れて SHA の形なら `headCommit`。ブランチがない（`rev-parse --verify -q` が code 1）なら、何も載せない。
+   * それ以外（git を起動できない・時間切れ・予期しない終了コード・SHA の形でない出力）は、取得の失敗として `headUnknown: true`
+   * （「先端がない」と取り違えない。T21r-e）。
+   */
+  const headFields = async (
+    nodeId: string,
+  ): Promise<{ headCommit?: string; headUnknown?: true }> => {
     const r = await git(["rev-parse", "--verify", "-q", `${branchOf(nodeId)}^{commit}`]);
     const sha = r.stdout.trim();
-    return r.code === 0 && isCommitSha(sha) ? { headCommit: sha } : {};
+    if (r.code === 0) return isCommitSha(sha) ? { headCommit: sha } : { headUnknown: true };
+    return r.code === 1 ? {} : { headUnknown: true };
   };
 
   /** 失われるもの: 統合されていないコミット（数と件名）、追跡中の変更、未追跡のファイルの数。 */

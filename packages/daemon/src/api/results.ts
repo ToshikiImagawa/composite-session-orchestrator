@@ -20,7 +20,7 @@ export const RESULT_KEYS: ResultKeys = {
   "node.split": ["newNodeId"],
   "scope.decide": ["state"],
   "node.review": ["state"],
-  "node.reclaimPreview": ["reclaimable", "unmet", "blockers", "loss"],
+  "node.reclaimPreview": ["reclaimable", "unmet", "blockers", "loss", "tips"],
   "node.reclaim": ["reclaimed"],
   "node.capabilities": ["operations"],
   "decision.get": ["decisionId", "nodeId", "status", "question", "options", "answer"],

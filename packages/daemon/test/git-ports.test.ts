@@ -41,6 +41,8 @@ const setup = (
     failBranchDOnce?: boolean;
     failUpdateRef?: boolean;
     discardedRefsMax?: number;
+    /** 先端の取得（`rev-parse --verify -q <branch>^{commit}`）の結果を差し替える（T21r-e）。`spawn`: git を起動できない（code null）、`missing`: ブランチがない（code 1）。 */
+    revParse?: "spawn" | "missing";
   } = {},
 ) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "cso-git-")));
@@ -56,6 +58,20 @@ const setup = (
   const calls: string[][] = [];
   const runner: GitRunner = (args, opts) => {
     calls.push([...args]);
+    if (
+      options.revParse !== undefined &&
+      args[0] === "rev-parse" &&
+      args.includes("--verify") &&
+      args.includes("-q") &&
+      String(args.at(-1)).endsWith("^{commit}") &&
+      String(args.at(-1)).startsWith("cso/")
+    ) {
+      return Promise.resolve(
+        options.revParse === "spawn"
+          ? { code: null, stdout: "", stderr: "" }
+          : { code: 1, stdout: "", stderr: "" },
+      );
+    }
     if (
       options.failUpdateRef === true &&
       args[0] === "update-ref" &&
@@ -398,6 +414,23 @@ describe("createGitPorts（実際の git で、作業ツリーの作成・事実
       const facts = await s.ports.factsFor("c1");
       expect(facts?.headCommit).toBe(sha);
       expect(facts?.headCommit).toMatch(/^[0-9a-f]{40}$/);
+    });
+
+    it("T21r-e: 先端を取れなかったときは、ブランチがない（code 1）のと、取得に失敗した（git を起動できないなど）のを、区別する（headUnknown）", async () => {
+      const missing = setup({ revParse: "missing" });
+      const pm = await provision(missing, "c1");
+      expect(pm).toBeTruthy();
+      const fm = await missing.ports.factsFor("c1");
+      expect(fm).toBeDefined();
+      expect(fm).not.toHaveProperty("headCommit");
+      expect(fm).not.toHaveProperty("headUnknown");
+
+      const failing = setup({ revParse: "spawn" });
+      await provision(failing, "c1");
+      const ff = await failing.ports.factsFor("c1");
+      expect(ff).toBeDefined();
+      expect(ff).not.toHaveProperty("headCommit");
+      expect(ff?.headUnknown).toBe(true);
     });
 
     it("作業ツリーが消えてブランチだけ残ったノードの事実にも、headCommit を載せる", async () => {

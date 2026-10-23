@@ -145,6 +145,11 @@ export interface OperationMap {
       unmet: readonly UnmetReason[];
       blockers: readonly Blocker[];
       loss?: readonly NodeLoss[];
+      /**
+       * 人間のロールにだけ返す。対象と配下の、作業ツリーを持ち、ブランチの先端（最終コミット）を取れたノードの先端（nodeId → SHA。T21r-e）。
+       * `node.reclaimInstruct` の `expectTips` に、そのまま渡す。取れなかったノードは載らない。
+       */
+      tips?: Readonly<Record<string, string>>;
     };
   };
   "node.reclaim": { params: { nodeId: string }; result: { reclaimed: readonly string[] } };
@@ -196,7 +201,15 @@ export interface OperationMap {
     params: { decisionId: string } & ({ choice: string } | { text: string });
     result: { accepted: true };
   };
-  "node.reclaimInstruct": { params: { nodeId: string }; result: { accepted: true } };
+  /**
+   * 破棄の判断（人間。停止したノードの成果を捨ててよいという判断）。**`expectTips`（必須。空でもよい）**: プレビュー（`node.reclaimPreview` の `tips`）で
+   * 表示した、対象と配下のノードのブランチの先端（nodeId → SHA）。対象と配下の停止したノードの今の先端と照合し、1 つでも違えば、何も記録せず
+   * `tipMismatch`。表示した先端がない（取れなかった）ノードの先端が、今は取れるときも `tipMismatch`。記録した先端は、強制の回収の直前にも照合する（T21r-e）。
+   */
+  "node.reclaimInstruct": {
+    params: { nodeId: string; expectTips: Readonly<Record<string, string>> };
+    result: { accepted: true };
+  };
   /**
    * 最終削除（FR_031）。最上位の木単位。`tombstone`: 削除後に 1 行の墓標（タイトル、結果、最終コミット、日付）を残すか。
    * 省略時は保持ポリシーの既定に従う（`DEFAULT_PURGE_TOMBSTONE` = 残す。daemon の設定で変えられる）。
