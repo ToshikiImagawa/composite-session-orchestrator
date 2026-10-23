@@ -282,3 +282,69 @@ describe("要約の補足（T24 PR1 レビュー）", () => {
     expect(text.startsWith("配下 ")).toBe(true);
   });
 });
+
+describe("アーカイブ済みのノードの項目は数えない（T24-a）", () => {
+  /** a を、回収まで済ませてアーカイブする。 */
+  const archiveA = (): OrchEvent[] => [
+    changed("a", { type: "reportDone" }),
+    changed("a", { type: "accept" }),
+    changed("a", { type: "markReclaimable", discarded: false }),
+    changed("a", { type: "archive" }),
+  ];
+
+  it("持ち主が archived の未解決の項目は、件数・優先度・最優先に入らない。それだけなら、要約はない。ノード数・状態別の件数には数える", () => {
+    const only = must([...base(), added("old", "failure", "a"), ...archiveA()]);
+    expect(digestOf(only, "m1", NOW)).toBeUndefined();
+    const mixed = must([
+      ...base(),
+      added("old", "failure", "a"),
+      added("live", "progress", "b"),
+      ...archiveA(),
+    ]);
+    const d = digestOf(mixed, "m1", NOW);
+    expect(d?.unresolved).toEqual({ progress: 1 });
+    expect(d?.priority).toBe("progress");
+    expect(d?.top).toEqual(["live"]);
+    expect(d?.descendants).toBe(2);
+    expect(d?.byState).toEqual({ archived: 1, running: 1 });
+  });
+
+  it("reclaimable より前の状態（停止した枝）の項目は、除かない", () => {
+    const s = must([
+      ...base(),
+      added("fail", "failure", "a"),
+      changed("a", { type: "stop", mode: "immediate" }),
+      changed("a", { type: "confirmStopped" }),
+    ]);
+    const d = digestOf(s, "m1", NOW);
+    expect(d?.unresolved).toEqual({ failure: 1 });
+    expect(d?.byState).toEqual({ stopped: 1, running: 1 });
+  });
+
+  it("未回答の判断・未判定の拡張要求も、持ち主が archived なら数えない（同じ規則。件数が食い違わない）", () => {
+    const s = must([
+      ...base(),
+      added("live", "progress", "b"),
+      added("old", "info", "a"),
+      ...archiveA(),
+    ]);
+    // 持ち主が archived の、未回答の判断・未判定の拡張要求がある状態（防御の確認。通常の fold では、archived にできない）
+    const withOpen: OrchState = {
+      ...s,
+      decisions: [
+        ...s.decisions,
+        { decisionId: "d-a", nodeId: "a", status: "open", rejected: [] } as never,
+        { decisionId: "d-b", nodeId: "b", status: "open", rejected: [] } as never,
+      ],
+      extensions: [
+        ...s.extensions,
+        { extensionId: "x-a", nodeId: "a", status: "open" } as never,
+        { extensionId: "x-b", nodeId: "b", status: "open" } as never,
+      ],
+    };
+    const d = digestOf(withOpen, "m1", NOW);
+    expect(d?.openDecisions).toBe(1); // b のものだけ
+    expect(d?.openExtensions).toBe(1);
+    expect(d?.summary).toContain("未回答の判断 1・未判定の拡張要求 1");
+  });
+});

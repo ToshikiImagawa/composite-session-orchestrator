@@ -356,6 +356,21 @@ describe("要約の発行器（T24-d）", () => {
     expect(r.open("m1")).toHaveLength(0); // 完了したノードには出さない
   });
 
+  it("T24-a: 配下のノードがアーカイブされ、残った項目が、アーカイブ済みの枝のものだけになったら、出ている要約を解決する（古い記録で、要約が残り続けない）", async () => {
+    const r = rig();
+    r.item("old", "info", "a");
+    const i = r.issuer();
+    await i.runOnce();
+    expect(r.open("m1")).toHaveLength(1);
+    r.ev("a", { type: "reportDone" });
+    r.ev("a", { type: "accept" });
+    r.ev("a", { type: "markReclaimable", discarded: false });
+    r.ev("a", { type: "archive" });
+    const out = await i.runOnce();
+    expect(out.resolved).toBe(1);
+    expect(r.open("m1")).toHaveLength(0);
+  });
+
   it("start() は、周期（intervalMs）で実行する。stop() は、周期を止める。isStopped なら動かない", async () => {
     const r = rig();
     r.item("f1", "failure", "a");
