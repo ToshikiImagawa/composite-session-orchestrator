@@ -77,6 +77,7 @@ describe("画面の資産（走査）", () => {
       "blocked",
       "typed",
       "rows",
+      "inputMode",
       "typedValue",
       "after",
       "filter",
@@ -351,6 +352,20 @@ describe("画面の資産（走査）", () => {
       expect(long).toContain(`x: ${"あ".repeat(300)}`);
       expect(long).not.toContain("あ".repeat(301));
       expect(api.describeFailure({ status: 500, body: null, retry: 0 })).toContain("HTTP 500");
+      // 保留の期限が範囲外（端末とサーバーの時計のずれ）: 日数を小さくするか、時計を合わせる案内
+      const clock = api.describeFailure({
+        status: 422,
+        body: { ok: false, error: { code: "invalidPurgeHoldUntil", cause: "範囲外" } },
+        retry: 0,
+      });
+      expect(clock).toContain("日数を小さくするか、この端末の時計を合わせて");
+      expect(
+        api.describeFailure({
+          status: 422,
+          body: { ok: false, error: { code: "other", cause: "x" } },
+          retry: 0,
+        }),
+      ).not.toContain("時計");
       expect(api.describeFailure({ status: 429, body: null, retry: 7 })).toContain("7 秒");
       expect(api.describeFailure({ status: 429, body: null, retry: 0 })).toContain("しばらく");
     });
@@ -509,6 +524,13 @@ describe("画面の資産（走査）", () => {
       expect(run(base({}))).toHaveLength(1);
       expect(run(base({ sending: true }))).toEqual([]);
     });
+  });
+
+  it("保留の日数の入力欄は、inputMode='numeric'（プロパティ。setAttribute は使わない。input タグは許可リストに足さない）。askHold は var の関数式", () => {
+    expect(UI_JS).toContain("daysArea.inputMode = 'numeric'");
+    expect(UI_JS).toContain("var askHold = function (label, days)");
+    expect(UI_JS).not.toContain("function askHold");
+    expect(UI_JS).not.toContain("setAttribute");
   });
 
   it("T23-d: 通信は callOperation の 1 か所だけ。最終削除・保管の削除は、打ち込みの確認（typed）を経る。保管の削除は一覧で見た先端を渡す", () => {

@@ -681,7 +681,7 @@ describe("cso purge の照合（T23-d2。--yes には --expect）", () => {
     expect(nodeIdsDigest(["n1", "n3"])).not.toBe(NODES_DG);
   });
 
-  it("ノードが expectNodeIds の上限（2000）を超える木は、はっきり失敗して、削除しない", async () => {
+  it("R1: ノードが 2000 件を超える木は、daemon の照合（expectNodeIds）を省いて送る。--expect の照合は残り、省いたことを出力する", async () => {
     const many = Array.from({ length: LIMITS.expectNodeIds + 1 }, (_, i) => `n${i}`);
     const { client, sent } = fakeClient({
       "node.purgePreview": ok({ ...PREVIEW, nodeIds: many }),
@@ -691,9 +691,97 @@ describe("cso purge の照合（T23-d2。--yes には --expect）", () => {
       ["purge", "n0", "--yes", "--expect", nodeIdsDigest(many)],
       deps(client),
     );
+    expect(r.exitCode).toBe(0);
+    expect(sent.at(-1)?.operation).toBe("node.purge");
+    expect(sent.at(-1)?.params).toEqual({ nodeId: "n0" });
+    expect(r.stderr).toContain("expectNodeIds");
+    expect(r.stderr).toContain("省いた");
+    // --expect が違えば、削除しない（取り直した事前確認との照合は、2000 件超でも働く）
+    const bad = fakeClient({
+      "node.purgePreview": ok({ ...PREVIEW, nodeIds: many }),
+      "node.purge": ok({ purged: many }),
+    });
+    const b = await runCommand(
+      ["purge", "n0", "--yes", "--expect", "000000000000"],
+      deps(bad.client),
+    );
+    expect(b.exitCode).toBe(1);
+    expect(ops(bad.sent)).toEqual(["node.purgePreview"]);
+    // ちょうど 2000 件は、daemon の照合つき
+    const exact = Array.from({ length: LIMITS.expectNodeIds }, (_, i) => `n${i}`);
+    const e = fakeClient({
+      "node.purgePreview": ok({ ...PREVIEW, nodeIds: exact }),
+      "node.purge": ok({ purged: exact }),
+    });
+    const er = await runCommand(
+      ["purge", "n0", "--yes", "--expect", nodeIdsDigest(exact)],
+      deps(e.client),
+    );
+    expect(er.exitCode).toBe(0);
+    const lastParams = e.sent.at(-1)?.params as { expectNodeIds?: string[] } | undefined;
+    expect(lastParams?.expectNodeIds).toHaveLength(2000);
+    expect(er.stderr).toBe("");
+  });
+
+  it("R2: --request-id を指定した再実行で、事前確認が notFound なら、前回の実行が成功して木が消えた可能性を案内する（事前確認は飛ばさない）。指定しなければ、これまでどおり", async () => {
+    const notFound = {
+      ok: false,
+      error: { code: "notFound", cause: "ノードが見つからない", nextActions: ["ID を確認する"] },
+    } as never;
+    const a = fakeClient({ "node.purgePreview": notFound, "node.purge": ok({ purged: [] }) });
+    const r = await runCommand(
+      ["purge", "n1", "--yes", "--expect", NODES_DG, "--request-id", "retry-1"],
+      deps(a.client),
+    );
     expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("上限");
-    expect(ops(sent)).toEqual(["node.purgePreview"]);
+    expect(r.stderr).toContain("前回の実行が成功して");
+    expect(r.stderr).toContain("cso discarded list");
+    expect(r.stderr).toContain("ID を確認する");
+    expect(ops(a.sent)).toEqual(["node.purgePreview"]); // 事前確認を飛ばす経路はない。node.purge は呼ばない
+    const b = fakeClient({ "node.purgePreview": notFound });
+    const plain = await runCommand(["purge", "n1", "--yes", "--expect", NODES_DG], deps(b.client));
+    expect(plain.stderr).not.toContain("前回の実行が成功して");
+    // notFound 以外の失敗は、案内を足さない
+    const c = fakeClient({
+      "node.purgePreview": {
+        ok: false,
+        error: { code: "forbidden", cause: "x", nextActions: ["y"] },
+      } as never,
+    });
+    const other = await runCommand(
+      ["purge", "n1", "--yes", "--expect", NODES_DG, "--request-id", "retry-2"],
+      deps(c.client),
+    );
+    expect(other.stderr).not.toContain("前回の実行が成功して");
+  });
+
+  it("N2: --yes なしで --expect を渡したときは、表示だけで、実行には --yes が要ると出す（reclaim も）", async () => {
+    const a = happy();
+    const r = await runCommand(["purge", "n1", "--expect", NODES_DG], deps(a.client));
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("表示だけ（実行には --yes が要る）");
+    expect(ops(a.sent)).toEqual(["node.purgePreview"]);
+    const plain = await runCommand(["purge", "n1"], deps(happy().client));
+    expect(plain.stderr).not.toContain("表示だけ");
+    const f = fakeClient({ "node.reclaimPreview": previewOf([LOSS]) });
+    const rr = await runCommand(["reclaim", "n1", "--expect", DG_NONE], deps(f.client));
+    expect(rr.exitCode).toBe(2);
+    expect(rr.stderr).toContain("表示だけ（実行には --yes が要る）");
+  });
+
+  it("R4: 照合の値は固定（以前の並べ方・畳み方から変えない）。reclaim は ID 順の id:SHA、purge は ID 順の id。ID の記号の並び（- . :）も固定", () => {
+    expect(tipsDigest({ n1: "a".repeat(40), n2: "b".repeat(64) })).toBe("ab9fac302398");
+    expect(
+      tipsDigest({
+        "a-b": "c".repeat(40),
+        a: "d".repeat(40),
+        "a.b": "e".repeat(40),
+        "a:b": "f".repeat(40),
+      }),
+    ).toBe("4b1d102e93ff");
+    expect(nodeIdsDigest(["n1", "n2"])).toBe("1838b884792c");
+    expect(nodeIdsDigest(["a-b", "a", "a.b", "a:b"])).toBe("0d4122142225");
+    expect(tipsDigest({})).toBe(tipsDigest(undefined));
   });
 });
 
@@ -739,6 +827,25 @@ describe("cso purge-hold --days（T23-d2）", () => {
     );
     expect(r.exitCode).toBe(2);
     expect(sent).toEqual([]);
+  });
+
+  it("R3: invalidPurgeHoldUntil で失敗したら、--days を小さくするか時計を合わせる案内を足す", async () => {
+    const { client } = fakeClient({
+      "node.purgeHold": {
+        ok: false,
+        error: {
+          code: "invalidPurgeHoldUntil",
+          cause: "保留の期限は、現在より後で、365 日先まで",
+          nextActions: ["期限を指定し直す（無期限にするときは省略する）"],
+        },
+      } as never,
+    });
+    const r = await runCommand(["purge-hold", "t", "--days", "365"], withNow(client));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("invalidPurgeHoldUntil");
+    expect(r.stderr).toContain("--days を小さくするか");
+    expect(r.stderr).toContain("時計を合わせて");
+    expect(r.stderr).toContain("期限を指定し直す");
   });
 
   it("結果が確認できないとき、再実行の案内は、計算した期限を --until で指定する（同じ requestId で、内容が変わらないように）", async () => {

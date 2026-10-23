@@ -149,6 +149,8 @@ export const UI_JS = `'use strict';
     var e = r.body && r.body.error;
     var base = e && typeof e.code === 'string' ? e.code + ': ' + String(e.cause || '').slice(0, 300) : 'HTTP ' + r.status;
     if (r.status === 429) base += '（' + (r.retry > 0 ? r.retry + ' 秒' : 'しばらく') + '待ってから、もう一度送る）';
+    // 保留の期限は、この端末の時計で決めている。サーバーの時計と合わないと、範囲外になる。
+    if (e && e.code === 'invalidPurgeHoldUntil') base += '\\n日数を小さくするか、この端末の時計を合わせてください（期限は、この端末の時計で決めています）。';
     return base + '\\n同じ内容で、もう一度送れます（同じ要求として扱われ、二重には実行されません）。';
   }
   function renderConfirm() {
@@ -554,7 +556,7 @@ export const UI_JS = `'use strict';
       problem.hidden = true;
       var hold = el('div', 'opts');
       // 保留の確認を出す（理由の検査のあと、今の保留を取って、確認に出す）。days が 0 なら無期限。
-      function askHold(label, days) {
+      var askHold = function (label, days) {
         var why = checkReason(area.value);
         problem.textContent = why;
         problem.hidden = why === '';
@@ -567,7 +569,7 @@ export const UI_JS = `'use strict';
         holdStatusLine(id).then(function (current) {
           openConfirm('自動の最終削除の保留', [['木の根', id], ['今の保留', current], ['新しい期限', until === undefined ? '無期限' : until + ' まで（' + label + '）。今の保留は、置き換わる'], ['理由', reason.trim() === '' ? '（なし）' : reason]], 'node.purgeHold', params, '保留しました（' + id + '）');
         });
-      }
+      };
       HOLD_CHOICES.forEach(function (c) {
         var b = el('button', '', '自動削除を保留（' + c.label + '）…');
         b.addEventListener('click', function () { askHold(c.label, c.days); });
@@ -576,6 +578,7 @@ export const UI_JS = `'use strict';
       var daysArea = el('textarea', '');
       daysArea.rows = 1;
       daysArea.maxLength = 3;
+      daysArea.inputMode = 'numeric';
       daysArea.placeholder = '日数（1〜' + HOLD_MAX_DAYS + '）';
       daysArea.value = daysDrafts.get(id) || '';
       daysArea.addEventListener('input', function () { daysDrafts.set(id, daysArea.value); });
