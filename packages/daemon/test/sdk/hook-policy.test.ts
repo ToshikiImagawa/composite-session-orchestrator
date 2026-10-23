@@ -71,6 +71,7 @@ describe("Bash は、コマンドで判定し、バックグラウンド実行�
 describe("自ノードの MCP ツールは許可し、未知のツールは拒否する（フェイルクローズ）", () => {
   it("mcp__node__* は許可する（自ノードの窓口。権限は窓口側のロールで絞る）", async () => {
     expect((await decide("mcp__node__report_progress", { text: "x" })).allow).toBe(true);
+    expect((await decide("mcp__node__whoami", {})).allow).toBe(true); // T10m-wh: 自分の nodeId・role を返すメタツール
   });
 
   it("読み取りのみで無害なツール（LS・TodoWrite・ToolSearch・BashOutput）は許可する", async () => {

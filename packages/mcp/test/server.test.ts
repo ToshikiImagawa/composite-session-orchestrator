@@ -204,6 +204,9 @@ describe("whoami ツール（T10m-wh）", () => {
       const who = tools.find((t) => t.name === "whoami");
       expect(who?.inputSchema).toMatchObject({ type: "object", properties: {} });
       expect(who?.description).toContain("nodeId");
+      // どのロールにも当てはまる文。tree_list への言及は、統合のときだけ
+      expect(who?.description).toContain("起動の指示の先頭に書かれた ID の確認に使える");
+      expect(who?.description?.includes("tree_list")).toBe(role === "integrator");
     }
     expect(counts).toEqual({ integrator: 15, child: 6 });
   });
@@ -262,6 +265,7 @@ describe("whoami ツール（T10m-wh）", () => {
     const relay = withWho(async () => ok({ role: "integrator", nodeId: "m1" }));
     const r = await (await connect("child", relay)).callTool({ name: "whoami", arguments: {} });
     expect(r.isError).toBe(true);
-    expect(text(r).code).toBe("whoami_failed");
+    expect(text(r).code).toBe("whoami_role_mismatch");
+    expect(text(r).nextActions.length).toBeGreaterThan(0);
   });
 });

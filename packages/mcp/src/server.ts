@@ -13,8 +13,8 @@ import {
   MCP_ROLES,
   type McpRole,
   toolsFor,
-  WHOAMI_DESCRIPTION,
   WHOAMI_TOOL,
+  whoamiDescription,
 } from "./tools.js";
 
 export interface ToolServerDeps {
@@ -45,13 +45,21 @@ async function whoamiTool(deps: ToolServerDeps, args: unknown) {
   }
   const who = await deps.relay.whoami();
   if (!who.ok) return asError(who.error);
-  if (who.value.nodeId === undefined || who.value.role !== deps.role) {
+  if (who.value.role !== deps.role) {
+    return asError(
+      failure(
+        "whoami_role_mismatch",
+        "daemon が返したロールが、この接続のロールと違う",
+        "接続のトークンを確認する（別のロールのトークンで接続していないか）",
+        "daemon → cso-mcp → 子の順に起動し直す",
+      ),
+    );
+  }
+  if (who.value.nodeId === undefined) {
     return asError(
       failure(
         "whoami_failed",
-        who.value.nodeId === undefined
-          ? "daemon が nodeId を返さなかった（古い daemon の可能性）"
-          : "daemon が返したロールが、接続のロールと違う",
+        "daemon が nodeId を返さなかった（古い daemon の可能性）",
         "daemon を更新して、起動し直す",
         "接続のトークンを確認する（daemon → cso-mcp → 子の順に起動する）",
       ),
@@ -72,7 +80,7 @@ export function createToolServer(deps: ToolServerDeps): Server {
       // 固定のメタツール（daemon の操作ではない）。入力はなし
       {
         name: WHOAMI_TOOL,
-        description: WHOAMI_DESCRIPTION,
+        description: whoamiDescription(deps.role),
         inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
       },
     ],

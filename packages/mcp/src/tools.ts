@@ -69,8 +69,8 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
  * 統合・子の両ロールに公開する。呼ぶたびに daemon に尋ねる（キャッシュしない）。
  */
 export const WHOAMI_TOOL = "whoami";
-export const WHOAMI_DESCRIPTION =
-  "自分の nodeId と role を返す（{ nodeId, role }）。起動の指示の先頭の ID の確認や、tree_list の self 列の代わりに使える。引数はない";
+export const whoamiDescription = (role: McpRole): string =>
+  `自分の nodeId と role を返す（{ nodeId, role }）。起動の指示の先頭に書かれた ID の確認に使える${role === "integrator" ? "（tree_list の self 列でも分かる）" : ""}。引数はない`;
 
 /** 操作名から MCP のツール名への変換（`.` を `_` にする）。ツール名を扱う箇所はすべてこれを使う。 */
 export const toolName = (op: DaemonOperation): string => op.replaceAll(".", "_");

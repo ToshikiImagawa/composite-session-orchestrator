@@ -72,8 +72,8 @@ proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト
 
 ## whoami の応答と、mcp の `whoami` ツール（T10m-wh）
 
-- `GET /v1/whoami`（Bearer）の応答は、`{ ok: true, value: { role, nodeId? } }`。**ノードのトークン（統合・子）には、自分の `nodeId` も返す**。人間のトークンには、nodeId がない（`{ role: "human" }`）。認証・失効・回数の制限・失敗の応答は変わらない。HTTP の応答で、core の `OperationMap` ではない。
-- mcp の固定のメタツール `whoami`（統合・子の両方。入力はなし。core の `ROLE_OPERATIONS` には入れない）は、自分の `{ nodeId, role }` を返す。**呼ぶたびに daemon に尋ねる**（キャッシュしない。トークンつきの要求の直前の身元の検証は、いつもどおり）。daemon が nodeId を返さない（古い daemon）、または、返したロールが接続のロールと違うときは、`whoami_failed`（「daemon を更新して、起動し直す」）。ツール一覧は、子が 6 個、統合が 15 個。
+- `GET /v1/whoami`（Bearer）の応答は、`{ ok: true, value: { role, nodeId? } }`。**ノードのトークン（統合・子）には、自分の `nodeId` も返す**。人間のトークンには、nodeId がない（`{ role: "human" }`）。**nodeId は、その呼び出しの Bearer の持ち主の ID だけ**（ほかのノードの ID は、返さない。daemon が認証したトークンから決める）。認証・失効・回数の制限・失敗の応答は変わらない。HTTP の応答で、core の `OperationMap` ではない。
+- mcp の固定のメタツール `whoami`（統合・子の両方。入力はなし。core の `ROLE_OPERATIONS` には入れない）は、自分の `{ nodeId, role }` を返す。**呼ぶたびに daemon に尋ねる**（キャッシュしない。トークンつきの要求の直前の身元の検証は、いつもどおり）。失敗は 2 種類: 返したロールが接続のロールと違うときは `whoami_role_mismatch`（トークンを確認する）。daemon が nodeId を返さない（古い daemon）ときは `whoami_failed`（「daemon を更新して、起動し直す」）。ツール一覧は、子が 6 個、統合が 15 個。
 
 ## 4. mcp の手順（契約）
 
