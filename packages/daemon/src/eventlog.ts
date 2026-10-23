@@ -272,6 +272,16 @@ export class EventLog {
     return this.current;
   }
 
+  /** `seq` より後のイベントの、`seq` と行為者（`actor`）。壊れた行は飛ばす（判定は、行為者の有無だけを使う）。 */
+  actorsAfter(seq: number): { seq: number; actor: Actor }[] {
+    const out: { seq: number; actor: Actor }[] = [];
+    for (const row of this.store.readAfter(seq)) {
+      const e = parseRow(row);
+      if (e.ok) out.push({ seq: e.value.seq, actor: e.value.actor });
+    }
+    return out;
+  }
+
   /** 最後のイベントの時刻（`at`）。空なら `undefined`。時計の異常の検知（自動の最終削除）に使う。 */
   lastEventAt(): string | undefined {
     return this.store.findBySeq(this.store.lastSeq())?.at;

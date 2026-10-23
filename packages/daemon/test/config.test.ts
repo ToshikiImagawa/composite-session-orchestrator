@@ -131,7 +131,7 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     const on = parseConfig(
       JSON.stringify({
         ...base,
-        wake: { enabled: true, intervalSec: 5, minIntervalSec: 10, maxPerRun: 3 },
+        wake: { enabled: true, intervalSec: 5, minIntervalSec: 10, maxPerRun: 3, maxPerHour: 500 },
       }),
     );
     expect(on.ok && on.value.wake).toEqual({
@@ -139,6 +139,7 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
       intervalSec: 5,
       minIntervalSec: 10,
       maxPerRun: 3,
+      maxPerHour: 500,
     });
     expect(parseConfig(JSON.stringify({ ...base, wake: {} })).ok).toBe(true);
     for (const v of [
@@ -150,6 +151,9 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
       { minIntervalSec: 9 },
       { maxPerRun: 0 },
       { maxPerRun: 101 },
+      { maxPerHour: 0 },
+      { maxPerHour: 1001 },
+      { maxPerHour: 1.5 },
       { unknown: 1 },
     ]) {
       expect(parseConfig(JSON.stringify({ ...base, wake: v })).ok, JSON.stringify(v)).toBe(false);

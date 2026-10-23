@@ -546,6 +546,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           intervalMs: (config.wake.intervalSec ?? DEFAULT_WAKE_INTERVAL_SEC) * 1000,
           minIntervalMs: (config.wake.minIntervalSec ?? DEFAULT_WAKE_MIN_INTERVAL_SEC) * 1000,
           maxPerRun: config.wake.maxPerRun ?? DEFAULT_WAKE_MAX_PER_RUN,
+          ...(config.wake.maxPerHour === undefined ? {} : { maxPerHour: config.wake.maxPerHour }),
           deliver: createInstructionDelivery({
             log,
             clock,

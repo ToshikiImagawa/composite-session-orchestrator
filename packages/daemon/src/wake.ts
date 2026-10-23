@@ -39,6 +39,9 @@ export const WAKE_KINDS: ReadonlySet<InboxKind> = new Set([
 ]);
 
 const MAX_CONSECUTIVE_FAILURES = 3;
+/** 起こしたあと、そのノードが何も操作しなくても、この時間（単調時計）たてば、また起こせる（起きたまま何もしないノードを、永久に起こさなくならないように）。 */
+const BUNDLE_STALE_MS = 10 * 60_000;
+export const DEFAULT_MAX_PER_HOUR = 120;
 const HOUR_MS = 3_600_000;
 const NEAR_LIMIT_RATIO = 0.8;
 
@@ -52,6 +55,8 @@ export interface WakerDeps {
   readonly intervalMs: number;
   readonly minIntervalMs: number;
   readonly maxPerRun: number;
+  /** 全ノード合計で、1 時間（単調時計の窓）に起こす数の上限。既定 `DEFAULT_MAX_PER_HOUR`（120）。 */
+  readonly maxPerHour?: number;
   /** 追加指示を、子へ届ける（`InstructionDelivery.deliver`）。 */
   readonly deliver: InstructionDelivery["deliver"];
   /** アダプタが、そのノードを管理しているか。 */
@@ -77,7 +82,8 @@ interface NodeStats {
 }
 
 export function createWaker(deps: WakerDeps): Waker {
-  const startedMono = deps.startMonoMs ?? deps.monoMs();
+  let startedMono = deps.startMonoMs ?? deps.monoMs();
+  const maxPerHour = deps.maxPerHour ?? DEFAULT_MAX_PER_HOUR;
   let running = false;
   let stopRequested = false;
   let started = false;
@@ -94,6 +100,13 @@ export function createWaker(deps: WakerDeps): Waker {
   /** ノードごとの、直近 1 時間に起こした時刻（単調時計）。 */
   const recent = new Map<string, number[]>();
   const stats = new Map<string, NodeStats>();
+  /** 配送済みで、そのノード自身の操作を待っている起こす指示（束ねる）。メモリだけ。 */
+  const pending = new Map<string, { seq: number; mono: number }>();
+  /** 全ノード合計の、直近 1 時間に起こした時刻（単調時計）。 */
+  let globalWakes: number[] = [];
+  /** nearLimit・hourlyLimit を、最後に出した時刻（窓ごとに 1 回だけ出す）。 */
+  const nearNotified = new Map<string, number>();
+  let hourlyNotified: number | undefined;
   let summaryFrom = startedMono;
   const hourlyMax = Math.max(1, Math.floor(HOUR_MS / deps.minIntervalMs));
 
@@ -133,8 +146,7 @@ export function createWaker(deps: WakerDeps): Waker {
   async function wake(
     nodeId: string,
     maxSeq: number,
-    mono: number,
-  ): Promise<"woken" | "already" | "failed"> {
+  ): Promise<{ result: "woken" | "already" | "failed"; seq?: number }> {
     const requestId = `wake-${nodeId}-${maxSeq}`;
     const recorded = appendAtomically(deps.log, deps.clock, requestId, SYSTEM, [
       { type: "node.instructed", payload: { nodeId, text: WAKE_TEXT } },
@@ -143,16 +155,15 @@ export function createWaker(deps: WakerDeps): Waker {
     if (!recorded.ok || seq === undefined) {
       const code = recorded.ok ? "noSeq" : recorded.error.code;
       note("wake.failed", { nodeId, code });
-      return "failed";
+      return { result: "failed" };
     }
-    if (isDelivered(deps.log.state(), seq)) return "already";
+    if (isDelivered(deps.log.state(), seq)) return { result: "already", seq };
     const sent: Result<undefined, Failure> = await deps.deliver(nodeId, WAKE_TEXT, seq);
     if (!sent.ok) {
       note("wake.failed", { nodeId, code: sent.error.code });
-      return "failed";
+      return { result: "failed" };
     }
-    void mono;
-    return "woken";
+    return { result: "woken", seq };
   }
 
   async function runOnce(): Promise<{ skipped: boolean; woken: string[] }> {
@@ -186,9 +197,31 @@ export function createWaker(deps: WakerDeps): Waker {
         if (posted >= deps.maxPerRun) break;
         const prev = lastAttempt.get(c.nodeId) ?? startedMono;
         if (mono - prev < deps.minIntervalMs) continue; // 間隔のために見送る（次の周期に、調べ直す）
+        // 束ねる: 配送済みの起こす指示のあと、そのノード自身の操作が 1 つもない間は、新しく起こさない（ターンの間に積み上げない）。
+        const waiting = pending.get(c.nodeId);
+        if (waiting !== undefined) {
+          const acted =
+            mono - waiting.mono >= BUNDLE_STALE_MS ||
+            (deps.log.actorsAfter?.(waiting.seq) ?? []).some(
+              (e) => "nodeId" in e.actor && e.actor.nodeId === c.nodeId,
+            ) ||
+            deps.log.actorsAfter === undefined;
+          if (!acted) continue;
+          pending.delete(c.nodeId);
+        }
+        // 全体の上限（全ノード合計。1 時間の窓）。
+        globalWakes = globalWakes.filter((t) => mono - t < HOUR_MS);
+        if (globalWakes.length >= maxPerHour) {
+          if (hourlyNotified === undefined || mono - hourlyNotified >= HOUR_MS) {
+            hourlyNotified = mono;
+            note("wake.hourlyLimit", { max: maxPerHour });
+          }
+          break;
+        }
         posted += 1;
         lastAttempt.set(c.nodeId, mono);
-        const r = await wake(c.nodeId, c.maxSeq, mono);
+        const woke = await wake(c.nodeId, c.maxSeq);
+        const r = woke.result;
         if (r === "failed") {
           const f = (failures.get(c.nodeId) ?? 0) + 1;
           failures.set(c.nodeId, f);
@@ -207,11 +240,18 @@ export function createWaker(deps: WakerDeps): Waker {
         if (r === "already") continue; // 前の実行（再起動の前）で、配送済み。送り直さない
         woken.push(c.nodeId);
         statOf(c.nodeId).woken += 1;
+        globalWakes.push(mono);
+        if (woke.seq !== undefined) pending.set(c.nodeId, { seq: woke.seq, mono });
         const times = (recent.get(c.nodeId) ?? []).filter((t) => mono - t < HOUR_MS);
         times.push(mono);
         recent.set(c.nodeId, times);
         note("wake.woken", { nodeId: c.nodeId });
-        if (times.length >= Math.ceil(hourlyMax * NEAR_LIMIT_RATIO)) {
+        const notified = nearNotified.get(c.nodeId);
+        if (
+          times.length >= Math.ceil(hourlyMax * NEAR_LIMIT_RATIO) &&
+          (notified === undefined || mono - notified >= HOUR_MS)
+        ) {
+          nearNotified.set(c.nodeId, mono); // 窓（1 時間）ごとに 1 回だけ
           note("wake.nearLimit", { nodeId: c.nodeId, count: times.length, max: hourlyMax });
         }
       }
@@ -257,6 +297,8 @@ export function createWaker(deps: WakerDeps): Waker {
   return {
     start() {
       if (started) return;
+      // 起動の時刻を決め直す（作ってから start までの時間は、間隔に数えない）。
+      if (deps.startMonoMs === undefined) startedMono = deps.monoMs();
       started = true;
       stopRequested = false;
       generation += 1;

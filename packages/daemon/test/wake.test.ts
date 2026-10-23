@@ -41,7 +41,14 @@ const manualTimers = () => {
 
 /** root ─ m1(統合。running) ─ a(実装)・x(統合。running) ─ y(実装)。m2(統合) ─ b。 */
 const rig = (
-  opts: { minIntervalMs?: number; maxPerRun?: number; managed?: (id: string) => boolean } = {},
+  opts: {
+    minIntervalMs?: number;
+    maxPerRun?: number;
+    maxPerHour?: number;
+    managed?: (id: string) => boolean;
+    /** true なら、`startMonoMs` を渡さない（`start()` で、起動の時刻を決める）。 */
+    noStartMono?: boolean;
+  } = {},
 ) => {
   const opened = EventLog.open(createMemoryStore().open(), {
     clock: () => new Date(T0).toISOString(),
@@ -96,8 +103,9 @@ const rig = (
       log,
       clock: () => new Date(T0).toISOString(),
       monoMs: () => mono,
-      startMonoMs: 0,
+      ...(opts.noStartMono ? {} : { startMonoMs: 0 }),
       intervalMs: 15_000,
+      ...(opts.maxPerHour === undefined ? {} : { maxPerHour: opts.maxPerHour }),
       minIntervalMs: opts.minIntervalMs ?? 60_000,
       maxPerRun: opts.maxPerRun ?? 10,
       deliver: delivery.deliver,
@@ -175,6 +183,13 @@ describe("起こす（T24-w）", () => {
   it.each([
     ["waiting", (r: ReturnType<typeof rig>) => r.ev("m1", { type: "requestDecision" })],
     ["stopping", (r: ReturnType<typeof rig>) => r.ev("m1", { type: "stop", mode: "graceful" })],
+    [
+      "stopped",
+      (r: ReturnType<typeof rig>) => {
+        r.ev("m1", { type: "stop", mode: "immediate" });
+        r.ev("m1", { type: "confirmStopped" });
+      },
+    ],
   ])("running でないノード（%s）は起こさない", async (_n, change) => {
     const r = rig();
     change(r);
@@ -215,6 +230,11 @@ describe("起こす（T24-w）", () => {
     r.setMono(60_000);
     expect((await w.runOnce()).woken).toEqual(["m1"]);
     r.item("f2", "failure", "a");
+    r.log.append({
+      requestId: "m1-acts-interval",
+      actor: { nodeId: "m1" },
+      body: { type: "inbox.added", payload: { id: "m1-i", kind: "info", nodeId: "m1" } } as never,
+    }); // m1 が操作した（束ねるを解く。ここでは、間隔だけを確かめる）
     r.setMono(90_000); // 前回から 30 秒
     expect((await w.runOnce()).woken).toEqual([]);
     r.setMono(120_000);
@@ -333,6 +353,109 @@ describe("起こす（T24-w）", () => {
     await w.stop();
     expect(r.sent.length).toBeLessThanOrEqual(1);
     w.start();
+    await w.stop();
+  });
+
+  it("束ねる: 起こしたあと、そのノード自身の操作（actor が自分のイベント）が 1 つもない間は、新しい項目が届いても、新しく起こさない。操作したら、次を起こせる", async () => {
+    const r = rig();
+    const w = r.waker();
+    r.item("f1", "failure", "a");
+    r.setMono(60_000);
+    expect((await w.runOnce()).woken).toEqual(["m1"]);
+    r.item("f2", "failure", "a");
+    r.setMono(130_000); // 間隔は過ぎたが、m1 はまだ何も操作していない
+    expect((await w.runOnce()).woken).toEqual([]);
+    expect(r.sent).toHaveLength(1);
+    // m1 が操作した（m1 を actor とするイベント）
+    const acted = r.log.append({
+      requestId: "m1-acts",
+      actor: { nodeId: "m1" },
+      body: {
+        type: "inbox.added",
+        payload: { id: "m1-info", kind: "info", nodeId: "m1" },
+      } as never,
+    });
+    expect(acted.ok).toBe(true);
+    r.setMono(200_000);
+    expect((await w.runOnce()).woken).toEqual(["m1"]);
+    expect(r.sent).toHaveLength(2);
+  });
+
+  it("束ねる: ほかのノードの操作では、解けない。10 分たてば（何も操作していなくても）、また起こせる", async () => {
+    const r = rig();
+    const w = r.waker();
+    r.item("f1", "failure", "a");
+    r.setMono(60_000);
+    await w.runOnce();
+    r.item("f2", "failure", "a");
+    r.log.append({
+      requestId: "other-acts",
+      actor: { nodeId: "a" },
+      body: { type: "inbox.added", payload: { id: "a-info", kind: "info", nodeId: "a" } } as never,
+    });
+    r.setMono(300_000);
+    expect((await w.runOnce()).woken).toEqual([]);
+    r.setMono(60_000 + 10 * 60_000 + 1);
+    expect((await w.runOnce()).woken).toEqual(["m1"]);
+  });
+
+  it("全体の上限 maxPerHour（全ノード合計）: 超える分は、1 時間たつまで起こさない。上限に達したことは、窓ごとに 1 回だけ出す", async () => {
+    const r = rig({ maxPerHour: 2 });
+    const w = r.waker();
+    r.item("f1", "failure", "a"); // m1
+    r.item("f2", "failure", "y"); // x
+    r.item("f3", "failure", "b"); // m2
+    r.setMono(60_000);
+    const first = (await w.runOnce()).woken;
+    expect(first).toHaveLength(2);
+    r.setMono(120_000);
+    expect((await w.runOnce()).woken).toEqual([]);
+    r.setMono(180_000);
+    expect((await w.runOnce()).woken).toEqual([]);
+    expect(r.notes.filter((n) => n.event === "wake.hourlyLimit")).toHaveLength(1);
+    r.setMono(60_000 + 3_600_000 + 1_000);
+    expect((await w.runOnce()).woken).toHaveLength(1);
+    expect(r.sent).toHaveLength(3);
+  });
+
+  it("nearLimit は、ノードごとに、時間の窓（1 時間）につき 1 回だけ出す", async () => {
+    const r = rig({ minIntervalMs: 600_000 }); // 1 時間に最大 6 回。5 回目から 8 割
+    const w = r.waker();
+    for (let i = 1; i <= 6; i++) {
+      r.item(`f${i}`, "failure", "a");
+      r.log.append({
+        requestId: `m1-acts-${i}`,
+        actor: { nodeId: "m1" },
+        body: {
+          type: "inbox.added",
+          payload: { id: `m1-i${i}`, kind: "info", nodeId: "m1" },
+        } as never,
+      });
+      r.setMono(i * 600_000);
+      await w.runOnce();
+      // 起こしたあとの操作（束ねるを解く）
+      r.log.append({
+        requestId: `m1-acts-after-${i}`,
+        actor: { nodeId: "m1" },
+        body: {
+          type: "inbox.added",
+          payload: { id: `m1-j${i}`, kind: "info", nodeId: "m1" },
+        } as never,
+      });
+    }
+    expect(r.notes.filter((n) => n.event === "wake.nearLimit")).toHaveLength(1);
+  });
+
+  it("start() で、起動の時刻を決め直す（作ってから start までの時間は、間隔に数えない）", async () => {
+    const r = rig({ noStartMono: true });
+    const w = r.waker(); // 作った時刻: mono 0
+    r.setMono(1_000_000);
+    w.start();
+    r.item("f1", "failure", "a");
+    r.setMono(1_030_000); // start から 30 秒
+    expect((await w.runOnce()).woken).toEqual([]);
+    r.setMono(1_060_000);
+    expect((await w.runOnce()).woken).toEqual(["m1"]);
     await w.stop();
   });
 });
