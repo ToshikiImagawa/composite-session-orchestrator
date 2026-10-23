@@ -118,6 +118,7 @@ proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト
   - **身元の失敗**（不一致・ファイルが読めない・不正。`daemon_identity_failed`）: 待たずに失敗し、**終了コード 3**（daemon を起動し直して設定を確認するまで、再起動を繰り返しても直らない）。待ち受けない。
   - **一時的な失敗**（429・503・タイムアウト・接続不可）: 1・2・4・8 秒待って、最大 5 回試す（標準エラーに `{"event":"identityCheckRetry",…}`）。尽きたら**終了コード 1**。途中で身元の失敗に変わったら、そこで終了コード 3。
   - `--no-strict-start`: 1 回だけ検証し、失敗しても起動は続ける（最初のトークンつきの要求が、`daemon_identity_failed` などで失敗する）。
+  - **supervisor の設定例**: 終了コード 3（と 2）では再起動しない。1 のときだけ、間隔をあけて再起動する。systemd なら `Restart=on-failure` と `RestartPreventExitStatus=2 3`、launchd なら `KeepAlive` の `SuccessfulExit=false` に、起動の間隔（`ThrottleInterval`）をあわせる（3 を止めるには、ラッパーで終了コードを見る）。
   - `--strict-start` と `--no-strict-start` の同時指定、`--config` なしの `--strict-start` は、終了コード 2。
 - 検証の失敗では、トークンを送っていないので、操作は実行されていない（`daemon_result_unknown` にはしない）。
 
