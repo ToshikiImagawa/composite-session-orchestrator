@@ -35,4 +35,5 @@ export * from "./reclaim.js";
 export * from "./scope.js";
 export * from "./transition.js";
 export * from "./tree.js";
+export * from "./ui-view.js";
 export * from "./visible.js";
