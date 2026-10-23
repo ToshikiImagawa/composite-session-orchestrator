@@ -2,7 +2,7 @@
  * HTML 画面の表示モデル（T23。FR_021）。I/O を持たない純粋関数。
  *
  * - **含めるもの**: ノードの識別子・役割・親・状態・依存、未解決の受信箱の項目、未回答の判断、未判定の拡張要求。
- * - **含めないもの**: トークン・秘密・パス（作業ツリーの絶対パス・作業範囲の場所・最終コミットなど）。ブリーフ（目的・受け入れ基準）も含めない。
+ * - **含めないもの**: トークン・秘密・パス（作業ツリーの絶対パス・作業範囲の場所・最終コミットなど）。ただし、拡張要求の対象は、`uiTargetOf` の規則を満たすものだけ載せる（T23-b）。ブリーフ（目的・受け入れ基準）も含めない。
  * - 子が書いた文字列（要約・判断の質問・選択肢・拡張の理由）は、制御文字（タブ・改行は残す）と書式制御文字（U+202E など）を除いて、種類ごとの上限（コードポイント）に切る。
  *   切ったときは、末尾に `UI_CUT_MARK`（「…（省略）」）を付ける。画面は、これを `textContent` だけで描く。
  *   上限: 要約・理由 `UI_TEXT_MAX`（200）、判断の質問 `UI_QUESTION_MAX`（2,000）、選択肢 `UI_OPTION_MAX`（500。サーバーの選択肢の上限と同じ）。
@@ -20,6 +20,8 @@ export const UI_TEXT_MAX = 200;
 export const UI_QUESTION_MAX = 2000;
 /** 選択肢の上限（サーバーの `LIMITS.optionLength` と同じ）。これを超える・文字を除いたものは、`choice` に使えない。 */
 export const UI_OPTION_MAX = 500;
+/** 拡張要求の対象の上限（コードポイント）。超えたものは、切らずに隠す（切った値を承認させない）。 */
+export const UI_TARGET_MAX = 200;
 /** 上限で切ったときに、末尾に付ける印。 */
 export const UI_CUT_MARK = "…（省略）";
 export const UI_LIMITS = {
@@ -68,6 +70,12 @@ export interface UiExtension {
   readonly id: string;
   readonly nodeId: string;
   readonly reason: string;
+  /** 要求の対象の種類（write: 書き込みの場所、command: 実行するコマンド）。種類が分からなければ、なし。 */
+  readonly kind?: "write" | "command";
+  /** 要求の対象。表示してよいもの（`uiTargetOf`）だけ。隠したときは、なし。 */
+  readonly target?: string;
+  /** 対象を隠した（絶対パス・`..`・制御文字・長すぎる、など）。画面は、承認・切り出しをさせない。 */
+  readonly targetHidden: boolean;
 }
 
 export interface UiView {
@@ -113,6 +121,42 @@ export function uiText(x: unknown, max: number = UI_TEXT_MAX): string {
 function uiOption(x: unknown): UiOption {
   const r = sanitize(x, UI_OPTION_MAX);
   return { text: r.text, truncated: r.cut || r.removed };
+}
+
+const ABSOLUTE_PATH = /^(?:[/\\~]|[A-Za-z][A-Za-z0-9+.-]*:)/;
+// command は許可リスト（これ以外の文字を含むものは隠す。`$`・バッククォート・`{}`・引用符・`~`・`\`・`;|&<>()` など）。
+const COMMAND_ALLOWED = /^[A-Za-z0-9._:@%+=,/ -]+$/;
+// 単語の先頭の `/`（先頭・空白・`=`・`,`・`:` の直後。絶対パス）と、`-I/usr/lib` のような、短いオプションに続く `/`
+const COMMAND_ABSOLUTE_WORD = /(?:^|[\s=,:])\//;
+const COMMAND_OPTION_SLASH = /(?:^|\s)-[A-Za-z]\//;
+const PARENT_SEGMENT = /(?:^|[\s=,:/\\])\.\.(?:$|[\s,:/\\])/;
+
+/**
+ * 拡張要求の対象の表示（T23-b）。表示してよいのは、作業ツリー内の相対パス（write）と、絶対パス・`..` を含まないコマンド（command）だけ。
+ * 絶対パス・`..`・制御文字（タブ・改行も）・書式制御文字・空・先頭か末尾に空白がある・長すぎる（`UI_TARGET_MAX` コードポイント超）ものは、**切らずに隠す**
+ * （切った値を承認すると、別の対象を許可してしまう）。command は**許可リスト**（`COMMAND_ALLOWED`）に合うものだけを表示し、それ以外の文字を含むものは隠す。承認は、daemon が記録済みの対象をそのまま許可するので、画面の表示と実際の許可は一致する。
+ */
+export function uiTargetOf(t: unknown): Pick<UiExtension, "kind" | "target" | "targetHidden"> {
+  if (typeof t !== "object" || t === null) return { targetHidden: true };
+  const { kind, value } = t as { kind?: unknown; value?: unknown };
+  if (kind !== "write" && kind !== "command") return { targetHidden: true };
+  const hidden = { kind, targetHidden: true } as const;
+  if (typeof value !== "string" || value.trim() === "" || value !== value.trim()) return hidden;
+  let length = 0;
+  for (const ch of value) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp < 0x20 || (cp >= 0x7f && cp <= 0x9f) || FORMAT_CHAR.test(ch)) return hidden;
+    length++;
+  }
+  if (length > UI_TARGET_MAX) return hidden;
+  const bad =
+    kind === "write"
+      ? ABSOLUTE_PATH.test(value) || PARENT_SEGMENT.test(value)
+      : !COMMAND_ALLOWED.test(value) ||
+        COMMAND_ABSOLUTE_WORD.test(value) ||
+        COMMAND_OPTION_SLASH.test(value) ||
+        PARENT_SEGMENT.test(value);
+  return bad ? hidden : { kind, target: value, targetHidden: false };
 }
 
 /** 識別子の形でなければ、空にする（画面に、形の崩れた文字列を出さない）。 */
@@ -187,6 +231,7 @@ export function uiViewOf(state: OrchState): UiView {
       id: idOf(x.extensionId),
       nodeId: idOf(x.nodeId),
       reason: uiText(x.reason),
+      ...uiTargetOf(x.target),
     }),
   );
 

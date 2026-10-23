@@ -73,6 +73,8 @@ describe("画面の資産（走査）", () => {
       "truncated",
       "decisions",
       "extensions",
+      "target",
+      "targetHidden",
       "inbox",
       "nodes",
       "lastSeq",
@@ -169,6 +171,17 @@ describe("画面の資産（走査）", () => {
     expect(used.has("textContent")).toBe(true); // 抜き出せていること（空の集合で通らない）
     const unknown = [...used].filter((x) => !SAFE.has(x));
     expect(unknown).toEqual([]);
+  });
+
+  it("拡張要求の判定（T23-b）: scope.decide は、確認（openConfirm）を挟んでだけ送る。params は extensionId と decision だけ。対象が隠れていれば、却下以外のボタンを無効にする", () => {
+    expect(UI_JS).toContain("'scope.decide'");
+    expect(UI_JS).toContain("{ extensionId: x.id, decision: decision }");
+    expect([...UI_JS.matchAll(/'scope\.decide'/g)]).toHaveLength(1);
+    expect(UI_JS).toContain("b.disabled = x.targetHidden && decision !== 'reject'");
+    // sendPending 以外に fetch がない（確認なしで送る経路がない）
+    expect([...UI_JS.matchAll(/\bfetch\(\s*'\/v1\/request'/g)]).toHaveLength(1);
+    // granted（許可する対象）を、画面から送らない
+    expect(UI_JS).not.toContain("granted");
   });
 
   it("el に渡すタグは、div・span・p・button・textarea だけ（実行時にも、許可リストで拒む）", () => {

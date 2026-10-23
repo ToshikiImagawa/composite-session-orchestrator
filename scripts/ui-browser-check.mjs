@@ -86,6 +86,33 @@ state = {
     },
   ],
 };
+// 拡張要求（T23-b）: x1 は表示してよい対象、x2 は絶対パスにあたる対象（隠れる）、x3 は XSS 文字列の理由
+state = {
+  ...state,
+  extensions: [
+    {
+      extensionId: "x1",
+      nodeId: "a",
+      status: "open",
+      reason: "テストを足したい",
+      target: { kind: "write", value: "src/ok.ts" },
+    },
+    {
+      extensionId: "x2",
+      nodeId: "a",
+      status: "open",
+      reason: "外へ書きたい",
+      target: { kind: "write", value: "../outside/secret" },
+    },
+    {
+      extensionId: "x3",
+      nodeId: "a",
+      status: "open",
+      reason: XSS,
+      target: { kind: "command", value: "pnpm test" },
+    },
+  ],
+};
 // 操作の呼び出しの記録（画面の操作の確認用）。d2 の最初の回答は、失敗させる（失敗の表示と、同じ要求 ID での再送の確認）
 const calls = [];
 let failD2Once = true;
@@ -110,6 +137,12 @@ const handlers = {
     bump({ decisions: state.decisions.filter((d) => d.decisionId !== req.params.decisionId) });
     return { ok: true, value: { accepted: true } };
   },
+};
+handlers["scope.decide"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  await new Promise((r) => setTimeout(r, 100));
+  bump({ extensions: state.extensions.filter((x) => x.extensionId !== req.params.extensionId) });
+  return { ok: true, value: { state: "running" } };
 };
 const credentials = createCredentialStore({ humanToken: HUMAN });
 const server = createApiServer({ credentials, getState: () => state, handlers });
@@ -335,6 +368,38 @@ const d3Calls = calls.filter((c) => c.params.decisionId === "d3");
 ops.answeredOnceAfter429 = d3Calls.length === 1; // 429 は、サーバーに届いていない（route で止めた）。待ったあとの 1 回だけが届く
 // (f) 子が書いた質問・選択肢の XSS 文字列は、実行されない（確認画面でも）
 ops.xssNotExecuted = (await pageO.evaluate(() => window.__xss ?? null)) === null;
+// (g) 拡張要求の判定（T23-b）: 対象を表示 → 確認（対象つき）→ 送信。許可する対象は送らない（daemon が記録済みの対象を使う）
+const ext1 = pageO.locator("#decisions .card", { hasText: "テストを足したい" });
+await ext1.waitFor();
+ops.ext1ShowsTarget = (await ext1.innerText()).includes("src/ok.ts");
+await ext1.getByRole("button", { name: "承認", exact: true }).click();
+const extConfirm = await confirmText();
+ops.ext1ConfirmShowsTarget = extConfirm.includes("src/ok.ts") && extConfirm.includes("承認");
+await pageO.getByRole("button", { name: "この内容で送る" }).click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("拡張要求を承認しました"),
+  null,
+  { timeout: 5000 },
+);
+const decideCalls = calls.filter((c) => c.operation === "scope.decide");
+ops.ext1SentOnce =
+  decideCalls.length === 1 &&
+  JSON.stringify(decideCalls[0].params) ===
+    JSON.stringify({ extensionId: "x1", decision: "approve" });
+// 隠れた対象（x2）: 値は画面に出ない。承認・切り出しは無効で、却下だけ押せる
+const ext2 = pageO.locator("#decisions .card", { hasText: "外へ書きたい" });
+await ext2.waitFor();
+ops.ext2HidesValue = !(await ext2.innerText()).includes("outside");
+ops.ext2ApproveDisabled = await ext2
+  .getByRole("button", { name: "承認", exact: true })
+  .isDisabled();
+ops.ext2SplitDisabled = await ext2
+  .getByRole("button", { name: "切り出し", exact: true })
+  .isDisabled();
+ops.ext2RejectEnabled = await ext2.getByRole("button", { name: "却下", exact: true }).isEnabled();
+// 子が書いた理由の XSS 文字列（x3）は、実行されない
+ops.ext3Rendered =
+  (await pageO.locator("#decisions .card", { hasText: "pnpm test" }).count()) === 1;
 ops.errors = opErrors;
 out.operations = ops;
 
