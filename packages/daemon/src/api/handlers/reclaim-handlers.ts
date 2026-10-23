@@ -44,8 +44,10 @@ type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failu
 
 /** 作業ツリーの事実（`discarded` は、`node.discardDecided` の記録から導く）。 */
 export type WorktreeFacts = Omit<ReclaimNodeFacts, "discarded"> & {
-  /** ブランチの先端（最終コミットの SHA）。取れなければ省略する（回収は止めない）。 */
+  /** ブランチの先端（最終コミットの SHA）。ブランチがなければ省略する（回収は止めない）。 */
   readonly headCommit?: string;
+  /** 先端の取得に失敗した（ブランチがないのとは別。不明。T21r-e）。 */
+  readonly headUnknown?: true;
 };
 
 /**
@@ -163,10 +165,35 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     }
   };
 
-  /** 今のブランチの先端。取れなければ `undefined`（不明）。 */
-  const currentTip = async (nodeId: string): Promise<string | undefined> => {
-    const f = await safely(nodeId, () => ports.factsFor(nodeId), undefined);
-    return isCommitSha(f?.headCommit) ? f?.headCommit : undefined;
+  /** 先端の状態: 先端あり／ブランチなし（照合は「なし」どうし）／取得失敗（不明。「なし」と取り違えない）。 */
+  type Tip = { kind: "tip"; sha: string } | { kind: "none" } | { kind: "unknown" };
+
+  const tipOfFacts = (f: WorktreeFacts | undefined): Tip => {
+    if (f === undefined) return { kind: "none" };
+    if (f.headUnknown === true) return { kind: "unknown" };
+    if (f.headCommit === undefined) return { kind: "none" };
+    return isCommitSha(f.headCommit) ? { kind: "tip", sha: f.headCommit } : { kind: "unknown" };
+  };
+
+  const currentTip = async (nodeId: string): Promise<Tip> => {
+    try {
+      return tipOfFacts(await ports.factsFor(nodeId));
+    } catch (e) {
+      deps.onFailure?.(nodeId, String(e));
+      return { kind: "unknown" };
+    }
+  };
+
+  /** 記録した判断（`discarded`）と、いまの先端の照合。記録に先端の情報がない（この機能の前の記録）なら、照合しない。 */
+  const checkRecorded = (
+    d: NonNullable<NodeRecord["discarded"]>,
+    tip: Tip,
+  ): "ok" | "mismatch" | "unknown" => {
+    if (d.expectTip === undefined && d.noTip !== true) return "ok";
+    if (tip.kind === "unknown") return "unknown";
+    if (d.expectTip !== undefined)
+      return tip.kind === "tip" && tip.sha === d.expectTip ? "ok" : "mismatch";
+    return tip.kind === "none" ? "ok" : "mismatch";
   };
 
   /** 強制の対象になりうるノード（停止した、または、そこから回収可能にした）。 */
@@ -177,6 +204,13 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
    * 先端の不一致。原因・次の操作・監査のログに出すのは、ノード ID だけ（SHA は出さない）。
    * 何が違ったのかは、再確認（`cso reclaim`）で人間が見る。
    */
+  const tipUnknown = (ids: readonly string[], when: string) =>
+    fail(
+      "tipUnknown",
+      `${when}、ブランチの先端を取得できない（不明）ノード: ${ids.join("、")}`,
+      "git の状態を確認して、もう一度 cso reclaim で確かめ直す",
+    );
+
   const tipMismatch = (ids: readonly string[], when: string) =>
     fail(
       "tipMismatch",
@@ -256,7 +290,7 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     for (const n of plan) {
       if (n.state === "archived") continue;
       const tip = await currentTip(n.id);
-      if (tip !== undefined) out[n.id] = tip;
+      if (tip.kind === "tip") out[n.id] = tip.sha;
     }
     return out;
   }
@@ -334,8 +368,11 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
       const expectTips: Readonly<Record<string, string>> = req.params.expectTips ?? {};
       const node = log.state().nodes.find((n) => n.id === nodeId);
       if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
-      if (node.discarded !== undefined) return { ok: true, value: { accepted: true } }; // 記録済み（冪等）
-      if (node.state !== "stopped") {
+      // 判断の更新（先端が動いて tipMismatch になったあとの、指示し直し）は、回収可能にした（reclaimable）ノードにも許す。
+      if (node.discarded !== undefined && !forceCandidate(node)) {
+        return { ok: true, value: { accepted: true } }; // 記録済み（冪等）
+      }
+      if (node.state !== "stopped" && node.discarded === undefined) {
         return fail(
           "notStopped",
           `ノード ${nodeId} は ${node.state} で、破棄を判断できない（停止済み〔stopped〕のノードだけ）`,
@@ -355,23 +392,34 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
           );
         }
       }
-      // 先端の照合。対象は、表示した先端と今の先端が（どちらもなしを含めて）一致すること。配下は、表示したもののうち、強制になりうる
-      // ノード（停止したノード）だけ（画面の内容が、全体として古くないことの確認）。
+      // 先端の照合（冪等の分岐より前に行う）。対象は、表示した先端と今の先端が（どちらもなしを含めて）一致すること。配下は、
+      // 表示したもののうち強制になりうるノード（停止したノード）だけ（画面の内容が、全体として古くないことの確認）。
       const mismatched: string[] = [];
+      const unknown: string[] = [];
       for (const n of subtree) {
         if (n.state === "archived") continue;
         const expected = expectTips[n.id];
         if (n.id !== nodeId && (expected === undefined || !forceCandidate(n))) continue;
-        if (n.id === nodeId || forceCandidate(n)) {
-          if ((await currentTip(n.id)) !== expected) mismatched.push(n.id);
-        }
+        const tip = await currentTip(n.id);
+        if (tip.kind === "unknown") unknown.push(n.id);
+        else if ((tip.kind === "tip" ? tip.sha : undefined) !== expected) mismatched.push(n.id);
       }
+      if (unknown.length > 0) return tipUnknown(unknown, "判断の記録の前に");
       if (mismatched.length > 0) return tipMismatch(mismatched, "判断の記録の前に");
+      // 常に、先端（expectTip）か、先端がなかったこと（noTip）のどちらかを記録する（照合を、記録のないものに倒さない）。
       const expectTip = expectTips[nodeId];
+      const same =
+        node.discarded !== undefined &&
+        node.discarded.expectTip === expectTip &&
+        (node.discarded.noTip === true) === (expectTip === undefined);
+      if (same) return { ok: true, value: { accepted: true } };
       const r = appendAtomically(log, deps.clock, req.requestId, { human: true }, [
         {
           type: "node.discardDecided",
-          payload: { nodeId, ...(expectTip === undefined ? {} : { expectTip }) },
+          payload: {
+            nodeId,
+            ...(expectTip === undefined ? { noTip: true as const } : { expectTip }),
+          },
         },
       ]);
       return r.ok ? { ok: true, value: { accepted: true } } : r;
@@ -462,12 +510,15 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
     {
       const now = log.state();
       const moved: string[] = [];
+      const unknown: string[] = [];
       for (const n of plan) {
         const rec = now.nodes.find((x) => x.id === n.id);
-        const expected = rec?.discarded?.expectTip;
-        if (!forceCandidate(rec) || rec.discarded === undefined || expected === undefined) continue;
-        if ((await currentTip(n.id)) !== expected) moved.push(n.id);
+        if (!forceCandidate(rec) || rec.discarded === undefined) continue;
+        const verdict = checkRecorded(rec.discarded, await currentTip(n.id));
+        if (verdict === "mismatch") moved.push(n.id);
+        else if (verdict === "unknown") unknown.push(n.id);
       }
+      if (unknown.length > 0) return tipUnknown(unknown, "回収の前に");
       if (moved.length > 0) return tipMismatch(moved, "回収の前に");
     }
 
@@ -508,10 +559,13 @@ export function createReclaimHandlers(deps: ReclaimHandlerDeps) {
         // 強制の直前にも、もう一度照合する（事実を取り直した、いまの先端。何かを変える前に）。
         {
           const rec = log.state().nodes.find((x) => x.id === n.id);
-          const expected = rec?.discarded?.expectTip;
-          if (forceCandidate(rec) && rec.discarded !== undefined && expected !== undefined) {
-            if (again.facts.headCommit !== expected) {
-              const f = tipMismatch([n.id], "回収の直前に");
+          if (forceCandidate(rec) && rec.discarded !== undefined) {
+            const verdict = checkRecorded(rec.discarded, tipOfFacts(again.facts));
+            if (verdict !== "ok") {
+              const f =
+                verdict === "unknown"
+                  ? tipUnknown([n.id], "回収の直前に")
+                  : tipMismatch([n.id], "回収の直前に");
               return {
                 ok: false,
                 error: failure(

@@ -3,7 +3,7 @@
  * 標準出力・標準エラーの文字列を返す。窓口は `DaemonClient` で受ける。
  *
  *   cso purge <nodeId> [--dry-run] [--yes] [--tombstone|--no-tombstone] [--request-id <id>]
- *   cso reclaim <nodeId> [--yes] [--request-id <id>]
+ *   cso reclaim <nodeId> [--yes --expect <digest>] [--request-id <id>]
  *   cso purge-hold <nodeId> [--until <ISO 8601 UTC>] [--reason <文>] [--request-id <id>]
  *   cso purge-release <nodeId> [--request-id <id>]
  *   cso discarded list
@@ -18,6 +18,7 @@ import {
   type Failure,
   isFailure,
   isSafeId,
+  LIMITS,
 } from "@cso/core";
 import type { DaemonClient, HumanOperation } from "./client.js";
 
@@ -39,11 +40,12 @@ const USAGE = `使い方:
       --dry-run  削除される木・アーカイブ日・経過日数を表示するだけで、削除しない
       --yes      対象を表示したうえで削除を実行する（なければ対象の表示だけで止まる）
       --tombstone / --no-tombstone  削除後に墓標を残す／残さない（省略時は保持ポリシーの既定）
-  cso reclaim <nodeId> [--yes] [--request-id <id>]
+  cso reclaim <nodeId> [--yes --expect <digest>] [--request-id <id>]
       停止したノードの成果を破棄して、回収する（取り消せない）。破棄の判断を記録し、そのあと、統合ノードの回収が、
       作業ツリーとブランチを強制して消す。
       まず、失われるもの（統合されていないコミット・未保存の変更・未追跡のファイル）を表示する。
-      --yes      表示したうえで、破棄を指示する（なければ、表示だけで止まる）
+      --yes      破棄を指示する（なければ、表示だけで止まる）。--expect が要る
+      --expect <digest>  表示した先端の照合用の値（表示に出る 12 桁の 16 進）。指示の時点の先端から計算し直した値と違えば、何も指示しない
   cso purge-hold <nodeId> [--until <日時>] [--reason <理由>] [--request-id <id>]
       自動の最終削除（autoPurge）を、この木について保留する。nodeId は、予告に出ている木の根（アーカイブ済みで、親がアーカイブされていないノード）。
       有効な予告は、その場で取り下げる。人間の cso purge は、保留に関係なく実行できる（保留を無視したことは監査に残る）。
@@ -64,7 +66,7 @@ const USAGE = `使い方:
 
 const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   purge: ["--dry-run", "--yes", "--tombstone", "--no-tombstone"],
-  reclaim: ["--yes"],
+  reclaim: ["--yes", "--expect"],
   "purge-hold": ["--until", "--reason"],
   "purge-release": [],
   "discarded-list": [],
@@ -72,7 +74,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "discarded-drop": ["--yes"],
 };
 /** 値を取るオプション。 */
-const VALUE_FLAGS: ReadonlySet<string> = new Set(["--until", "--reason", "--branch"]);
+const VALUE_FLAGS: ReadonlySet<string> = new Set(["--until", "--reason", "--branch", "--expect"]);
 
 export function formatFailure(f: Failure): string {
   return `失敗 [${f.code}]: ${f.cause}\n次の操作:\n${f.nextActions.map((a) => `  - ${a}`).join("\n")}\n`;
@@ -269,6 +271,25 @@ const terminalSafe = (s: string, max = 100): string => {
   return chars.length <= max ? flat : `${chars.slice(0, max - 1).join("")}…`;
 };
 
+/**
+ * 表示した先端（nodeId → SHA）の照合用の値。ID 順の `id:SHA` を、FNV-1a（32 ビット 2 本。種を変える）で畳んだ 12 桁の 16 進。
+ * 改ざん対策ではない（表示のあとで先端が変わったことの検出。実際の照合は、daemon が SHA で行う）。cli は node の型に依存しない。
+ */
+export const tipsDigest = (tips: Readonly<Record<string, string>> | undefined): string => {
+  const text = Object.entries(tips ?? {})
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([id, tip]) => `${id}:${tip}\n`)
+    .join("");
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193 ^ 0xa5a5a5a5;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+  }
+  return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0")}`.slice(0, 12);
+};
+
 function describeReclaim(nodeId: string, p: ReclaimPreview): string {
   const tipLines = Object.entries(p.tips ?? {}).map(
     ([id, tip]) => `  ${terminalSafe(id, 128)}: ${tip.slice(0, 12)}`,
@@ -276,7 +297,7 @@ function describeReclaim(nodeId: string, p: ReclaimPreview): string {
   const head = `回収（破棄）の対象: ${terminalSafe(nodeId, 128)}\n${
     tipLines.length === 0
       ? ""
-      : `ブランチの先端（この先端と照合して、破棄を指示する。違っていたら、拒否する）:\n${tipLines.join("\n")}\n`
+      : `ブランチの先端（照合の値: ${tipsDigest(p.tips)}。破棄の指示は、この値と今の先端が違えば、拒否する）:\n${tipLines.join("\n")}\n`
   }`;
   if (p.loss === undefined) {
     return `${head}失われるものの情報が得られない（daemon が対応していない）。作業ツリーとブランチを、強制して消す。\n`;
@@ -527,21 +548,42 @@ export async function runCommand(
       isReclaimPreview,
     );
     if (preview.kind !== "ok") return fail(preview);
+    const tips = preview.value.tips ?? {};
+    if (Object.keys(tips).length > LIMITS.expectTips) {
+      return failed({
+        code: "tooManyNodes",
+        cause: `配下のノードが多すぎて、先端の照合ができない（${Object.keys(tips).length} 件。上限 ${LIMITS.expectTips} 件）`,
+        nextActions: ["配下を先に回収して、数を減らす"],
+      } as Failure);
+    }
     const shown = describeReclaim(nodeId, preview.value);
+    const digest = tipsDigest(tips);
+    const expect = values.get("--expect");
     if (!flags.has("--yes")) {
       return {
         exitCode: 2,
         stdout: shown,
-        stderr:
-          "破棄の判断は取り消せない（停止したノードの作業ツリーとブランチが、強制して消える）。上の内容でよければ --yes を付けて再実行する\n",
+        stderr: `破棄の判断は取り消せない（停止したノードの作業ツリーとブランチが、強制して消える）。上の内容でよければ、表示の値を付けて再実行する: cso reclaim ${nodeId} --yes --expect ${digest}\n`,
       };
     }
-    // 表示した先端（プレビューの tips）を、そのまま渡す。daemon が、今の先端と照合する（違えば tipMismatch）。
+    if (expect === undefined) {
+      return usageError(
+        `--yes には --expect <digest> が要る（表示した先端の照合用の値。--yes なしで実行すると、表示される: ${digest}）`,
+      );
+    }
+    if (expect !== digest) {
+      return {
+        exitCode: 1,
+        stdout: shown,
+        stderr: `表示した内容のあとで、先端が変わっている（照合の値が違う）。何も指示していない。上の内容を確かめ直して、よければ再実行する: cso reclaim ${nodeId} --yes --expect ${digest}\n`,
+      };
+    }
+    // 表示した先端（プレビューの tips）を渡す。daemon が、今の先端と照合する（違えば tipMismatch）。
     const res = await invoke(
       deps.client,
       id,
       "node.reclaimInstruct",
-      { nodeId, expectTips: preview.value.tips ?? {} },
+      { nodeId, expectTips: tips },
       isAccepted,
     );
     if (res.kind !== "ok") return fail(res);

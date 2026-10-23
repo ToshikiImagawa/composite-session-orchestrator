@@ -37,6 +37,8 @@ export const LIMITS = {
   /** 強制の回収で失われるコミットの件名（T21r）: 1 ノードあたりの件数と、1 件の長さ。 */
   lossSubjects: 5,
   lossSubjectLength: 100,
+  /** 破棄の指示（`node.reclaimInstruct`）の `expectTips` の件数の上限（対象と配下のノード数の上限。プレビューの `tips` も同じ。T21r-e）。 */
+  expectTips: 256,
   /** 子が入れる報告（`progress`・`outOfScope`）の、ノードあたりの件数。直近の start・restart より後だけを数える。完了・失敗・差し戻しの報告は数えない。 */
   reportsPerNode: 200,
   /** 判断要求（`decision.requested`）で、判断待ちの間に止める子の件数。 */

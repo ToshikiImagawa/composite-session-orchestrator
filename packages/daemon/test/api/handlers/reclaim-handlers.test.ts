@@ -888,11 +888,85 @@ describe("先端の照合（expectTips。T21r-e）", () => {
     expect(r.removed).toEqual([]); // d も消えていない
   });
 
-  it("実行: expectTip がない判断（古い記録・先端がなかった）は、照合しない（これまでどおり回収できる）", async () => {
+  it("実行: 先端がなかった判断（noTip）は、いま先端が取れるなら tipMismatch。取れなければ、これまでどおり回収できる", async () => {
     const r = stoppedTree({ d: undefined, e: T2 });
     expect((await humanInstruct(r, "d", {})).ok).toBe(true);
-    const res = await r.call("node.reclaim", { nodeId: "d" }, "root");
-    expect(res.ok).toBe(true);
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded?.noTip).toBe(true);
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T1 };
+    const bad = await r.call("node.reclaim", { nodeId: "d" }, "root");
+    expect(bad.error?.code).toBe("tipMismatch");
+    expect(r.removed).toEqual([]);
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d` };
+    expect((await r.call("node.reclaim", { nodeId: "d" }, "root")).ok).toBe(true);
+  });
+
+  it("実行: 先端の記録がない判断（この機能の前の記録）は、照合しない（これまでどおり回収できる）", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    const legacy = r.log.append({
+      requestId: "legacy-d",
+      actor: { human: true },
+      body: { type: "node.discardDecided", payload: { nodeId: "d" } },
+    });
+    expect(legacy.ok).toBe(true);
+    const d = r.s().nodes.find((x) => x.id === "d")?.discarded;
+    expect(d).not.toHaveProperty("expectTip");
+    expect(d).not.toHaveProperty("noTip");
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T3 };
+    expect((await r.call("node.reclaim", { nodeId: "d" }, "root")).ok).toBe(true);
+  });
+
+  it("M1: 回収が tipMismatch になったあと、指示し直せば、先端の記録を更新して、回収できる（デッドロックしない）", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    expect((await humanInstruct(r, "d", { d: T1 })).ok).toBe(true);
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T3 };
+    expect((await r.call("node.reclaim", { nodeId: "d" }, "root")).error?.code).toBe("tipMismatch");
+    // 古い表示（T1）での指示し直しは、冪等の分岐より前に照合されて、拒否される
+    const stale = await humanInstruct(r, "d", { d: T1 });
+    expect(stale.error?.code).toBe("tipMismatch");
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded?.expectTip).toBe(T1);
+    // 見直した先端（T3）で指示し直す: 更新される
+    const again = await humanInstruct(r, "d", { d: T3 });
+    expect(again.ok).toBe(true);
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded?.expectTip).toBe(T3);
+    // 同じ指示の再送は、何も変えない
+    const seq = r.s().lastSeq;
+    expect((await humanInstruct(r, "d", { d: T3 })).ok).toBe(true);
+    expect(r.s().lastSeq).toBe(seq);
+    const done = await r.call("node.reclaim", { nodeId: "d" }, "root");
+    expect(done.ok).toBe(true);
+    expect(r.removed).toEqual(["d"]);
+  });
+
+  it("R2: 先端の取得に失敗した（headUnknown）ノードは、「先端なし」と取り違えず、不明として拒否する（指示・回収の両方）。プレビューの tips には載せない", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headUnknown: true };
+    const pv = await humanPreview(r, "d");
+    expect(pv.value).not.toHaveProperty("tips");
+    const res = await humanInstruct(r, "d", {});
+    expect(res.error?.code).toBe("tipUnknown");
+    expect(res.error?.cause).toContain("d");
+    expect(r.s().nodes.find((x) => x.id === "d")?.discarded).toBeUndefined();
+    // 判断のあとに取得が失敗したら、回収も拒否する（何も消さない）
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headCommit: T1 };
+    expect((await humanInstruct(r, "d", { d: T1 })).ok).toBe(true);
+    r.state.facts.d = { merged: false, clean: false, worktreePath: `${WT}/d`, headUnknown: true };
+    const exec = await r.call("node.reclaim", { nodeId: "d" }, "root");
+    expect(exec.error?.code).toBe("tipUnknown");
+    expect(r.removed).toEqual([]);
+  });
+
+  it("R2: ポートが例外を投げたときも、不明として拒否する", async () => {
+    const r = stoppedTree({ d: T1, e: T2 });
+    const original = r.state.facts.d;
+    expect(original).toBeDefined();
+    Object.defineProperty(r.state.facts, "d", {
+      get() {
+        throw new Error("git が壊れた");
+      },
+      configurable: true,
+    });
+    const res = await humanInstruct(r, "d", {});
+    expect(res.error?.code).toBe("tipUnknown");
   });
 });
 

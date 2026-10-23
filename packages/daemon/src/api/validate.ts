@@ -26,7 +26,7 @@ import {
 } from "@cso/core";
 
 /** `node.reclaimInstruct` の `expectTips` の件数の上限（対象と配下のノード数の上限）。 */
-const EXPECT_TIPS_MAX = 256;
+const EXPECT_TIPS_MAX = LIMITS.expectTips;
 
 type Rec = Record<string, unknown>;
 type Failure = ReturnType<typeof failure>;
