@@ -79,6 +79,12 @@ describe("画面の資産（GET /ui ほか）", () => {
       expect(res.headers.get("content-security-policy")).toContain("default-src 'none'");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
       expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+      // HTML だけに、COOP と Permissions-Policy
+      expect(res.headers.get("cross-origin-opener-policy")).toBe(
+        path === "/ui" ? "same-origin" : null,
+      );
+      expect(res.headers.get("permissions-policy") !== null).toBe(path === "/ui");
       expect((await res.text()).length).toBeGreaterThan(50);
     }
   });
@@ -134,6 +140,36 @@ describe("GET /v1/ui/state（人間のトークンだけ）", () => {
     expect(text).not.toContain("secret-dir");
     expect(text).not.toContain(HUMAN);
     expect(text).not.toContain(r.root);
+  });
+
+  it("CORP: same-origin。ETag は lastSeq。If-None-Match が一致すれば 304（本文なし）、違えば 200", async () => {
+    const r = await start();
+    const res = await get(r.url, HUMAN);
+    expect(res.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    const etag = res.headers.get("etag");
+    expect(etag).toBe(`"${state().lastSeq}"`);
+    const same = await get(r.url, HUMAN, { "if-none-match": etag ?? "" });
+    expect(same.status).toBe(304);
+    expect(await same.text()).toBe("");
+    expect(same.headers.get("etag")).toBe(etag);
+    expect((await get(r.url, HUMAN, { "if-none-match": '"0"' })).status).toBe(200);
+    // 304 でも、認証は先に通す（トークンなしは 401）
+    expect((await get(r.url, undefined, { "if-none-match": etag ?? "" })).status).toBe(401);
+  });
+
+  it("表示モデルは lastSeq を鍵に、直近の 1 件を使い回す（lastSeq が変われば作り直す）", async () => {
+    const credentials = createCredentialStore({ humanToken: HUMAN });
+    let current = state();
+    server = createApiServer({ credentials, getState: () => current, handlers: {} });
+    const { url } = await server.listen(0);
+    const first = await (await get(url, HUMAN)).text();
+    // lastSeq は同じで、中身だけ変える（通常は起きない）。キャッシュなら、前の本文のまま
+    current = { ...current, inbox: [] };
+    expect(await (await get(url, HUMAN)).text()).toBe(first);
+    current = { ...current, lastSeq: current.lastSeq + 1 };
+    const next = await get(url, HUMAN);
+    expect(next.headers.get("etag")).toBe(`"${current.lastSeq}"`);
+    expect(JSON.parse(await next.text()).value.inbox).toEqual([]);
   });
 
   it("GET 以外は 405。誤った Origin は 403", async () => {

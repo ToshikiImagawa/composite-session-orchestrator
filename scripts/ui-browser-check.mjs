@@ -49,6 +49,14 @@ const r = foldEvents([
 ]);
 if (!r.ok) throw new Error(r.error.code + r.error.cause);
 let state = r.value;
+// Object.prototype のキーと同じ名前のノード（描画で、表の引き当てを間違えないこと）
+state = {
+  ...state,
+  nodes: [
+    ...state.nodes,
+    { id: "constructor", role: "implement", parentId: "m1", state: "running", dependsOn: [] },
+  ],
+};
 state = {
   ...state,
   decisions: [
@@ -107,10 +115,23 @@ await page.fill("#token", "wrong-token-wrong-token-wrong-token-1");
 await page.click("button[type=submit]");
 await page.waitForTimeout(800);
 out.wrongStatus = await page.locator("#status").innerText();
+// 人間以外のトークン（403）は、401 と分けて表示する
+await page.fill("#token", credentials.issueNodeToken("root", "integrator"));
+await page.click("button[type=submit]");
+await page.waitForTimeout(800);
+out.nonHumanStatus = await page.locator("#status").innerText();
+const statuses = [];
+page.on("response", (res) => {
+  if (res.url().endsWith("/v1/ui/state")) statuses.push(res.status());
+});
 await page.fill("#token", HUMAN);
 await page.click("button[type=submit]");
 await page.waitForSelector("#view:not([hidden])", { timeout: 8000 });
 out.pasteOk = await page.locator("#status").innerText();
+// 変化がない間は、304（描き直さない）
+await page.waitForTimeout(5000);
+out.statusesBeforeChange = [...statuses];
+statuses.length = 0;
 // 更新（状態の変化が、ポーリングで反映される）
 state = {
   ...state,
@@ -135,6 +156,7 @@ await page.waitForFunction(
   { timeout: 5000 },
 );
 out.reflectMs = Date.now() - t0;
+out.statusesAfterChange = [...statuses]; // 変わった直後は 200（新しい ETag）、そのあとは 304
 await browser.close();
 await server.close();
 console.log(JSON.stringify(out, null, 1));

@@ -67,6 +67,7 @@ export const UI_JS = `'use strict';
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 
+  var TAGS = { div: true, span: true, p: true };
   var STATE_NAMES = { pending: '未起動', running: '実行', waiting: '待機', done: '完了報告', verified: '受理', stopping: '停止中', stopIncomplete: '停止未完了', stopped: '停止', reclaimable: '回収可', archived: 'アーカイブ' };
   var PRIORITY_NAMES = { blocking: '要判断', failed: '失敗', completed: '完了', progress: '進捗', info: '情報' };
   var POLL_MS = 2000;
@@ -76,7 +77,9 @@ export const UI_JS = `'use strict';
   var viewEl = document.getElementById('view');
   var timer = null;
 
+  function name(table, key) { return Object.hasOwn(table, key) ? table[key] : key; }
   function el(tag, cls, text) {
+    if (!Object.hasOwn(TAGS, tag)) throw new Error('tag');
     var e = document.createElement(tag);
     if (cls) e.className = cls;
     if (text !== undefined) e.textContent = text;
@@ -116,7 +119,7 @@ export const UI_JS = `'use strict';
     if (!list.length) { box.appendChild(el('p', 'empty', '未解決の項目はありません')); return; }
     list.forEach(function (i) {
       var card = el('div', 'card ' + (i.priority === 'blocking' || i.priority === 'failed' ? i.priority : ''));
-      card.appendChild(el('span', 'tag ' + (i.priority === 'blocking' || i.priority === 'failed' ? i.priority : ''), PRIORITY_NAMES[i.priority] || i.priority));
+      card.appendChild(el('span', 'tag ' + (i.priority === 'blocking' || i.priority === 'failed' ? i.priority : ''), name(PRIORITY_NAMES, i.priority)));
       card.appendChild(el('span', 'tag', i.kind));
       card.appendChild(el('span', 'tag', i.nodeId));
       card.appendChild(el('span', 'tag', i.at));
@@ -125,50 +128,64 @@ export const UI_JS = `'use strict';
     });
   }
 
+  // 描いたノードの数を返す（木にならない・深すぎるもので、描けなかった分は、呼び出し側が「一部省略」にする）。
   function renderTree(nodes) {
     var box = document.getElementById('tree');
     clear(box);
-    if (!nodes.length) { box.appendChild(el('p', 'empty', 'ノードはありません')); return; }
-    var kids = {};
+    if (!nodes.length) { box.appendChild(el('p', 'empty', 'ノードはありません')); return 0; }
+    var kids = new Map();
     nodes.forEach(function (n) {
       var k = n.parentId === null ? '' : n.parentId;
-      (kids[k] = kids[k] || []).push(n);
+      if (!kids.has(k)) kids.set(k, []);
+      kids.get(k).push(n);
     });
-    var seen = {};
+    var seen = new Set();
     function walk(parent, depth) {
-      (kids[parent] || []).forEach(function (n) {
-        if (seen[n.id] || depth > 64) return;
-        seen[n.id] = true;
+      (kids.get(parent) || []).forEach(function (n) {
+        if (seen.has(n.id) || depth > 64) return;
+        seen.add(n.id);
         var row = el('div', 'node');
         row.style.paddingLeft = (depth * 20) + 'px';
         row.appendChild(el('span', '', n.id));
-        row.appendChild(el('span', 'state', n.role + ' / ' + (STATE_NAMES[n.state] || n.state)));
+        row.appendChild(el('span', 'state', n.role + ' / ' + name(STATE_NAMES, n.state)));
         if (n.openItems > 0) row.appendChild(el('span', 'count', '要対応 ' + n.openItems));
         box.appendChild(row);
         walk(n.id, depth + 1);
       });
     }
     walk('', 0);
+    return seen.size;
   }
 
   function render(view) {
     renderDecisions(view.decisions);
     renderExtensions(view.extensions, document.getElementById('decisions'));
     renderInbox(view.inbox);
-    renderTree(view.nodes);
+    var drawn = renderTree(view.nodes);
     showAuth(false);
-    setStatus('接続中（seq ' + view.lastSeq + (view.truncated.length ? '・一部省略' : '') + '）');
+    var partial = view.truncated.length > 0 || drawn < view.nodes.length;
+    setStatus('接続中（seq ' + view.lastSeq + (partial ? '・一部省略' : '') + '）');
   }
 
+  var etag = '';
   function refresh() {
     if (!token) { showAuth(true); setStatus('未接続'); return Promise.resolve(); }
-    return fetch('/v1/ui/state', { headers: { authorization: 'Bearer ' + token }, cache: 'no-store' })
+    var headers = etag
+      ? { authorization: 'Bearer ' + token, 'if-none-match': etag }
+      : { authorization: 'Bearer ' + token };
+    return fetch('/v1/ui/state', { headers: headers })
       .then(function (res) {
-        if (res.status === 401 || res.status === 403) { token = ''; showAuth(true); setStatus('トークンが正しくありません'); return null; }
+        if (res.status === 304) { return { unchanged: true }; }
+        if (res.status === 401) { token = ''; etag = ''; showAuth(true); setStatus('トークンが正しくありません'); return null; }
+        if (res.status === 403) { token = ''; etag = ''; showAuth(true); setStatus('人間のトークンが必要です'); return null; }
         if (!res.ok) { setStatus('取得に失敗（' + res.status + '）。再試行します'); return null; }
+        etag = res.headers.get('etag') || '';
         return res.json();
       })
-      .then(function (body) { if (body && body.ok) render(body.value); })
+      .then(function (body) {
+        if (body && body.unchanged) return;
+        if (body && body.ok) render(body.value);
+      })
       .catch(function () { setStatus('daemon に接続できません。再試行します'); });
   }
 
@@ -197,4 +214,12 @@ export const UI_HEADERS: Readonly<Record<string, string>> = {
   "referrer-policy": "no-referrer",
   "cache-control": "no-store",
   "x-frame-options": "DENY",
+  "cross-origin-resource-policy": "same-origin",
+};
+
+/** HTML だけに付けるヘッダー（ほかのオリジンのページと、ウィンドウを共有しない。使わない機能を許さない）。 */
+export const UI_HTML_HEADERS: Readonly<Record<string, string>> = {
+  "cross-origin-opener-policy": "same-origin",
+  "permissions-policy":
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), interest-cohort=()",
 };

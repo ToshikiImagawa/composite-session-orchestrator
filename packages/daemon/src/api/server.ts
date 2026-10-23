@@ -55,7 +55,7 @@ import {
   operationWeight,
 } from "./rate-limit.js";
 import { pickResult } from "./results.js";
-import { UI_CSS, UI_HEADERS, UI_HTML, UI_JS } from "./ui-assets.js";
+import { UI_CSS, UI_HEADERS, UI_HTML, UI_HTML_HEADERS, UI_JS } from "./ui-assets.js";
 import { parseEnvelope, validateParams } from "./validate.js";
 
 export interface HandlerRequest<Op extends DaemonOperation = DaemonOperation> {
@@ -193,10 +193,12 @@ const HOST = "127.0.0.1";
 interface UiAsset {
   readonly type: string;
   readonly body: string;
+  /** HTML だけに付けるヘッダー（COOP・Permissions-Policy）を付ける。 */
+  readonly html?: boolean;
 }
 /** 画面の資産（パス → 内容）。 */
 const UI_ASSETS: Readonly<Record<string, UiAsset>> = {
-  "/ui": { type: "text/html; charset=utf-8", body: UI_HTML },
+  "/ui": { type: "text/html; charset=utf-8", body: UI_HTML, html: true },
   "/ui/app.js": { type: "text/javascript; charset=utf-8", body: UI_JS },
   "/ui/app.css": { type: "text/css; charset=utf-8", body: UI_CSS },
 };
@@ -757,8 +759,10 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       });
       return;
     }
+    // 静的な資産（状態を含まない）には、回数の制限をかけない（`docs/ui.md`）。
     res.writeHead(200, {
       ...UI_HEADERS,
+      ...(asset.html === true ? UI_HTML_HEADERS : {}),
       "content-type": asset.type,
       "content-length": Buffer.byteLength(asset.body),
     });
@@ -806,8 +810,36 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       );
       return;
     }
-    send(res, 200, { ok: true, value: uiViewOf(deps.getState()) });
+    // 表示モデルは、`lastSeq` が同じなら同じ（直近の 1 件だけ持つ）。`If-None-Match` が一致すれば 304（本文なし）。
+    const current = deps.getState();
+    if (uiCache === undefined || uiCache.seq !== current.lastSeq) {
+      const etag = `"${current.lastSeq}"`;
+      uiCache = {
+        seq: current.lastSeq,
+        etag,
+        json: JSON.stringify({ ok: true, value: uiViewOf(current) }),
+      };
+    }
+    const headers = {
+      etag: uiCache.etag,
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "cross-origin-resource-policy": "same-origin",
+    };
+    if (req.headers["if-none-match"] === uiCache.etag) {
+      res.writeHead(304, headers);
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      ...headers,
+      "content-type": "application/json; charset=utf-8",
+      "content-length": Buffer.byteLength(uiCache.json),
+    });
+    res.end(uiCache.json);
   }
+  /** `GET /v1/ui/state` の直近の 1 件（`lastSeq` が鍵）。 */
+  let uiCache: { readonly seq: number; readonly etag: string; readonly json: string } | undefined;
 
   const now = (): string => (deps.clock ?? (() => new Date().toISOString()))();
   const throttle: Throttle = deps.bindThrottle ?? createThrottle({});
