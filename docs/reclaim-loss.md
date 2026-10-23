@@ -64,3 +64,8 @@ cso reclaim <nodeId> --yes    # 表示したうえで、破棄を指示する（
 - **二重の保護**: 強制の `-D` の直前に、ポートが先端を `refs/cso/discarded/` に保管する（T13f-r）。照合をすり抜けて消えた成果も、保管から取り戻せる。
 - **`tipMismatch`・`tipUnknown` の原因・次の操作・監査のログに、SHA は出さない**（ノード ID だけ）。もう一度 `cso reclaim` で、失われるものを確かめ直す。
 - 保存データの版（`STATE_VERSION`）は 11（`node.discardDecided` に `expectTip`・`noTip`）。
+
+## 画面から（T23-c）
+
+HTML 画面（`docs/ui.md`「回収の指示」）からも、同じ破棄の指示ができる。cli と同じく、プレビューで内容を見せ、**見せた先端（`tips`）を `expectTips` としてそのまま送る**（違えば、何も記録せず `tipMismatch`）。画面は、さらに、**対象のノード ID を打ち込ませる**。失われるものを調べられなかったノードがあるとき（`unknown`・`workingTreeUnknown`）は、画面からは指示できない（cli で確かめる）。
+

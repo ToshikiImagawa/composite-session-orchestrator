@@ -40,6 +40,8 @@ export interface UiNode {
   readonly dependsOn: readonly string[];
   /** そのノードの未解決の項目の数（要約を除く）。 */
   readonly openItems: number;
+  /** 破棄の判断（`node.reclaimInstruct`）が記録済みか。画面は、停止したノードで、指示済みなら、もう一度は出さない。 */
+  readonly discarded: boolean;
 }
 
 export interface UiInboxItem {
@@ -184,6 +186,7 @@ export function uiViewOf(state: OrchState): UiView {
       state: n.state,
       dependsOn: n.dependsOn.map(idOf).filter((d) => d !== ""),
       openItems: counts.get(n.id) ?? 0,
+      discarded: n.discarded !== undefined,
     }),
   );
 
