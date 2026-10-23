@@ -1,3 +1,4 @@
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { UI_CSS, UI_HEADERS, UI_HTML, UI_HTML_HEADERS, UI_JS } from "../../src/api/ui-assets.js";
 
@@ -23,7 +24,7 @@ describe("画面の資産（走査）", () => {
     ["storage・cookie", /localStorage|sessionStorage|document\s*\.\s*cookie|indexedDB/],
     ["importScripts・動的 import", /importScripts|\bimport\s*\(/],
     ["postMessage・window.open", /postMessage|window\s*\.\s*open/],
-    ["ブラケット記法の文字列キー", /\[\s*['"`]/],
+    ["ブラケット記法の文字列キー（メンバーの参照）", /[\w$)\]]\s*\[\s*['"`]/],
     [
       "HTML を解釈する API",
       /setHTMLUnsafe|parseHTMLUnsafe|setHTML\b|createContextualFragment|DOMParser|document\s*\.\s*createRange/,
@@ -114,6 +115,35 @@ describe("画面の資産（走査）", () => {
       "Map",
       "Set",
       "body",
+      "retryAt",
+      "ceil",
+      "optionsCut",
+      "text",
+      "from",
+      "some",
+      "test",
+      "error",
+      "code",
+      "cause",
+      "retry",
+      "title",
+      "lines",
+      "sending",
+      "disabled",
+      "crypto",
+      "randomUUID",
+      "stringify",
+      "requestId",
+      "operation",
+      "params",
+      "activeElement",
+      "dataset",
+      "draft",
+      "maxLength",
+      "placeholder",
+      "delete",
+      "focus",
+      "setSelectionRange",
       "seq",
       "partial",
       "getReader",
@@ -141,10 +171,10 @@ describe("画面の資産（走査）", () => {
     expect(unknown).toEqual([]);
   });
 
-  it("el に渡すタグは、div・span・p だけ（実行時にも、許可リストで拒む）", () => {
+  it("el に渡すタグは、div・span・p・button・textarea だけ（実行時にも、許可リストで拒む）", () => {
     const calls = [...UI_JS.matchAll(/\bel\(\s*'([^']*)'/g)].map((m) => m[1]);
     expect(calls.length).toBeGreaterThan(5);
-    for (const tag of calls) expect(["div", "span", "p"]).toContain(tag);
+    for (const tag of calls) expect(["div", "span", "p", "button", "textarea"]).toContain(tag);
     expect(UI_JS).toContain("Object.hasOwn(TAGS, tag)");
   });
 
@@ -185,5 +215,85 @@ describe("画面の資産（走査）", () => {
     expect(UI_HEADERS["cross-origin-resource-policy"]).toBe("same-origin");
     expect(UI_HTML_HEADERS["cross-origin-opener-policy"]).toBe("same-origin");
     expect(UI_HTML_HEADERS["permissions-policy"]).toContain("camera=()");
+  });
+
+  describe("画面の純粋な部分（vm で評価する。new Function は使わない）", () => {
+    // app.js から、純粋な関数と定数だけを取り出して、別の文脈で評価する（DOM・通信に触れない部分）
+    const fn = (name: string): string => {
+      const i = UI_JS.indexOf(`  function ${name}(`);
+      expect(i, name).toBeGreaterThan(-1);
+      return UI_JS.slice(i, UI_JS.indexOf("\n  }\n", i) + 5);
+    };
+    const line = (prefix: string): string => {
+      const i = UI_JS.indexOf(`  ${prefix}`);
+      expect(i, prefix).toBeGreaterThan(-1);
+      return UI_JS.slice(i, UI_JS.indexOf("\n", i));
+    };
+    const api = runInNewContext(
+      [
+        line("var TEXT_MAX ="),
+        line("var FORBIDDEN ="),
+        fn("hasForbidden"),
+        fn("checkAnswer"),
+        fn("waitSecondsOf"),
+        fn("describeFailure"),
+        "({ checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure })",
+      ].join("\n"),
+      {},
+    ) as {
+      checkAnswer(text: string): string;
+      waitSecondsOf(r: { status: number; retry: number }): number;
+      describeFailure(r: { status: number; body: unknown; retry: number }): string;
+    };
+
+    it("checkAnswer: 空・空白だけ・長すぎる・制御文字・書式制御文字を拒む。タブ・改行は使える。長さは、コードポイントで数える", () => {
+      expect(api.checkAnswer("")).toContain("空");
+      expect(api.checkAnswer("   \n\t ")).toContain("空");
+      expect(api.checkAnswer("はい")).toBe("");
+      expect(api.checkAnswer("a".repeat(4000))).toBe("");
+      expect(api.checkAnswer("a".repeat(4001))).toContain("長すぎ");
+      expect(api.checkAnswer("😀".repeat(4000))).toBe(""); // 1 文字（サロゲートペア）を 1 と数える
+      expect(api.checkAnswer("😀".repeat(4001))).toContain("長すぎ");
+      for (const bad of [
+        "a\u0007b",
+        "a\u0000b",
+        "a\u007fb",
+        "a\u0085b",
+        "a\u202eb",
+        "a\u200bb",
+        "a\ufeffb",
+      ]) {
+        expect(api.checkAnswer(bad), JSON.stringify(bad)).toContain("使えない文字");
+      }
+      expect(api.checkAnswer("一行目\n\t二行目")).toBe("");
+    });
+
+    it("waitSecondsOf: 429 は Retry-After の秒数（なければ 5 秒）。それ以外は 0", () => {
+      expect(api.waitSecondsOf({ status: 429, retry: 3 })).toBe(3);
+      expect(api.waitSecondsOf({ status: 429, retry: 0 })).toBe(5);
+      expect(api.waitSecondsOf({ status: 429, retry: Number.NaN })).toBe(5);
+      expect(api.waitSecondsOf({ status: 409, retry: 3 })).toBe(0);
+      expect(api.waitSecondsOf({ status: 200, retry: 0 })).toBe(0);
+    });
+
+    it("describeFailure: code と cause を出す（cause は 300 文字まで）。本文がなければ HTTP の状態。429 は待つ秒数。再送の案内つき", () => {
+      const a = api.describeFailure({
+        status: 409,
+        body: { ok: false, error: { code: "conflict", cause: "先に確定している" } },
+        retry: 0,
+      });
+      expect(a).toContain("conflict: 先に確定している");
+      expect(a).toContain("もう一度送れます");
+      const long = api.describeFailure({
+        status: 422,
+        body: { ok: false, error: { code: "x", cause: "あ".repeat(500) } },
+        retry: 0,
+      });
+      expect(long).toContain(`x: ${"あ".repeat(300)}`);
+      expect(long).not.toContain("あ".repeat(301));
+      expect(api.describeFailure({ status: 500, body: null, retry: 0 })).toContain("HTTP 500");
+      expect(api.describeFailure({ status: 429, body: null, retry: 7 })).toContain("7 秒");
+      expect(api.describeFailure({ status: 429, body: null, retry: 0 })).toContain("しばらく");
+    });
   });
 });

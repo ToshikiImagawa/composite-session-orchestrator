@@ -5,6 +5,8 @@
  * - 文字列は `textContent` と `createElement` だけで描く。`innerHTML`・`outerHTML`・`insertAdjacentHTML`・`document.write`・`eval`・`new Function`・
  *   `setAttribute`・`on*` への代入・`location` への代入・`srcdoc` は使わない。
  * - インラインの script・style・イベント属性は置かない（CSP が `'self'` だけを許す）。
+ * - 操作（判断への回答）は、`<form>` を使わず、ボタンの click で、`POST /v1/request`（`Authorization: Bearer`。cookie は使わない）で送る。
+ *   送る前に、必ず確認の表示（内容と回答）を挟む。確認のたびに `requestId` を新しく作り、その確認の間は同じ ID で再送する。
  * - 人間のトークンは、読み込んだらすぐ `history.replaceState` でフラグメントを消し、メモリにだけ持つ（storage・cookie には置かない）。
  */
 
@@ -25,6 +27,8 @@ export const UI_HTML = `<!doctype html>
 <p>人間のトークンのファイルの中身を、貼り付けてください（推奨）。トークンはこのページのメモリにだけ置き、保存しません。</p>
 <form id="auth-form"><input id="token" type="password" autocomplete="off" spellcheck="false" aria-label="人間のトークン"><button type="submit">接続</button></form>
 </section>
+<section id="confirm" class="confirm" hidden></section>
+<p id="notice" class="notice" hidden></p>
 <section id="view" hidden>
 <h2>判断待ち</h2><div id="decisions"></div>
 <h2>受信箱</h2><div id="inbox"></div>
@@ -50,6 +54,13 @@ main{padding:0 16px 32px;max-width:960px;margin:0 auto}
 .tag.blocking{color:var(--blocking);font-weight:600}.tag.failed{color:var(--failed);font-weight:600}
 .node{padding:2px 0;overflow-wrap:anywhere}.state{color:var(--muted);margin-left:8px;font-size:13px}.count{color:var(--blocking);margin-left:8px;font-size:13px}
 .empty{color:var(--muted)}
+button{cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.opts{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
+button.primary{background:var(--blocking);color:#fff;border-color:var(--blocking)}
+textarea{display:block;width:100%;min-height:64px;margin:6px 0;font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+.confirm{border:2px solid var(--blocking);border-radius:6px;padding:4px 12px 12px;margin:16px 0;background:var(--card)}
+.confirm-title{font-weight:600;margin:10px 0 6px}.confirm-line{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.error{color:var(--blocking);margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.notice{color:var(--ok);margin:12px 0}
 input,button{font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 form{display:flex;gap:8px;flex-wrap:wrap}input{flex:1;min-width:200px}
 `;
@@ -67,7 +78,9 @@ export const UI_JS = `'use strict';
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 
-  var TAGS = { div: true, span: true, p: true };
+  var TAGS = { div: true, span: true, p: true, button: true, textarea: true };
+  var TEXT_MAX = 4000;
+  var FORBIDDEN = /[\\p{Cc}\\p{Cf}]/u;
   var STATE_NAMES = { pending: '未起動', running: '実行', waiting: '待機', done: '完了報告', verified: '受理', stopping: '停止中', stopIncomplete: '停止未完了', stopped: '停止', reclaimable: '回収可', archived: 'アーカイブ' };
   var PRIORITY_NAMES = { blocking: '要判断', failed: '失敗', completed: '完了', progress: '進捗', info: '情報' };
   var POLL_MS = 2000;
@@ -89,6 +102,8 @@ export const UI_JS = `'use strict';
   var again = false;
   var controller = null;
   var throttleTimer = null;
+  var drafts = new Map();
+  var pending = null;
   var retryMs = 0;
 
   function name(table, key) { return Object.hasOwn(table, key) ? table[key] : key; }
@@ -103,18 +118,170 @@ export const UI_JS = `'use strict';
   function setStatus(text) { statusEl.textContent = text; }
   function showAuth(show) { authEl.hidden = !show; viewEl.hidden = show; }
 
+  // ---- 操作（判断への回答）----
+  function hasForbidden(text) {
+    return Array.from(text).some(function (ch) { return ch !== '\\t' && ch !== '\\n' && FORBIDDEN.test(ch); });
+  }
+  // 自由入力の回答の検査。制御文字・書式制御文字は、サーバーの検証と同じ規則（タブ・改行は可）。上限（TEXT_MAX）は、サーバー（64 KiB）より厳しい。問題がなければ ''。
+  function checkAnswer(text) {
+    if (text.trim() === '') return '回答が空です（空白だけは送れません）';
+    var n = Array.from(text).length;
+    if (n > TEXT_MAX) return '長すぎます（' + n + ' 文字。' + TEXT_MAX + ' 文字以下）';
+    if (hasForbidden(text)) return '使えない文字（制御文字・書式制御文字）を含んでいます';
+    return '';
+  }
+  function notice(text) {
+    var n = document.getElementById('notice');
+    n.textContent = text;
+    n.hidden = !text;
+  }
+  // 429 のとき、送り直すまで待つ秒数（Retry-After。なければ 5 秒）。それ以外は 0。
+  function waitSecondsOf(r) {
+    return r.status === 429 ? (r.retry > 0 ? r.retry : 5) : 0;
+  }
+  function describeFailure(r) {
+    var e = r.body && r.body.error;
+    var base = e && typeof e.code === 'string' ? e.code + ': ' + String(e.cause || '').slice(0, 300) : 'HTTP ' + r.status;
+    if (r.status === 429) base += '（' + (r.retry > 0 ? r.retry + ' 秒' : 'しばらく') + '待ってから、もう一度送る）';
+    return base + '\\n同じ内容で、もう一度送れます（同じ要求として扱われ、二重には実行されません）。';
+  }
+  function renderConfirm() {
+    var box = document.getElementById('confirm');
+    clear(box);
+    if (!pending) { box.hidden = true; return; }
+    box.hidden = false;
+    box.appendChild(el('div', 'confirm-title', pending.title + '（確認）'));
+    pending.lines.forEach(function (line) {
+      var row = el('div', 'confirm-line');
+      row.appendChild(el('span', 'tag', line[0]));
+      row.appendChild(el('span', '', line[1]));
+      box.appendChild(row);
+    });
+    if (pending.error) box.appendChild(el('p', 'error', pending.error));
+    var actions = el('div', 'actions');
+    // 429 のときは、Retry-After の秒数のあいだ、送れない（時間が来たら、自動で、押せるようになる）
+    var left = pending.retryAt ? Math.ceil((pending.retryAt - Date.now()) / 1000) : 0;
+    var waiting = left > 0;
+    var send = el('button', 'primary', pending.sending ? '送信中…' : waiting ? 'あと ' + left + ' 秒待つ' : 'この内容で送る');
+    send.disabled = pending.sending || waiting;
+    if (waiting) {
+      var shown = pending;
+      window.setTimeout(function () { if (pending === shown) renderConfirm(); }, 500);
+    }
+    send.addEventListener('click', sendPending);
+    var back = el('button', '', '戻る');
+    back.disabled = pending.sending;
+    back.addEventListener('click', function () { pending = null; renderConfirm(); });
+    actions.appendChild(send);
+    actions.appendChild(back);
+    box.appendChild(actions);
+  }
+  // 確認を出す。確認のたびに requestId を新しく作る（その確認の間は、同じ ID で再送する）。
+  function openConfirm(title, lines, operation, params, done) {
+    if (pending && pending.sending) return;
+    if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）'); return; }
+    notice('');
+    pending = { title: title, lines: lines, operation: operation, params: params, done: done, requestId: window.crypto.randomUUID(), sending: false, error: '', retryAt: 0 };
+    renderConfirm();
+  }
+  function sendPending() {
+    var p = pending;
+    if (!p || p.sending) return;
+    p.sending = true;
+    p.error = '';
+    renderConfirm();
+    fetch('/v1/request', {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: p.requestId, operation: p.operation, params: p.params })
+    })
+      .then(function (res) {
+        if (res.status === 401) { rejectToken('トークンが正しくありません'); return null; }
+        var retry = res.status === 429 ? parseInt(res.headers.get('retry-after') || '', 10) : 0;
+        return res.json().then(
+          function (body) { return { status: res.status, body: body, retry: retry }; },
+          function () { return { status: res.status, body: null, retry: retry }; }
+        );
+      })
+      .then(function (r) {
+        p.sending = false;
+        if (r === null) { pending = null; renderConfirm(); return; }
+        if (r.status === 200 && r.body && r.body.ok === true) {
+          pending = null;
+          renderConfirm();
+          notice(p.done);
+          refresh();
+          return;
+        }
+        p.error = describeFailure(r);
+        var wait = waitSecondsOf(r);
+        p.retryAt = wait > 0 ? Date.now() + wait * 1000 : 0;
+        if (pending === p) renderConfirm();
+      })
+      .catch(function () {
+        p.sending = false;
+        p.error = '送れませんでした（daemon に接続できません）。\\n同じ内容で、もう一度送れます（同じ要求として扱われ、二重には実行されません）。';
+        if (pending === p) renderConfirm();
+      });
+  }
+
   function renderDecisions(list) {
     var box = document.getElementById('decisions');
+    var active = document.activeElement;
+    var keep = active && active.dataset ? active.dataset.draft : '';
+    var areas = new Map();
     clear(box);
-    if (!list.length) { box.appendChild(el('p', 'empty', '判断待ちはありません')); return; }
+    var live = new Set();
     list.forEach(function (d) {
+      live.add(d.id);
       var card = el('div', 'card blocking');
       card.appendChild(el('span', 'tag blocking', '判断待ち'));
       card.appendChild(el('span', 'tag', d.nodeId));
-      card.appendChild(el('div', '', d.question || '（質問の記録なし）'));
-      d.options.forEach(function (o) { card.appendChild(el('div', 'tag', '・' + o)); });
+      var question = d.question || '（質問の記録なし）';
+      card.appendChild(el('div', '', question));
+      var opts = el('div', 'opts');
+      var anyCut = d.optionsCut;
+      d.options.forEach(function (o) {
+        var b = el('button', '', o.text);
+        // 切った・文字を除いた選択肢は、そのままでは choice に送れない（別の文字列を送ってしまう）。ボタンを無効にして、自由入力を促す
+        b.disabled = o.truncated;
+        if (o.truncated) anyCut = true;
+        b.addEventListener('click', function () {
+          openConfirm('判断への回答', [['ノード', d.nodeId], ['判断', question], ['回答（選択肢）', o.text]], 'decision.answer', { decisionId: d.id, choice: o.text }, '回答を送りました');
+        });
+        opts.appendChild(b);
+      });
+      card.appendChild(opts);
+      if (anyCut) card.appendChild(el('p', 'error', '長すぎる（または、表示できない文字を含む・数が多い）選択肢があります。長すぎるため、自由入力で回答してください'));
+      var area = el('textarea', '');
+      area.maxLength = TEXT_MAX;
+      area.placeholder = '自由入力で回答（' + TEXT_MAX + ' 文字まで）';
+      area.dataset.draft = d.id;
+      area.value = drafts.get(d.id) || '';
+      area.addEventListener('input', function () { drafts.set(d.id, area.value); });
+      areas.set(d.id, area);
+      card.appendChild(area);
+      var problem = el('p', 'error', '');
+      problem.hidden = true;
+      var free = el('button', '', '自由入力で回答する');
+      free.addEventListener('click', function () {
+        var text = area.value;
+        var why = checkAnswer(text);
+        problem.textContent = why;
+        problem.hidden = why === '';
+        if (why !== '') return;
+        openConfirm('判断への回答', [['ノード', d.nodeId], ['判断', question], ['回答（自由入力）', text]], 'decision.answer', { decisionId: d.id, text: text }, '回答を送りました');
+      });
+      card.appendChild(free);
+      card.appendChild(problem);
       box.appendChild(card);
     });
+    drafts.forEach(function (_v, id) { if (!live.has(id)) drafts.delete(id); });
+    if (keep && areas.has(keep)) {
+      var ta = areas.get(keep);
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
   }
 
   function renderExtensions(list, box) {
@@ -174,6 +341,7 @@ export const UI_JS = `'use strict';
   function render(view) {
     renderDecisions(view.decisions);
     renderExtensions(view.extensions, document.getElementById('decisions'));
+    if (!view.decisions.length && !view.extensions.length) document.getElementById('decisions').appendChild(el('p', 'empty', '判断待ちはありません'));
     renderInbox(view.inbox);
     var drawn = renderTree(view.nodes);
     showAuth(false);
