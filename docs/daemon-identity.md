@@ -114,7 +114,11 @@ proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト
 - **429 の待ち**: `Retry-After`（整数の秒。なし・不正は 1 秒。上限 10 秒）+ 0〜500ms のジッターで、検証の中で 1 度だけやり直す。2 度目も 429 なら `rate_limited`（トークンは送らない）。
 - **身元の失敗のやり直し**: ファイルを読み直し、新しい nonce で 1 度だけ。それでも失敗なら `daemon_identity_failed`（HTTP では 502）。
 - **検証なしで動くとき**（`--config` なしで、環境変数 `CSO_MCP_ALLOW_UNVERIFIED` が**ちょうど `1`**）: `true`・空文字・ほかの値では有効にしない。起動のログ（標準エラーの `{"event":"identityUnverified",…}`）を 1 回と、**すべての応答**のヘッダー `x-cso-identity: unverified` で分かる。`--config` があるときは、この変数があっても検証する。
-- **起動時の検証**: 起動のときにも 1 回検証する。失敗しても起動は止めず、標準エラーに `{"event":"identityCheckFailed","code":…}` を出す（最初のトークンつきの要求が、`daemon_identity_failed` などで失敗する）。
+- **起動時の検証（`--strict-start`。T10m-i3）**: 起動のときにも検証する。**`--config` があるときは、既定で強制**（失敗したら起動しない）。`--no-strict-start` で緩める。失敗のたびに、標準エラーに `{"event":"identityCheckFailed","code":…}` を出す。
+  - **身元の失敗**（不一致・ファイルが読めない・不正。`daemon_identity_failed`）: 待たずに失敗し、**終了コード 3**（daemon を起動し直して設定を確認するまで、再起動を繰り返しても直らない）。待ち受けない。
+  - **一時的な失敗**（429・503・タイムアウト・接続不可）: 1・2・4・8 秒待って、最大 5 回試す（標準エラーに `{"event":"identityCheckRetry",…}`）。尽きたら**終了コード 1**。途中で身元の失敗に変わったら、そこで終了コード 3。
+  - `--no-strict-start`: 1 回だけ検証し、失敗しても起動は続ける（最初のトークンつきの要求が、`daemon_identity_failed` などで失敗する）。
+  - `--strict-start` と `--no-strict-start` の同時指定、`--config` なしの `--strict-start` は、終了コード 2。
 - 検証の失敗では、トークンを送っていないので、操作は実行されていない（`daemon_result_unknown` にはしない）。
 
 ## 5. 脅威モデル（範囲）

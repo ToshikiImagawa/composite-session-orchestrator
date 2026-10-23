@@ -66,7 +66,7 @@
    node packages/mcp/dist/bin.js --daemon-url "$URL" --config "$W/config.json"
    ```
 
-   起動のときに、daemon に届くか確かめる（届かなければ失敗する）。`{"event":"listening","url":"http://127.0.0.1:7777/mcp"}` が標準出力に出る。身元の検証に失敗すると、標準エラーに `identityCheckFailed` が出る（起動は続き、最初のトークンつきの要求が `daemon_identity_failed` で失敗する）。
+   起動のときに、daemon に届くか確かめる（届かなければ失敗する）。`{"event":"listening","url":"http://127.0.0.1:7777/mcp"}` が標準出力に出る。`--config` があるときは、起動時の身元の検証に失敗すると、標準エラーに `identityCheckFailed` が出て、起動しない（身元の失敗は終了コード 3、一時的な失敗が尽きたときは 1。既定の強制〔`--strict-start`〕。`--no-strict-start` なら、起動は続き、最初のトークンつきの要求が `daemon_identity_failed` で失敗する）。
    `--config` なしで動かせるのは、環境変数 `CSO_MCP_ALLOW_UNVERIFIED=1`（ちょうど `1`）を付けたときだけ（`--port` が必要。検証なし。起動のログ `identityUnverified` を 1 回と、すべての応答のヘッダー `x-cso-identity: unverified` で分かる）。標準の手順では使わない。
 3. 単体で確かめる（トークンのファイルは `$W/state/` にある）。
 
