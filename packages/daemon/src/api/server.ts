@@ -35,6 +35,7 @@ import {
   type OperationMap,
   type OrchState,
   type Result,
+  uiViewOf,
 } from "@cso/core";
 import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
 import { type BindCodes, createThrottle, type Throttle } from "./bind.js";
@@ -54,6 +55,7 @@ import {
   operationWeight,
 } from "./rate-limit.js";
 import { pickResult } from "./results.js";
+import { UI_CSS, UI_HEADERS, UI_HTML, UI_HTML_HEADERS, UI_JS } from "./ui-assets.js";
 import { parseEnvelope, validateParams } from "./validate.js";
 
 export interface HandlerRequest<Op extends DaemonOperation = DaemonOperation> {
@@ -188,6 +190,18 @@ export interface ApiServer {
 }
 
 const HOST = "127.0.0.1";
+interface UiAsset {
+  readonly type: string;
+  readonly body: string;
+  /** HTML だけに付けるヘッダー（COOP・Permissions-Policy）を付ける。 */
+  readonly html?: boolean;
+}
+/** 画面の資産（パス → 内容）。 */
+const UI_ASSETS: Readonly<Record<string, UiAsset>> = {
+  "/ui": { type: "text/html; charset=utf-8", body: UI_HTML, html: true },
+  "/ui/app.js": { type: "text/javascript; charset=utf-8", body: UI_JS },
+  "/ui/app.css": { type: "text/css; charset=utf-8", body: UI_CSS },
+};
 /** 本文を読まずに返す応答には、接続を閉じさせる（読んでいない本文が、次の要求と混ざらない。遅い本文で接続を占有されない）。 */
 const CLOSE = { connection: "close" } as const;
 const DEFAULT_MAX_BODY = 1024 * 1024;
@@ -427,6 +441,10 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const path = (req.url ?? "").split("?")[0];
     if (path === "/v1/bind" && deps.bind !== undefined) return handleBind(req, res, deps.bind);
     if (path === "/v1/whoami") return handleWhoami(req, res);
+    if (path === "/v1/ui/state") return handleUiState(req, res);
+    const asset =
+      path !== undefined && Object.hasOwn(UI_ASSETS, path) ? UI_ASSETS[path] : undefined;
+    if (asset !== undefined) return handleUiAsset(req, res, asset);
     if (path === "/v1/identity" && deps.identity !== undefined) return handleIdentity(req, res);
     if (path !== "/v1/request") {
       return reject(res, failure("notFound", "このパスはない", "POST /v1/request を使う"));
@@ -732,6 +750,96 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     }
     send(res, 200, { ok: true, value: { role: principal.role } });
   }
+
+  /** 画面の資産（HTML・JS・CSS）。状態を含まないので、認証はない（Host・Origin の検査は、入口で済んでいる）。 */
+  function handleUiAsset(req: IncomingMessage, res: ServerResponse, asset: UiAsset): void {
+    if (req.method !== "GET") {
+      reject(res, failure("methodNotAllowed", "GET だけを受け付ける", "GET で呼び出す"), {
+        allow: "GET",
+      });
+      return;
+    }
+    // 静的な資産（状態を含まない）には、回数の制限をかけない（`docs/ui.md`）。
+    res.writeHead(200, {
+      ...UI_HEADERS,
+      ...(asset.html === true ? UI_HTML_HEADERS : {}),
+      "content-type": asset.type,
+      "content-length": Buffer.byteLength(asset.body),
+    });
+    res.end(asset.body);
+  }
+
+  /** 画面の表示モデル。人間のトークンだけ（それ以外は 403）。認証・失効・回数の制限は、`whoami` と同じ。 */
+  function handleUiState(req: IncomingMessage, res: ServerResponse): void {
+    if (req.method !== "GET") {
+      reject(res, failure("methodNotAllowed", "GET だけを受け付ける", "GET で呼び出す"), {
+        allow: "GET",
+      });
+      return;
+    }
+    const token = parseBearer(req.headers.authorization);
+    const principal = deps.credentials.authenticate(token);
+    if (principal === undefined) {
+      authFailed(req, res, token === undefined ? "missing" : "invalid");
+      return;
+    }
+    if (!checkPrincipal(principal, deps.getState()).ok) {
+      counters.count("authFailed", "principalRejected");
+      reject(
+        res,
+        failure(
+          "unauthenticated",
+          "資格情報がないか、正しくない",
+          "正しい資格情報で呼び出す",
+          "資格情報を再発行する",
+        ),
+        { "www-authenticate": "Bearer" },
+      );
+      return;
+    }
+    const used = principalLimiter.tryConsume(principalKey(principal), 1);
+    if (!used.ok) {
+      counters.count("rateLimited", "principal");
+      tooMany(res, used.retryAfterSec);
+      return;
+    }
+    if (principal.role !== "human") {
+      reject(
+        res,
+        failure("forbidden", "画面の状態は人間のトークンだけが読める", "人間のトークンで呼び出す"),
+      );
+      return;
+    }
+    // 表示モデルは、`lastSeq` が同じなら同じ（直近の 1 件だけ持つ）。`If-None-Match` が一致すれば 304（本文なし）。
+    const current = deps.getState();
+    if (uiCache === undefined || uiCache.seq !== current.lastSeq) {
+      const etag = `"${current.lastSeq}"`;
+      uiCache = {
+        seq: current.lastSeq,
+        etag,
+        json: JSON.stringify({ ok: true, value: uiViewOf(current) }),
+      };
+    }
+    const headers = {
+      etag: uiCache.etag,
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "cross-origin-resource-policy": "same-origin",
+    };
+    if (req.headers["if-none-match"] === uiCache.etag) {
+      res.writeHead(304, headers);
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      ...headers,
+      "content-type": "application/json; charset=utf-8",
+      "content-length": Buffer.byteLength(uiCache.json),
+    });
+    res.end(uiCache.json);
+  }
+  /** `GET /v1/ui/state` の直近の 1 件（`lastSeq` が鍵）。 */
+  let uiCache: { readonly seq: number; readonly etag: string; readonly json: string } | undefined;
 
   const now = (): string => (deps.clock ?? (() => new Date().toISOString()))();
   const throttle: Throttle = deps.bindThrottle ?? createThrottle({});
