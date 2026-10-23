@@ -127,7 +127,12 @@ page.on("response", (res) => {
 await page.fill("#token", HUMAN);
 await page.click("button[type=submit]");
 await page.waitForSelector("#view:not([hidden])", { timeout: 8000 });
-out.pasteOk = await page.locator("#status").innerText();
+await page.waitForFunction(
+  () => document.getElementById("status").innerText.includes("SSE"),
+  null,
+  { timeout: 8000 },
+);
+out.pasteOk = await page.locator("#status").innerText(); // SSE で接続している
 // 変化がない間は、304（描き直さない）
 await page.waitForTimeout(5000);
 out.statusesBeforeChange = [...statuses];
@@ -157,6 +162,75 @@ await page.waitForFunction(
 );
 out.reflectMs = Date.now() - t0;
 out.statusesAfterChange = [...statuses]; // 変わった直後は 200（新しい ETag）、そのあとは 304
+// SSE が使えないとき（上限 0 で、429）は、ポーリング（ETag）に切り替わる
+const poll = createApiServer({
+  credentials,
+  getState: () => state,
+  handlers: {},
+  sse: { maxConnections: 0 },
+});
+const pollUrl = (await poll.listen(0)).url;
+const page2 = await (await browser.newContext()).newPage();
+const pollStatuses = [];
+page2.on("response", (res) => {
+  if (res.url().endsWith("/v1/ui/state")) pollStatuses.push(res.status());
+});
+await page2.goto(`${pollUrl}/ui#token=${HUMAN}`);
+await page2.waitForFunction(
+  () => document.getElementById("status").innerText.includes("ポーリング"),
+  null,
+  { timeout: 8000 },
+);
+out.fallbackStatus = await page2.locator("#status").innerText();
+await page2.waitForTimeout(5000);
+out.fallbackStatuses = [...pollStatuses]; // 200 のあと 304
+// 429 のときは、Retry-After（5 秒）より前に、再接続しない
+let retryRequests = 0;
+const page4 = await (await browser.newContext()).newPage();
+page4.on("request", (req) => {
+  if (req.url().endsWith("/v1/events")) retryRequests += 1;
+});
+await page4.goto(`${pollUrl}/ui#token=${HUMAN}`);
+await page4.waitForTimeout(4000);
+out.eventRequestsWithin4sOf429 = retryRequests; // 1（Retry-After の 5 秒より前には、再接続しない）
+// 通知が続いても、状態の取り直しは、最短 1 秒ごと（間引き）
+const pageT = await (await browser.newContext()).newPage();
+let stateRequests = 0;
+pageT.on("request", (req) => {
+  if (req.url().endsWith("/v1/ui/state")) stateRequests += 1;
+});
+await pageT.goto(`${url}/ui#token=${HUMAN}`);
+await pageT.waitForFunction(
+  () => document.getElementById("status").innerText.includes("SSE"),
+  null,
+  { timeout: 8000 },
+);
+await pageT.waitForTimeout(1500);
+stateRequests = 0;
+const tt = Date.now();
+for (let i = 0; i < 30; i++) {
+  state = { ...state, lastSeq: state.lastSeq + 1 };
+  await pageT.waitForTimeout(100); // 3 秒の間、100ms ごとに変える（SSE の通知は 250ms ごと）
+}
+out.stateRequestsDuring3sOfChanges = stateRequests; // 最短 1 秒ごとなので、4 回前後（30 回ではない）
+out.throttleWindowMs = Date.now() - tt;
+// 切れたら、指数バックオフで再接続する（1 回目を中断させる）
+let eventRequests = 0;
+const page3 = await (await browser.newContext()).newPage();
+await page3.route("**/v1/events", (route) => {
+  eventRequests += 1;
+  return eventRequests === 1 ? route.abort() : route.continue();
+});
+await page3.goto(`${url}/ui#token=${HUMAN}`);
+const t1 = Date.now();
+await page3.waitForFunction(
+  () => document.getElementById("status").innerText.includes("SSE"),
+  null,
+  { timeout: 10000 },
+);
+out.reconnectMs = Date.now() - t1;
+out.eventRequests = eventRequests;
 await browser.close();
+await poll.close();
 await server.close();
 console.log(JSON.stringify(out, null, 1));
