@@ -6,6 +6,8 @@
  * - 対象は、中間統合ノード（根でない統合ノード）で、動作中か待機中のもの。完了・停止したノードには出さない。
  * - 優先度は、配下（自分を含む）の**未解決の項目**の最高の優先度（要判断 > 失敗 > 完了 > 進捗 > 情報）。未解決の項目がなければ、要約はない。
  * - 数える項目は、要約以外（要約は、ほかの要約を数えない。再帰しない）。
+ * - **持ち主のノードが `archived` の項目・未回答の判断・未判定の拡張要求は、数えない**（件数・優先度・最優先の項目に入らない）。アーカイブは、回収まで済んだ終わりの状態で、
+ *   残ったものは古い記録だから（T24-a）。ノード数・状態別の件数には、アーカイブ済みのノードも数える。`reclaimable` より前の状態（停止した枝など）のものは、除かない。
  * - `fingerprint` は、時間に依存しない事実（件数・状態・最優先の項目）の指紋。同じなら、要約を出し直さない（最古の要判断の経過分は含めない）。
  */
 
@@ -114,8 +116,11 @@ export function digestOf(state: OrchState, nodeId: string, nowMs: number): Diges
     if (st !== undefined) byState[st] = (byState[st] ?? 0) + 1;
   }
 
+  // 持ち主が archived のものは、数えない（項目・判断・拡張要求のどれにも、同じ規則を当てはめる。件数が食い違わない）。
+  const counted = (ownerId: string): boolean =>
+    scope.has(ownerId) && stateOf.get(ownerId) !== "archived";
   const items = state.inbox.filter(
-    (i) => i.resolved === undefined && i.kind !== "digest" && scope.has(i.nodeId),
+    (i) => i.resolved === undefined && i.kind !== "digest" && counted(i.nodeId),
   );
   if (items.length === 0) return undefined;
 
@@ -144,10 +149,10 @@ export function digestOf(state: OrchState, nodeId: string, nowMs: number): Diges
       : Math.max(Math.floor((nowMs - oldest) / 60_000), 0);
 
   const openDecisions = state.decisions.filter(
-    (d) => d.status === "open" && scope.has(d.nodeId),
+    (d) => d.status === "open" && counted(d.nodeId),
   ).length;
   const openExtensions = state.extensions.filter(
-    (x) => x.status === "open" && scope.has(x.nodeId),
+    (x) => x.status === "open" && counted(x.nodeId),
   ).length;
 
   const facts: DigestFacts = {

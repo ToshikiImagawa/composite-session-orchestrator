@@ -356,6 +356,45 @@ describe("要約の発行器（T24-d）", () => {
     expect(r.open("m1")).toHaveLength(0); // 完了したノードには出さない
   });
 
+  it("T24-a: 配下のノードがアーカイブされ、残った項目が、アーカイブ済みの枝のものだけになったら、出ている要約を解決する（古い記録で、要約が残り続けない）", async () => {
+    const r = rig();
+    r.item("old", "info", "a");
+    const i = r.issuer();
+    await i.runOnce();
+    expect(r.open("m1")).toHaveLength(1);
+    r.ev("a", { type: "reportDone" });
+    r.ev("a", { type: "accept" });
+    r.ev("a", { type: "markReclaimable", discarded: false });
+    r.ev("a", { type: "archive" });
+    const out = await i.runOnce();
+    expect(out.resolved).toBe(1);
+    expect(r.open("m1")).toHaveLength(0);
+  });
+
+  it("T24-a: a の失敗で出した要約（failed）は、a がアーカイブされると、残った進捗（m1 自身の項目）の新しい要約（progress）に置き換わる。古い要約は解決される", async () => {
+    const r = rig();
+    r.item("f1", "failure", "a");
+    r.item("p1", "progress", "m1");
+    const i = r.issuer();
+    await i.runOnce();
+    const before = r.open("m1");
+    expect(before).toHaveLength(1);
+    expect(before[0]?.priority).toBe("failed");
+    r.ev("a", { type: "reportDone" });
+    r.ev("a", { type: "accept" });
+    r.ev("a", { type: "markReclaimable", discarded: false });
+    r.ev("a", { type: "archive" });
+    r.setMono(10 * 60_000); // 要約を出し直す最小の間隔を過ぎる
+    const out = await i.runOnce();
+    expect(out.issued).toHaveLength(1);
+    const after = r.open("m1");
+    expect(after).toHaveLength(1);
+    expect(after[0]?.priority).toBe("progress");
+    expect(after[0]?.id).not.toBe(before[0]?.id);
+    expect(r.digests("m1").find((d) => d.id === before[0]?.id)?.resolved).toBeDefined();
+    expect(after[0]?.summary).toBe(digestOf(r.log.state(), "m1", r.wall())?.summary);
+  });
+
   it("start() は、周期（intervalMs）で実行する。stop() は、周期を止める。isStopped なら動かない", async () => {
     const r = rig();
     r.item("f1", "failure", "a");

@@ -137,15 +137,34 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
   });
 
   it("再起動しても、根を重複させず、根のトークンは変わらず有効", async () => {
-    const r = rig();
-    const first = await boot(r);
-    await first.daemon.stop();
-    cleanups.length = 0;
-    const second = await boot(r);
-    expect(second.rootToken).toBe(first.rootToken);
-    expect(second.daemon.log.state().nodes).toHaveLength(1);
-    expect((await call(second.url, second.rootToken, "tree.list", {})).status).toBe(200);
-  });
+    // 手元では全体で 100ms ほど（stop も数 ms）。5 秒の既定を超えたのは、CI の macOS が、git の試験と並んで重かったため（実際の遅れではない）。
+    // 時間切れの切り分け用に、区間ごとの所要（ms）を測り、失敗したときだけ出力する。
+    const marks: [string, number][] = [];
+    let t = performance.now();
+    const lap = (name: string) => {
+      const n = performance.now();
+      marks.push([name, Math.round(n - t)]);
+      t = n;
+    };
+    try {
+      const r = rig();
+      lap("rig");
+      const first = await boot(r);
+      lap("1 回目の起動");
+      await first.daemon.stop();
+      lap("stop");
+      cleanups.length = 0;
+      const second = await boot(r);
+      lap("2 回目の起動");
+      expect(second.rootToken).toBe(first.rootToken);
+      expect(second.daemon.log.state().nodes).toHaveLength(1);
+      expect((await call(second.url, second.rootToken, "tree.list", {})).status).toBe(200);
+      lap("tree.list");
+    } catch (e) {
+      console.error(`再起動の試験の区間（ms）: ${JSON.stringify(marks)}`);
+      throw e;
+    }
+  }, 15_000);
 
   it("根の統合ノードが spawn で子を作り、実際に起動できる（rootScope・根の cwd・作業ツリーの配線）", async () => {
     const r = rig();
