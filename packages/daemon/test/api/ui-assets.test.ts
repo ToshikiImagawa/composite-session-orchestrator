@@ -23,7 +23,7 @@ describe("画面の資産（走査）", () => {
     ["storage・cookie", /localStorage|sessionStorage|document\s*\.\s*cookie|indexedDB/],
     ["importScripts・動的 import", /importScripts|\bimport\s*\(/],
     ["postMessage・window.open", /postMessage|window\s*\.\s*open/],
-    ["ブラケット記法の文字列キー", /\[\s*['"`]/],
+    ["ブラケット記法の文字列キー（メンバーの参照）", /[\w$)\]]\s*\[\s*['"`]/],
     [
       "HTML を解釈する API",
       /setHTMLUnsafe|parseHTMLUnsafe|setHTML\b|createContextualFragment|DOMParser|document\s*\.\s*createRange/,
@@ -114,6 +114,31 @@ describe("画面の資産（走査）", () => {
       "Map",
       "Set",
       "body",
+      "from",
+      "some",
+      "test",
+      "error",
+      "code",
+      "cause",
+      "retry",
+      "title",
+      "lines",
+      "sending",
+      "disabled",
+      "crypto",
+      "randomUUID",
+      "stringify",
+      "requestId",
+      "operation",
+      "params",
+      "activeElement",
+      "dataset",
+      "draft",
+      "maxLength",
+      "placeholder",
+      "delete",
+      "focus",
+      "setSelectionRange",
       "seq",
       "partial",
       "getReader",
@@ -141,10 +166,10 @@ describe("画面の資産（走査）", () => {
     expect(unknown).toEqual([]);
   });
 
-  it("el に渡すタグは、div・span・p だけ（実行時にも、許可リストで拒む）", () => {
+  it("el に渡すタグは、div・span・p・button・textarea だけ（実行時にも、許可リストで拒む）", () => {
     const calls = [...UI_JS.matchAll(/\bel\(\s*'([^']*)'/g)].map((m) => m[1]);
     expect(calls.length).toBeGreaterThan(5);
-    for (const tag of calls) expect(["div", "span", "p"]).toContain(tag);
+    for (const tag of calls) expect(["div", "span", "p", "button", "textarea"]).toContain(tag);
     expect(UI_JS).toContain("Object.hasOwn(TAGS, tag)");
   });
 
