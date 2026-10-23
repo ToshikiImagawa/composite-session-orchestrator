@@ -228,23 +228,23 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
         connection: {
           requestTimeoutMs: 1000,
           headersTimeoutMs: 1000,
-          keepAliveTimeoutMs: 1000,
-          maxConnections: 16,
+          keepAliveTimeoutMs: 3000,
+          maxConnections: 64,
         },
-        inProgress: { waitMs: 1000, maxWaiters: 1, staleMs: 30000, maxEntries: 64 },
+        inProgress: { waitMs: 1000, maxWaiters: 1, staleMs: 150000, maxEntries: 64 },
       }),
     );
     expect(all.ok && all.value.rateLimit).toEqual({ maxInFlightPerPrincipal: 1 });
     expect(all.ok && all.value.connection).toEqual({
       requestTimeoutMs: 1000,
       headersTimeoutMs: 1000,
-      keepAliveTimeoutMs: 1000,
-      maxConnections: 16,
+      keepAliveTimeoutMs: 3000,
+      maxConnections: 64,
     });
     expect(all.ok && all.value.inProgress).toEqual({
       waitMs: 1000,
       maxWaiters: 1,
-      staleMs: 30000,
+      staleMs: 150000,
       maxEntries: 64,
     });
     const max = parseConfig(
@@ -277,8 +277,9 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
       { requestTimeoutMs: 999 },
       { requestTimeoutMs: 600001 },
       { headersTimeoutMs: 999 },
+      { keepAliveTimeoutMs: 2999 },
       { keepAliveTimeoutMs: 120001 },
-      { maxConnections: 15 },
+      { maxConnections: 63 },
       { maxConnections: 10001 },
       { maxConnections: 16.5 },
       { requestTimeoutMs: "30000" },
@@ -293,7 +294,7 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
       { waitMs: 60001 },
       { maxWaiters: 0 },
       { maxWaiters: 257 },
-      { staleMs: 29999 },
+      { staleMs: 149999 }, // 最長の操作のタイムアウト（120 秒）より長くする
       { staleMs: 3600001 },
       { maxEntries: 63 },
       { maxEntries: 100001 },
@@ -303,7 +304,7 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
-  it("T10l-f: 実効の値の組み合わせを検査する（headersTimeoutMs ＞ requestTimeoutMs、waitMs ＞ staleMs は、省略した既定の値とも照合して拒否する）", () => {
+  it("T10l-f: 実効の値の組み合わせを検査する（headersTimeoutMs ＞ requestTimeoutMs は、省略した既定の値とも照合して拒否する）", () => {
     // requestTimeoutMs だけ小さくすると、既定の headersTimeoutMs（10 秒）が上回る
     bad({ connection: { requestTimeoutMs: 5000 } }, "headersTimeoutMs");
     bad({ connection: { requestTimeoutMs: 5000, headersTimeoutMs: 6000 } }, "headersTimeoutMs");
@@ -314,10 +315,10 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     ).toBe(true);
     // headersTimeoutMs だけ大きくすると、既定の requestTimeoutMs（30 秒）を上回る
     bad({ connection: { headersTimeoutMs: 31000 } }, "headersTimeoutMs");
-    // staleMs だけ小さくすると、既定の waitMs（20 秒）が上回る
-    bad({ inProgress: { staleMs: 30000, waitMs: 31000 } }, "waitMs");
-    expect(parseConfig(JSON.stringify({ ...base, inProgress: { staleMs: 30000 } })).ok).toBe(true);
-    expect(parseConfig(JSON.stringify({ ...base, inProgress: { waitMs: 60000 } })).ok).toBe(true); // 既定の staleMs（5 分）以下
+    // waitMs の上限（60 秒）は、staleMs の下限（150 秒）より小さい: どの組み合わせでも、waitMs ＞ staleMs にならない
+    expect(
+      parseConfig(JSON.stringify({ ...base, inProgress: { staleMs: 150000, waitMs: 60000 } })).ok,
+    ).toBe(true);
   });
 
   it("rateLimit（窓口の回数の制限の調整。無効にはできない）: 範囲・未知のキーを検査する。下限がある", () => {

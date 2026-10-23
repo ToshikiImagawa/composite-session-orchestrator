@@ -487,6 +487,7 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
       bindOptions?: Parameters<typeof createBindCodes>[0];
       throttle?: ReturnType<typeof createThrottle>;
       authFailures?: { burst: number; perSecond: number };
+      monotonicMs?: () => number;
     } = {},
   ) => {
     const credentials = createCredentialStore({ humanToken: HUMAN });
@@ -497,7 +498,12 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
       ...(over.logger ? { logger: over.logger } : {}),
       ...(over.throttle ? { bindThrottle: over.throttle } : {}),
       ...(over.authFailures
-        ? { rateLimit: { authFailures: over.authFailures, monotonicMs: () => 0 } }
+        ? {
+            rateLimit: {
+              authFailures: over.authFailures,
+              monotonicMs: over.monotonicMs ?? (() => 0),
+            },
+          }
         : {}),
       clock: () => "2026-10-20T00:00:00.000Z",
       getState: () => (typeof over.state === "function" ? over.state() : (over.state ?? state())),
@@ -697,23 +703,70 @@ describe("bind 専用の入口（POST /v1/bind。Bearer なしで、nodeId と b
     expect(JSON.stringify(logs)).not.toContain(code);
   });
 
-  it("T10l-f: bind の成功は、bucket を使わない（正しいコードの bind を何度でも）。トークンの認証の失敗と、同じ bucket を共有する", async () => {
+  it("T10l-f: bind の成功は、bucket を使わない（正しいコードの bind を何度でも）", async () => {
     const r = await rigBind({ authFailures: { burst: 3, perSecond: 0.01 } });
     for (let i = 0; i < 8; i++) {
       const res = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
       expect(res.status, String(i)).toBe(200);
     }
-    // トークンの認証の失敗（Bearer が無効）を 3 回 → bind も断られる（同じ接続元の bucket）
-    for (let i = 0; i < 3; i++) {
-      const bad = await fetch(`${r.url}/v1/request`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${"z".repeat(43)}`, "content-type": "application/json" },
-        body: JSON.stringify({ requestId: `x${i}`, operation: "report.progress", params: {} }),
-      });
-      expect(bad.status).toBe(401);
+  });
+
+  const badToken = (url: string, i: number) =>
+    fetch(`${url}/v1/request`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${"z".repeat(43)}`, "content-type": "application/json" },
+      body: JSON.stringify({ requestId: `x${i}`, operation: "report.progress", params: {} }),
+    });
+
+  it("T10l-f（R2）: bind の bucket は、トークンの認証の失敗とは別。失効したトークンの連打で bind は止まらず、bind の失敗でトークンの認証は止まらない", async () => {
+    const r = await rigBind({ authFailures: { burst: 3, perSecond: 0.01 } });
+    // トークンの認証の失敗を、容量の 2 倍（bucket は尽きる）。bind は、止まらない
+    for (let i = 0; i < 6; i++) {
+      const res = await badToken(r.url, i);
+      expect(res.status).toBe(401);
     }
-    const res = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
-    expect(res.status).toBe(429);
+    const retry = (await badToken(r.url, 99)).headers.get("retry-after");
+    expect(retry).not.toBeNull(); // トークン側の bucket は尽きている（Retry-After つきの 401）
+    const bound = await r.call({ nodeId: "a", bindCode: r.bind.issue("a") });
+    expect(bound.status).toBe(200);
+  });
+
+  it("T10l-f（R2）: bind の失敗で bind の bucket が尽きても、トークンの認証の失敗の bucket は使われない（Retry-After のない 401）。有効なトークンも通る", async () => {
+    const r = await rigBind({ authFailures: { burst: 3, perSecond: 0.01 } });
+    for (let i = 0; i < 3; i++) await r.call({ nodeId: "a", bindCode: `wrong-${i}` });
+    expect((await r.call({ nodeId: "a", bindCode: r.bind.issue("a") })).status).toBe(429);
+    const res = await badToken(r.url, 1);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("retry-after")).toBeNull(); // トークン側の bucket は、まだ残っている
+    const token = r.credentials.issueNodeToken("a", "child");
+    const ok1 = await fetch(`${r.url}/v1/request`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "p1",
+        operation: "report.progress",
+        params: { text: "x" },
+      }),
+    });
+    expect(ok1.status).toBe(200);
+  });
+
+  it("T10l-f（R5）: bucket が尽きたあと、時計を進めると、bind が通るようになる（回復）。尽きている間は、同じコードで 429 のまま", async () => {
+    let t = 0;
+    const r = await rigBind({
+      authFailures: { burst: 3, perSecond: 0.01 }, // 1 トークンの補充に 100 秒
+      monotonicMs: () => t,
+    });
+    for (let i = 0; i < 3; i++) await r.call({ nodeId: "a", bindCode: `wrong-${i}` });
+    const code = r.bind.issue("a");
+    const blocked = await r.call({ nodeId: "a", bindCode: code });
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("retry-after")).toBe("100");
+    t += 50_000; // まだ足りない
+    expect((await r.call({ nodeId: "a", bindCode: code })).status).toBe(429);
+    t += 50_000; // 1 トークンになる
+    const ok1 = await r.call({ nodeId: "a", bindCode: code });
+    expect(ok1.status).toBe(200); // 429 のとき、コードは消費されていない
   });
 
   it("形の検査: 余計なキー・不正なコード・JSON でない・大きすぎる本文・GET・Content-Type", async () => {

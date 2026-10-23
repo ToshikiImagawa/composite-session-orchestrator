@@ -128,8 +128,8 @@ export const RATE_LIMIT_BOUNDS = {
 export const CONNECTION_BOUNDS = {
   requestTimeoutMs: { min: 1_000, max: 600_000 },
   headersTimeoutMs: { min: 1_000, max: 600_000 },
-  keepAliveTimeoutMs: { min: 1_000, max: 120_000 },
-  maxConnections: { min: 16, max: 10_000 },
+  keepAliveTimeoutMs: { min: 3_000, max: 120_000 },
+  maxConnections: { min: 64, max: 10_000 },
 } as const;
 export const CONNECTION_DEFAULTS = {
   requestTimeoutMs: 30_000,
@@ -138,11 +138,14 @@ export const CONNECTION_DEFAULTS = {
   maxConnections: 256,
 } as const;
 
-/** 同じ要求の処理中の重複の扱いの設定の範囲（T10l-f）。`waitMs` は、実効の `staleMs` 以下。 */
+/**
+ * 同じ要求の処理中の重複の扱いの設定の範囲（T10l-f）。`staleMs` の下限（150 秒）は、最長の操作のタイムアウト（120 秒）より長い
+ * （正常に処理中の項目を、古いと見なして外さない）。`waitMs` の上限（60 秒）は、`staleMs` の下限より小さいので、組み合わせの検査はいらない。
+ */
 export const IN_PROGRESS_BOUNDS = {
   waitMs: { min: 1_000, max: 60_000 },
   maxWaiters: { min: 1, max: 256 },
-  staleMs: { min: 30_000, max: 3_600_000 },
+  staleMs: { min: 150_000, max: 3_600_000 },
   maxEntries: { min: 64, max: 100_000 },
 } as const;
 export const IN_PROGRESS_DEFAULTS = {

@@ -766,7 +766,7 @@ describe("apiLimitsOf（設定から窓口の制限・接続・処理中の重�
     const l = apiLimitsOf(
       cfg({
         rateLimit: { maxInFlightPerPrincipal: 3 },
-        connection: { requestTimeoutMs: 5000, headersTimeoutMs: 4000, maxConnections: 32 },
+        connection: { requestTimeoutMs: 5000, headersTimeoutMs: 4000, maxConnections: 64 },
         inProgress: { waitMs: 2000, maxEntries: 100 },
       }),
       () => 7,
@@ -778,7 +778,7 @@ describe("apiLimitsOf（設定から窓口の制限・接続・処理中の重�
     expect(l.connection).toEqual({
       requestTimeoutMs: 5000,
       headersTimeoutMs: 4000,
-      maxConnections: 32,
+      maxConnections: 64,
     });
     expect(l.inProgress).toEqual({ waitMs: 2000, maxEntries: 100 });
   });
@@ -804,6 +804,40 @@ describe("createDaemon（窓口の回数の制限。T10l）", () => {
     // 人間は、別の主体なので、影響されない
     const human = await call(d.url, d.humanToken, "node.purgePreview", { nodeId: "root" });
     expect(human.status).not.toBe(429);
+  });
+
+  it("T10l-f（R4）: 設定の maxInFlightPerPrincipal が、窓口に届いている（1 にすると、同時の 2 つ目の要求が 429。1 つ目は、終われば成功する）", async () => {
+    const r = rig({ rateLimit: { maxInFlightPerPrincipal: 1 } });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    let entered: () => void = () => {};
+    const started = new Promise<void>((res) => {
+      entered = res;
+    });
+    r.deps = {
+      ...r.deps,
+      worktree: {
+        ...r.deps.worktree,
+        lossFor: async () => {
+          entered();
+          await gate;
+          return undefined;
+        },
+      },
+    };
+    const d = await boot(r);
+    const first = call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "root" });
+    await started; // 1 つ目が、ハンドラの中で止まっている
+    const second = await call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "root" });
+    expect(second.status).toBe(429);
+    release();
+    expect((await first).status).toBe(200);
+    // 枠は、1 つ目の処理が終わったとき返る（もう一度通る）
+    expect(
+      (await call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "root" })).status,
+    ).toBe(200);
   });
 
   it("設定を省かなければ、既定（容量 60）で動く: 通常の操作の頻度では、制限に当たらない", async () => {

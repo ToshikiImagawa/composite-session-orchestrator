@@ -72,8 +72,8 @@ export interface DaemonConfig {
   };
   /**
    * 接続の上限とタイムアウト（T10l-f。遅い要求への対策）。省略した項目は既定: `requestTimeoutMs` 30,000（1,000〜600,000）・
-   * `headersTimeoutMs` 10,000（1,000〜600,000。実効の `requestTimeoutMs` 以下）・`keepAliveTimeoutMs` 5,000（1,000〜120,000）・
-   * `maxConnections` 256（16〜10,000）。
+   * `headersTimeoutMs` 10,000（1,000〜600,000。実効の `requestTimeoutMs` 以下）・`keepAliveTimeoutMs` 5,000（3,000〜120,000）・
+   * `maxConnections` 256（64〜10,000。mcp の接続と SSE も数に含まれる）。
    */
   readonly connection?: {
     readonly requestTimeoutMs?: number;
@@ -83,8 +83,8 @@ export interface DaemonConfig {
   };
   /**
    * 同じ要求（同じ主体・同じ requestId）の処理中の重複の扱い（T10l-f。`docs/request-dedup.md`）。省略した項目は既定: `waitMs` 20,000
-   * （1,000〜60,000。実効の `staleMs` 以下。最初の結果を待つ上限）・`maxWaiters` 16（1〜256。1 つの項目に同時に待てる重複の数）・
-   * `staleMs` 300,000（30,000〜3,600,000。古いと見なして外す時間）・`maxEntries` 1,024（64〜100,000。表の大きさ）。
+   * （1,000〜60,000。最初の結果を待つ上限）・`maxWaiters` 16（1〜256。1 つの項目に同時に待てる重複の数）・
+   * `staleMs` 300,000（150,000〜3,600,000。古いと見なして外す時間。最長の操作のタイムアウト 120 秒より長い）・`maxEntries` 1,024（64〜100,000。表の大きさ）。
    */
   readonly inProgress?: {
     readonly waitMs?: number;
@@ -364,13 +364,6 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
   if (raw.inProgress !== undefined) {
     const g = boundedGroup("inProgress", raw.inProgress, IN_PROGRESS_BOUNDS);
     if (!g.ok) return bad(g.cause);
-    const wait = g.value.waitMs ?? IN_PROGRESS_DEFAULTS.waitMs;
-    const stale = g.value.staleMs ?? IN_PROGRESS_DEFAULTS.staleMs;
-    if (wait > stale) {
-      return bad(
-        `inProgress.waitMs（${wait}。省略すると ${IN_PROGRESS_DEFAULTS.waitMs}）は、staleMs（${stale}。省略すると ${IN_PROGRESS_DEFAULTS.staleMs}）以下にする`,
-      );
-    }
     inProgress = g.value;
   }
   let autoPurge:
