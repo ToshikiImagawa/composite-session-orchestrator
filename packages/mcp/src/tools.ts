@@ -39,7 +39,8 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
     "稼働中の子へ追加指示を送る。結果は { status: queued, duplicate }（受け付けた。duplicate は同じ要求の重複。届いたかは受信箱・状態で確認する）",
   "node.stop":
     "子を停止する。mode は graceful（穏当）か immediate（即時）。graceMs（1〜3600000 ミリ秒の整数）は graceful のときだけ指定でき、省略すると既定の猶予になる",
-  "inbox.fetch": "受信箱を取得する。優先度・依存関係・時刻の順。detail と limit で量を絞れる",
+  "inbox.fetch":
+    "受信箱を取得する。優先度・依存関係・時刻の順（中間統合ノードの配下の要約 digest は、配下の未解決の項目の最高の優先度の帯に並ぶ）。detail と limit で量を絞れる",
   "tree.list": "木の一覧表を取得する",
   "decision.present": `選択肢と自由入力欄を持つ判断要求を人間に提示する。pauseNodeIds で、判断待ちの間に止める子（自分の子孫）を指定できる。未回答の判断要求は 1 ノードにつき ${LIMITS.openDecisionsPerNode} 件まで（再開後の要求を数える。超えると tooManyOpenDecisions）。回答は受信箱に届く`,
   "node.split":
