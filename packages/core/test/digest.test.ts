@@ -283,6 +283,12 @@ describe("要約の補足（T24 PR1 レビュー）", () => {
   });
 });
 
+// 試験用の最小の判断・拡張要求（DecisionRecord・ExtensionRecord の全項目は、ここでは要らない）。型の項目を変えたら、ここも更新が必要。
+const openDecision = (decisionId: string, nodeId: string): OrchState["decisions"][number] =>
+  ({ decisionId, nodeId, status: "open", rejected: [] }) as never;
+const openExtension = (extensionId: string, nodeId: string): OrchState["extensions"][number] =>
+  ({ extensionId, nodeId, status: "open" }) as never;
+
 describe("アーカイブ済みのノードの項目は数えない（T24-a）", () => {
   /** a を、回収まで済ませてアーカイブする。 */
   const archiveA = (): OrchEvent[] => [
@@ -331,16 +337,8 @@ describe("アーカイブ済みのノードの項目は数えない（T24-a）",
     // 持ち主が archived の、未回答の判断・未判定の拡張要求がある状態（防御の確認。通常の fold では、archived にできない）
     const withOpen: OrchState = {
       ...s,
-      decisions: [
-        ...s.decisions,
-        { decisionId: "d-a", nodeId: "a", status: "open", rejected: [] } as never,
-        { decisionId: "d-b", nodeId: "b", status: "open", rejected: [] } as never,
-      ],
-      extensions: [
-        ...s.extensions,
-        { extensionId: "x-a", nodeId: "a", status: "open" } as never,
-        { extensionId: "x-b", nodeId: "b", status: "open" } as never,
-      ],
+      decisions: [...s.decisions, openDecision("d-a", "a"), openDecision("d-b", "b")],
+      extensions: [...s.extensions, openExtension("x-a", "a"), openExtension("x-b", "b")],
     };
     const d = digestOf(withOpen, "m1", NOW);
     expect(d?.openDecisions).toBe(1); // b のものだけ
