@@ -77,6 +77,22 @@ describe("tree.list（状態から決定的に生成した木の一覧表。呼�
     expect(res.value.table).not.toMatch(/\bb\b/);
   });
 
+  it("呼び出したノード自身の行に、self の印（あなた）を付ける。人間・ほかのノードの行には付けない", async () => {
+    const r = rig();
+    const rowOf = (table: string, id: string) =>
+      table.split("\n").find((l) => l.split("|")[1]?.trim() === id) ?? "";
+    const m1 = (await r.call("tree.list", r.req("tree.list", {}, M1))).value.table as string;
+    expect(m1.split("\n")[0]).toContain("self");
+    expect(rowOf(m1, "m1")).toContain("あなた");
+    expect(rowOf(m1, "a")).not.toContain("あなた");
+    const root = (await r.call("tree.list", r.req("tree.list", {}, ROOT))).value.table as string;
+    expect(rowOf(root, "root")).toContain("あなた");
+    expect(rowOf(root, "m1")).not.toContain("あなた");
+    const human = (await r.call("tree.list", r.req("tree.list", {}, "human"))).value
+      .table as string;
+    expect(human).not.toContain("あなた");
+  });
+
   it("根は全体。同じ状態からは同じ表（決定的）", async () => {
     const r = rig();
     const t1 = (await r.call("tree.list", r.req("tree.list", {}, ROOT))).value.table as string;

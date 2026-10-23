@@ -25,6 +25,7 @@ import {
   stateOf,
 } from "@cso/core";
 import type { RuntimeAdapter } from "../../sdk/runtime.js";
+import { selfIntroLines } from "../../self-intro.js";
 import type { CredentialStore } from "../credentials.js";
 import type { HandlerRequest } from "../server.js";
 import { deliverAnswer, noteStoppingAnswer } from "./answer-delivery.js";
@@ -82,6 +83,7 @@ function instructionAfterAnswer(
 ): string {
   const n = state.nodes.find((x) => x.id === nodeId);
   return [
+    ...(n === undefined ? [] : selfIntroLines(n.id, n.role, n.parentId)),
     `判断が出ました。回答: ${answer}`,
     "作業を再開してください。",
     ...(n?.objective === undefined ? [] : [`目的: ${n.objective}`]),

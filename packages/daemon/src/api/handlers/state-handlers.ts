@@ -156,6 +156,7 @@ export function createStateHandlers(deps: StateHandlerDeps) {
     "tree.list": (req: HandlerRequest<"tree.list">): R<"tree.list"> => {
       const v = visibleState(log.state(), callerOf(req));
       const all = log.state().nodes;
+      const me = callerOf(req);
       const rows = v.nodes.map((n) => [
         n.id,
         n.role,
@@ -168,8 +169,10 @@ export function createStateHandlers(deps: StateHandlerDeps) {
                 all.find((x) => x.id === d)?.discarded === undefined ? d : `${d}(破棄済み)`,
               )
               .join(","),
+        // 呼び出したノード自身の行に印を付ける（自分の ID を、表から見分けるため。人間には付けない）。
+        me !== "" && n.id === me ? "あなた" : "",
       ]);
-      const header = ["id", "role", "state", "parent", "dependsOn"];
+      const header = ["id", "role", "state", "parent", "dependsOn", "self"];
       const widths = header.map((h, i) =>
         Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)),
       );

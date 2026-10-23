@@ -38,6 +38,7 @@ import {
   validateScope,
 } from "@cso/core";
 import type { RuntimeAdapter } from "../../sdk/runtime.js";
+import { selfIntroLines } from "../../self-intro.js";
 import type { CredentialStore } from "../credentials.js";
 import type { HandlerRequest } from "../server.js";
 import {
@@ -113,8 +114,9 @@ const LIVE = new Set(["running", "waiting"]);
 /** 後始末済み・終わった子。同じ requestId の再試行で、成功として返してはならない。 */
 const DEAD = new Set(["stopping", "stopIncomplete", "stopped", "reclaimable", "archived"]);
 
-const instructionOf = (b: BriefParams): string =>
+const instructionOf = (b: BriefParams, self: string[]): string =>
   [
+    ...self,
     `目的: ${b.objective}`,
     "受け入れ基準:",
     ...b.acceptanceCriteria.map((c) => `- ${c}`),
@@ -259,7 +261,10 @@ export function createSpawner(deps: SpawnHandlerDeps) {
         nodeId,
         worktreePath,
         scope: brief.scope,
-        instruction: instructionOf(brief),
+        instruction: instructionOf(
+          brief,
+          selfIntroLines(nodeId, role, nodeOf(log.state(), nodeId)?.parentId ?? null),
+        ),
         mcp: { url: ports.mcpUrl, token },
       });
       if (!started.ok) {
