@@ -1,6 +1,9 @@
 import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
+import { hostPortOf, proofOf } from "../src/identity.js";
 import { main, parseArgs } from "../src/main.js";
+
+const DID = "00112233445566778899aabbccddeeff";
 
 const URL1 = "http://127.0.0.1:7777";
 const noFile = () => {
@@ -16,7 +19,7 @@ describe("cso-mcp の引数", () => {
       parseArgs(["--daemon-url", URL1, "--port", "8123"], UNVERIFIED, { readFile: noFile }),
     ).toEqual({
       ok: true,
-      value: { daemonUrl: URL1, port: 8123 },
+      value: { daemonUrl: URL1, port: 8123, strictStart: false },
     });
     expect(
       parseArgs(
@@ -24,7 +27,7 @@ describe("cso-mcp の引数", () => {
         { CSO_DAEMON_URL: URL1, CSO_MCP_PORT: "8123", ...UNVERIFIED },
         { readFile: noFile },
       ),
-    ).toEqual({ ok: true, value: { daemonUrl: URL1, port: 8123 } });
+    ).toEqual({ ok: true, value: { daemonUrl: URL1, port: 8123, strictStart: false } });
     const both = parseArgs(
       ["--port", "9000"],
       { CSO_DAEMON_URL: URL1, CSO_MCP_PORT: "8123", ...UNVERIFIED },
@@ -59,7 +62,12 @@ describe("--config（daemon の設定から mcpUrl のポートを読む）", ()
     );
     expect(r).toEqual({
       ok: true,
-      value: { daemonUrl: URL1, port: 7788, identityPath: "/s/daemon-identity" },
+      value: {
+        daemonUrl: URL1,
+        port: 7788,
+        identityPath: "/s/daemon-identity",
+        strictStart: true,
+      },
     });
   });
 
@@ -192,7 +200,7 @@ describe("daemon の身元確認の設定（T10m-i2）", () => {
 
   it("CSO_MCP_ALLOW_UNVERIFIED=1 なら、--config なしで動く（identityPath なし）", () => {
     const r = parseArgs(args, UNVERIFIED, { readFile: noFile });
-    expect(r).toEqual({ ok: true, value: { daemonUrl: URL1, port: 8123 } });
+    expect(r).toEqual({ ok: true, value: { daemonUrl: URL1, port: 8123, strictStart: false } });
   });
 
   it("--config があるときは、CSO_MCP_ALLOW_UNVERIFIED=1 があっても検証する（identityPath あり）", () => {
@@ -239,23 +247,235 @@ describe("daemon の身元確認の設定（T10m-i2）", () => {
     expect(r.server).toBeUndefined();
   });
 
-  it("検証ありで起動したとき、起動時にも 1 回検証し、失敗しても起動は止めずに警告を出す", async () => {
+  it("--no-strict-start: 検証ありで起動したとき、起動時にも 1 回検証し、失敗しても起動は止めずに警告を出す", async () => {
     const fetchImpl = (async (u: string) => {
       if (u.includes("/v1/identity")) return new Response("{}", { status: 404 });
       return new Response("{}", { status: 401 });
     }) as unknown as typeof fetch;
     const x = io();
     const port = String(await freePort());
-    const r = await main(["--daemon-url", URL1, "--config", "/c.json", "--port", port], {}, x.io, {
-      fetch: fetchImpl,
-      readFile: () => JSON.stringify({ stateDir: "/s", mcpUrl: `http://127.0.0.1:${port}/mcp` }),
-      readIdentityFile: () => {
-        throw new Error("ENOENT");
+    const r = await main(
+      ["--daemon-url", URL1, "--config", "/c.json", "--port", port, "--no-strict-start"],
+      {},
+      x.io,
+      {
+        fetch: fetchImpl,
+        readFile: () => JSON.stringify({ stateDir: "/s", mcpUrl: `http://127.0.0.1:${port}/mcp` }),
+        readIdentityFile: () => {
+          throw new Error("ENOENT");
+        },
       },
-    });
+    );
     expect(r.exitCode).toBe(0);
     expect(x.err.join("")).toContain("identityCheckFailed");
     expect(x.err.join("")).not.toContain("identityUnverified");
     await r.server?.close();
+  });
+
+  describe("--strict-start（T10m-i3）", () => {
+    const cfg = (port: string) => () =>
+      JSON.stringify({ stateDir: "/s", mcpUrl: `http://127.0.0.1:${port}/mcp` });
+    const run = async (
+      identityStatus: number | "throw",
+      extra: string[] = [],
+      sleeps: number[] = [],
+      statuses?: number[],
+    ) => {
+      let n = 0;
+      const fetchImpl = (async (u: string) => {
+        if (u.includes("/v1/identity")) {
+          if (identityStatus === "throw") throw new Error("ECONNRESET");
+          const st = statuses?.[Math.min(n++, statuses.length - 1)] ?? identityStatus;
+          if (st === 200) {
+            const nonce = new URL(u).searchParams.get("nonce") ?? "";
+            const proof = proofOf(
+              { daemonId: DID, secret: "ff".repeat(32) },
+              hostPortOf(URL1) ?? "",
+              nonce,
+            );
+            return Response.json({ ok: true, value: { daemonId: DID, proof } });
+          }
+          return new Response("{}", { status: st });
+        }
+        return new Response("{}", { status: 401 });
+      }) as unknown as typeof fetch;
+      const x = io();
+      const port = String(await freePort());
+      const r = await main(
+        ["--daemon-url", URL1, "--config", "/c.json", "--port", port, ...extra],
+        {},
+        x.io,
+        {
+          fetch: fetchImpl,
+          readFile: cfg(port),
+          readIdentityFile: () =>
+            identityStatus === 404
+              ? (() => {
+                  throw new Error("ENOENT");
+                })()
+              : JSON.stringify({ version: 1, daemonId: DID, secret: "ff".repeat(32) }),
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+        },
+      );
+      return { r, x };
+    };
+
+    it("既定で強制: 身元の失敗なら、1 秒・2 秒の 2 回だけ確かめ直して、それでも失敗なら終了コード 3（待ち受けない）", async () => {
+      const sleeps: number[] = [];
+      const { r, x } = await run(404, [], sleeps);
+      expect(r.exitCode).toBe(3);
+      expect(r.server).toBeUndefined();
+      expect(sleeps).toEqual([1000, 2000]);
+      const err = x.err.join("");
+      expect(err).toContain("daemon_identity_failed");
+      expect(err).toContain("identityCheckFailed");
+    });
+
+    it("--strict-start の明示も、同じ（強制）", async () => {
+      const { r } = await run(404, ["--strict-start"]);
+      expect(r.exitCode).toBe(3);
+    });
+
+    it("一時的な失敗（503）は 1・2・4・8 秒待って、最大 5 回試す。尽きたら終了コード 1", async () => {
+      const sleeps: number[] = [];
+      const { r, x } = await run(503, [], sleeps);
+      expect(r.exitCode).toBe(1);
+      expect(r.server).toBeUndefined();
+      expect(sleeps).toEqual([1000, 2000, 4000, 8000]);
+      expect(x.err.join("")).toContain("identityCheckRetry");
+    });
+
+    it("一時的な失敗が途中で回復すれば、起動する", async () => {
+      const sleeps: number[] = [];
+      const { r } = await run(503, [], sleeps, [503, 503, 200]);
+      expect(r.exitCode).toBe(0);
+      expect(sleeps).toEqual([1000, 2000]);
+      await r.server?.close();
+    });
+
+    it("一時的な失敗のあとで、身元の失敗に変わったら、身元の確かめ直し（1 秒・2 秒）だけして、終了コード 3", async () => {
+      const sleeps: number[] = [];
+      const { r } = await run(503, [], sleeps, [503, 404]);
+      expect(r.exitCode).toBe(3);
+      expect(sleeps).toEqual([1000, 1000, 2000]);
+    });
+
+    it("身元の失敗が確かめ直しで直れば（daemon の起動し直しの直後など）、起動する", async () => {
+      const sleeps: number[] = [];
+      const { r } = await run(401, [], sleeps, [401, 401, 200]);
+      expect(r.exitCode).toBe(0);
+      expect(sleeps).toEqual([1000]);
+      await r.server?.close();
+    });
+
+    it("R2: 到達確認の失敗（接続拒否）も、一時的な失敗として 1・2・4・8 秒待って確かめ直す。回復すれば起動する", async () => {
+      const sleeps: number[] = [];
+      let whoami = 0;
+      const fetchImpl = (async (u: string) => {
+        if (u.includes("/v1/whoami")) {
+          if (whoami++ < 2) throw new Error("ECONNREFUSED");
+          return new Response("{}", { status: 401 });
+        }
+        const nonce = new URL(u).searchParams.get("nonce") ?? "";
+        const proof = proofOf(
+          { daemonId: DID, secret: "ff".repeat(32) },
+          hostPortOf(URL1) ?? "",
+          nonce,
+        );
+        return Response.json({ ok: true, value: { daemonId: DID, proof } });
+      }) as unknown as typeof fetch;
+      const x = io();
+      const port = String(await freePort());
+      const r = await main(
+        ["--daemon-url", URL1, "--config", "/c.json", "--port", port],
+        {},
+        x.io,
+        {
+          fetch: fetchImpl,
+          readFile: cfg(port),
+          readIdentityFile: () =>
+            JSON.stringify({ version: 1, daemonId: DID, secret: "ff".repeat(32) }),
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+        },
+      );
+      expect(r.exitCode).toBe(0);
+      expect(sleeps).toEqual([1000, 2000]);
+      expect(x.err.join("")).toContain("startupRetry");
+      await r.server?.close();
+    });
+
+    it("R2: 到達できないまま尽きたら、終了コード 1（daemon_unreachable）。--no-strict-start は待たずに 1", async () => {
+      const refused = (async () => {
+        throw new Error("ECONNREFUSED");
+      }) as unknown as typeof fetch;
+      const go = async (extra: string[], sleeps: number[]) => {
+        const x = io();
+        const port = String(await freePort());
+        const r = await main(
+          ["--daemon-url", URL1, "--config", "/c.json", "--port", port, ...extra],
+          {},
+          x.io,
+          {
+            fetch: refused,
+            readFile: cfg(port),
+            readIdentityFile: () => "",
+            sleep: async (ms) => {
+              sleeps.push(ms);
+            },
+          },
+        );
+        return { r, err: x.err.join("") };
+      };
+      const strict: number[] = [];
+      const a = await go([], strict);
+      expect(a.r.exitCode).toBe(1);
+      expect(a.err).toContain("daemon_unreachable");
+      expect(strict).toEqual([1000, 2000, 4000, 8000]);
+      const relaxed: number[] = [];
+      const b = await go(["--no-strict-start"], relaxed);
+      expect(b.r.exitCode).toBe(1);
+      expect(relaxed).toEqual([]);
+    });
+
+    it("--no-strict-start は警告だけで起動する", async () => {
+      const { r, x } = await run(404, ["--no-strict-start"]);
+      expect(r.exitCode).toBe(0);
+      expect(x.err.join("")).toContain("identityCheckFailed");
+      await r.server?.close();
+    });
+
+    it.each([
+      [["--strict-start", "--no-strict-start"]],
+      [["--strict-start", "--strict-start", "--no-strict-start"]],
+    ])("両方の指定（%j）は終了コード 2", async (extra) => {
+      const { r } = await run(404, extra);
+      expect(r.exitCode).toBe(2);
+    });
+
+    it("--config なしの --strict-start は終了コード 2（検証がないので強制できない）", async () => {
+      const x = io();
+      const r = await main(
+        ["--daemon-url", URL1, "--port", "8123", "--strict-start"],
+        UNVERIFIED,
+        x.io,
+        { readFile: noFile },
+      );
+      expect(r.exitCode).toBe(2);
+    });
+
+    it("parseArgs: strictStart は、検証あり（--config）のとき既定で true、--no-strict-start で false", () => {
+      const base = ["--daemon-url", URL1, "--config", "/c.json"];
+      const deps = {
+        readFile: () => JSON.stringify({ stateDir: "/s", mcpUrl: "http://127.0.0.1:8123/mcp" }),
+      };
+      const def = parseArgs(base, {}, deps);
+      const relaxed = parseArgs([...base, "--no-strict-start"], {}, deps);
+      expect(def.ok && def.value.strictStart).toBe(true);
+      expect(relaxed.ok && relaxed.value.strictStart).toBe(false);
+    });
   });
 });
