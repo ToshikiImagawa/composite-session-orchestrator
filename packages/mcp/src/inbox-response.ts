@@ -106,7 +106,7 @@ const isNonNegInt = (x: unknown): x is number => Number.isInteger(x) && (x as nu
 
 /**
  * daemon から受け取った項目の形を検査する（境界での実行時検査。値の細かい検証は zod の導入時に拡張する）。
- * `summary`・`at` は検査しない: `summary` は core が書き込み時に長さと文字を保証し、`at` は書き込み時に
+ * `at` は検査しない（`summary` は、`digest` が持つことだけ検査する）: `summary` の長さと文字は、core が書き込み時に保証し、`at` は書き込み時に
  * ISO 8601 UTC を保証する（不正でも `sortInbox` が時刻の最後に置くので、整列は壊れない）。
  */
 function itemProblem(x: unknown): string | undefined {
@@ -118,6 +118,10 @@ function itemProblem(x: unknown): string | undefined {
     return `dependsOn が識別子の配列でない: ${x.id}`;
   }
   if (x.ref !== undefined && !isSafeId(x.ref)) return `ref が識別子の形式でない: ${x.id}`;
+  // 要約（digest）は、summary を必ず持つ（core が書き込み時に保証する決定的な文面）。
+  if (x.kind === "digest" && typeof x.summary !== "string") {
+    return `digest が summary を持たない: ${x.id}`;
+  }
   // 優先度は、要約（digest）だけが持ち、必ず持つ（PRIORITIES のどれか）。
   if ((x.kind === "digest") !== (x.priority !== undefined)) {
     return `priority は、digest だけが持ち、必ず持つ: ${x.id}`;

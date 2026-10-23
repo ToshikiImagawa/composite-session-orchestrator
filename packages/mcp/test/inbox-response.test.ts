@@ -182,9 +182,76 @@ describe("不正な項目は、その項目だけを除外する（受信箱全�
   });
 
   it("digest は、priority（PRIORITIES のどれか）を持てば受け付け、簡潔版に priority を出す", () => {
-    const page = run(item({ id: "dg", kind: "digest", priority: "failed", nodeId: "m1" } as never));
+    const page = run(
+      item({
+        id: "dg",
+        kind: "digest",
+        priority: "failed",
+        summary: "要約",
+        nodeId: "m1",
+      } as never),
+    );
     expect(page.excluded).toBe(0);
     expect(page.entries[0]).toMatchObject({ id: "dg", kind: "digest", priority: "failed" });
+  });
+
+  it("digest は、項目の priority の帯に整列する（種類の既定の info に置かない）。同じ帯では、時刻・ID の順", () => {
+    const digest = (id: string, priority: string, at: string) =>
+      item({
+        id,
+        kind: "digest",
+        priority,
+        summary: "配下の要約",
+        nodeId: "m1",
+        seq: 5,
+        at,
+      } as never);
+    const page = run(
+      item({ id: "i1", kind: "info", at: "2026-01-01T00:00:00Z" }),
+      item({ id: "f1", kind: "failure", at: "2026-01-01T00:00:02Z" }),
+      item({ id: "d1", kind: "decision", at: "2026-01-01T00:00:03Z" }),
+      digest("dg-info", "info", "2026-01-01T00:00:01Z"),
+      digest("dg-failed", "failed", "2026-01-01T00:00:01Z"),
+      digest("dg-block", "blocking", "2026-01-01T00:00:09Z"),
+    );
+    expect(page.entries.map((e) => e.id)).toEqual([
+      "d1", // blocking（時刻が早い）
+      "dg-block", // blocking（digest の priority）
+      "dg-failed", // failed（時刻の順。f1 より早い）
+      "f1",
+      "i1", // info（時刻が早い）
+      "dg-info",
+    ]);
+  });
+
+  it("詳細版にも、digest の priority と summary が出る。digest 以外には priority がない", () => {
+    const r = renderInbox(
+      [
+        item({
+          id: "dg",
+          kind: "digest",
+          priority: "blocking",
+          summary: "要約",
+          nodeId: "m1",
+        } as never),
+        item({ id: "x", kind: "info", seq: 2 }),
+      ],
+      { detail: "full" },
+    );
+    if (!r.ok) throw new Error("failure");
+    const dg = r.value.entries.find((e) => e.id === "dg");
+    expect(dg).toMatchObject({ kind: "digest", priority: "blocking", summary: "要約" });
+    const x = r.value.entries.find((e) => e.id === "x");
+    expect(x && "priority" in x).toBe(false);
+  });
+
+  it("digest は summary を必ず持つ（core が書き込み時に保証する）。持たないものは除外する", () => {
+    const page = run(
+      item({ id: "ok", kind: "digest", priority: "info", summary: "要約", nodeId: "m1" } as never),
+      item({ id: "bad", kind: "digest", priority: "info", nodeId: "m1", seq: 2 } as never),
+    );
+    expect(page.entries.map((e) => e.id)).toEqual(["ok"]);
+    expect(page.excluded).toBe(1);
   });
 
   it("除外がなければ excluded は 0", () => {
