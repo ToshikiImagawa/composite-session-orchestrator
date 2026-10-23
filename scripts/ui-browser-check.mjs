@@ -68,10 +68,51 @@ state = {
       options: ["A案", XSS],
       rejected: [],
     },
+    {
+      decisionId: "d2",
+      nodeId: "a",
+      status: "open",
+      question: "自由入力の判断",
+      options: [],
+      rejected: [],
+    },
+    {
+      decisionId: "d3",
+      nodeId: "a",
+      status: "open",
+      question: `長い質問。${"問".repeat(2500)}`,
+      options: ["短い選択肢", "長".repeat(600)],
+      rejected: [],
+    },
   ],
 };
+// 操作の呼び出しの記録（画面の操作の確認用）。d2 の最初の回答は、失敗させる（失敗の表示と、同じ要求 ID での再送の確認）
+const calls = [];
+let failD2Once = true;
+const bump = (patch) => {
+  state = { ...state, ...patch, lastSeq: state.lastSeq + 1 };
+};
+const handlers = {
+  "decision.answer": async (req) => {
+    calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+    await new Promise((r) => setTimeout(r, 150));
+    if (req.params.decisionId === "d2" && failD2Once) {
+      failD2Once = false;
+      return {
+        ok: false,
+        error: {
+          code: "conflict",
+          cause: "別の回答が先に確定している",
+          nextActions: ["状態を取り直す"],
+        },
+      };
+    }
+    bump({ decisions: state.decisions.filter((d) => d.decisionId !== req.params.decisionId) });
+    return { ok: true, value: { accepted: true } };
+  },
+};
 const credentials = createCredentialStore({ humanToken: HUMAN });
-const server = createApiServer({ credentials, getState: () => state, handlers: {} });
+const server = createApiServer({ credentials, getState: () => state, handlers });
 const { url } = await server.listen(0);
 const browser = await chromium.launch({
   executablePath: process.env.CSO_CHROMIUM ?? "/opt/pw-browsers/chromium",
@@ -162,6 +203,141 @@ await page.waitForFunction(
 );
 out.reflectMs = Date.now() - t0;
 out.statusesAfterChange = [...statuses]; // 変わった直後は 200（新しい ETag）、そのあとは 304
+// ---- 操作（T23 PR3）: 判断への回答 ----
+const ops = {};
+const pageO = await (await browser.newContext()).newPage();
+const opErrors = [];
+pageO.on("pageerror", (e) => opErrors.push(String(e)));
+pageO.on("dialog", (d) => {
+  opErrors.push(`dialog:${d.message()}`);
+  d.dismiss();
+});
+await pageO.goto(`${url}/ui#token=${HUMAN}`);
+await pageO.waitForSelector("#view:not([hidden])", { timeout: 8000 });
+const confirmText = async () =>
+  (await pageO.locator("#confirm").isVisible()) ? pageO.locator("#confirm").innerText() : "";
+// (a) 選択肢で回答 → 確認画面（質問と回答が、もう一度出る）→ 戻る → もう一度 → 二重クリックでも要求は 1 回
+await pageO.locator("#decisions .card").first().waitFor();
+const card1 = pageO.locator("#decisions .card").first();
+await card1.getByRole("button", { name: "A案", exact: true }).click();
+ops.confirmShown =
+  (await confirmText()).includes("A案") && (await confirmText()).includes("判断への回答");
+ops.noRequestBeforeConfirm = calls.length === 0;
+await pageO.getByRole("button", { name: "戻る" }).click();
+ops.backHidesConfirm = !(await pageO.locator("#confirm").isVisible());
+await card1.getByRole("button", { name: "A案", exact: true }).click();
+await pageO.getByRole("button", { name: "この内容で送る" }).dblclick();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("回答を送りました"),
+  null,
+  { timeout: 5000 },
+);
+ops.callsAfterDoubleClick = calls.length; // 1
+ops.answeredParams = calls[0]?.params;
+await pageO
+  .waitForFunction(
+    () => ![...document.querySelectorAll("#decisions button")].some((b) => b.textContent === "A案"),
+    null,
+    {
+      timeout: 5000,
+    },
+  )
+  .then(
+    () => {
+      ops.d1Gone = true;
+    },
+    () => {
+      ops.d1Gone = false;
+    },
+  );
+// (b) 自由入力: 空・制御文字は、確認に進まない。改行つきの回答は、確認に出る
+const card2 = pageO.locator("#decisions .card", { hasText: "自由入力の判断" });
+await card2.getByRole("button", { name: "自由入力で回答する" }).click();
+ops.emptyRejected =
+  (await card2.innerText()).includes("回答が空です") &&
+  !(await pageO.locator("#confirm").isVisible());
+await card2.locator("textarea").fill("a\u0007b");
+await card2.getByRole("button", { name: "自由入力で回答する" }).click();
+ops.controlCharRejected =
+  (await card2.innerText()).includes("使えない文字") &&
+  !(await pageO.locator("#confirm").isVisible());
+await card2.locator("textarea").fill("一行目\n二行目");
+// 状態が更新されて再描画されても、入力中の文は残る
+await new Promise((r) => setTimeout(r, 300));
+bump({});
+await pageO.waitForTimeout(1500);
+ops.draftKeptOnRerender = (await card2.locator("textarea").inputValue()) === "一行目\n二行目";
+await card2.getByRole("button", { name: "自由入力で回答する" }).click();
+ops.multilineInConfirm =
+  (await confirmText()).includes("一行目") && (await confirmText()).includes("二行目");
+// (c) 失敗: 理由が出て、確認に戻る。同じ内容で再送でき、同じ requestId
+await pageO.getByRole("button", { name: "この内容で送る" }).click();
+await pageO.waitForFunction(
+  () => document.getElementById("confirm").innerText.includes("conflict"),
+  null,
+  { timeout: 5000 },
+);
+ops.failureShown = (await confirmText()).includes("別の回答が先に確定している");
+await pageO.getByRole("button", { name: "この内容で送る" }).click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("回答を送りました"),
+  null,
+  { timeout: 5000 },
+);
+const d2Calls = calls.filter((c) => c.params.decisionId === "d2");
+ops.retrySameRequestId = d2Calls.length === 2 && d2Calls[0].requestId === d2Calls[1].requestId;
+ops.requestIdIsUuid = /^[0-9a-f-]{36}$/.test(d2Calls[0]?.requestId ?? "");
+// (d) 長い質問・長い選択肢: 質問は 2,000 文字まで読め、超えたら印。長い選択肢のボタンは無効（自由入力を促す）
+const card3 = pageO.locator("#decisions .card", { hasText: "長い質問" });
+const q3 = await card3.innerText();
+ops.longQuestionShownUpTo2000 = q3.includes("問".repeat(1990)) && q3.includes("…（省略）");
+ops.shortOptionEnabled = await card3.getByRole("button", { name: "短い選択肢" }).isEnabled();
+ops.longOptionDisabled = await card3.locator("button:disabled", { hasText: "…（省略）" }).count();
+ops.longOptionNote = q3.includes("自由入力で回答してください");
+// (e) 429: Retry-After の秒数のあいだ、送れない。時間が来たら、同じ requestId で送れる
+let n429 = 0;
+await pageO.route("**/v1/request", (route) => {
+  n429 += 1;
+  if (n429 > 1) return route.continue();
+  return route.fulfill({
+    status: 429,
+    headers: { "retry-after": "2", "content-type": "application/json" },
+    body: JSON.stringify({
+      ok: false,
+      error: { code: "tooManyRequests", cause: "要求が多すぎる" },
+    }),
+  });
+});
+await card3.getByRole("button", { name: "短い選択肢" }).click();
+ops.longQuestionInConfirm = (await confirmText()).includes("問".repeat(1990));
+await pageO.getByRole("button", { name: "この内容で送る" }).click();
+await pageO.waitForFunction(
+  () => document.getElementById("confirm").innerText.includes("tooManyRequests"),
+  null,
+  { timeout: 5000 },
+);
+ops.sendDisabledWhile429 = await pageO.locator("#confirm button.primary").isDisabled();
+ops.sendLabelWhile429 = await pageO.locator("#confirm button.primary").innerText();
+await pageO.waitForFunction(
+  () => !document.querySelector("#confirm button.primary").disabled,
+  null,
+  { timeout: 6000 },
+);
+ops.sendEnabledAfterWait = await pageO.locator("#confirm button.primary").isEnabled();
+await pageO.getByRole("button", { name: "この内容で送る" }).click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("回答を送りました"),
+  null,
+  { timeout: 5000 },
+);
+await pageO.unroute("**/v1/request");
+const d3Calls = calls.filter((c) => c.params.decisionId === "d3");
+ops.answeredOnceAfter429 = d3Calls.length === 1; // 429 は、サーバーに届いていない（route で止めた）。待ったあとの 1 回だけが届く
+// (f) 子が書いた質問・選択肢の XSS 文字列は、実行されない（確認画面でも）
+ops.xssNotExecuted = (await pageO.evaluate(() => window.__xss ?? null)) === null;
+ops.errors = opErrors;
+out.operations = ops;
+
 // SSE が使えないとき（上限 0 で、429）は、ポーリング（ETag）に切り替わる
 const poll = createApiServer({
   credentials,

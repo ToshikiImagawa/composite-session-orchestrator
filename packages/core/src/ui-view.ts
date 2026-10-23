@@ -3,7 +3,10 @@
  *
  * - **含めるもの**: ノードの識別子・役割・親・状態・依存、未解決の受信箱の項目、未回答の判断、未判定の拡張要求。
  * - **含めないもの**: トークン・秘密・パス（作業ツリーの絶対パス・作業範囲の場所・最終コミットなど）。ブリーフ（目的・受け入れ基準）も含めない。
- * - 子が書いた文字列（要約・判断の質問・選択肢・拡張の理由）は、制御文字を除いて、`UI_TEXT_MAX` 文字（コードポイント）に切る。画面は、これを `textContent` だけで描く。
+ * - 子が書いた文字列（要約・判断の質問・選択肢・拡張の理由）は、制御文字（タブ・改行は残す）と書式制御文字（U+202E など）を除いて、種類ごとの上限（コードポイント）に切る。
+ *   切ったときは、末尾に `UI_CUT_MARK`（「…（省略）」）を付ける。画面は、これを `textContent` だけで描く。
+ *   上限: 要約・理由 `UI_TEXT_MAX`（200）、判断の質問 `UI_QUESTION_MAX`（2,000）、選択肢 `UI_OPTION_MAX`（500。サーバーの選択肢の上限と同じ）。
+ * - **選択肢は、回答の `choice` に、そのまま送る文字列**なので、切った・文字を除いたものは、そのままでは送れない（`UiOption.truncated`。画面は、ボタンを無効にして、自由入力を促す）。
  * - 件数には上限がある（`UI_LIMITS`）。切ったときは、`truncated` に種類を入れる。
  */
 
@@ -13,6 +16,12 @@ import { PRIORITIES, type Priority, priorityOf } from "./inbox-kinds.js";
 import type { NodeRole, NodeState } from "./index.js";
 
 export const UI_TEXT_MAX = 200;
+/** 判断の質問の上限（コードポイント）。人間が、何を聞かれているかを読んで答えるので、ほかより長い。 */
+export const UI_QUESTION_MAX = 2000;
+/** 選択肢の上限（サーバーの `LIMITS.optionLength` と同じ）。これを超える・文字を除いたものは、`choice` に使えない。 */
+export const UI_OPTION_MAX = 500;
+/** 上限で切ったときに、末尾に付ける印。 */
+export const UI_CUT_MARK = "…（省略）";
 export const UI_LIMITS = {
   nodes: 500,
   inbox: 200,
@@ -40,11 +49,19 @@ export interface UiInboxItem {
   readonly summary?: string;
 }
 
+export interface UiOption {
+  readonly text: string;
+  /** 切った・文字を除いた（`choice` に、そのままは送れない）。画面は、ボタンを無効にして、自由入力を促す。 */
+  readonly truncated: boolean;
+}
+
 export interface UiDecision {
   readonly id: string;
   readonly nodeId: string;
   readonly question?: string;
-  readonly options: readonly string[];
+  readonly options: readonly UiOption[];
+  /** 選択肢が多くて、一部を載せていない（`UI_LIMITS.options` 件まで）。 */
+  readonly optionsCut: boolean;
 }
 
 export interface UiExtension {
@@ -63,18 +80,39 @@ export interface UiView {
   readonly truncated: readonly string[];
 }
 
-const isControl = (cp: number): boolean => cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
+const isControl = (cp: number): boolean =>
+  (cp < 0x20 && cp !== 0x09 && cp !== 0x0a) || (cp >= 0x7f && cp <= 0x9f);
+const FORMAT_CHAR = /\p{Cf}/u;
 
-/** 制御文字を除き、`UI_TEXT_MAX` コードポイントに切る。 */
-export function uiText(x: unknown): string {
-  if (typeof x !== "string") return "";
+/** 制御文字・書式制御文字を除き、`max` コードポイントに切る。`removed`: 文字を除いたか。`cut`: 切ったか（切ったら、末尾に `UI_CUT_MARK`）。 */
+function sanitize(x: unknown, max: number): { text: string; removed: boolean; cut: boolean } {
+  if (typeof x !== "string") return { text: "", removed: false, cut: false };
   const out: string[] = [];
+  let removed = false;
+  let cut = false;
   for (const ch of x) {
-    if (isControl(ch.codePointAt(0) ?? 0)) continue;
+    if (isControl(ch.codePointAt(0) ?? 0) || FORMAT_CHAR.test(ch)) {
+      removed = true;
+      continue;
+    }
+    if (out.length >= max) {
+      cut = true;
+      break;
+    }
     out.push(ch);
-    if (out.length >= UI_TEXT_MAX) break;
   }
-  return out.join("");
+  return { text: out.join("") + (cut ? UI_CUT_MARK : ""), removed, cut };
+}
+
+/** 制御文字・書式制御文字を除き、`max`（既定 `UI_TEXT_MAX`）コードポイントに切る。切ったら、末尾に `UI_CUT_MARK` を付ける。 */
+export function uiText(x: unknown, max: number = UI_TEXT_MAX): string {
+  return sanitize(x, max).text;
+}
+
+/** 選択肢。そのまま `choice` に送れるのは、切っても文字を除いてもいないものだけ。 */
+function uiOption(x: unknown): UiOption {
+  const r = sanitize(x, UI_OPTION_MAX);
+  return { text: r.text, truncated: r.cut || r.removed };
 }
 
 /** 識別子の形でなければ、空にする（画面に、形の崩れた文字列を出さない）。 */
@@ -129,12 +167,14 @@ export function uiViewOf(state: OrchState): UiView {
     state.decisions.filter((d) => d.status === "open"),
     UI_LIMITS.decisions,
   ).map((d): UiDecision => {
-    const question = uiText(d.question);
+    const question = uiText(d.question, UI_QUESTION_MAX);
+    const options = d.options ?? [];
     return {
       id: idOf(d.decisionId),
       nodeId: idOf(d.nodeId),
       ...(question === "" ? {} : { question }),
-      options: (d.options ?? []).slice(0, UI_LIMITS.options).map(uiText),
+      options: options.slice(0, UI_LIMITS.options).map((o) => uiOption(o)),
+      optionsCut: options.length > UI_LIMITS.options,
     };
   });
 
