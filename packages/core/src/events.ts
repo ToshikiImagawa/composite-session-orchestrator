@@ -1273,6 +1273,10 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (!isId(id) || !isId(nodeId) || !INBOX_KINDS.includes(kind as InboxKind)) {
         return invalid(seq, "inbox.added の payload");
       }
+      // 要約（digest）は、summary を必ず持つ（決定的な文面。`digestOf`）。
+      if (kind === "digest" && summary === undefined) {
+        return invalid(seq, "inbox.added の summary（種類 digest は必ず持つ）");
+      }
       // 優先度は、要約（digest）だけが持ち、要約は必ず持つ。
       if (
         (kind === "digest") !== (priority !== undefined) ||

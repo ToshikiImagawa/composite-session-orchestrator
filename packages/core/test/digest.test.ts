@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  DIGEST_STATE_NAMES,
   digestOf,
+  digestSummary,
   digestTargets,
   type EventBody,
   foldEvents,
   INBOX_SUMMARY_MAX,
+  NODE_STATES,
   type NodeEvent,
   type OrchEvent,
   type OrchState,
@@ -127,7 +130,7 @@ describe("digestOf（配下の要約。決定的・自由な文字列を含ま�
     const withDigest = must([
       ...base(),
       added("below", "failure", "a"),
-      added("dg", "digest", "m1", { priority: "failed" }),
+      added("dg", "digest", "m1", { priority: "failed", summary: "s" }),
     ]);
     expect(digestOf(withDigest, "m1", NOW)?.unresolved).toEqual({ failure: 1 });
   });
@@ -204,39 +207,78 @@ describe("digestOf（配下の要約。決定的・自由な文字列を含ま�
 
 describe("inbox.added の digest（fold の規則）", () => {
   it("digest は priority を必ず持つ（PRIORITIES のどれか）。ほかの種類は priority を持てない", () => {
-    expect(code([...base(), added("d", "digest", "m1", { priority: "failed" })])).toBeNull();
+    expect(
+      code([...base(), added("d", "digest", "m1", { priority: "failed", summary: "s" })]),
+    ).toBeNull();
     expect(code([...base(), added("d", "digest", "m1")])).toBe("invalidPayload");
-    expect(code([...base(), added("d", "digest", "m1", { priority: "urgent" })])).toBe(
-      "invalidPayload",
-    );
+    expect(
+      code([...base(), added("d", "digest", "m1", { priority: "urgent", summary: "s" })]),
+    ).toBe("invalidPayload");
     expect(code([...base(), added("i", "failure", "a", { priority: "failed" })])).toBe(
       "invalidPayload",
     );
   });
 
   it("digest は、中間統合ノード自身のものだけ（根・実装ノードは不可）。ref は持てない", () => {
-    expect(code([...base(), added("d", "digest", "root", { priority: "info" })])).toBe(
+    expect(
+      code([...base(), added("d", "digest", "root", { priority: "info", summary: "s" })]),
+    ).toBe("invalidDigestOwner");
+    expect(code([...base(), added("d", "digest", "a", { priority: "info", summary: "s" })])).toBe(
       "invalidDigestOwner",
     );
-    expect(code([...base(), added("d", "digest", "a", { priority: "info" })])).toBe(
-      "invalidDigestOwner",
-    );
-    expect(code([...base(), added("d", "digest", "m1", { priority: "info", ref: "x" })])).toBe(
-      "unknownRef",
-    );
+    expect(
+      code([...base(), added("d", "digest", "m1", { priority: "info", ref: "x", summary: "s" })]),
+    ).toBe("unknownRef");
   });
 
   it("digest の優先度は、整列と priorityOf に使われる（同じ種類でも、priority で帯が変わる）", () => {
     const s = must([
       ...base(),
       added("fail", "failure", "a"),
-      added("dg-block", "digest", "m1", { priority: "blocking" }),
-      added("dg-info", "digest", "m1", { priority: "info" }),
+      added("dg-block", "digest", "m1", { priority: "blocking", summary: "s" }),
+      added("dg-info", "digest", "m1", { priority: "info", summary: "s" }),
       added("prog", "progress", "b"),
     ]);
     const byId = new Map(s.inbox.map((i) => [i.id, i]));
     expect(priorityOf(byId.get("dg-block") as never)).toBe("blocking");
     expect(priorityOf(byId.get("dg-info") as never)).toBe("info");
     expect(sortInbox(s.inbox).map((i) => i.id)).toEqual(["dg-block", "fail", "prog", "dg-info"]);
+  });
+});
+
+describe("要約の補足（T24 PR1 レビュー）", () => {
+  it("R2: summary のない digest は、fold で invalidPayload", () => {
+    const s = (extra: Record<string, unknown>) =>
+      code([...base(), added("d", "digest", "m1", { priority: "info", ...extra })]);
+    expect(s({})).toBe("invalidPayload");
+    expect(s({ summary: "配下 2" })).toBeNull();
+  });
+
+  it("R4: 要約の状態の表示名は、NODE_STATES のすべての状態を持つ（状態が増えたら、ここで気づく）", () => {
+    expect(Object.keys(DIGEST_STATE_NAMES).sort()).toEqual([...NODE_STATES].sort());
+    for (const name of Object.values(DIGEST_STATE_NAMES)) expect(name).not.toBe("");
+  });
+
+  it("N3: 極端な値（桁数の多い件数）でも、文面は INBOX_SUMMARY_MAX 文字以内（最優先の項目を全部減らしても収まらないときは、切る）", () => {
+    const huge = 10n ** 60n;
+    const facts = {
+      nodeId: "m1",
+      descendants: Number(huge),
+      byState: Object.fromEntries(Object.keys(DIGEST_STATE_NAMES).map((s) => [s, Number(huge)])),
+      unresolved: Object.fromEntries(
+        ["decision", "violation", "failure", "done", "progress", "info"].map((g) => [
+          g,
+          Number(huge),
+        ]),
+      ),
+      openDecisions: Number(huge),
+      openExtensions: Number(huge),
+      top: ["a".repeat(100), "b".repeat(100), "c".repeat(100)],
+      oldestBlockingMinutes: Number(huge),
+    };
+    const text = digestSummary(facts);
+    expect([...text].length).toBeLessThanOrEqual(INBOX_SUMMARY_MAX);
+    expect([...text].length).toBe(INBOX_SUMMARY_MAX); // 切った（頭から 200 文字）
+    expect(text.startsWith("配下 ")).toBe(true);
   });
 });

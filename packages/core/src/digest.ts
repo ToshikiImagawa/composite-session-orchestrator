@@ -12,21 +12,24 @@
 import type { NodeRecord, OrchState } from "./events.js";
 import type { InboxItem } from "./inbox.js";
 import { INBOX_SUMMARY_MAX, PRIORITIES, type Priority, priorityOf } from "./inbox-kinds.js";
+import type { NodeState } from "./index.js";
 import { LIMITS } from "./limits.js";
 import { descendantsOf } from "./tree.js";
 
-const STATE_LABEL = [
-  ["running", "実行"],
-  ["waiting", "待機"],
-  ["pending", "未起動"],
-  ["done", "完了報告"],
-  ["verified", "受理"],
-  ["stopping", "停止中"],
-  ["stopIncomplete", "停止未完了"],
-  ["stopped", "停止"],
-  ["reclaimable", "回収可"],
-  ["archived", "アーカイブ"],
-] as const;
+/** ノードの状態の表示名。`Record<NodeState, string>` なので、状態が増えれば、型で漏れに気づく（網羅の試験もある）。 */
+export const DIGEST_STATE_NAMES: Readonly<Record<NodeState, string>> = {
+  pending: "未起動",
+  running: "実行",
+  waiting: "待機",
+  done: "完了報告",
+  verified: "受理",
+  stopping: "停止中",
+  stopIncomplete: "停止未完了",
+  stopped: "停止",
+  reclaimable: "回収可",
+  archived: "アーカイブ",
+};
+const STATE_LABEL = Object.entries(DIGEST_STATE_NAMES) as readonly (readonly [NodeState, string])[];
 
 export interface DigestFacts {
   readonly nodeId: string;
@@ -166,11 +169,14 @@ export function digestOf(state: OrchState, nodeId: string, nowMs: number): Diges
     priority,
     top.join(","),
   ].join("|");
-  return { ...facts, priority, summary: summaryOf(facts), fingerprint };
+  return { ...facts, priority, summary: digestSummary(facts), fingerprint };
 }
 
-/** 要約の文面（`INBOX_SUMMARY_MAX` 文字以下）。自由な文字列を含まない。長くなるときは、最優先の項目の ID を減らし、最後に切る。 */
-function summaryOf(f: DigestFacts): string {
+/**
+ * 要約の文面（`INBOX_SUMMARY_MAX` 文字以下）。自由な文字列を含まない。長くなるときは、最優先の項目の ID を減らし、最後に切る。
+ * 事実（`DigestFacts`）から組み立てる純粋関数（`digestOf` が使う。極端な値の試験のために公開している）。
+ */
+export function digestSummary(f: DigestFacts): string {
   const states = STATE_LABEL.filter(([s]) => (f.byState[s] ?? 0) > 0)
     .map(([s, label]) => `${label} ${f.byState[s]}`)
     .join("・");

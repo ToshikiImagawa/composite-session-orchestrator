@@ -15,6 +15,7 @@ import {
   isSafeId,
   type NodeDeps,
   ok,
+  PRIORITIES,
   type Result,
   type RoleOperation,
   sortInbox,
@@ -117,6 +118,13 @@ function itemProblem(x: unknown): string | undefined {
     return `dependsOn が識別子の配列でない: ${x.id}`;
   }
   if (x.ref !== undefined && !isSafeId(x.ref)) return `ref が識別子の形式でない: ${x.id}`;
+  // 優先度は、要約（digest）だけが持ち、必ず持つ（PRIORITIES のどれか）。
+  if ((x.kind === "digest") !== (x.priority !== undefined)) {
+    return `priority は、digest だけが持ち、必ず持つ: ${x.id}`;
+  }
+  if (x.priority !== undefined && !(PRIORITIES as readonly unknown[]).includes(x.priority)) {
+    return `priority が不正: ${x.id}`;
+  }
   return undefined;
 }
 

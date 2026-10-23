@@ -10,7 +10,10 @@
 - **`nodeId` は、中間統合ノード自身**（上位から見たときに、どのノードの要約か分かる）。fold は、根・実装などのノードを `invalidDigestOwner` で拒否する。
 - **`priority`**（`inbox.added` の任意の項目。**`digest` だけが持ち、必ず持つ**。`PRIORITIES` のどれか）。そのほかの種類が持つと `invalidPayload`。
   優先度は、種類で決まる既存の規則（`INBOX_KIND_PRIORITY`）の代わりに、項目の `priority` で決まる（`priorityOf`）。整列（`sortInbox`・FR_012）は、`priorityOf` を使う。
-- `ref` は持てない（記録を指さない）。`summary` は、`INBOX_SUMMARY_MAX`（200）文字以下。
+- `ref` は持てない（記録を指さない）。**`summary` は必ず持つ**（持たない `digest` は `invalidPayload`）。`INBOX_SUMMARY_MAX`（200）文字以下。
+- **前提: `digest` の項目を作るのは、daemon の発行器だけ**で、`summary` は `digestOf(...).summary` の値をそのまま書く。fold は、`summary` が `digestOf` の結果かは検査しない
+  （許可文字による検査はしない）。発行器の試験が、`summary === digestOf(...).summary` を毎回突き合わせる（T24-d の完了条件）。人間・子・統合ノードが、`digest` を書く窓口の操作はない。
+- 保存データの版 `STATE_VERSION` は 10（受信箱の項目に `priority` を追加）。mcp の受信箱の応答は、`priority` が `digest` だけにあり、`PRIORITIES` のどれかであることを検査する（不正な項目は除外）。
 
 ## 中身（`digestOf(state, nodeId, nowMs)`）
 
