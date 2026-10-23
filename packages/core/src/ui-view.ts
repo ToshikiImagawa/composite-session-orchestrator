@@ -9,8 +9,8 @@
 
 import type { OrchState } from "./events.js";
 import { ID_PATTERN } from "./ids.js";
-import type { NodeRole, NodeState } from "./index.js";
 import { PRIORITIES, type Priority, priorityOf } from "./inbox-kinds.js";
+import type { NodeRole, NodeState } from "./index.js";
 
 export const UI_TEXT_MAX = 200;
 export const UI_LIMITS = {
