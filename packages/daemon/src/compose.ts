@@ -58,8 +58,15 @@ import {
   loadOrCreateHumanToken,
   type ReclaimPorts,
   type SpawnPorts,
+  type SummaryScheduler,
   type WorktreeFacts,
 } from "./api/index.js";
+import {
+  ALERT_ID_PREFIX,
+  createApiAlert,
+  DEFAULT_ALERT_INTERVAL_MINUTES,
+  DEFAULT_ALERT_THRESHOLD,
+} from "./api-alert.js";
 import { createAutoPurger } from "./auto-purge.js";
 import type { DaemonConfig } from "./config.js";
 import { createDigestIssuer } from "./digest-issuer.js";
@@ -124,6 +131,8 @@ export interface DaemonDeps {
   readonly timers?: Timers;
   /** 単調時計（ミリ秒）。既定は `process.hrtime`。自動の最終削除が、時計が飛んだことを検知するのに使う（試験で差し替える）。 */
   readonly monotonicMs?: () => number;
+  /** 窓口の件数のまとめを、窓の終わりに出す予約（試験で差し替える。既定は、`unref` したタイマー）。 */
+  readonly summaryScheduler?: SummaryScheduler | null;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
@@ -235,6 +244,7 @@ function realOverlap(config: DaemonConfig): string | undefined {
 export function apiLimitsOf(
   config: DaemonConfig,
   monotonicMs?: () => number,
+  summaryScheduler?: SummaryScheduler | null,
 ): Pick<Parameters<typeof createApiServer>[0], "rateLimit" | "connection" | "inProgress"> {
   return {
     rateLimit: {
@@ -252,6 +262,7 @@ export function apiLimitsOf(
         ? {}
         : { maxInFlightPerPrincipal: config.rateLimit.maxInFlightPerPrincipal }),
       ...(monotonicMs === undefined ? {} : { monotonicMs }),
+      ...(summaryScheduler === undefined ? {} : { summaryScheduler }),
     },
     ...(config.connection === undefined ? {} : { connection: config.connection }),
     ...(config.inProgress === undefined ? {} : { inProgress: config.inProgress }),
@@ -590,6 +601,25 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         })
       : undefined;
 
+  // 窓口の 429・401 の件数の見える化（T10l-f PR-B。既定で有効）。件数のまとめ（apiSummary）が閾値以上なら、根の受信箱に info を 1 件出す。
+  const apiAlert =
+    config.rateLimit?.alert?.enabled === false
+      ? undefined
+      : createApiAlert({
+          threshold: config.rateLimit?.alert?.threshold ?? DEFAULT_ALERT_THRESHOLD,
+          minIntervalMs:
+            (config.rateLimit?.alert?.minIntervalMinutes ?? DEFAULT_ALERT_INTERVAL_MINUTES) *
+            60_000,
+          rootNodeId: config.rootNodeId,
+          monoMs: deps.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n)),
+          record: (requestId, body) => log.append({ requestId, actor: { system: true }, body }),
+          openAlertIds: () =>
+            log
+              .state()
+              .inbox.filter((i) => i.id.startsWith(ALERT_ID_PREFIX) && i.resolved === undefined)
+              .map((i) => i.id),
+          note,
+        });
   const logger: ApiLogger = (e) => {
     // 秘密（コード・トークン）は、イベントに含まれない（`ApiLogEvent` の規則）。
     if (e.event === "internalError")
@@ -599,6 +629,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         error: String(e.error),
       });
     else note(e.event, e as unknown as Record<string, unknown>);
+    apiAlert?.(e);
   };
   const bind: BindCodes = createBindCodes();
   const identityPath = join(config.stateDir, IDENTITY_FILE);
@@ -632,7 +663,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     logger,
     bind,
     clock,
-    ...apiLimitsOf(config, deps.monotonicMs),
+    ...apiLimitsOf(config, deps.monotonicMs, deps.summaryScheduler),
   });
 
   let running: RunningDaemon | undefined;

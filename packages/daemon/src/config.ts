@@ -26,7 +26,6 @@ import {
   CONNECTION_BOUNDS,
   CONNECTION_DEFAULTS,
   IN_PROGRESS_BOUNDS,
-  IN_PROGRESS_DEFAULTS,
   RATE_LIMIT_BOUNDS,
 } from "./api/rate-limit.js";
 import { isForbiddenChildEnvName } from "./sdk/child-env.js";
@@ -69,6 +68,16 @@ export interface DaemonConfig {
     readonly maxKeys?: number;
     /** 主体ごとの、同時に処理中の要求の数の上限（T10l-f。1〜64。既定 8）。超えたら、本文を読まずに 429。 */
     readonly maxInFlightPerPrincipal?: number;
+    /**
+     * 運用の見える化（T10l-f PR-B）。**既定で有効**: 窓（1 分）の、認証の失敗・制限の発動の件数が `threshold`（5〜100000。既定 30）以上のとき、
+     * 根の受信箱に `info` の項目を 1 件出す（同じ種類は、最短 `minIntervalMinutes` 分〔1〜1440。既定 10〕あける）。`enabled: false` で出さない
+     * （件数のまとめは、daemon の記録に、いつも出る）。
+     */
+    readonly alert?: {
+      readonly enabled?: boolean;
+      readonly threshold?: number;
+      readonly minIntervalMinutes?: number;
+    };
   };
   /**
    * 接続の上限とタイムアウト（T10l-f。遅い要求への対策）。省略した項目は既定: `requestTimeoutMs` 30,000（1,000〜600,000）・
@@ -277,7 +286,18 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     const pp = isRec(v) ? v.perPrincipal : undefined;
     const af = isRec(v) ? v.authFailures : undefined;
     if (
-      !onlyKeys(v, ["perPrincipal", "authFailures", "maxKeys", "maxInFlightPerPrincipal"]) ||
+      !onlyKeys(v, [
+        "perPrincipal",
+        "authFailures",
+        "maxKeys",
+        "maxInFlightPerPrincipal",
+        "alert",
+      ]) ||
+      (v.alert !== undefined &&
+        (!onlyKeys(v.alert, ["enabled", "threshold", "minIntervalMinutes"]) ||
+          (v.alert.enabled !== undefined && typeof v.alert.enabled !== "boolean") ||
+          !inRange(v.alert.threshold, RATE_LIMIT_BOUNDS.alertThreshold) ||
+          !inRange(v.alert.minIntervalMinutes, RATE_LIMIT_BOUNDS.alertIntervalMinutes))) ||
       !inRange(v.maxInFlightPerPrincipal, RATE_LIMIT_BOUNDS.maxInFlightPerPrincipal) ||
       (pp !== undefined && !onlyKeys(pp, ["burst", "perSecond"])) ||
       (af !== undefined && !onlyKeys(af, ["burst", "perMinute"])) ||
@@ -290,7 +310,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
           !inRange(af.perMinute, RATE_LIMIT_BOUNDS.authFailurePerMinute)))
     ) {
       return bad(
-        `rateLimit は、perPrincipal（burst ${RATE_LIMIT_BOUNDS.principalBurst.min}〜${RATE_LIMIT_BOUNDS.principalBurst.max}・perSecond ${RATE_LIMIT_BOUNDS.principalPerSecond.min}〜${RATE_LIMIT_BOUNDS.principalPerSecond.max}）・authFailures（burst ${RATE_LIMIT_BOUNDS.authFailureBurst.min}〜${RATE_LIMIT_BOUNDS.authFailureBurst.max}・perMinute ${RATE_LIMIT_BOUNDS.authFailurePerMinute.min}〜${RATE_LIMIT_BOUNDS.authFailurePerMinute.max}）・maxKeys（${RATE_LIMIT_BOUNDS.maxKeys.min}〜${RATE_LIMIT_BOUNDS.maxKeys.max}）・maxInFlightPerPrincipal（${RATE_LIMIT_BOUNDS.maxInFlightPerPrincipal.min}〜${RATE_LIMIT_BOUNDS.maxInFlightPerPrincipal.max}）だけを持つオブジェクト（整数。制限は無効にできない）`,
+        `rateLimit は、perPrincipal（burst ${RATE_LIMIT_BOUNDS.principalBurst.min}〜${RATE_LIMIT_BOUNDS.principalBurst.max}・perSecond ${RATE_LIMIT_BOUNDS.principalPerSecond.min}〜${RATE_LIMIT_BOUNDS.principalPerSecond.max}）・authFailures（burst ${RATE_LIMIT_BOUNDS.authFailureBurst.min}〜${RATE_LIMIT_BOUNDS.authFailureBurst.max}・perMinute ${RATE_LIMIT_BOUNDS.authFailurePerMinute.min}〜${RATE_LIMIT_BOUNDS.authFailurePerMinute.max}）・maxKeys（${RATE_LIMIT_BOUNDS.maxKeys.min}〜${RATE_LIMIT_BOUNDS.maxKeys.max}）・maxInFlightPerPrincipal（${RATE_LIMIT_BOUNDS.maxInFlightPerPrincipal.min}〜${RATE_LIMIT_BOUNDS.maxInFlightPerPrincipal.max}）・alert（enabled・threshold ${RATE_LIMIT_BOUNDS.alertThreshold.min}〜${RATE_LIMIT_BOUNDS.alertThreshold.max}・minIntervalMinutes ${RATE_LIMIT_BOUNDS.alertIntervalMinutes.min}〜${RATE_LIMIT_BOUNDS.alertIntervalMinutes.max}）だけを持つオブジェクト（整数。制限は無効にできない）`,
       );
     }
     const num = (o: unknown, k: string): number | undefined =>
@@ -320,6 +340,9 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(v.maxInFlightPerPrincipal === undefined
         ? {}
         : { maxInFlightPerPrincipal: v.maxInFlightPerPrincipal as number }),
+      ...(v.alert === undefined
+        ? {}
+        : { alert: v.alert as NonNullable<NonNullable<DaemonConfig["rateLimit"]>["alert"]> }),
     };
   }
   // 接続・処理中の重複の設定（T10l-f）。範囲・型・未知のキーを検査し、実効の値（省略は既定）の組み合わせも検査する。

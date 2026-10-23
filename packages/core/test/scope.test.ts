@@ -243,11 +243,13 @@ describe("コマンド: 回帰（迂回の試み）", () => {
   it("変数展開・ANSI-C 引用・履歴展開は拒否（単引用符内は文字として扱う）", () => {
     for (const c of [
       "ls $HOME",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: シェルの展開を、そのまま文字列として試験する
       "ls ${IFS}x",
       "ls $'a\\nb'",
       "ls $((1+1))",
       "ls !!",
       'ls "$X"',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: シェルの展開を、そのまま文字列として試験する
       'ls "a${X}"',
     ]) {
       expect(reasonOf(cmd(c)), c).toBe("unparsable");
@@ -358,6 +360,7 @@ describe("性質（fast-check）", () => {
     " < f",
     " (ls)",
     " $X",
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: シェルの展開を、そのまま文字列として試験する
     " ${X}",
     " !",
     " &",
