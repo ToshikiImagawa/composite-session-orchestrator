@@ -1114,4 +1114,38 @@ describe("createDaemon（配下の要約の発行。T24-d）", () => {
     await m2.advance(6_000);
     expect(digests(d2.daemon)).toHaveLength(1);
   });
+
+  const instructions = (d: Daemon) => d.log.state().instructions;
+
+  it("wake（T24-w）は、既定で無効。有効にしても、アダプタが管理していないノードは起こさない。stop で周期が止まる", async () => {
+    const off = rig();
+    const m1 = manual();
+    off.deps = {
+      ...off.deps,
+      timers: m1.timers,
+      clock: m1.clock,
+      monotonicMs: () => m1.timers.now(),
+    };
+    const d1 = await boot(off);
+    seed(d1.daemon);
+    await m1.advance(10 * 60_000);
+    expect(instructions(d1.daemon)).toHaveLength(0);
+    expect(off.logs.some((l) => l.includes("wake."))).toBe(false);
+
+    const on = rig({ wake: { enabled: true, intervalSec: 5, minIntervalSec: 10 } });
+    const m2 = manual();
+    on.deps = {
+      ...on.deps,
+      timers: m2.timers,
+      clock: m2.clock,
+      monotonicMs: () => m2.timers.now(),
+    };
+    const d2 = await boot(on);
+    seed(d2.daemon);
+    await m2.advance(60_000);
+    // seed の m1 は、アダプタが管理していない（起動していない）ので、起こさない。
+    expect(instructions(d2.daemon)).toHaveLength(0);
+    await d2.daemon.stop();
+    await m2.advance(60_000); // 止めたあとは、何も起きない（例外にならない）
+  });
 });

@@ -28,6 +28,8 @@ export interface LogPort {
   append(request: AppendRequest): Result<AppendOutcome, Failure>;
   /** 複数のイベントを、1 トランザクションで追記する（1 件でも失敗したら全件を書かない）。 */
   appendAll(requests: readonly AppendRequest[]): Result<AppendOutcome[], Failure>;
+  /** `seq` より後のイベントの、`seq` と行為者（`actor`）。ないログ（試験用の簡易なもの）では、行為者による判定（起こす指示の束ね）をしない。 */
+  actorsAfter?(seq: number): readonly { readonly seq: number; readonly actor: Actor }[];
   /** 木の最終削除（`EventLog.purgeTree`）。ないログ（試験用の簡易なもの）では、最終削除の操作を有効にしない。 */
   purgeTree?(request: PurgeRequest): Result<PurgeOutcome, Failure>;
   /** 最終削除の事前確認（ドライラン）。何も書かない。 */

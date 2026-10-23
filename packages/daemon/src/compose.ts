@@ -74,12 +74,16 @@ import { nodeFsOps, resolveForWrite } from "./sdk/path-resolve.js";
 import type { Timers } from "./sdk/runtime.js";
 import { SdkRuntimeAdapter } from "./sdk/sdk-adapter.js";
 import { openSqliteStore } from "./sqlite-store.js";
+import { createWaker } from "./wake.js";
 
 /** 最終削除の保持期間の既定（日。spec 5.8）。 */
 const DEFAULT_RETENTION_DAYS = 90;
 const DEFAULT_DIGEST_INTERVAL_SEC = 30;
 const DEFAULT_DIGEST_MIN_INTERVAL_SEC = 60;
 const DEFAULT_DIGEST_MAX_PER_RUN = 20;
+const DEFAULT_WAKE_INTERVAL_SEC = 15;
+const DEFAULT_WAKE_MIN_INTERVAL_SEC = 60;
+const DEFAULT_WAKE_MAX_PER_RUN = 10;
 const DEFAULT_AUTO_PURGE_INTERVAL_MINUTES = 60;
 const DEFAULT_AUTO_PURGE_MAX_TREES = 2;
 const DEFAULT_AUTO_PURGE_NOTICE_DAYS = 7;
@@ -532,6 +536,30 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           isStopped: () => fatalSeen,
         });
 
+  // 中間統合ノードを起こす（T24-w。**既定で無効**。`wake.enabled: true` で有効）。固定の 1 行の指示を、`node.send` と同じ配送で送る。
+  const waker =
+    config.wake?.enabled === true
+      ? createWaker({
+          log,
+          clock,
+          monoMs: deps.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n)),
+          intervalMs: (config.wake.intervalSec ?? DEFAULT_WAKE_INTERVAL_SEC) * 1000,
+          minIntervalMs: (config.wake.minIntervalSec ?? DEFAULT_WAKE_MIN_INTERVAL_SEC) * 1000,
+          maxPerRun: config.wake.maxPerRun ?? DEFAULT_WAKE_MAX_PER_RUN,
+          ...(config.wake.maxPerHour === undefined ? {} : { maxPerHour: config.wake.maxPerHour }),
+          deliver: createInstructionDelivery({
+            log,
+            clock,
+            adapterFor: () => adapter,
+            onFailure: (nodeId, cause) => note("handlerFailure", { nodeId, cause }),
+          }).deliver,
+          canDeliver: (id) => adapter.has(id),
+          timers,
+          note,
+          isStopped: () => fatalSeen,
+        })
+      : undefined;
+
   const logger: ApiLogger = (e) => {
     // 秘密（コード・トークン）は、イベントに含まれない（`ApiLogEvent` の規則）。
     if (e.event === "internalError")
@@ -641,10 +669,12 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         void schedule();
         autoPurger?.start();
         digestIssuer?.start();
+        waker?.start();
         note("started", { port, rootNodeId: config.rootNodeId });
         return running;
       },
       async stop() {
+        await waker?.stop(); // 実行中の 1 回が終わるのを待つ
         await digestIssuer?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await autoPurger?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await server.close();

@@ -87,6 +87,20 @@ export interface DaemonConfig {
     readonly minIntervalSec?: number;
     readonly maxPerRun?: number;
   };
+  /**
+   * 中間統合ノードを起こす（T24-w。`docs/digest.md`）。**既定で無効**: 有効にすると、配下に新しい項目が届くたびに、動作中の中間統合ノードへ
+   * 固定の 1 行の指示を送るので、**追加のターンと予算（`maxBudgetUsd`）を使う**。`enabled: true` で有効にする。
+   * `intervalSec`: 周期（5〜3600 秒。既定 15）。`minIntervalSec`: ノードごとの、最短の間隔（10〜3600 秒。既定 60）。
+   * `maxPerRun`: 1 周期に起こす数の上限（1〜100。既定 10）。`maxPerHour`: 全ノード合計で、1 時間に起こす数の上限（1〜1000。既定 120）。
+   */
+  readonly wake?: {
+    readonly enabled?: boolean;
+    readonly intervalSec?: number;
+    readonly minIntervalSec?: number;
+    readonly maxPerRun?: number;
+    /** 全ノード合計で、1 時間に起こす数の上限（1〜1000。既定 120）。 */
+    readonly maxPerHour?: number;
+  };
   /** 子に渡す環境変数の、既定（PATH・HOME・認証・プロキシなど）に加える名前（完全一致）。 */
   readonly childEnvAllow?: readonly string[];
   /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
@@ -117,6 +131,7 @@ const KEYS = [
   "purgeTombstone",
   "autoPurge",
   "digest",
+  "wake",
   "rateLimit",
   "maxTurns",
   "maxBudgetUsd",
@@ -301,6 +316,39 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(v.maxPerRun === undefined ? {} : { maxPerRun: v.maxPerRun as number }),
     };
   }
+  let wake: DaemonConfig["wake"];
+  if (raw.wake !== undefined) {
+    const v = raw.wake;
+    const okRange = (x: unknown, min: number, max: number): boolean =>
+      x === undefined || (typeof x === "number" && Number.isInteger(x) && x >= min && x <= max);
+    if (
+      !isRec(v) ||
+      Object.keys(v).some(
+        (k) =>
+          k !== "enabled" &&
+          k !== "intervalSec" &&
+          k !== "minIntervalSec" &&
+          k !== "maxPerRun" &&
+          k !== "maxPerHour",
+      ) ||
+      (v.enabled !== undefined && typeof v.enabled !== "boolean") ||
+      !okRange(v.intervalSec, 5, 3600) ||
+      !okRange(v.minIntervalSec, 10, 3600) ||
+      !okRange(v.maxPerRun, 1, 100) ||
+      !okRange(v.maxPerHour, 1, 1000)
+    ) {
+      return bad(
+        "wake は、enabled（真偽値。任意）・intervalSec（5〜3600 の整数。任意）・minIntervalSec（10〜3600 の整数。任意）・maxPerRun（1〜100 の整数。任意）・maxPerHour（1〜1000 の整数。任意）だけを持つオブジェクト",
+      );
+    }
+    wake = {
+      ...(v.enabled === undefined ? {} : { enabled: v.enabled as boolean }),
+      ...(v.intervalSec === undefined ? {} : { intervalSec: v.intervalSec as number }),
+      ...(v.minIntervalSec === undefined ? {} : { minIntervalSec: v.minIntervalSec as number }),
+      ...(v.maxPerRun === undefined ? {} : { maxPerRun: v.maxPerRun as number }),
+      ...(v.maxPerHour === undefined ? {} : { maxPerHour: v.maxPerHour as number }),
+    };
+  }
   if (raw.autoPurge !== undefined) {
     const v = raw.autoPurge;
     const okInt = (x: unknown, max: number): boolean =>
@@ -474,6 +522,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
       ...(autoPurge === undefined ? {} : { autoPurge }),
       ...(digest === undefined ? {} : { digest }),
+      ...(wake === undefined ? {} : { wake }),
       ...(rateLimit === undefined ? {} : { rateLimit }),
       ...(raw.childHome === undefined
         ? {}

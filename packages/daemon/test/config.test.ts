@@ -125,6 +125,41 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("wake（中間統合ノードを起こす。T24-w）は、省略するとオフ（既定で無効）。enabled・intervalSec（5〜3600）・minIntervalSec（10〜3600）・maxPerRun（1〜100）だけを持つ", () => {
+    const d = parseConfig(JSON.stringify(base));
+    expect(d.ok && d.value.wake).toBeUndefined();
+    const on = parseConfig(
+      JSON.stringify({
+        ...base,
+        wake: { enabled: true, intervalSec: 5, minIntervalSec: 10, maxPerRun: 3, maxPerHour: 500 },
+      }),
+    );
+    expect(on.ok && on.value.wake).toEqual({
+      enabled: true,
+      intervalSec: 5,
+      minIntervalSec: 10,
+      maxPerRun: 3,
+      maxPerHour: 500,
+    });
+    expect(parseConfig(JSON.stringify({ ...base, wake: {} })).ok).toBe(true);
+    for (const v of [
+      true,
+      "on",
+      { enabled: "yes" },
+      { intervalSec: 4 },
+      { intervalSec: 3601 },
+      { minIntervalSec: 9 },
+      { maxPerRun: 0 },
+      { maxPerRun: 101 },
+      { maxPerHour: 0 },
+      { maxPerHour: 1001 },
+      { maxPerHour: 1.5 },
+      { unknown: 1 },
+    ]) {
+      expect(parseConfig(JSON.stringify({ ...base, wake: v })).ok, JSON.stringify(v)).toBe(false);
+    }
+  });
+
   it("autoPurge（自動の最終削除）は、省略するとオフ。enabled（必須）・intervalMinutes（1〜1440）・maxTreesPerRun（1〜100）だけを持つ", () => {
     const d = parseConfig(JSON.stringify(base));
     expect(d.ok && d.value.autoPurge).toBeUndefined();
