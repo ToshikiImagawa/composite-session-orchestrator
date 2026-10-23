@@ -24,6 +24,8 @@ export interface McpCliArgs {
   readonly port: number;
   /** 秘密のファイル（`<stateDir>/daemon-identity`）。検証なしで動くときは `undefined`。 */
   readonly identityPath?: string;
+  /** 起動時の身元確認が失敗したら、起動しない（`--config` があるとき、既定で true。`--no-strict-start` で false）。 */
+  readonly strictStart: boolean;
 }
 
 export interface ParseDeps {
@@ -88,6 +90,9 @@ function readConfig(
   return ok({ port: Number(url.port), stateDir });
 }
 
+/** 値を取らないフラグ。 */
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["--strict-start", "--no-strict-start"]);
+
 export function parseArgs(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>>,
@@ -97,8 +102,16 @@ export function parseArgs(
   let portText = env.CSO_MCP_PORT;
   let configPath = env.CSO_DAEMON_CONFIG;
   let identityPath: string | undefined;
+  let strict = false;
+  let relaxed = false;
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i];
+    if (typeof flag === "string" && BOOLEAN_FLAGS.has(flag)) {
+      if (flag === "--strict-start") strict = true;
+      else relaxed = true;
+      i -= 1; // 値を取らない（次の反復で、次の引数に進む）
+      continue;
+    }
     const value = argv[i + 1];
     if (value === undefined) return bad(`${String(flag)} に値がない`);
     if (flag === "--daemon-url") daemonUrl = value;
@@ -114,6 +127,7 @@ export function parseArgs(
     port = Number(portText);
     if (port < 1 || port > 65535) return bad("ポート（--port）は 1〜65535 の整数");
   }
+  if (strict && relaxed) return bad("--strict-start と --no-strict-start は同時に指定できない");
   if (configPath !== undefined && configPath !== "") {
     const fromConfig = readConfig(configPath, deps.readFile ?? ((p) => readFileSync(p, "utf8")));
     if (!fromConfig.ok) return fromConfig;
@@ -128,7 +142,17 @@ export function parseArgs(
     );
   }
   if (port === undefined) return bad("ポート（--port）または daemon の設定（--config）が必要");
-  return ok({ daemonUrl, port, ...(identityPath === undefined ? {} : { identityPath }) });
+  if (strict && identityPath === undefined) {
+    return bad(
+      "--strict-start は、daemon の設定（--config）があるときだけ（検証がないので、強制できない）",
+    );
+  }
+  return ok({
+    daemonUrl,
+    port,
+    ...(identityPath === undefined ? {} : { identityPath }),
+    strictStart: identityPath !== undefined && !relaxed,
+  });
 }
 
 export interface MainResult {
@@ -141,7 +165,16 @@ export interface MainDeps extends ParseDeps {
   readonly fetch?: typeof fetch;
   /** 秘密のファイルの読み出し（テスト用）。 */
   readonly readIdentityFile?: (path: string) => string;
+  /** 起動時の身元確認の、一時的な失敗のあとの待ち（テスト用）。 */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
+
+/** 起動時の到達確認・身元確認で、一時的な失敗のあとに待つ時間（最大 5 回試す。待ちの合計 15 秒）。 */
+const STARTUP_RETRY_MS = [1_000, 2_000, 4_000, 8_000] as const;
+/** 起動時の身元の失敗のあとに待つ時間（2 回だけ確認し直す。daemon の起動し直しの直後など、秘密が入れ替わる間を見込む）。 */
+const STARTUP_IDENTITY_RETRY_MS = [1_000, 2_000] as const;
+/** 身元の失敗の終了コード（daemon を起動し直して設定を確認するまで、再起動を繰り返しても直らない）。 */
+const EXIT_IDENTITY = 3;
 
 /** daemon に届くか確かめる（認証なしの `GET /v1/whoami`。応答があれば、401 でも daemon がいるとみなす）。 */
 async function daemonReachable(daemonUrl: string, doFetch: typeof fetch): Promise<boolean> {
@@ -169,7 +202,10 @@ export async function main(
 ): Promise<MainResult> {
   const fail = (e: Failure): MainResult => {
     io.stderr(`失敗 [${e.code}]: ${e.cause}\n  次の操作: ${e.nextActions.join(" / ")}\n`);
-    return { exitCode: e.code === "invalid_config" ? 2 : 1 };
+    return {
+      exitCode:
+        e.code === "invalid_config" ? 2 : e.code === "daemon_identity_failed" ? EXIT_IDENTITY : 1,
+    };
   };
   const args = parseArgs(argv, env, deps);
   if (!args.ok) return fail(args.error);
@@ -191,7 +227,21 @@ export async function main(
     logger: (e) => io.stderr(`${JSON.stringify(e)}\n`),
   });
   if (!created.ok) return fail(created.error);
-  if (!(await daemonReachable(args.value.daemonUrl, deps.fetch ?? globalThis.fetch))) {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const doFetch = deps.fetch ?? globalThis.fetch;
+  const retryLog = (phase: string, attempt: number, waitMs: number) =>
+    io.stderr(`${JSON.stringify({ event: "startupRetry", phase, attempt, waitMs })}\n`);
+  // 到達確認。強制（既定）のときは、接続拒否など（daemon がまだ起動していない）を一時的な失敗として、待って確かめ直す。
+  let reachable = await daemonReachable(args.value.daemonUrl, doFetch);
+  if (args.value.strictStart) {
+    for (const [i, wait] of STARTUP_RETRY_MS.entries()) {
+      if (reachable) break;
+      retryLog("reachable", i + 1, wait);
+      await sleep(wait);
+      reachable = await daemonReachable(args.value.daemonUrl, doFetch);
+    }
+  }
+  if (!reachable) {
     return fail(
       failure(
         "daemon_unreachable",
@@ -202,12 +252,27 @@ export async function main(
     );
   }
   if (verifier !== undefined) {
-    // 起動時にも 1 回検証する。失敗しても起動は止めず、警告にとどめる（最初の要求が、daemon_identity_failed で失敗する）。
-    const v = await verifier.verify();
-    if (!v.ok) {
+    // 起動時にも検証する。強制（既定）のときは、失敗したら起動しない。
+    // - 一時的な失敗: 待って最大 5 回試す（尽きたら終了コード 1）。
+    // - 身元の失敗: 1 秒・2 秒の 2 回だけ待って確かめ直す（それでも失敗なら終了コード 3。人手での確認が要る）。
+    // 強制でないとき（`--no-strict-start`）は、1 回だけで、失敗しても警告にとどめる（最初の要求が、daemon_identity_failed で失敗する）。
+    let transientRetries = 0;
+    let identityRetries = 0;
+    for (;;) {
+      const v = await verifier.verify();
+      if (v.ok) break;
       io.stderr(
         `${JSON.stringify({ event: "identityCheckFailed", code: v.failure.code, at: new Date().toISOString() })}\n`,
       );
+      if (!args.value.strictStart) break;
+      const schedule = v.kind === "identity" ? STARTUP_IDENTITY_RETRY_MS : STARTUP_RETRY_MS;
+      const used = v.kind === "identity" ? identityRetries++ : transientRetries++;
+      const wait = schedule[used];
+      if (wait === undefined) return fail(v.failure); // 身元の失敗は終了コード 3、一時的な失敗が尽きたら 1
+      io.stderr(
+        `${JSON.stringify({ event: "identityCheckRetry", attempt: used + 1, waitMs: wait })}\n`,
+      );
+      await sleep(wait);
     }
   }
   try {
