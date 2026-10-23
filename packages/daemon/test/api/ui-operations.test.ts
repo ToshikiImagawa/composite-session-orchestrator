@@ -56,6 +56,11 @@ const start = async () => {
         await gate;
         return ok({ accepted: true });
       },
+      "scope.decide": async (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        await new Promise((x) => setTimeout(x, 30));
+        return ok({ state: "running" });
+      },
     },
   });
   const { url } = await server.listen(0);
@@ -169,6 +174,108 @@ describe("画面からの操作（decision.answer）の要求", () => {
     r.release();
     const [a, b] = await Promise.all([first, second]);
     expect([a.status, b.status]).toEqual([200, 200]);
+    expect(r.calls).toHaveLength(1);
+  });
+});
+
+const DECIDE = (requestId: string, decision: unknown = "approve") => ({
+  requestId,
+  operation: "scope.decide",
+  params: { extensionId: "x1", decision },
+});
+
+describe("画面からの操作（scope.decide。T23-b）の要求", () => {
+  it("同じ origin・JSON・人間のトークンなら、承認・却下・切り出しが通る。ロールは human。params は extensionId と decision だけ", async () => {
+    const r = await start();
+    const origin = new URL(r.url).origin;
+    for (const [i, d] of (["approve", "reject", "split"] as const).entries()) {
+      const res = await send(r.url, HUMAN, DECIDE(`aaaaaaaa-0000-4000-8000-00000000000${i}`, d), {
+        origin,
+      });
+      expect(res.status, d).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, value: { state: "running" } });
+    }
+    expect(r.calls.map((c) => [c.role, c.params])).toEqual([
+      ["human", { extensionId: "x1", decision: "approve" }],
+      ["human", { extensionId: "x1", decision: "reject" }],
+      ["human", { extensionId: "x1", decision: "split" }],
+    ]);
+  });
+
+  it("画面が許可する対象を指定する口はない: granted など余計なキーは 400（実行しない）", async () => {
+    const r = await start();
+    const res = await send(r.url, HUMAN, {
+      requestId: "bbbbbbbb-0000-4000-8000-000000000001",
+      operation: "scope.decide",
+      params: { extensionId: "x1", decision: "approve", granted: { kind: "write", value: "/etc" } },
+    });
+    expect(res.status).toBe(400);
+    expect(r.calls).toEqual([]);
+  });
+
+  it("不正な判定（approve・reject・split 以外）・extensionId の欠落・不正な ID は 400", async () => {
+    const r = await start();
+    expect(
+      (await send(r.url, HUMAN, DECIDE("cccccccc-0000-4000-8000-000000000001", "grant"))).status,
+    ).toBe(400);
+    expect(
+      (
+        await send(r.url, HUMAN, {
+          requestId: "cccccccc-0000-4000-8000-000000000002",
+          operation: "scope.decide",
+          params: { decision: "approve" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await send(r.url, HUMAN, {
+          requestId: "cccccccc-0000-4000-8000-000000000003",
+          operation: "scope.decide",
+          params: { extensionId: "../x", decision: "approve" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(r.calls).toEqual([]);
+  });
+
+  it("CSRF: 誤った Origin は 403、JSON でない Content-Type は 415、cookie だけは 401（実行しない）", async () => {
+    const r = await start();
+    expect(
+      (
+        await send(r.url, HUMAN, DECIDE("dddddddd-0000-4000-8000-000000000001"), {
+          origin: "http://evil.example",
+        })
+      ).status,
+    ).toBe(403);
+    for (const type of ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"]) {
+      const res = await send(
+        r.url,
+        HUMAN,
+        JSON.stringify(DECIDE("dddddddd-0000-4000-8000-000000000002")),
+        {},
+        type,
+      );
+      expect(res.status, type).toBe(415);
+    }
+    const noToken = await fetch(`${r.url}/v1/request`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: `token=${HUMAN}` },
+      body: JSON.stringify(DECIDE("dddddddd-0000-4000-8000-000000000003")),
+    });
+    expect(noToken.status).toBe(401);
+    expect(r.calls).toEqual([]);
+  });
+
+  it("二重送信: 同じ requestId・同じ本文を同時に 2 回送っても、ハンドラは 1 回だけ（結果は同じ）", async () => {
+    const r = await start();
+    const origin = new URL(r.url).origin;
+    const body = DECIDE("eeeeeeee-0000-4000-8000-000000000001");
+    const first = send(r.url, HUMAN, body, { origin });
+    const second = send(r.url, HUMAN, body, { origin });
+    const [a, b] = await Promise.all([first, second]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(await a.json()).toEqual(await b.json());
     expect(r.calls).toHaveLength(1);
   });
 });

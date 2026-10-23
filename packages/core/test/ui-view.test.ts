@@ -8,7 +8,9 @@ import {
   UI_LIMITS,
   UI_OPTION_MAX,
   UI_QUESTION_MAX,
+  UI_TARGET_MAX,
   UI_TEXT_MAX,
+  uiTargetOf,
   uiText,
   uiViewOf,
 } from "../src/index.js";
@@ -141,7 +143,10 @@ describe("uiViewOf（画面の表示モデル。T23）", () => {
         optionsCut: false,
       },
     ]);
-    expect(v.extensions).toEqual([{ id: "x1", nodeId: "a", reason: "足りない" }]);
+    // 対象の形が不正（記録に target がない）なら、隠す（承認・切り出しをさせない）
+    expect(v.extensions).toEqual([
+      { id: "x1", nodeId: "a", reason: "足りない", targetHidden: true },
+    ]);
     expect(JSON.stringify(v)).not.toContain("secret-dir");
   });
 
@@ -193,5 +198,163 @@ describe("uiViewOf（画面の表示モデル。T23）", () => {
     const v = uiViewOf(must([...base(), ...items]));
     expect(v.inbox).toHaveLength(UI_LIMITS.inbox);
     expect(v.truncated).toContain("inbox");
+  });
+});
+
+describe("拡張要求の対象の表示（T23-b）", () => {
+  const w = (value: unknown) => uiTargetOf({ kind: "write", value });
+  const c = (value: unknown) => uiTargetOf({ kind: "command", value });
+
+  it.each([
+    "src/app.ts",
+    "docs/設計 メモ.md",
+    "packages/*/src/**/*.ts",
+    "a..b/c",
+    ".hidden/x",
+    "src/a.ts:12",
+  ])("write: 作業ツリー内の相対パス %j は、そのまま表示する", (v) => {
+    expect(w(v)).toEqual({ kind: "write", target: v, targetHidden: false });
+  });
+
+  it.each([
+    ["絶対パス", "/etc/passwd"],
+    ["絶対パス（バックスラッシュ）", "\\Windows\\x"],
+    ["ホーム", "~/.ssh/id_rsa"],
+    ["ドライブ", "C:\\Users\\x"],
+    ["ドライブ（スラッシュ）", "c:/x"],
+    ["スキーム", "file:///etc/passwd"],
+    [".. の区間", "../x"],
+    [".. の区間（途中）", "src/../../x"],
+    [".. の区間（バックスラッシュ）", "src\\..\\x"],
+    [".. だけ", ".."],
+    ["末尾の ..", "src/.."],
+    ["改行", "src/a\nb"],
+    ["タブ", "src/a\tb"],
+    ["NUL", "src/a\u0000b"],
+    ["DEL", "src/a\u007fb"],
+    ["書式制御文字（U+202E）", "src/a\u202eb"],
+    ["ゼロ幅", "src/a\u200bb"],
+    ["空", ""],
+    ["空白だけ", "   "],
+    ["文字列でない", 5],
+    ["長すぎる", "a".repeat(UI_TARGET_MAX + 1)],
+  ])("write: %s は、値を出さずに隠す（切らない）", (_n, v) => {
+    const r = w(v);
+    expect(r).toEqual({ kind: "write", targetHidden: true });
+    expect(JSON.stringify(r)).not.toContain(String(v).slice(0, 5) || "\u0000never");
+  });
+
+  it("上限ちょうどは表示する。1 つ超えたら隠す（切った値を承認させない）", () => {
+    expect(w("a".repeat(UI_TARGET_MAX))).toMatchObject({ targetHidden: false });
+    expect(w("a".repeat(UI_TARGET_MAX + 1))).toEqual({ kind: "write", targetHidden: true });
+    // コードポイントで数える
+    expect(w("あ".repeat(UI_TARGET_MAX))).toMatchObject({ targetHidden: false });
+  });
+
+  it.each([
+    "pnpm test",
+    "git diff --stat src/a.ts",
+    "node scripts/x.mjs --flag=a/b",
+    "ls a/b > out.txt",
+  ])("command: 絶対パスも .. もない %j は、そのまま表示する", (v) => {
+    expect(c(v)).toEqual({ kind: "command", target: v, targetHidden: false });
+  });
+
+  it.each([
+    ["先頭が絶対パス", "/usr/bin/rm -rf x"],
+    ["引数が絶対パス", "cat /etc/passwd"],
+    ["= のあとが絶対パス", "tool --out=/tmp/x"],
+    ["引用符のあとが絶対パス", `sh -c "cat /etc/passwd"`],
+    ["リダイレクト先が絶対パス", "echo x >/tmp/x"],
+    ["; のあとが絶対パス", "echo x;/bin/sh"],
+    ["ホーム", "cat ~/.bashrc"],
+    ["ドライブ", "type C:\\x"],
+    [".. の区間", "cat ../x"],
+    [".. の区間（途中）", "cat a/../../x"],
+    ["= のあとが ..", "tool --dir=../x"],
+    ["改行", "pnpm test\nrm -rf x"],
+    ["制御文字", "pnpm\u0007test"],
+    ["書式制御文字", "pnpm test\u202e"],
+    ["長すぎる", "a ".repeat(UI_TARGET_MAX)],
+  ])("command: %s は隠す", (_n, v) => {
+    expect(c(v)).toEqual({ kind: "command", targetHidden: true });
+  });
+
+  it("種類が write でも command でもない・target がない・オブジェクトでない場合は、種類も出さずに隠す", () => {
+    for (const t of [undefined, null, 5, "x", {}, { kind: "read", value: "a" }]) {
+      expect(uiTargetOf(t)).toEqual({ targetHidden: true });
+    }
+  });
+
+  it("uiViewOf: 拡張要求に、対象（kind・target）を載せる。隠れた対象は値を出さず、targetHidden", () => {
+    const s = must([
+      ...base(),
+      ev({
+        type: "node.stateChanged",
+        payload: { nodeId: "a", event: { type: "start" } },
+      } as never),
+      ev({
+        type: "scope.extensionRequested",
+        payload: {
+          extensionId: "x1",
+          nodeId: "a",
+          target: { kind: "write", value: "src/ok.ts" },
+          reason: "足りない",
+        },
+      } as never),
+      ev({
+        type: "scope.extensionRequested",
+        payload: {
+          extensionId: "x2",
+          nodeId: "a",
+          target: { kind: "write", value: "../outside" },
+          reason: "外",
+        },
+      } as never),
+    ]);
+    const v = uiViewOf(s);
+    expect(v.extensions).toEqual([
+      {
+        id: "x1",
+        nodeId: "a",
+        reason: "足りない",
+        kind: "write",
+        target: "src/ok.ts",
+        targetHidden: false,
+      },
+      { id: "x2", nodeId: "a", reason: "外", kind: "write", targetHidden: true },
+    ]);
+    expect(JSON.stringify(v)).not.toContain("outside");
+  });
+
+  it("件数の上限: 拡張要求は UI_LIMITS.extensions まで。切ったら truncated に extensions", () => {
+    const evs = base();
+    // 1 ノードの未判定の上限があるので、複数のノードに分ける
+    const ids: string[] = [];
+    for (let i = 0; i < UI_LIMITS.extensions + 1; i++) {
+      const id = `n${i}`;
+      ids.push(id);
+      evs.push(created(id, "implement", "root"));
+      evs.push(
+        ev({
+          type: "node.stateChanged",
+          payload: { nodeId: id, event: { type: "start" } },
+        } as never),
+      );
+      evs.push(
+        ev({
+          type: "scope.extensionRequested",
+          payload: {
+            extensionId: `x${i}`,
+            nodeId: id,
+            target: { kind: "write", value: "a" },
+            reason: "r",
+          },
+        } as never),
+      );
+    }
+    const v = uiViewOf(must(evs));
+    expect(v.extensions).toHaveLength(UI_LIMITS.extensions);
+    expect(v.truncated).toContain("extensions");
   });
 });

@@ -5,7 +5,7 @@
  * - 文字列は `textContent` と `createElement` だけで描く。`innerHTML`・`outerHTML`・`insertAdjacentHTML`・`document.write`・`eval`・`new Function`・
  *   `setAttribute`・`on*` への代入・`location` への代入・`srcdoc` は使わない。
  * - インラインの script・style・イベント属性は置かない（CSP が `'self'` だけを許す）。
- * - 操作（判断への回答）は、`<form>` を使わず、ボタンの click で、`POST /v1/request`（`Authorization: Bearer`。cookie は使わない）で送る。
+ * - 操作（判断への回答・拡張要求の判定）は、`<form>` を使わず、ボタンの click で、`POST /v1/request`（`Authorization: Bearer`。cookie は使わない）で送る。
  *   送る前に、必ず確認の表示（内容と回答）を挟む。確認のたびに `requestId` を新しく作り、その確認の間は同じ ID で再送する。
  * - 人間のトークンは、読み込んだらすぐ `history.replaceState` でフラグメントを消し、メモリにだけ持つ（storage・cookie には置かない）。
  */
@@ -284,12 +284,35 @@ export const UI_JS = `'use strict';
     }
   }
 
+  // 拡張要求の判定（scope.decide）。許可する対象は、daemon が記録済みの対象をそのまま使う（画面の表示と一致する）。
+  // 対象が隠れている（絶対パス・.. ・制御文字・長すぎる、など）ときは、承認・切り出しをさせない（却下だけ）。
+  var DECISION_LABELS = { approve: '承認', reject: '却下', split: '切り出し' };
+  var KIND_LABELS = { write: '書き込みの場所', command: 'コマンド' };
   function renderExtensions(list, box) {
     list.forEach(function (x) {
       var card = el('div', 'card');
       card.appendChild(el('span', 'tag', '拡張要求'));
       card.appendChild(el('span', 'tag', x.nodeId));
+      if (x.kind) card.appendChild(el('span', 'tag', name(KIND_LABELS, x.kind)));
       card.appendChild(el('div', '', x.reason));
+      card.appendChild(el('div', 'confirm-line', x.targetHidden ? '対象: （表示できない）' : '対象: ' + x.target));
+      var opts = el('div', 'opts');
+      ['approve', 'reject', 'split'].forEach(function (decision) {
+        var b = el('button', '', DECISION_LABELS[decision]);
+        b.disabled = x.targetHidden && decision !== 'reject';
+        b.addEventListener('click', function () {
+          openConfirm(
+            '拡張要求の' + DECISION_LABELS[decision],
+            [['ノード', x.nodeId], ['種類', x.kind ? name(KIND_LABELS, x.kind) : '（不明）'], ['対象', x.targetHidden ? '（表示できない）' : x.target], ['理由', x.reason], ['判定', DECISION_LABELS[decision]]],
+            'scope.decide',
+            { extensionId: x.id, decision: decision },
+            '拡張要求を' + DECISION_LABELS[decision] + 'しました'
+          );
+        });
+        opts.appendChild(b);
+      });
+      card.appendChild(opts);
+      if (x.targetHidden) card.appendChild(el('p', 'error', '対象に、表示できない文字・絶対パス・.. ・長すぎる値などが含まれるため、承認・切り出しはできません（却下だけできます）。'));
       box.appendChild(card);
     });
   }
