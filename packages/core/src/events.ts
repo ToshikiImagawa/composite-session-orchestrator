@@ -22,7 +22,7 @@ import { briefProblem } from "./brief.js";
 import { type Failure, failure, ok, type Result } from "./contract.js";
 import { isSafeId, pauseNodeIdsProblem } from "./ids.js";
 import { type InboxItem, isValidInboxTime } from "./inbox.js";
-import { INBOX_KINDS, type InboxKind } from "./inbox-kinds.js";
+import { INBOX_KINDS, type InboxKind, PRIORITIES, type Priority } from "./inbox-kinds.js";
 import type { NodeRole, NodeState } from "./index.js";
 import { isBoundedText, LIMITS } from "./limits.js";
 import type { Scope, ScopeViolationReason } from "./scope.js";
@@ -78,6 +78,8 @@ export type EventBody =
         readonly summary?: string;
         /** 参照 ID（`decisionId`・`reportId` など）。 */
         readonly ref?: string;
+        /** 優先度（種類 `digest` だけ。配下の未解決の項目の最高の優先度。T24）。 */
+        readonly priority?: Priority;
       };
     }
   | {
@@ -496,6 +498,7 @@ export type FoldFailureCode =
   | "unknownRef"
   | "duplicateExtension"
   | "alreadyDiscarded"
+  | "invalidDigestOwner"
   | "notPurgeRoot"
   | "invalidPurgeHoldUntil"
   | "noPurgeHold"
@@ -652,6 +655,7 @@ const REF_TARGET: Readonly<Record<InboxKind, "decision" | "report" | "extension"
   done: "report",
   progress: "report",
   info: "report",
+  digest: undefined, // 要約は、記録を指さない（`ref` を持てない）
 };
 
 /** `node.toolDenied`・`node.exited` を記録できるノードの状態（子のプロセスがありうる間）。 */
@@ -1265,9 +1269,23 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
     }
 
     case "inbox.added": {
-      const { id, kind, nodeId, summary, ref } = p;
+      const { id, kind, nodeId, summary, ref, priority } = p;
       if (!isId(id) || !isId(nodeId) || !INBOX_KINDS.includes(kind as InboxKind)) {
         return invalid(seq, "inbox.added の payload");
+      }
+      // 要約（digest）は、summary を必ず持つ（決定的な文面。`digestOf`）。
+      if (kind === "digest" && summary === undefined) {
+        return invalid(seq, "inbox.added の summary（種類 digest は必ず持つ）");
+      }
+      // 優先度は、要約（digest）だけが持ち、要約は必ず持つ。
+      if (
+        (kind === "digest") !== (priority !== undefined) ||
+        (priority !== undefined && !PRIORITIES.includes(priority as Priority))
+      ) {
+        return invalid(
+          seq,
+          "inbox.added の priority（種類 digest だけが持ち、PRIORITIES のどれか）",
+        );
       }
       if (summary !== undefined && !isBoundedText(summary, LIMITS.summary)) {
         return invalid(seq, `inbox.added の summary（${LIMITS.summary} 文字以下、制御文字なし）`);
@@ -1276,6 +1294,15 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (!isValidInboxTime(raw.at)) return invalid(seq, "inbox.added の at（ISO 8601 UTC）");
       const node = nodeAt(d, nodeId);
       if (node === undefined) return unknownNode(seq, nodeId);
+      // 要約は、中間統合ノード（根でない統合ノード）自身のもの（上位から、どのノードの要約か分かる）。
+      if (kind === "digest" && (node.role !== "integrator" || node.parentId === null)) {
+        return reject(
+          seq,
+          "invalidDigestOwner",
+          `要約（digest）は、中間統合ノード（根でない統合ノード）自身のものだけ。ノード ${nodeId} は違う`,
+          "要約の nodeId を、配下を持つ中間統合ノードにする",
+        );
+      }
       if (d.inboxIds.has(id)) {
         return reject(seq, "duplicateInboxId", `受信箱の項目 ${id} は既にある`, "別の ID を使う");
       }
@@ -1311,6 +1338,7 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           at: raw.at,
           ...(summary === undefined ? {} : { summary: summary as string }),
           ...(ref === undefined ? {} : { ref: ref as string }),
+          ...(priority === undefined ? {} : { priority: priority as Priority }),
         }),
       );
       return commit();

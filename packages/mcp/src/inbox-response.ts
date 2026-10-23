@@ -15,6 +15,7 @@ import {
   isSafeId,
   type NodeDeps,
   ok,
+  PRIORITIES,
   type Result,
   type RoleOperation,
   sortInbox,
@@ -33,6 +34,8 @@ const NEXT_ACTIONS: Readonly<Record<InboxKind, readonly IntegratorOperation[]>> 
   done: ["report.get", "node.review"],
   progress: ["report.get"],
   info: [],
+  // 配下の要約（T24）: 詳細は、受信箱の全体と木の一覧で読む。
+  digest: ["inbox.fetch", "tree.list"],
 };
 
 /** 次に取るべき操作の候補を、MCP のツール名で返す。 */
@@ -69,7 +72,11 @@ export const MAX_LIMIT = 100;
 interface WithNext {
   readonly nextActions: readonly string[];
 }
-export type BriefEntry = Pick<InboxItem, "id" | "kind" | "nodeId" | "summary" | "ref"> & WithNext;
+export type BriefEntry = Pick<
+  InboxItem,
+  "id" | "kind" | "nodeId" | "summary" | "ref" | "priority"
+> &
+  WithNext;
 export type FullEntry = InboxItem & WithNext;
 
 export interface InboxPage {
@@ -111,6 +118,13 @@ function itemProblem(x: unknown): string | undefined {
     return `dependsOn が識別子の配列でない: ${x.id}`;
   }
   if (x.ref !== undefined && !isSafeId(x.ref)) return `ref が識別子の形式でない: ${x.id}`;
+  // 優先度は、要約（digest）だけが持ち、必ず持つ（PRIORITIES のどれか）。
+  if ((x.kind === "digest") !== (x.priority !== undefined)) {
+    return `priority は、digest だけが持ち、必ず持つ: ${x.id}`;
+  }
+  if (x.priority !== undefined && !(PRIORITIES as readonly unknown[]).includes(x.priority)) {
+    return `priority が不正: ${x.id}`;
+  }
   return undefined;
 }
 
@@ -160,6 +174,7 @@ export function renderInbox(
       nodeId: it.nodeId,
       ...(it.summary !== undefined ? { summary: it.summary } : {}),
       ...(it.ref !== undefined ? { ref: it.ref } : {}),
+      ...(it.priority !== undefined ? { priority: it.priority } : {}),
       nextActions,
     };
   });

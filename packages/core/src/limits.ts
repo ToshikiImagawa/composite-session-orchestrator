@@ -44,6 +44,8 @@ export const LIMITS = {
   /** 最終削除の標識（`node.purged`）: 木のノードの件数と、最終コミットの長さ。 */
   purgeNodeCount: 10_000,
   commit: 128,
+  /** 配下の要約（`digest`。T24）に載せる、最優先の項目の件数。 */
+  digestTopItems: 3,
   /** 自動の最終削除の保留（T13f-h）: 理由の長さ（文字）と、保留の期限の上限（日）。 */
   purgeHoldReason: 200,
   purgeHoldMaxDays: 365,

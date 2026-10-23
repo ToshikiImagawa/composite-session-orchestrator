@@ -21,6 +21,7 @@ const NEXT_ACTIONS: Record<InboxKind, readonly string[]> = {
   done: ["report_get", "node_review"],
   progress: ["report_get"],
   info: [],
+  digest: ["inbox_fetch", "tree_list"],
 };
 
 describe("nextActionsFor（FR_012: 次に取るべき操作の候補）", () => {
@@ -167,6 +168,10 @@ describe("不正な項目は、その項目だけを除外する（受信箱全�
     [{ ...item({ id: "x" }), nodeId: "*" }],
     [{ ...item({ id: "x" }), ref: "dec 1" }],
     [{ ...item({ id: "x" }), dependsOn: ["ok", "a;b"] }],
+    // 優先度（T24）: digest だけが持ち、必ず持つ。PRIORITIES のどれか
+    [{ ...item({ id: "x" }), kind: "digest" }],
+    [{ ...item({ id: "x" }), kind: "digest", priority: "urgent" }],
+    [{ ...item({ id: "x" }), kind: "failure", priority: "failed" }],
     [null],
     ["str"],
   ])("不正な項目 %j だけを除外し、除外した件数を知らせる", (bad1) => {
@@ -174,6 +179,12 @@ describe("不正な項目は、その項目だけを除外する（受信箱全�
     expect(page.entries.map((e) => e.id)).toEqual(["a", "b"]);
     expect(page.excluded).toBe(1);
     expect(page.total).toBe(2);
+  });
+
+  it("digest は、priority（PRIORITIES のどれか）を持てば受け付け、簡潔版に priority を出す", () => {
+    const page = run(item({ id: "dg", kind: "digest", priority: "failed", nodeId: "m1" } as never));
+    expect(page.excluded).toBe(0);
+    expect(page.entries[0]).toMatchObject({ id: "dg", kind: "digest", priority: "failed" });
   });
 
   it("除外がなければ excluded は 0", () => {

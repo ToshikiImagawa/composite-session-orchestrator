@@ -42,6 +42,7 @@ describe("InboxKind と Priority の対応（spec 4.2, FR_012）", () => {
       "done",
       "progress",
       "info",
+      "digest",
     ]);
   });
 
