@@ -19,6 +19,7 @@ import { deriveId } from "../src/api/handlers/context.js";
 import { parseIdentityFile, proofOf } from "../src/api/identity.js";
 import { FileTokenRepository } from "../src/api/token-repository.js";
 import {
+  apiLimitsOf,
   createDaemon,
   type Daemon,
   type DaemonDeps,
@@ -748,6 +749,41 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
   });
 });
 
+describe("apiLimitsOf（設定から窓口の制限・接続・処理中の重複の deps。T10l-f）", () => {
+  const cfg = (over: Partial<DaemonConfig> = {}): DaemonConfig => rig(over).config;
+
+  it("設定がなければ、いまの既定と同じ（connection・inProgress・maxInFlightPerPrincipal は渡さない。窓口の既定が働く）", () => {
+    const l = apiLimitsOf(cfg());
+    expect(l.rateLimit).toEqual({
+      perPrincipal: { burst: 60, perSecond: 20 },
+      authFailures: { burst: 20, perSecond: 0.5 },
+    });
+    expect(l).not.toHaveProperty("connection");
+    expect(l).not.toHaveProperty("inProgress");
+  });
+
+  it("設定した値は、そのまま渡る（同時数・接続・処理中の重複。省略した項目は、足さない）", () => {
+    const l = apiLimitsOf(
+      cfg({
+        rateLimit: { maxInFlightPerPrincipal: 3 },
+        connection: { requestTimeoutMs: 5000, headersTimeoutMs: 4000, maxConnections: 64 },
+        inProgress: { waitMs: 2000, maxEntries: 100 },
+      }),
+      () => 7,
+    );
+    expect(l.rateLimit).toMatchObject({
+      maxInFlightPerPrincipal: 3,
+      monotonicMs: expect.any(Function),
+    });
+    expect(l.connection).toEqual({
+      requestTimeoutMs: 5000,
+      headersTimeoutMs: 4000,
+      maxConnections: 64,
+    });
+    expect(l.inProgress).toEqual({ waitMs: 2000, maxEntries: 100 });
+  });
+});
+
 describe("createDaemon（窓口の回数の制限。T10l）", () => {
   it("既定で有効: 設定で小さくした容量を超えると、実 HTTP で 429 と Retry-After。429 の要求は実行されていない。人間は影響されない", async () => {
     const r = rig({ rateLimit: { perPrincipal: { burst: 10, perSecond: 1 } } });
@@ -768,6 +804,40 @@ describe("createDaemon（窓口の回数の制限。T10l）", () => {
     // 人間は、別の主体なので、影響されない
     const human = await call(d.url, d.humanToken, "node.purgePreview", { nodeId: "root" });
     expect(human.status).not.toBe(429);
+  });
+
+  it("T10l-f（R4）: 設定の maxInFlightPerPrincipal が、窓口に届いている（1 にすると、同時の 2 つ目の要求が 429。1 つ目は、終われば成功する）", async () => {
+    const r = rig({ rateLimit: { maxInFlightPerPrincipal: 1 } });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    let entered: () => void = () => {};
+    const started = new Promise<void>((res) => {
+      entered = res;
+    });
+    r.deps = {
+      ...r.deps,
+      worktree: {
+        ...r.deps.worktree,
+        lossFor: async () => {
+          entered();
+          await gate;
+          return undefined;
+        },
+      },
+    };
+    const d = await boot(r);
+    const first = call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "root" });
+    await started; // 1 つ目が、ハンドラの中で止まっている
+    const second = await call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "root" });
+    expect(second.status).toBe(429);
+    release();
+    expect((await first).status).toBe(200);
+    // 枠は、1 つ目の処理が終わったとき返る（もう一度通る）
+    expect(
+      (await call(d.url, d.humanToken, "node.reclaimPreview", { nodeId: "root" })).status,
+    ).toBe(200);
   });
 
   it("設定を省かなければ、既定（容量 60）で動く: 通常の操作の頻度では、制限に当たらない", async () => {

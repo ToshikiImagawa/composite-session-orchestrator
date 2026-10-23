@@ -228,6 +228,36 @@ function realOverlap(config: DaemonConfig): string | undefined {
   return undefined;
 }
 
+/**
+ * 設定から、窓口の回数の制限・接続・処理中の重複の扱い（T10l・T10l-f）の deps を作る。省略した項目は、窓口の既定のまま
+ * （`connection`・`inProgress` は、設定にあるときだけ渡す）。
+ */
+export function apiLimitsOf(
+  config: DaemonConfig,
+  monotonicMs?: () => number,
+): Pick<Parameters<typeof createApiServer>[0], "rateLimit" | "connection" | "inProgress"> {
+  return {
+    rateLimit: {
+      perPrincipal: {
+        burst: config.rateLimit?.perPrincipal?.burst ?? DEFAULT_PRINCIPAL_SPEC.burst,
+        perSecond: config.rateLimit?.perPrincipal?.perSecond ?? DEFAULT_PRINCIPAL_SPEC.perSecond,
+      },
+      authFailures: {
+        burst: config.rateLimit?.authFailures?.burst ?? DEFAULT_AUTH_FAILURE_BURST,
+        perSecond:
+          (config.rateLimit?.authFailures?.perMinute ?? DEFAULT_AUTH_FAILURE_PER_MINUTE) / 60,
+      },
+      ...(config.rateLimit?.maxKeys === undefined ? {} : { maxKeys: config.rateLimit.maxKeys }),
+      ...(config.rateLimit?.maxInFlightPerPrincipal === undefined
+        ? {}
+        : { maxInFlightPerPrincipal: config.rateLimit.maxInFlightPerPrincipal }),
+      ...(monotonicMs === undefined ? {} : { monotonicMs }),
+    },
+    ...(config.connection === undefined ? {} : { connection: config.connection }),
+    ...(config.inProgress === undefined ? {} : { inProgress: config.inProgress }),
+  };
+}
+
 export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Daemon, Failure> {
   const clock = deps.clock ?? (() => new Date().toISOString());
   const logLine = deps.logLine ?? ((line: string) => process.stderr.write(`${line}\n`));
@@ -602,19 +632,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     logger,
     bind,
     clock,
-    rateLimit: {
-      perPrincipal: {
-        burst: config.rateLimit?.perPrincipal?.burst ?? DEFAULT_PRINCIPAL_SPEC.burst,
-        perSecond: config.rateLimit?.perPrincipal?.perSecond ?? DEFAULT_PRINCIPAL_SPEC.perSecond,
-      },
-      authFailures: {
-        burst: config.rateLimit?.authFailures?.burst ?? DEFAULT_AUTH_FAILURE_BURST,
-        perSecond:
-          (config.rateLimit?.authFailures?.perMinute ?? DEFAULT_AUTH_FAILURE_PER_MINUTE) / 60,
-      },
-      ...(config.rateLimit?.maxKeys === undefined ? {} : { maxKeys: config.rateLimit.maxKeys }),
-      ...(deps.monotonicMs === undefined ? {} : { monotonicMs: deps.monotonicMs }),
-    },
+    ...apiLimitsOf(config, deps.monotonicMs),
   });
 
   let running: RunningDaemon | undefined;

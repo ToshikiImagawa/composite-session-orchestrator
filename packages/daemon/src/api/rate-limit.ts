@@ -23,6 +23,8 @@ export type Consume =
 export interface RateLimiter {
   /** `cost` 個のトークンを使う（全部使えるときだけ。足りなければ何も使わない）。 */
   tryConsume(key: string, cost: number): Consume;
+  /** `cost` 個を使えるか（何も使わない・キーを作らない・並べ替えない）。bind の入口が、失敗が続いている接続元を先に断るのに使う。 */
+  canConsume(key: string, cost: number): Consume;
   /** 表にあるキーの数（試験用）。 */
   size(): number;
 }
@@ -76,6 +78,19 @@ export function createRateLimiter(options: {
       const missing = need - bucket.tokens;
       return { ok: false, retryAfterSec: Math.max(1, Math.ceil(missing / perSecond)) };
     },
+    canConsume(key, cost) {
+      const need = Math.min(Math.max(cost, 0), burst);
+      const existing = buckets.get(key);
+      const tokens =
+        existing === undefined
+          ? burst
+          : Math.min(
+              burst,
+              existing.tokens + (Math.max(now() - existing.last, 0) / 1000) * perSecond,
+            );
+      if (tokens >= need) return { ok: true };
+      return { ok: false, retryAfterSec: Math.max(1, Math.ceil((need - tokens) / perSecond)) };
+    },
     size: () => buckets.size,
   };
 }
@@ -105,6 +120,39 @@ export const RATE_LIMIT_BOUNDS = {
   authFailureBurst: { min: 5, max: 10_000 },
   authFailurePerMinute: { min: 5, max: 100_000 },
   maxKeys: { min: 100, max: 1_000_000 },
+  /** 主体ごとの同時に処理中の要求の数（T10l-f）。 */
+  maxInFlightPerPrincipal: { min: 1, max: 64 },
+} as const;
+
+/** 接続の上限とタイムアウトの設定の範囲（T10l-f。ミリ秒）。`headersTimeoutMs` は、実効の `requestTimeoutMs` 以下（Node の制約）。 */
+export const CONNECTION_BOUNDS = {
+  requestTimeoutMs: { min: 1_000, max: 600_000 },
+  headersTimeoutMs: { min: 1_000, max: 600_000 },
+  keepAliveTimeoutMs: { min: 3_000, max: 120_000 },
+  maxConnections: { min: 64, max: 10_000 },
+} as const;
+export const CONNECTION_DEFAULTS = {
+  requestTimeoutMs: 30_000,
+  headersTimeoutMs: 10_000,
+  keepAliveTimeoutMs: 5_000,
+  maxConnections: 256,
+} as const;
+
+/**
+ * 同じ要求の処理中の重複の扱いの設定の範囲（T10l-f）。`staleMs` の下限（150 秒）は、最長の操作のタイムアウト（120 秒）より長い
+ * （正常に処理中の項目を、古いと見なして外さない）。`waitMs` の上限（60 秒）は、`staleMs` の下限より小さいので、組み合わせの検査はいらない。
+ */
+export const IN_PROGRESS_BOUNDS = {
+  waitMs: { min: 1_000, max: 60_000 },
+  maxWaiters: { min: 1, max: 256 },
+  staleMs: { min: 150_000, max: 3_600_000 },
+  maxEntries: { min: 64, max: 100_000 },
+} as const;
+export const IN_PROGRESS_DEFAULTS = {
+  waitMs: 20_000,
+  maxWaiters: 16,
+  staleMs: 300_000,
+  maxEntries: 1_024,
 } as const;
 
 /**

@@ -23,6 +23,23 @@ describe("token bucket（createRateLimiter）", () => {
     expect(rl.tryConsume("k", 1)).toEqual({ ok: false, retryAfterSec: 1 });
   });
 
+  it("canConsume（T10l-f）: 使えるかだけを返す。何も使わない・キーを作らない。尽きていれば、足りるまでの秒数を返す。補充は tryConsume と同じ", () => {
+    const c = clockOf();
+    const rl = createRateLimiter({ spec: { burst: 2, perSecond: 1 }, nowMs: c.now });
+    expect(rl.canConsume("k", 1)).toEqual({ ok: true });
+    expect(rl.size()).toBe(0); // キーを作らない
+    for (let i = 0; i < 5; i++) expect(rl.canConsume("k", 1)).toEqual({ ok: true }); // 何も使わない
+    rl.tryConsume("k", 2);
+    expect(rl.canConsume("k", 1)).toEqual({ ok: false, retryAfterSec: 1 });
+    expect(rl.canConsume("k", 1)).toEqual({ ok: false, retryAfterSec: 1 }); // 数えても、変わらない
+    c.advance(1000);
+    expect(rl.canConsume("k", 1)).toEqual({ ok: true });
+    expect(rl.tryConsume("k", 1).ok).toBe(true);
+    expect(rl.canConsume("k", 1).ok).toBe(false);
+    // 容量を超える要求は、容量に切られる（tryConsume と同じ）
+    expect(rl.canConsume("other", 100)).toEqual({ ok: true });
+  });
+
   it("補充は毎秒。小数の経過も数える。拒否は、何も使わない（トークンが減らない）", () => {
     const c = clockOf();
     const rl = createRateLimiter({ spec: { burst: 2, perSecond: 2 }, nowMs: c.now });
