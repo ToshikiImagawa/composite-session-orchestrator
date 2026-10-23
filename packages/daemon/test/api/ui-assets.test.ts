@@ -293,6 +293,7 @@ describe("画面の資産（走査）", () => {
         line("var REASON_MAX ="),
         line("var EXPECT_TIPS_MAX ="),
         line("var CLI_HINT ="),
+        line("var NODE_LIST_MAX ="),
         UI_JS.slice(
           UI_JS.indexOf("  var UNMET_NAMES = {"),
           UI_JS.indexOf("\n  };", UI_JS.indexOf("  var UNMET_NAMES = {")) + 5,
@@ -367,7 +368,9 @@ describe("画面の資産（走査）", () => {
         retry: 0,
       });
       expect(a).toContain("conflict: 先に確定している");
-      expect(a).toContain("もう一度送れます");
+      // 判断の失敗（4xx）は、同じ内容を送り直しても、結果が変わらない。再送を勧めず、状態を確かめさせる
+      expect(a).not.toContain("もう一度送れます");
+      expect(a).toContain("結果は変わりません");
       const long = api.describeFailure({
         status: 422,
         body: { ok: false, error: { code: "x", cause: "あ".repeat(500) } },
@@ -378,6 +381,18 @@ describe("画面の資産（走査）", () => {
       expect(api.describeFailure({ status: 500, body: null, retry: 0 })).toContain("HTTP 500");
       expect(api.describeFailure({ status: 429, body: null, retry: 7 })).toContain("7 秒");
       expect(api.describeFailure({ status: 429, body: null, retry: 0 })).toContain("しばらく");
+      // 再送して意味があるのは、待てば通りうる 429 だけ（ネットワークの失敗は、sendPending の catch で、再送を案内する）
+      expect(api.describeFailure({ status: 429, body: null, retry: 3 })).toContain(
+        "もう一度送れます",
+      );
+      for (const status of [400, 403, 404, 409, 422]) {
+        const text = api.describeFailure({
+          status,
+          body: { ok: false, error: { code: "x", cause: "y" } },
+          retry: 0,
+        });
+        expect(text, String(status)).not.toContain("もう一度送れます");
+      }
     });
 
     it("typedMatches: 打ち込む文字列と完全に一致するときだけ。前後の空白・大文字小文字・全角・空・型の違いは、すべて不一致", () => {
@@ -523,6 +538,10 @@ describe("画面の資産（走査）", () => {
       expect(text).toContain("配下の停止ノードは、別に指示が必要");
       expect(text).toContain("破棄の判断が要る");
       expect(text).toContain("プロセス 1234");
+      expect(text).toContain(
+        "失われるもの（この対象と配下。配下は、それぞれの指示のときに失われる） 1 件のノード",
+      );
+      expect(text).toContain("ノード s1 統合されていないコミット 2 件");
       expect(text).toContain("統合されていないコミット 2 件");
       expect(text).toContain("追跡中のファイルの未保存の変更あり");
       expect(text).toContain("未追跡のファイル 3 件");
@@ -534,12 +553,14 @@ describe("画面の資産（走査）", () => {
       expect(text).toContain("先端が変わっていたら、何も記録されません");
     });
 
-    it("reclaimLines: 失われるものがなければ「なし」。長い一覧は切る", () => {
+    it("reclaimLines: 失われるものがなければ「なし」。長い一覧（20 件超）は切り、「ほか N 件」を出す（先端は、すべて照合に含める）", () => {
       const none = api
         .reclaimLines("s1", preview({ tips: undefined }))
         .map((l) => l.join(" "))
         .join("\n");
-      expect(none).toContain("失われるもの なし");
+      expect(none).toContain(
+        "失われるもの（この対象と配下。配下は、それぞれの指示のときに失われる） なし",
+      );
       const many = api.reclaimLines(
         "s1",
         preview({
@@ -553,8 +574,43 @@ describe("画面の資産（走査）", () => {
           tips: Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`n${i}`, sha("d")])),
         }),
       );
-      expect(many.filter((l) => l[0].startsWith("失われるもの（")).length).toBe(20);
+      expect(many.filter((l) => l[0].startsWith("  ノード n")).length).toBe(20);
       expect(many.filter((l) => l[0].startsWith("ブランチの先端（")).length).toBe(20);
+      expect(many).toContainEqual([
+        "  失われるもの",
+        "ほか 10 件（表示を省略。破棄の対象には、すべて含まれる）",
+      ]);
+      expect(many).toContainEqual(["ブランチの先端", "ほか 10 件（すべて、照合に含める）"]);
+      // ちょうど 20 件なら、「ほか」は出さない
+      const exact = api.reclaimLines(
+        "s1",
+        preview({
+          tips: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`n${i}`, sha("e")])),
+        }),
+      );
+      expect(exact.some((l) => l[1].startsWith("ほか"))).toBe(false);
+    });
+
+    it("reclaimLines: 満たしていない条件・原因を 10 件で切ったときも、「ほか N 件」を出す", () => {
+      const unmet = Array.from({ length: 12 }, () => "dirty");
+      const blockers = Array.from({ length: 13 }, (_, i) => ({
+        kind: "process",
+        reason: "processesRunning",
+        pid: 100 + i,
+      }));
+      const lines = api.reclaimLines("s1", preview({ unmet, blockers }));
+      expect(
+        lines.filter((l) => l[0] === "満たしていない条件" && !l[1].startsWith("ほか")).length,
+      ).toBe(10);
+      expect(lines).toContainEqual(["満たしていない条件", "ほか 2 件"]);
+      expect(lines.filter((l) => l[0] === "原因" && !l[1].startsWith("ほか")).length).toBe(10);
+      expect(lines).toContainEqual(["原因", "ほか 3 件"]);
+      // 10 件ちょうどなら、「ほか」は出さない
+      const ten = api.reclaimLines(
+        "s1",
+        preview({ unmet: unmet.slice(0, 10), blockers: blockers.slice(0, 10) }),
+      );
+      expect(ten.some((l) => l[1].startsWith("ほか"))).toBe(false);
     });
 
     it("failureHint・describeFailure: tipMismatch・tipUnknown は、同じ内容の再送でなく、確かめ直しを案内する", () => {

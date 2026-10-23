@@ -152,7 +152,9 @@ export const UI_JS = `'use strict';
     var hint = failureHint(e && e.code);
     // 先端が変わった（または確かめられない）ときは、同じ内容では、何度送っても通らない。確かめ直させる
     if (hint) return base + '\\n' + hint;
-    return base + '\\n同じ内容で、もう一度送れます（同じ要求として扱われ、二重には実行されません）。';
+    // 再送して意味があるのは、待てば通りうるもの（429。ネットワークの失敗は、sendPending の catch）だけ。判断の失敗（4xx）は、同じ内容では、結果が変わらない
+    if (r.status === 429) return base + '\\n同じ内容で、もう一度送れます（同じ要求として扱われ、二重には実行されません）。';
+    return base + '\\n同じ内容を送り直しても、結果は変わりません。「戻る」で、状態を確かめてから、やり直してください。';
   }
   // 失敗の種類ごとの案内。なければ ''。
   function failureHint(code) {
@@ -485,22 +487,29 @@ export const UI_JS = `'use strict';
       ['内容', '破棄の判断は、取り消せません。停止したノードの作業ツリーとブランチが、強制して消えます。記録されるのは、この対象だけです（配下の停止ノードは、別に指示が必要です）']
     ];
     v.unmet.slice(0, 10).forEach(function (u) { lines.push(['満たしていない条件', name(UNMET_NAMES, String(u))]); });
+    if (v.unmet.length > 10) lines.push(['満たしていない条件', 'ほか ' + (v.unmet.length - 10) + ' 件']);
     v.blockers.slice(0, 10).forEach(function (b) {
       var who = b && b.kind === 'process' ? 'プロセス ' + Number(b.pid) : 'ノード ' + cleanText(String(b && b.nodeId), 128);
       lines.push(['原因', who + '（' + name(UNMET_NAMES, String(b && b.reason)) + '）']);
     });
+    if (v.blockers.length > 10) lines.push(['原因', 'ほか ' + (v.blockers.length - 10) + ' 件']);
     var loss = v.loss || [];
-    loss.slice(0, 20).forEach(function (l) {
-      lines.push(['失われるもの（' + cleanText(String(l.nodeId), 128) + '）', lossText(l)]);
+    var lossHead = '失われるもの（この対象と配下。配下は、それぞれの指示のときに失われる）';
+    if (!loss.length) lines.push([lossHead, 'なし']);
+    else lines.push([lossHead, loss.length + ' 件のノード']);
+    loss.slice(0, NODE_LIST_MAX).forEach(function (l) {
+      lines.push(['  ノード ' + cleanText(String(l.nodeId), 128), lossText(l)]);
       (Array.isArray(l.untrustedSubjects) ? l.untrustedSubjects : []).slice(0, 5).forEach(function (subject) {
-        lines.push(['コミットの件名（信頼できない入力）', cleanText(String(subject), 100)]);
+        lines.push(['  コミットの件名（信頼できない入力）', cleanText(String(subject), 100)]);
       });
     });
-    if (!loss.length) lines.push(['失われるもの', 'なし']);
+    if (loss.length > NODE_LIST_MAX) lines.push(['  失われるもの', 'ほか ' + (loss.length - NODE_LIST_MAX) + ' 件（表示を省略。破棄の対象には、すべて含まれる）']);
     var tips = v.tips || {};
-    Object.keys(tips).sort().slice(0, 20).forEach(function (k) {
+    var tipIds = Object.keys(tips).sort();
+    tipIds.slice(0, NODE_LIST_MAX).forEach(function (k) {
       lines.push(['ブランチの先端（' + cleanText(k, 128) + '）', cleanText(tips[k].slice(0, 12), 12)]);
     });
+    if (tipIds.length > NODE_LIST_MAX) lines.push(['ブランチの先端', 'ほか ' + (tipIds.length - NODE_LIST_MAX) + ' 件（すべて、照合に含める）']);
     lines.push(['照合', '見せた先端を、そのまま、指示に添えます。指示の時点で、先端が変わっていたら、何も記録されません']);
     return lines;
   }
