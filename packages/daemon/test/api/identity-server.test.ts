@@ -129,3 +129,37 @@ describe("GET /v1/identity: 専用の回数の制限", () => {
     expect((await fetch(`${b.url}/v1/identity?nonce=${NONCE}`)).status).toBe(503);
   });
 });
+
+describe("x-cso-daemon-id（すべての応答に daemonId を付ける。相手の検知用）", () => {
+  it("成功・認証の失敗・404・405・identity の入口の応答のどれにも、daemonId が付く", async () => {
+    const r = await start();
+    const want = r.id.daemonId;
+    const get = (path: string, init: RequestInit = {}) => fetch(`${r.url}${path}`, init);
+    expect((await get(`/v1/identity?nonce=${NONCE}`)).headers.get("x-cso-daemon-id")).toBe(want);
+    expect((await get("/v1/whoami")).headers.get("x-cso-daemon-id")).toBe(want); // 401
+    expect((await get("/v1/nothing")).headers.get("x-cso-daemon-id")).toBe(want); // 404
+    expect((await get("/v1/request", { method: "GET" })).headers.get("x-cso-daemon-id")).toBe(want); // 405
+    expect(
+      (await get(`/v1/identity?nonce=${NONCE}`, { method: "POST" })).headers.get("x-cso-daemon-id"),
+    ).toBe(want);
+    expect(
+      (await get("/v1/whoami", { headers: { authorization: `Bearer ${HUMAN}` } })).headers.get(
+        "x-cso-daemon-id",
+      ),
+    ).toBe(want);
+  });
+
+  it("起動の途中で、まだ身元がないとき（503）は、付けない", async () => {
+    const server = createApiServer({
+      credentials: createCredentialStore({ humanToken: HUMAN }),
+      getState: empty,
+      handlers: {},
+      identity: () => undefined,
+    });
+    servers.push(server);
+    const { url } = await server.listen(0);
+    const res = await fetch(`${url}/v1/identity?nonce=${NONCE}`);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("x-cso-daemon-id")).toBeNull();
+  });
+});

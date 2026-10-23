@@ -884,6 +884,10 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     // タイムアウトは、この間隔でしか検査されない（既定 30 秒）。ヘッダ 10 秒・要求 30 秒を、ほぼ正確に効かせるため、1 秒にする。
     { connectionsCheckingInterval: conn.checkIntervalMs ?? 1000 },
     (req, res) => {
+      // すべての応答に、この daemon の公開 ID を付ける（相手の検知用。mcp は、検証で得た daemonId と、トークンつきの要求の応答で照合する。
+      // 検証から送信までの窓で、別のプロセスに入れ替わったことを知るため。防止ではなく、検知）。身元がまだない間は付けない。
+      const daemonId = deps.identity?.()?.daemonId;
+      if (daemonId !== undefined) res.setHeader("x-cso-daemon-id", daemonId);
       handle(req, res).catch(() => {
         if (!res.headersSent) {
           reject(res, failure("internalError", "内部エラー", "もう一度試す"));
