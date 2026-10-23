@@ -2,9 +2,9 @@
  * 人間用コマンド（FR_029, FR_031, NFR_006, NFR_010）。入出力は持たず、終了コードと
  * 標準出力・標準エラーの文字列を返す。窓口は `DaemonClient` で受ける。
  *
- *   cso purge <nodeId> [--dry-run] [--yes] [--tombstone|--no-tombstone] [--request-id <id>]
+ *   cso purge <nodeId> [--dry-run] [--yes --expect <digest>] [--tombstone|--no-tombstone] [--request-id <id>]
  *   cso reclaim <nodeId> [--yes --expect <digest>] [--request-id <id>]
- *   cso purge-hold <nodeId> [--until <ISO 8601 UTC>] [--reason <文>] [--request-id <id>]
+ *   cso purge-hold <nodeId> [--until <ISO 8601 UTC> | --days <1〜365>] [--reason <文>] [--request-id <id>]
  *   cso purge-release <nodeId> [--request-id <id>]
  *   cso discarded list
  *   cso discarded restore <nodeId|key> [--branch <名前>] [--request-id <id>]
@@ -26,6 +26,8 @@ export interface CommandDeps {
   readonly client: DaemonClient;
   /** 要求の識別子（冪等性）。時刻・乱数を持たないよう、呼び出し側が渡す。 */
   readonly newRequestId: () => string;
+  /** 現在の時刻（ミリ秒。保留の `--days` の期限の計算用。省略すると `Date.now`）。 */
+  readonly nowMs?: () => number;
 }
 
 export interface CommandResult {
@@ -35,10 +37,11 @@ export interface CommandResult {
 }
 
 const USAGE = `使い方:
-  cso purge <nodeId> [--dry-run] [--yes] [--tombstone | --no-tombstone] [--request-id <id>]
+  cso purge <nodeId> [--dry-run] [--yes --expect <digest>] [--tombstone | --no-tombstone] [--request-id <id>]
       アーカイブ済みの木を最終削除する（取り消せない）。
-      --dry-run  削除される木・アーカイブ日・経過日数を表示するだけで、削除しない
-      --yes      対象を表示したうえで削除を実行する（なければ対象の表示だけで止まる）
+      --dry-run  削除される木・アーカイブ日・経過日数・照合の値を表示するだけで、削除しない
+      --yes      対象を表示したうえで削除を実行する（なければ対象の表示だけで止まる）。--expect が要る
+      --expect <digest>  表示した、削除される木の照合用の値（表示に出る 12 桁の 16 進）。実行の時点の木から計算し直した値と違えば、何も削除しない
       --tombstone / --no-tombstone  削除後に墓標を残す／残さない（省略時は保持ポリシーの既定）
   cso reclaim <nodeId> [--yes --expect <digest>] [--request-id <id>]
       停止したノードの成果を破棄して、回収する（取り消せない）。破棄の判断を記録し、そのあと、統合ノードの回収が、
@@ -46,10 +49,11 @@ const USAGE = `使い方:
       まず、失われるもの（統合されていないコミット・未保存の変更・未追跡のファイル）を表示する。
       --yes      破棄を指示する（なければ、表示だけで止まる）。--expect が要る
       --expect <digest>  表示した先端の照合用の値（表示に出る 12 桁の 16 進）。指示の時点の先端から計算し直した値と違えば、何も指示しない
-  cso purge-hold <nodeId> [--until <日時>] [--reason <理由>] [--request-id <id>]
+  cso purge-hold <nodeId> [--until <日時> | --days <日数>] [--reason <理由>] [--request-id <id>]
       自動の最終削除（autoPurge）を、この木について保留する。nodeId は、予告に出ている木の根（アーカイブ済みで、親がアーカイブされていないノード）。
       有効な予告は、その場で取り下げる。人間の cso purge は、保留に関係なく実行できる（保留を無視したことは監査に残る）。
       --until   保留の期限（ISO 8601 UTC。例: 2026-12-01T00:00:00Z。現在より後、365 日先まで）。省略すると無期限
+      --days    保留の日数（1〜365 の整数。いまから数える。--until とは同時に指定できない。365 日のときは、時計のずれを見込んで 10 分短くする。実際の期限は、結果に出る）
       --reason  理由（200 文字まで）
   cso purge-release <nodeId> [--request-id <id>]
       保留を解除する。解除のあとは、予告から出し直し、そこから noticeDays 日たつまで消えない
@@ -65,16 +69,22 @@ const USAGE = `使い方:
 終了コード: 0 成功 / 1 失敗・結果が確認できない / 2 引数の誤り`;
 
 const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  purge: ["--dry-run", "--yes", "--tombstone", "--no-tombstone"],
+  purge: ["--dry-run", "--yes", "--expect", "--tombstone", "--no-tombstone"],
   reclaim: ["--yes", "--expect"],
-  "purge-hold": ["--until", "--reason"],
+  "purge-hold": ["--until", "--days", "--reason"],
   "purge-release": [],
   "discarded-list": [],
   "discarded-restore": ["--branch"],
   "discarded-drop": ["--yes"],
 };
 /** 値を取るオプション。 */
-const VALUE_FLAGS: ReadonlySet<string> = new Set(["--until", "--reason", "--branch", "--expect"]);
+const VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "--until",
+  "--days",
+  "--reason",
+  "--branch",
+  "--expect",
+]);
 
 export function formatFailure(f: Failure): string {
   return `失敗 [${f.code}]: ${f.cause}\n次の操作:\n${f.nextActions.map((a) => `  - ${a}`).join("\n")}\n`;
@@ -271,15 +281,8 @@ const terminalSafe = (s: string, max = 100): string => {
   return chars.length <= max ? flat : `${chars.slice(0, max - 1).join("")}…`;
 };
 
-/**
- * 表示した先端（nodeId → SHA）の照合用の値。ID 順の `id:SHA` を、FNV-1a（32 ビット 2 本。種を変える）で畳んだ 12 桁の 16 進。
- * 改ざん対策ではない（表示のあとで先端が変わったことの検出。実際の照合は、daemon が SHA で行う）。cli は node の型に依存しない。
- */
-export const tipsDigest = (tips: Readonly<Record<string, string>> | undefined): string => {
-  const text = Object.entries(tips ?? {})
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([id, tip]) => `${id}:${tip}\n`)
-    .join("");
+const byId = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const digestOfText = (text: string): string => {
   let h1 = 0x811c9dc5;
   let h2 = 0x01000193 ^ 0xa5a5a5a5;
   for (let i = 0; i < text.length; i++) {
@@ -288,6 +291,34 @@ export const tipsDigest = (tips: Readonly<Record<string, string>> | undefined): 
     h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
   }
   return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0")}`.slice(0, 12);
+};
+
+/**
+ * 表示した先端（nodeId → SHA）の照合用の値（`cso reclaim`）。ID 順の `id:SHA` を、FNV-1a（32 ビット 2 本。種を変える）で畳んだ
+ * 12 桁の 16 進。T21r-e からの形で、値は変えない（試験で固定している）。改ざん対策ではない（表示のあとで、対象が変わったことの検出。
+ * 実際の照合は、daemon が行う）。cli は node の型に依存しない。
+ */
+export const tipsDigest = (tips: Readonly<Record<string, string>> | undefined): string =>
+  digestOfText(
+    Object.entries(tips ?? {})
+      .sort(([a], [b]) => byId(a, b))
+      .map(([id, tip]) => `${id}:${tip}\n`)
+      .join(""),
+  );
+
+/** 削除される木のノード（`cso purge`）の照合用の値。ID 順の `id` を畳む（同じ方式）。順序に依存しない。 */
+export const nodeIdsDigest = (nodeIds: readonly string[]): string =>
+  digestOfText(
+    [...nodeIds]
+      .sort(byId)
+      .map((id) => `${id}\n`)
+      .join(""),
+  );
+
+/** 保留の期限（`--days`）。いまから `days` 日後（ISO 8601 UTC。ミリ秒なし）。365 日のときだけ、時計のずれを見込んで 10 分短くする。 */
+export const holdDeadline = (days: number, nowMs: number): string => {
+  const ms = nowMs + days * 86_400_000 - (days >= LIMITS.purgeHoldMaxDays ? 10 * 60_000 : 0);
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 };
 
 function describeReclaim(nodeId: string, p: ReclaimPreview): string {
@@ -349,6 +380,7 @@ function describePreview(p: Preview, tombstone: boolean | undefined): string {
       : `  実行できない理由:\n${p.blockers.map((b) => `    - ${b.code}: ${b.cause}`).join("\n")}\n`;
   return (
     `最終削除の対象（${p.nodeIds.length} ノード）: ${p.nodeIds.join(", ")}\n` +
+    `  照合の値: ${nodeIdsDigest(p.nodeIds)}（実行の時点で、削除される木がこれと違えば、削除しない）\n` +
     `  アーカイブ日: ${p.archivedAt}\n  経過日数: ${p.elapsedDays}（保持期間: ${p.retentionDays} 日）\n  墓標: ${tomb}\n` +
     remains +
     (p.hold === undefined
@@ -508,7 +540,19 @@ export async function runCommand(
   }
 
   if (command === "purge-hold") {
-    const until = values.get("--until");
+    let until = values.get("--until");
+    const daysText = values.get("--days");
+    if (daysText !== undefined) {
+      if (until !== undefined) return usageError("--until と --days は同時に指定できない");
+      if (
+        !/^[0-9]{1,3}$/.test(daysText) ||
+        Number(daysText) < 1 ||
+        Number(daysText) > LIMITS.purgeHoldMaxDays
+      ) {
+        return usageError(`--days は 1〜${LIMITS.purgeHoldMaxDays} の整数`);
+      }
+      until = holdDeadline(Number(daysText), (deps.nowMs ?? Date.now)());
+    }
     const reason = values.get("--reason");
     const res = await invoke(
       deps.client,
@@ -521,7 +565,26 @@ export async function runCommand(
       },
       isHeld,
     );
-    if (res.kind !== "ok") return fail(res);
+    if (res.kind !== "ok") {
+      // `--days` は、再実行のたびに期限が変わる（同じ requestId で、内容が違ってしまう）。計算した期限を、`--until` で指定し直す。
+      if (res.kind === "unconfirmed" && daysText !== undefined && until !== undefined) {
+        return unconfirmed(
+          res.reason,
+          rerun.replace(/--days '[0-9]+'/, `--until ${shellQuote(until)}`),
+          id,
+        );
+      }
+      if (res.kind === "failure" && res.failure.code === "invalidPurgeHoldUntil") {
+        return failed({
+          ...res.failure,
+          nextActions: [
+            "--days を小さくするか、この端末の時計を合わせて、もう一度実行する（期限は、この端末の時計で決めている）",
+            ...res.failure.nextActions,
+          ] as unknown as Failure["nextActions"],
+        } as Failure);
+      }
+      return fail(res);
+    }
     return {
       exitCode: 0,
       stdout: `自動の最終削除を保留した: ${nodeId}（${res.value.until === undefined ? "無期限" : `${res.value.until} まで`}）\n有効な予告は取り下げた。人間の cso purge は、保留に関係なく実行できる\nrequestId: ${id}\n`,
@@ -563,7 +626,7 @@ export async function runCommand(
       return {
         exitCode: 2,
         stdout: shown,
-        stderr: `破棄の判断は取り消せない（停止したノードの作業ツリーとブランチが、強制して消える）。上の内容でよければ、表示の値を付けて再実行する: cso reclaim ${nodeId} --yes --expect ${digest}\n`,
+        stderr: `${values.has("--expect") ? "--expect は、表示だけ（実行には --yes が要る）。" : ""}破棄の判断は取り消せない（停止したノードの作業ツリーとブランチが、強制して消える）。上の内容でよければ、表示の値を付けて再実行する: cso reclaim ${nodeId} --yes --expect ${digest}\n`,
       };
     }
     if (expect === undefined) {
@@ -601,6 +664,23 @@ export async function runCommand(
       ? false
       : undefined;
   const preview = await invoke(deps.client, id, "node.purgePreview", { nodeId }, isPreview);
+  if (
+    preview.kind === "failure" &&
+    preview.failure.code === "notFound" &&
+    requestId !== undefined
+  ) {
+    // --request-id を指定した再実行で、木が見つからない: 前回の実行が成功して、木がもう消えている可能性がある（事前確認は飛ばさない）。
+    return failed({
+      ...preview.failure,
+      cause: `${preview.failure.cause}（前回の実行が成功して、木がすでに消えた可能性がある）`,
+      nextActions: [
+        "画面の木の一覧に、そのノードがないか確かめる。ないなら、前回の最終削除は成功している",
+        "墓標を残した場合は、墓標の記録（削除した日時・木の根）が残っている。残さない場合も、標識（削除した日時・ノード数）が記録に残る",
+        "破棄した成果を保管していた木は、cso discarded list で、その木のノードの保管が（孤立として残っていないか）確かめる",
+        ...preview.failure.nextActions,
+      ] as unknown as Failure["nextActions"],
+    } as Failure);
+  }
   if (preview.kind !== "ok") return fail(preview);
   const shown = describePreview(preview.value, tombstone);
 
@@ -613,20 +693,43 @@ export async function runCommand(
       stderr: `最終削除を実行できない（理由を解消してから、もう一度実行する）:\n${preview.value.blockers.map((b) => `  - ${b.code}: ${b.cause}`).join("\n")}\n`,
     };
   }
+  const digest = nodeIdsDigest(preview.value.nodeIds);
   if (!flags.has("--yes")) {
     return {
       exitCode: 2,
       stdout: shown,
-      stderr: "最終削除は取り消せない。上の対象でよければ --yes を付けて再実行する\n",
+      stderr: `${values.has("--expect") ? "--expect は、表示だけ（実行には --yes が要る）。" : ""}最終削除は取り消せない。上の対象でよければ、表示の値を付けて再実行する: cso purge ${nodeId} --yes --expect ${digest}\n`,
+    };
+  }
+  const expect = values.get("--expect");
+  if (expect === undefined) {
+    return usageError(
+      `--yes には --expect <digest> が要る（表示した、削除される木の照合用の値。--yes なしで実行すると、表示される: ${digest}）`,
+    );
+  }
+  if (expect !== digest) {
+    return {
+      exitCode: 1,
+      stdout: shown,
+      stderr: `表示した内容のあとで、削除される木が変わっている（照合の値が違う）。何も削除していない。上の内容を確かめ直して、よければ再実行する: cso purge ${nodeId} --yes --expect ${digest}\n`,
     };
   }
 
-  const params = tombstone === undefined ? { nodeId } : { nodeId, tombstone };
+  // 見せた木（削除されるノード）を渡す。実行までの間に木が変わっていたら、daemon が削除しない（purgeStale）。
+  // ノードが 2000 件（`LIMITS.expectNodeIds`）を超える木は、daemon の照合（expectNodeIds）を省く。照合は、--expect（取り直した事前確認との照合）だけになる。
+  const daemonCheck = preview.value.nodeIds.length <= LIMITS.expectNodeIds;
+  const params = {
+    nodeId,
+    ...(tombstone === undefined ? {} : { tombstone }),
+    ...(daemonCheck ? { expectNodeIds: preview.value.nodeIds } : {}),
+  };
   const res = await invoke(deps.client, id, "node.purge", params, isPurged);
   if (res.kind !== "ok") return fail(res);
   return {
     exitCode: 0,
     stdout: `${shown}最終削除した（${res.value.purged.length} ノード）: ${res.value.purged.join(", ")}\nrequestId: ${id}\n`,
-    stderr: "",
+    stderr: daemonCheck
+      ? ""
+      : `注意: ノードが ${LIMITS.expectNodeIds} 件を超える木なので、daemon での照合（expectNodeIds）は省いた。照合は、--expect（実行の直前に取り直した事前確認との照合）だけ\n`,
   };
 }
