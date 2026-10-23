@@ -78,7 +78,7 @@
    ```
 
    期待する結果:
-   - 子のトークン: 子のロールの 5 ツール（`report_progress`・`report_decision`・`report_outOfScope`・`report_done`・`scope_extend`）だけ（`ROLE_OPERATIONS.child` の件数。統合のツールは見えない）。
+   - 子のトークン: 子のロールの 5 ツール＋固定のメタツール `whoami`（T10m-wh。自分の nodeId・role を返す。合わせて 6 個。統合は 14 個＋ `whoami` で 15 個）（`report_progress`・`report_decision`・`report_outOfScope`・`report_done`・`scope_extend`）だけ（`ROLE_OPERATIONS.child` の件数。統合のツールは見えない）。
    - 統合のトークン（`$ROOT`）: 統合のロールのツール（`node_spawn`・`node_send`・`node_stop`・`inbox_fetch` など）。
    - 人間のトークン（`$HUMAN`）: 403（MCP では、人間用の操作を公開しない）。トークンなし・無効なトークンは 401。
 4. 子に渡す MCP の設定は、daemon が組み立てる（`mcpServers.node = { type: "http", url: <mcpUrl>, headers: { Authorization: "Bearer <ノードのトークン>" } }`）。手で試すときは、この形で書く。`.mcp.json` に書くトークンは、使い捨てのリポジトリでだけにする。
@@ -161,7 +161,7 @@
 
 | # | 結果 | 観測 |
 |:--|:--|:--|
-| 6 | 合格 | 子が `mcp__node__report_done` を呼び（`{"accepted":true}`）、受信箱に `done`（「完了報告（根拠 1 件）」）、ノードは `done`。根拠は受け入れ基準ごと（`criterion` と `evidence`）に付いた。子は `mcp__node__*` を ToolSearch で読み込んでから呼んだ（`ToolSearch` はフックが許可している）。`cso-mcp` の認証: トークンなし・無効は 401、人間のトークンは 403、統合のトークンは統合のツール 14 個（`node_spawn`・`node_send`・`node_stop`・`inbox_fetch` など）。子のトークンのツール一覧は、実 SDK の子に `ToolSearch`（`mcp__node__`）で列挙させて確認した: **5 ツールだけ**（`report_decision`・`report_done`・`report_outOfScope`・`report_progress`・`scope_extend`）で、統合のツールは見えない |
+| 6 | 合格 | 子が `mcp__node__report_done` を呼び（`{"accepted":true}`）、受信箱に `done`（「完了報告（根拠 1 件）」）、ノードは `done`。根拠は受け入れ基準ごと（`criterion` と `evidence`）に付いた。子は `mcp__node__*` を ToolSearch で読み込んでから呼んだ（`ToolSearch` はフックが許可している）。`cso-mcp` の認証: トークンなし・無効は 401、人間のトークンは 403、統合のトークンは統合のツール 14 個（`node_spawn`・`node_send`・`node_stop`・`inbox_fetch` など）。子のトークンのツール一覧は、実 SDK の子に `ToolSearch`（`mcp__node__`）で列挙させて確認した: **5 ツールだけ**（当時。T10m-wh 以降は `whoami` が加わり、子 6・統合 15。`report_decision`・`report_done`・`report_outOfScope`・`report_progress`・`scope_extend`）で、統合のツールは見えない |
 | 7 | **不合格** → T10b-a（2026-10-22）で修正し、再確認で**合格**（下の「2026-10-22 の再確認」） | 子が `report_decision` を呼び、受信箱に `decision`、ノードは `waiting`。`decision.answer`（人間のトークン、`choice: "YAML"`）は `accepted`、受信箱に `answer`、ノードは `running` に戻った。**ただし、回答の内容は子に届かない**: 子のセッションは「回答がないので何もしない」と述べて 1 ターンで終わっており、再開後に新しいターンが始まらない（約 75 秒待っても `src/b.txt` はできず、`node.instructionDelivered` もない）。`decision.answer` は状態を `running` にするだけで、回答を子へ配送する経路がない（子のロールには `decision.get` もない） |
 
 見つかった問題（項目 7 → T10b-a で修正）: 判断の回答が子に届かないため、子が `report_decision` で待つ使い方が成立しない。回答を子へ配送するか（追加指示として送る等）、子に回答を読ませる経路が要る。

@@ -10,7 +10,7 @@
  * 415 JSON でない、422 操作の失敗、500 内部エラー、501 未実装）。内部の例外の詳細は返さず、`logger` に記録する。
  * 成功の結果は、`OperationMap` の `result` のキーだけに写して返す（`pickResult`）。
  *
- * `GET /v1/whoami`: Bearer で認証し、ロール（`integrator`・`child`・`human`）だけを返す（`nodeId` は返さない）。MCP の入口が、
+ * `GET /v1/whoami`: Bearer で認証し、ロール（`integrator`・`child`・`human`）と、ノードのトークンには自分の `nodeId` を返す（人間には、nodeId がない。T10m-wh）。MCP の入口が、
  * 受け取った資格情報のロールを知るのに使う。Host・Origin の検査と、主体の検査（失効・止まったノードは 401）は、操作の入口と同じ。
  *
  * `GET /v1/identity?nonce=…`（`identity` を渡したときだけ）: 認証なし。daemon の身元確認（T10m-i。`docs/daemon-identity.md`）。`daemonId` と、
@@ -760,7 +760,14 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       tooMany(res, used.retryAfterSec);
       return;
     }
-    send(res, 200, { ok: true, value: { role: principal.role } });
+    // ノードのトークン（統合・子）には、自分の nodeId も返す（mcp の `whoami` ツール。T10m-wh）。人間には、nodeId がない。
+    send(res, 200, {
+      ok: true,
+      value:
+        principal.role === "human"
+          ? { role: principal.role }
+          : { role: principal.role, nodeId: principal.nodeId },
+    });
   }
 
   /** 画面の資産（HTML・JS・CSS）。状態を含まないので、認証はない（Host・Origin の検査は、入口で済んでいる）。 */

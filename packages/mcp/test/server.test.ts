@@ -2,7 +2,7 @@ import { failure, ok, type Result } from "@cso/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
-import { createToolServer, MCP_ROLES, type Relay, toolsFor } from "../src/index.js";
+import { createToolServer, MCP_ROLES, type Relay, toolsFor, WHOAMI_TOOL } from "../src/index.js";
 
 const fakeRelay = (
   request: Relay["request"] = async () => ok({ accepted: true }),
@@ -28,7 +28,8 @@ describe("tools/list", () => {
     async (role) => {
       const c = await connect(role, fakeRelay());
       const { tools } = await c.listTools();
-      expect(tools.map((t) => t.name)).toEqual(toolsFor(role).map((t) => t.name));
+      // 操作のツールに、固定のメタツール whoami（T10m-wh）が最後に加わる
+      expect(tools.map((t) => t.name)).toEqual([...toolsFor(role).map((t) => t.name), WHOAMI_TOOL]);
       for (const t of tools) {
         expect(t.inputSchema.type).toBe("object");
         expect(t.description?.length).toBeGreaterThan(0);
@@ -183,5 +184,84 @@ describe("rate_limited（daemon の 429）", () => {
     expect(r.isError).toBe(true);
     expect(text(r).code).toBe("rate_limited");
     expect(text(r).nextActions.length).toBeGreaterThan(0);
+  });
+});
+
+describe("whoami ツール（T10m-wh）", () => {
+  const withWho = (who: () => ReturnType<Relay["whoami"]>) => {
+    const relay = { whoami: vi.fn(who), request: vi.fn(async () => ok({ accepted: true })) };
+    return relay as unknown as Relay & {
+      whoami: ReturnType<typeof vi.fn>;
+      request: ReturnType<typeof vi.fn>;
+    };
+  };
+
+  it("ツール一覧に、統合は 15 個・子は 6 個（whoami を含む）。名前は whoami、入力はなし", async () => {
+    const counts: Record<string, number> = {};
+    for (const role of MCP_ROLES) {
+      const { tools } = await (await connect(role, fakeRelay())).listTools();
+      counts[role] = tools.length;
+      const who = tools.find((t) => t.name === "whoami");
+      expect(who?.inputSchema).toMatchObject({ type: "object", properties: {} });
+      expect(who?.description).toContain("nodeId");
+    }
+    expect(counts).toEqual({ integrator: 15, child: 6 });
+  });
+
+  it.each(MCP_ROLES)(
+    "%s: { nodeId, role } だけを返す。daemon に尋ねる（要求の中継はしない）",
+    async (role) => {
+      const relay = withWho(async () => ok({ role, nodeId: "node-1" }));
+      const c = await connect(role, relay);
+      const r = await c.callTool({ name: "whoami", arguments: {} });
+      expect(r.isError).toBeFalsy();
+      expect(text(r)).toEqual({ nodeId: "node-1", role });
+      expect(relay.request).not.toHaveBeenCalled();
+    },
+  );
+
+  it("呼ぶたびに、daemon に尋ねる（接続の間のキャッシュはしない）。引数なし（undefined）も通る", async () => {
+    let n = 0;
+    const relay = withWho(async () => ok({ role: "child", nodeId: `n${++n}` }));
+    const c = await connect("child", relay);
+    expect(text(await c.callTool({ name: "whoami" })).nodeId).toBe("n1");
+    expect(text(await c.callTool({ name: "whoami", arguments: {} })).nodeId).toBe("n2");
+    expect(relay.whoami).toHaveBeenCalledTimes(2);
+  });
+
+  it("引数があれば、daemon に尋ねずに invalid_argument（余計なキーは拒む）", async () => {
+    const relay = withWho(async () => ok({ role: "child", nodeId: "n1" }));
+    const c = await connect("child", relay);
+    const r = await c.callTool({ name: "whoami", arguments: { nodeId: "other" } });
+    expect(r.isError).toBe(true);
+    expect(text(r).code).toBe("invalid_argument");
+    expect(relay.whoami).not.toHaveBeenCalled();
+  });
+
+  it("daemon が nodeId を返さない（古い daemon）なら、whoami_failed。daemon を更新する案内つき", async () => {
+    const relay = withWho(async () => ok({ role: "child" }));
+    const r = await (await connect("child", relay)).callTool({ name: "whoami", arguments: {} });
+    expect(r.isError).toBe(true);
+    expect(text(r).code).toBe("whoami_failed");
+    expect(JSON.stringify(text(r).nextActions)).toContain("daemon を更新");
+  });
+
+  it("身元の検証の失敗（daemon_identity_failed）や、daemon の失敗は、そのまま返す。例外は internal_error", async () => {
+    const f = failure("daemon_identity_failed", "身元を確認できない", "daemon を起動し直す");
+    const a = withWho(async () => ({ ok: false, error: f }));
+    const ra = await (await connect("child", a)).callTool({ name: "whoami", arguments: {} });
+    expect(text(ra).code).toBe("daemon_identity_failed");
+    const b = withWho(async () => {
+      throw new Error("boom");
+    });
+    const rb = await (await connect("child", b)).callTool({ name: "whoami", arguments: {} });
+    expect(text(rb).code).toBe("internal_error");
+  });
+
+  it("接続のロールと、daemon が返したロールが違えば、失敗にする（ロールの食い違い）", async () => {
+    const relay = withWho(async () => ok({ role: "integrator", nodeId: "m1" }));
+    const r = await (await connect("child", relay)).callTool({ name: "whoami", arguments: {} });
+    expect(r.isError).toBe(true);
+    expect(text(r).code).toBe("whoami_failed");
   });
 });

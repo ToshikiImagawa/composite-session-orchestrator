@@ -2,7 +2,7 @@ import { failure, ok } from "@cso/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
-import { openSession, type Relay, toolsFor } from "../src/index.js";
+import { openSession, type Relay, toolsFor, WHOAMI_TOOL } from "../src/index.js";
 
 const relayOf = (whoami: Relay["whoami"]): Relay => ({
   whoami: vi.fn(whoami),
@@ -20,9 +20,10 @@ describe("接続ごとのロールの解決（whoami）", () => {
       const c = new Client({ name: "t", version: "0" });
       const [a, b] = InMemoryTransport.createLinkedPair();
       await Promise.all([s.value.connect(a), c.connect(b)]);
-      expect((await c.listTools()).tools.map((t) => t.name)).toEqual(
-        toolsFor(role).map((t) => t.name),
-      );
+      expect((await c.listTools()).tools.map((t) => t.name)).toEqual([
+        ...toolsFor(role).map((t) => t.name),
+        WHOAMI_TOOL,
+      ]);
       // ロールは接続の間だけ。2 回の tools/list・tools/call で whoami を繰り返さない
       await c.listTools();
       expect(relay.whoami).toHaveBeenCalledTimes(1);

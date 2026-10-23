@@ -3,7 +3,7 @@
  * トークンの真偽・ロールの判定・部分木の判定は daemon が行い（ここでは検証しない）、失敗はそのまま返す。
  * 外へ出すのはループバックの daemon だけ。トークンと本文は、失敗の原因にもログにも入れない。
  */
-import { type Failure, failure, ok, type Result, sanitizeText } from "@cso/core";
+import { type Failure, failure, isSafeId, ok, type Result, sanitizeText } from "@cso/core";
 import type { IdentityVerifier } from "./identity.js";
 
 /** 中継する本文・応答の上限（daemon の窓口と同じ 1 MiB）。 */
@@ -23,7 +23,8 @@ const FAILURE_ACTIONS_MAX = 10;
 
 export interface Relay {
   /** トークンのロール（接続ごとに 1 回引く）。 */
-  whoami(): Promise<Result<{ role: string }>>;
+  /** 呼び出し元のロールと、ノードのトークンなら自分の nodeId（古い daemon・人間のトークンでは、なし。T10m-wh）。 */
+  whoami(): Promise<Result<{ role: string; nodeId?: string }>>;
   /** 操作を daemon へ中継する。成功の値・daemon の失敗は、そのまま返す。 */
   request(operation: string, params: unknown): Promise<Result<unknown>>;
 }
@@ -281,7 +282,9 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
           "daemon の状態を確認する",
         );
       }
-      return ok({ role: r.value.role });
+      // nodeId は、ID の形のときだけ取る（形の崩れた値は、なしとして扱う）。
+      const nodeId = isSafeId(r.value.nodeId) ? r.value.nodeId : undefined;
+      return ok({ role: r.value.role, ...(nodeId === undefined ? {} : { nodeId }) });
     },
     async request(operation, params) {
       const body = JSON.stringify({ requestId: newRequestId(), operation, params });

@@ -70,6 +70,11 @@ proof = hex( HMAC-SHA256( key  = secret を 16 進として解釈したバイト
 | proof | `a4c03bfab8207e7a550d464c02f9467f4bed4a7e504bfb5da6fe98b22e29be3a` |
 | （hostPort が `127.0.0.1:43211` のときの proof） | `1577069198737695bc2df73dc098dce25f6abd3157c269450ab49f29d58f4855` |
 
+## whoami の応答と、mcp の `whoami` ツール（T10m-wh）
+
+- `GET /v1/whoami`（Bearer）の応答は、`{ ok: true, value: { role, nodeId? } }`。**ノードのトークン（統合・子）には、自分の `nodeId` も返す**。人間のトークンには、nodeId がない（`{ role: "human" }`）。認証・失効・回数の制限・失敗の応答は変わらない。HTTP の応答で、core の `OperationMap` ではない。
+- mcp の固定のメタツール `whoami`（統合・子の両方。入力はなし。core の `ROLE_OPERATIONS` には入れない）は、自分の `{ nodeId, role }` を返す。**呼ぶたびに daemon に尋ねる**（キャッシュしない。トークンつきの要求の直前の身元の検証は、いつもどおり）。daemon が nodeId を返さない（古い daemon）、または、返したロールが接続のロールと違うときは、`whoami_failed`（「daemon を更新して、起動し直す」）。ツール一覧は、子が 6 個、統合が 15 個。
+
 ## 4. mcp の手順（契約）
 
 1. **いつ**: **トークンつきの要求（`whoami`・`request`）を送るたびに、その直前に**。**キャッシュはしない**（検証した結果を、次の要求に使い回さない。ポートが奪われても、**次の要求からは**、その直前の検証で止まる。
