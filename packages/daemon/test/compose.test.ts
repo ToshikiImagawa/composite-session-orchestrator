@@ -13,7 +13,7 @@ import {
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Failure, ok, planPurge, type Result } from "@cso/core";
+import { digestOf, type Failure, ok, planPurge, type Result } from "@cso/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deriveId } from "../src/api/handlers/context.js";
 import { parseIdentityFile, proofOf } from "../src/api/identity.js";
@@ -996,5 +996,103 @@ describe("createDaemon（保管した成果の操作。T13f-r）", () => {
     expect((await call(d.url, d.humanToken, "node.discardedDrop", { target: "a b" })).status).toBe(
       400,
     );
+  });
+});
+
+describe("createDaemon（配下の要約の発行。T24-d）", () => {
+  /** 起動のあと（起動時の整合が済んだあと）に、動作中の中間統合ノード m1 と、配下 a の失敗の項目を、ログに足す。 */
+  const seed = (d: Daemon) => {
+    let k = 0;
+    const add = (body: Parameters<Daemon["log"]["append"]>[0]["body"]) => {
+      const x = d.log.append({ requestId: `seed-${++k}`, actor: { system: true }, body });
+      if (!x.ok) throw new Error(`${x.error.code}: ${x.error.cause}`);
+    };
+    const ev = (nodeId: string, event: { type: string }) =>
+      add({ type: "node.stateChanged", payload: { nodeId, event } } as never);
+    const node = (nodeId: string, role: "integrator" | "implement", parentId: string | null) =>
+      add({ type: "node.created", payload: { nodeId, role, parentId, dependsOn: [] } });
+    node("m1", "integrator", "root");
+    ev("m1", { type: "start" });
+    node("a", "implement", "m1");
+    ev("a", { type: "start" });
+    add({ type: "inbox.added", payload: { id: "f1", kind: "failure", nodeId: "a" } });
+  };
+  const manual = () => {
+    let nowMs = Date.parse("2026-06-01T00:00:00Z");
+    const waiting: { at: number; resolve: () => void; cancelled: boolean }[] = [];
+    const timers = {
+      now: () => nowMs,
+      sleep: async () => undefined,
+      after: (ms: number) => {
+        const w = { at: nowMs + ms, resolve: () => {}, cancelled: false };
+        const promise = new Promise<void>((res) => {
+          w.resolve = res;
+        });
+        waiting.push(w);
+        return { promise, cancel: () => (w.cancelled = true) };
+      },
+    };
+    return {
+      timers,
+      advance: async (ms: number) => {
+        nowMs += ms;
+        for (const w of waiting) {
+          if (!w.cancelled && w.at <= nowMs) {
+            w.cancelled = true;
+            w.resolve();
+          }
+        }
+        for (let i = 0; i < 5; i++) await new Promise((res) => setImmediate(res));
+      },
+      clock: () => new Date(nowMs).toISOString(),
+    };
+  };
+  const digests = (d: Daemon) => d.log.state().inbox.filter((i) => i.kind === "digest");
+
+  it("設定がなくても（既定で有効）、1 周期（既定 30 秒）後に、中間統合ノードの要約を出す。文面は digestOf と同じ。記録に残る", async () => {
+    const r = rig();
+    const m = manual();
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock, monotonicMs: () => m.timers.now() };
+    const d = await boot(r);
+    seed(d.daemon);
+    expect(digests(d.daemon)).toHaveLength(0); // 起動直後は出さない
+    await m.advance(29_000);
+    expect(digests(d.daemon)).toHaveLength(0);
+    await m.advance(2_000);
+    const out = digests(d.daemon);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ nodeId: "m1", priority: "failed" });
+    expect(out[0]?.summary).toBe(digestOf(d.daemon.log.state(), "m1", m.timers.now())?.summary);
+    expect(r.logs.some((l) => l.includes("digest.issued"))).toBe(true);
+    // 事実が同じなら、周期が来ても、出し直さない
+    await m.advance(5 * 60_000);
+    expect(digests(d.daemon)).toHaveLength(1);
+  });
+
+  it("digest.enabled: false なら、出さない。intervalSec を設定すれば、その周期になる", async () => {
+    const off = rig({ digest: { enabled: false } });
+    const m1 = manual();
+    off.deps = {
+      ...off.deps,
+      timers: m1.timers,
+      clock: m1.clock,
+      monotonicMs: () => m1.timers.now(),
+    };
+    const d1 = await boot(off);
+    seed(d1.daemon);
+    await m1.advance(10 * 60_000);
+    expect(digests(d1.daemon)).toHaveLength(0);
+    const fast = rig({ digest: { intervalSec: 5 } });
+    const m2 = manual();
+    fast.deps = {
+      ...fast.deps,
+      timers: m2.timers,
+      clock: m2.clock,
+      monotonicMs: () => m2.timers.now(),
+    };
+    const d2 = await boot(fast);
+    seed(d2.daemon);
+    await m2.advance(6_000);
+    expect(digests(d2.daemon)).toHaveLength(1);
   });
 });
