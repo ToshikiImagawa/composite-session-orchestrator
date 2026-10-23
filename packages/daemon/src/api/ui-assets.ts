@@ -118,7 +118,7 @@ export const UI_JS = `'use strict';
   function setStatus(text) { statusEl.textContent = text; }
   function showAuth(show) { authEl.hidden = !show; viewEl.hidden = show; }
 
-  // ---- 操作（判断への回答・拡張要求の判定）----
+  // ---- 操作（判断への回答）----
   function hasForbidden(text) {
     return Array.from(text).some(function (ch) { return ch !== '\\t' && ch !== '\\n' && FORBIDDEN.test(ch); });
   }
