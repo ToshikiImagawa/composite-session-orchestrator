@@ -558,7 +558,11 @@ await pageO.evaluate(() => {
 await pageO.waitForTimeout(400);
 ops.purgeForcedClickNoRequest = calls.filter((c) => c.operation === "node.purge").length === 0;
 // 別の木（arch2）の保留の理由を入力しておく（あとで、arch1 が消えて描き直されても、残る）
-await pageO.locator("#purge .card", { hasText: "arch2" }).locator("textarea").fill("調査中");
+await pageO
+  .locator("#purge .card", { hasText: "arch2" })
+  .locator("textarea")
+  .first()
+  .fill("調査中");
 await typedArea().fill("arch1");
 ops.purgeSendEnabledWhenTyped = await sendBtn().isEnabled();
 ops.purgeNoRequestBeforeSend = calls.filter((c) => c.operation === "node.purge").length === 0;
@@ -582,8 +586,11 @@ await pageO.waitForFunction(
 );
 ops.purgeCardGone = true;
 ops.reasonDraftKeptAfterRerender =
-  (await pageO.locator("#purge .card", { hasText: "arch2" }).locator("textarea").inputValue()) ===
-  "調査中";
+  (await pageO
+    .locator("#purge .card", { hasText: "arch2" })
+    .locator("textarea")
+    .first()
+    .inputValue()) === "調査中";
 // 通信に失敗したら、通知は赤（.notice.bad）で出る
 await pageO.route("**/v1/request", (route) => route.abort());
 await pageO
@@ -636,6 +643,41 @@ ops.holdUntilIsIso30Days =
   holdCalls[0].params.reason === "調査中" &&
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(holdCalls[0].params.until) &&
   Math.abs(Date.parse(holdCalls[0].params.until) - (Date.now() + 30 * 86400000)) < 120000;
+// 保留の期限「その他」（T23-d2）: 範囲外は確認に進まない。45 日は、確認に期限が出て、その期限で送る。365 日は 10 分短い
+const arch2Card = pageO.locator("#purge .card", { hasText: "arch2" });
+await arch2Card.locator("textarea").nth(1).fill("400");
+await arch2Card.getByRole("button", { name: "指定した日数で保留…" }).click();
+ops.daysOutOfRangeNoConfirm =
+  (await arch2Card.innerText()).includes("1〜365") &&
+  !(await pageO.locator("#confirm").isVisible());
+await arch2Card.locator("textarea").nth(1).fill("45");
+await arch2Card.getByRole("button", { name: "指定した日数で保留…" }).click();
+await pageO.locator("#confirm").waitFor();
+const daysConfirm = await confirmText();
+await sendBtn().click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("保留しました"),
+  null,
+  { timeout: 5000 },
+);
+const holdCalls2 = calls.filter((c) => c.operation === "node.purgeHold");
+const until45 = holdCalls2.at(-1)?.params.until ?? "";
+ops.days45Sent =
+  holdCalls2.length === 2 &&
+  Math.abs(Date.parse(until45) - (Date.now() + 45 * 86400000)) < 120000 &&
+  daysConfirm.includes(until45);
+await arch2Card.locator("textarea").nth(1).fill("365");
+await arch2Card.getByRole("button", { name: "指定した日数で保留…" }).click();
+await pageO.locator("#confirm").waitFor();
+await sendBtn().click();
+await pageO.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("保留しました"),
+  null,
+  { timeout: 5000 },
+);
+const until365 = calls.filter((c) => c.operation === "node.purgeHold").at(-1)?.params.until ?? "";
+ops.days365Is10MinShort =
+  Math.abs(Date.parse(until365) - (Date.now() + 365 * 86400000 - 600000)) < 120000;
 // (i) 保管（T23-d）: 一覧は、読み込みボタンで取る。件名は信頼できない入力（制御文字を除き、実行されない）
 ops.keptNotLoadedAtFirst = (await pageO.locator("#kept .card").count()) === 0;
 await pageO.getByRole("button", { name: "一覧を読み込む" }).click();
