@@ -277,6 +277,9 @@ describe("画面の資産（走査）", () => {
         line("var TEXT_MAX ="),
         line("var FORBIDDEN ="),
         line("var REASON_MAX ="),
+        line("var HOLD_MAX_DAYS ="),
+        fn("parseDays"),
+        fn("checkDays"),
         fn("typedMatches"),
         fn("purgeRoots"),
         fn("holdUntil"),
@@ -286,7 +289,7 @@ describe("画面の資産（走査）", () => {
         fn("checkAnswer"),
         fn("waitSecondsOf"),
         fn("describeFailure"),
-        "({ checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdUntil: holdUntil, checkReason: checkReason, cleanText: cleanText })",
+        "({ checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdUntil: holdUntil, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
@@ -296,6 +299,8 @@ describe("画面の資産（走査）", () => {
       typedMatches(typed: unknown, input: unknown): boolean;
       purgeRoots(nodes: { id: string; parentId: string | null; state: string }[]): { id: string }[];
       holdUntil(days: number, nowMs: number): string | undefined;
+      parseDays(text: string): number;
+      checkDays(text: string): string;
       checkReason(text: string): string;
       cleanText(text: string, max: number): string;
     };
@@ -382,6 +387,35 @@ describe("画面の資産（走査）", () => {
       expect(api.holdUntil(0, now)).toBeUndefined();
       expect(api.holdUntil(30, now)).toBe("2026-11-22T12:00:00Z");
       expect(api.holdUntil(90, now)).toBe("2027-01-21T12:00:00Z");
+      // 365 日（サーバーの上限）のときだけ、時計のずれを見込んで 10 分短い（cli の holdDeadline と同じ）
+      expect(api.holdUntil(364, now)).toBe("2027-10-22T12:00:00Z");
+      expect(api.holdUntil(365, now)).toBe("2027-10-23T11:50:00Z");
+    });
+
+    it("parseDays・checkDays: 1〜365 の整数だけ（前後の空白は可）。0・366・小数・負・全角・文字・空は不正", () => {
+      expect(api.parseDays("1")).toBe(1);
+      expect(api.parseDays(" 30 ")).toBe(30);
+      expect(api.parseDays("365")).toBe(365);
+      expect(api.parseDays("007")).toBe(7);
+      for (const bad of [
+        "",
+        " ",
+        "0",
+        "366",
+        "999",
+        "1.5",
+        "-1",
+        "+1",
+        "１０",
+        "10日",
+        "1e2",
+        "1 0",
+        "0x10",
+      ]) {
+        expect(api.parseDays(bad), JSON.stringify(bad)).toBe(0);
+        expect(api.checkDays(bad), JSON.stringify(bad)).toContain("1〜365");
+      }
+      expect(api.checkDays("30")).toBe("");
     });
 
     it("checkReason: 空は可（任意）。長すぎる・制御文字・書式制御文字は拒む", () => {
