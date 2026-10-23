@@ -148,4 +148,14 @@ describe("operationForTool", () => {
   it("toolName は操作名の . を _ にする", () => {
     expect(toolName("node.review")).toBe("node_review");
   });
+
+  it("ID を引数に取る操作の説明は、自分の ID が起動の指示の先頭にあることと、短縮しないことを書く（T10m-id）", () => {
+    const d = (n: string) => toolsFor("integrator").find((t) => t.name === n)?.description ?? "";
+    for (const name of ["node_spawn", "node_split", "decision_present"]) {
+      expect(d(name), name).toContain("起動の指示");
+      expect(d(name), name).toContain("tree_list");
+      expect(d(name), name).toContain("短縮しない");
+    }
+    expect(d("tree_list")).toContain("self");
+  });
 });

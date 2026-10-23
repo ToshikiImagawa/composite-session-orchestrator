@@ -38,6 +38,7 @@ import {
   validateScope,
 } from "@cso/core";
 import type { RuntimeAdapter } from "../../sdk/runtime.js";
+import { selfIntroLines } from "../../self-intro.js";
 import type { CredentialStore } from "../credentials.js";
 import type { HandlerRequest } from "../server.js";
 import {
@@ -113,8 +114,9 @@ const LIVE = new Set(["running", "waiting"]);
 /** 後始末済み・終わった子。同じ requestId の再試行で、成功として返してはならない。 */
 const DEAD = new Set(["stopping", "stopIncomplete", "stopped", "reclaimable", "archived"]);
 
-const instructionOf = (b: BriefParams): string =>
+const instructionOf = (b: BriefParams, self: string[]): string =>
   [
+    ...self,
     `目的: ${b.objective}`,
     "受け入れ基準:",
     ...b.acceptanceCriteria.map((c) => `- ${c}`),
@@ -244,6 +246,15 @@ export function createSpawner(deps: SpawnHandlerDeps) {
         return false;
       }
     };
+    // 起動の指示の先頭（自分の ID・role・親）。組み立てられなければ、何も起動せずに、後始末して失敗にする。
+    const intro = selfIntroLines(nodeId, role, nodeOf(log.state(), nodeId)?.parentId ?? null);
+    if (!intro.ok) {
+      return abort(
+        "internal",
+        "子を起動できなかった",
+        `指示を組み立てられない: ${intro.error.cause}`,
+      );
+    }
     let token: string;
     try {
       token = credentials.issueNodeToken(nodeId, role === "integrator" ? "integrator" : "child");
@@ -259,7 +270,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
         nodeId,
         worktreePath,
         scope: brief.scope,
-        instruction: instructionOf(brief),
+        instruction: instructionOf(brief, intro.value),
         mcp: { url: ports.mcpUrl, token },
       });
       if (!started.ok) {

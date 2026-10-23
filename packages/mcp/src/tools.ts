@@ -34,17 +34,18 @@ type McpOperation = RoleOperation<McpRole>;
 /** 操作ごとの説明。`McpOperation` を網羅しないと型エラーになる。 */
 const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
   "node.spawn":
-    "子を生成する。引数: parentId・role・objective（目的）・acceptanceCriteria（受け入れ基準）・scope（writableLocations・forbiddenLocations は作業ツリー内の相対パス、allowedCommands）・dependsOn（省略可）。作業ツリーとブランチは指定しない（システムが親のブランチから決める）。結果は { nodeId, status: running か pending, waitingFor? }（依存先が未完了なら pending で、待っている先行ノードを waitingFor に示す）",
+    "子を生成する。parentId は、自分の ID（起動の指示の先頭か、tree_list の self 列が「あなた」の行で分かる）か、子孫の ID を、短縮しないでそのまま渡す（作業ツリーのディレクトリ名は ID ではない）。引数: parentId・role・objective（目的）・acceptanceCriteria（受け入れ基準）・scope（writableLocations・forbiddenLocations は作業ツリー内の相対パス、allowedCommands）・dependsOn（省略可）。作業ツリーとブランチは指定しない（システムが親のブランチから決める）。結果は { nodeId, status: running か pending, waitingFor? }（依存先が未完了なら pending で、待っている先行ノードを waitingFor に示す）",
   "node.send":
     "稼働中の子へ追加指示を送る。結果は { status: queued, duplicate }（受け付けた。duplicate は同じ要求の重複。届いたかは受信箱・状態で確認する）",
   "node.stop":
     "子を停止する。mode は graceful（穏当）か immediate（即時）。graceMs（1〜3600000 ミリ秒の整数）は graceful のときだけ指定でき、省略すると既定の猶予になる",
   "inbox.fetch":
     "受信箱を取得する。優先度・依存関係・時刻の順（中間統合ノードの配下の要約 digest は、配下の未解決の項目の最高の優先度の帯に並ぶ）。detail と limit で量を絞れる",
-  "tree.list": "木の一覧表を取得する",
-  "decision.present": `選択肢と自由入力欄を持つ判断要求を人間に提示する。pauseNodeIds で、判断待ちの間に止める子（自分の子孫）を指定できる。未回答の判断要求は 1 ノードにつき ${LIMITS.openDecisionsPerNode} 件まで（再開後の要求を数える。超えると tooManyOpenDecisions）。回答は受信箱に届く`,
+  "tree.list":
+    "木の一覧表を取得する。self 列が「あなた」の行が、自分のノード（起動した子は、自分の ID が起動の指示の先頭にも書いてある）",
+  "decision.present": `選択肢と自由入力欄を持つ判断要求を人間に提示する。pauseNodeIds で、判断待ちの間に止める子（自分の子孫。ID は、起動の指示の先頭か tree_list に出たものを、短縮しないでそのまま渡す）を指定できる。未回答の判断要求は 1 ノードにつき ${LIMITS.openDecisionsPerNode} 件まで（再開後の要求を数える。超えると tooManyOpenDecisions）。回答は受信箱に届く`,
   "node.split":
-    "脱線部分を新しい子へ移す。引数: nodeId・keep（mainline か stop。元の子を本筋に戻すか停止するか）と、新しい子のブリーフ（objective・acceptanceCriteria・scope・dependsOn）",
+    "脱線部分を新しい子へ移す。ID は、起動の指示の先頭か tree_list に出たものを、短縮しないでそのまま渡す。引数: nodeId・keep（mainline か stop。元の子を本筋に戻すか停止するか）と、新しい子のブリーフ（objective・acceptanceCriteria・scope・dependsOn）",
   "scope.decide":
     "子の範囲の拡張要求（extensionId）を承認（approve）・却下（reject）・切り出し（split）のいずれかで判定する。拡張の発生元のノードが自分の子孫のときだけ使える",
   "node.review":

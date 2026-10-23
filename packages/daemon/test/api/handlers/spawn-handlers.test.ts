@@ -230,6 +230,9 @@ describe("node.spawn（子の生成と起動）", () => {
       worktreePath: `${WT}/${id}`,
       scope: CHILD_SCOPE,
     });
+    // 自分のノード ID・role・親が、指示の先頭にある（作業ツリーの名前から推測して、取り違えないように。T10m-id）
+    const text0 = r.calls.started[0]?.instruction ?? "";
+    expect(text0.split("\n")[0]).toBe(`あなたのノード ID: ${id}（role: implement、親: m1）`);
     expect(r.calls.started[0]?.instruction).toContain("UI を直す");
     expect(r.calls.started[0]?.instruction).toContain("テストが通る");
     expect(r.calls.started[0]?.mcp).toEqual({ url: "http://127.0.0.1:1/mcp", token: `tok-${id}` });

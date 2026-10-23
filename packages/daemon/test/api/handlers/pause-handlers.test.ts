@@ -282,6 +282,14 @@ describe("decision.answer（回答で、止めた子を必ず再開する）", (
     for (const part of ["B", "o", "c", "src", "pnpm test"]) expect(text).toContain(part);
   });
 
+  it("再開の指示の先頭に、自分のノード ID・role・親を書く（T10m-id）", async () => {
+    const r = rig();
+    const id = await paused(r);
+    await r.answer(id, "B");
+    const first = (r.calls.started[0]?.instruction ?? "").split("\n")[0];
+    expect(first).toBe("あなたのノード ID: a（role: implement、親: m1）");
+  });
+
   it("失効に失敗したら、応答に警告を含める", async () => {
     const r = rig();
     const id = await paused(r);
