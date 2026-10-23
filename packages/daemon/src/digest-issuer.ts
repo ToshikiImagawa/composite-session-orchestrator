@@ -5,12 +5,16 @@
  * - 契機: 周期（`intervalMs`。既定 30 秒）に、ログが前回の確認から進んでいたら（または、間隔のために見送った要約があれば）、全対象を調べる。
  * - 頻度の上限: ノードごとに、最短 `minIntervalMs`（既定 60 秒。単調時計）あけて出す。1 周期に出す件数は `maxPerRun`（既定 20）まで。
  * - 出し直さない: 前回の要約と事実（`fingerprint`）が同じなら出さない。項目の ID は、`(ノード, 指紋, そのノードの要約の通し番号)` から決まる
- *   （同じ状態で再実行しても、同じ ID・同じ要求 ID なので、重複しない。再起動しても、状態から同じ判断になる）。
+ *   （同じ状態で再実行しても、同じ ID なので、重複しない。再起動しても、状態から同じ判断になる）。要求 ID は、本文（要約の文面）も含めて決める
+ *   （同じ要求 ID が、違う本文で再送されない）。
+ * - 記録の増え方を抑える: 事実が変わっても、出し直すのは、**優先度が変わったとき・要判断の件数が変わったとき・前回から `reissueMs`（既定 10 分）以上たったとき**
+ *   に限る（最上位の項目の ID や、状態別の件数が変わっただけでは、出し直さない）。
  * - ノードごとに、未解決の要約は常に 1 件: 新しい要約を出せたら、前の要約を system が解決済みにする。
  * - 要約が要らなくなったとき（配下の未解決の項目がなくなった・ノードが完了・停止など、対象でなくなった）は、出ている要約を system が解決済みにする。
  * - 時計: 間隔は単調時計で測る（壁時計の飛びで、頻度の上限が外れない）。壁時計は、要約の経過分の文面にだけ使う。
  */
 
+import { createHash } from "node:crypto";
 import {
   type Actor,
   digestOf,
@@ -33,6 +37,8 @@ export interface DigestIssuerDeps {
   readonly monoMs: () => number;
   readonly intervalMs: number;
   readonly minIntervalMs: number;
+  /** 優先度・要判断の件数が変わらないときに、事実が変わった要約を出し直す最短の間隔（ミリ秒。壁時計）。既定 10 分。 */
+  readonly reissueMs?: number;
   readonly maxPerRun: number;
   /** system の操作として、イベントを 1 件追記する。同じ要求 ID の再送は、重複させない。 */
   readonly record: (requestId: string, body: EventBody) => Result<unknown, Failure>;
@@ -54,23 +60,46 @@ export interface DigestIssuer {
   }>;
 }
 
+const DEFAULT_REISSUE_MS = 10 * 60_000;
+
 const digestIdOf = (nodeId: string, fingerprint: string, index: number): string =>
   deriveId("dg", "system", `${nodeId}:${fingerprint}:${index}`, "digest");
-const digestRequestId = (nodeId: string, fingerprint: string, index: number): string =>
-  deriveId("dgq", "system", `${nodeId}:${fingerprint}:${index}`, "digest-request");
+/** 要求 ID: 本文（要約の文面）も含めて決める。同じ要求 ID が、違う本文で再送されない。 */
+const digestRequestId = (
+  nodeId: string,
+  fingerprint: string,
+  index: number,
+  summary: string,
+): string =>
+  deriveId(
+    "dgq",
+    "system",
+    `${nodeId}:${fingerprint}:${index}:${createHash("sha256").update(summary, "utf8").digest("hex")}`,
+    "digest-request",
+  );
+
+interface Issued {
+  readonly priority: string;
+  readonly blocking: number;
+  readonly mono: number;
+  readonly wallMs: number;
+}
 
 export function createDigestIssuer(deps: DigestIssuerDeps): DigestIssuer {
+  const reissueMs = deps.reissueMs ?? DEFAULT_REISSUE_MS;
   let running = false;
   let stopRequested = false;
   let started = false;
+  /** `start()` のたびに増やす。古い周期（`stop()` のあと、`start()` し直す前の）が、二重に動かない。 */
+  let generation = 0;
   let timer: { cancel(): void } | undefined;
   let current: Promise<unknown> | undefined;
-  /** 前回の確認の時点のログの `lastSeq`。進んでいなければ、事実は変わっていない。 */
+  /** 前回の確認の（追記のあとの）ログの `lastSeq`。進んでいなければ、事実は変わっていない。 */
   let seenSeq = -1;
-  /** 間隔のために見送った要約があるノード（次の周期に、ログが進んでいなくても調べる）。 */
-  const throttled = new Set<string>();
-  /** ノードごとに、最後に要約を出した単調時計の時刻。 */
-  const lastIssuedMono = new Map<string, number>();
+  /** 次の周期に、ログが進んでいなくても、調べ直すノード（間隔・件数の上限で見送った・追記や解決に失敗した）。 */
+  const retry = new Set<string>();
+  /** ノードごとに、最後に要約を出したときの、優先度・要判断の件数・時刻。 */
+  const lastIssued = new Map<string, Issued>();
 
   const resolveItem = (id: string, reason: string): boolean => {
     const r = deps.record(`digest-resolve:${id}`, {
@@ -91,56 +120,88 @@ export function createDigestIssuer(deps: DigestIssuerDeps): DigestIssuer {
     let resolved = 0;
     try {
       const state = deps.state();
-      if (state.lastSeq === seenSeq && throttled.size === 0)
+      if (state.lastSeq === seenSeq && retry.size === 0) {
         return { skipped: false, issued, resolved };
+      }
       const targets = new Set(digestTargets(state));
       const digestsOf = (nodeId: string) =>
         state.inbox.filter((i) => i.kind === "digest" && i.nodeId === nodeId);
+      retry.clear();
+      /** 解決する。失敗したら、次の周期に、ログが進んでいなくても、やり直す。 */
+      const resolveAll = (nodeId: string, ids: readonly string[], reason: string): void => {
+        for (const id of ids) {
+          if (resolveItem(id, reason)) resolved += 1;
+          else retry.add(nodeId);
+        }
+      };
 
       // (1) 対象でなくなったノード（完了・停止・根でない、など）の、出ている要約を解決する。
       const owners = new Set(state.inbox.filter((i) => i.kind === "digest").map((i) => i.nodeId));
       for (const nodeId of owners) {
         if (targets.has(nodeId)) continue;
-        for (const d of digestsOf(nodeId)) {
-          if (d.resolved === undefined && resolveItem(d.id, "対象でなくなった")) resolved += 1;
-        }
+        resolveAll(
+          nodeId,
+          digestsOf(nodeId)
+            .filter((d) => d.resolved === undefined)
+            .map((d) => d.id),
+          "対象でなくなった",
+        );
       }
 
       // (2) 対象のノードごとに、要約を出す・出し直す・解決する。
-      throttled.clear();
       let posted = 0;
       for (const nodeId of targets) {
         if (deps.isStopped() || stopRequested) break;
-        const digest = digestOf(state, nodeId, deps.nowMs());
+        const nowWall = deps.nowMs();
+        const digest = digestOf(state, nodeId, nowWall);
         const mine = digestsOf(nodeId);
         const open = mine.filter((d) => d.resolved === undefined);
         if (digest === undefined) {
           // 配下に未解決の項目がなくなった: 出ている要約を解決する。
-          for (const d of open) if (resolveItem(d.id, "未解決の項目がなくなった")) resolved += 1;
+          resolveAll(
+            nodeId,
+            open.map((d) => d.id),
+            "未解決の項目がなくなった",
+          );
           continue;
         }
-        const index = mine.length;
         const latest = open.at(-1);
-        // 前回の要約と、事実が同じなら、出さない（ID は、指紋と通し番号から決まる）。
-        if (
-          latest !== undefined &&
-          open.length === 1 &&
-          latest.id === digestIdOf(nodeId, digest.fingerprint, index - 1)
-        ) {
+        const blocking = digest.unresolved.decision ?? 0;
+        // 最新の未解決の要約が、今の事実のものなら、追記はしない。それ以外の未解決の要約だけを解決する（追記と解決を分ける）。
+        const currentId = digestIdOf(nodeId, digest.fingerprint, mine.length - 1);
+        if (latest !== undefined && latest.id === currentId) {
+          resolveAll(
+            nodeId,
+            open.filter((d) => d.id !== latest.id).map((d) => d.id),
+            "同じ事実の要約が、すでにある",
+          );
           continue;
         }
+        // 事実が変わった。出し直すのは、優先度が変わったとき・要判断の件数が変わったとき・前回から reissueMs 以上たったとき。
         const mono = deps.monoMs();
-        const last = lastIssuedMono.get(nodeId);
-        if (last !== undefined && mono - last < deps.minIntervalMs) {
-          throttled.add(nodeId); // 間隔のために見送る（次の周期に、また調べる）
+        const prev = lastIssued.get(nodeId);
+        if (latest !== undefined) {
+          const priorityChanged = (prev?.priority ?? latest.priority) !== digest.priority;
+          const blockingChanged = prev !== undefined && prev.blocking !== blocking;
+          const latestAt = Date.parse(latest.at);
+          const lastWall = prev?.wallMs ?? (Number.isFinite(latestAt) ? latestAt : 0);
+          const aged = nowWall - lastWall >= reissueMs;
+          if (!priorityChanged && !blockingChanged && !aged) {
+            retry.add(nodeId); // 時間がたつのを待つ（ログが進んでいなくても、調べ直す）
+            continue;
+          }
+        }
+        if (prev !== undefined && mono - prev.mono < deps.minIntervalMs) {
+          retry.add(nodeId); // 間隔のために見送る
           continue;
         }
         if (posted >= deps.maxPerRun) {
-          throttled.add(nodeId);
+          retry.add(nodeId);
           continue;
         }
+        const index = mine.length;
         const id = digestIdOf(nodeId, digest.fingerprint, index);
-        const r = deps.record(digestRequestId(nodeId, digest.fingerprint, index), {
+        const r = deps.record(digestRequestId(nodeId, digest.fingerprint, index, digest.summary), {
           type: "inbox.added",
           payload: {
             id,
@@ -152,17 +213,22 @@ export function createDigestIssuer(deps: DigestIssuerDeps): DigestIssuer {
         });
         if (!r.ok) {
           deps.note("digest.failed", { nodeId, code: r.error.code });
-          throttled.add(nodeId);
+          retry.add(nodeId);
           continue;
         }
         posted += 1;
-        lastIssuedMono.set(nodeId, mono);
+        lastIssued.set(nodeId, { priority: digest.priority, blocking, mono, wallMs: nowWall });
         issued.push(id);
         deps.note("digest.issued", { nodeId, priority: digest.priority });
-        // 新しい要約を出せたら、前の要約を解決する（ノードごとに、未解決の要約は常に 1 件）。
-        for (const d of open) if (resolveItem(d.id, "新しい要約を出した")) resolved += 1;
+        // 新しい要約を出せたら、前の要約を解決する（ノードごとに、未解決の要約は常に 1 件）。解決に失敗したら、次の周期にやり直す。
+        resolveAll(
+          nodeId,
+          open.map((d) => d.id),
+          "新しい要約を出した",
+        );
       }
-      seenSeq = state.lastSeq;
+      // 追記したあとの `lastSeq` で更新する（自分の追記では、次の周期に、全対象を調べ直さない）。
+      seenSeq = deps.state().lastSeq;
     } catch (e) {
       deps.note("digest.error", { cause: String(e) });
     } finally {
@@ -180,14 +246,14 @@ export function createDigestIssuer(deps: DigestIssuerDeps): DigestIssuer {
     return p;
   }
 
-  function schedule(): void {
-    if (stopRequested || !started) return;
+  function schedule(gen: number): void {
+    if (stopRequested || !started || gen !== generation) return;
     const t = deps.timers.after(deps.intervalMs);
     timer = t;
     void t.promise.then(async () => {
-      if (stopRequested || deps.isStopped()) return;
+      if (stopRequested || deps.isStopped() || gen !== generation) return;
       await track();
-      schedule();
+      schedule(gen);
     });
   }
 
@@ -196,11 +262,13 @@ export function createDigestIssuer(deps: DigestIssuerDeps): DigestIssuer {
       if (started) return;
       started = true;
       stopRequested = false;
-      schedule();
+      generation += 1;
+      schedule(generation);
     },
     async stop() {
       stopRequested = true;
       started = false;
+      generation += 1; // 古い周期を無効にする（stop のあとに start し直しても、二重に動かない）
       timer?.cancel();
       timer = undefined;
       await current?.catch(() => undefined);

@@ -66,12 +66,13 @@ const rig = (
   node("b", "implement", "m2");
   ev("b", { type: "start" });
   let mono = 0;
+  let wall = T0 + 3_600_000;
   const notes: { event: string; data: Record<string, unknown> }[] = [];
   const mt = manualTimers();
   const issuer = (extra: Partial<Parameters<typeof createDigestIssuer>[0]> = {}) =>
     createDigestIssuer({
       state: () => log.state(),
-      nowMs: () => T0 + 3_600_000,
+      nowMs: () => wall,
       monoMs: () => mono,
       intervalMs: 30_000,
       minIntervalMs: opts.minIntervalMs ?? 60_000,
@@ -101,6 +102,8 @@ const rig = (
     notes,
     mt,
     setMono: (v: number) => (mono = v),
+    setWall: (v: number) => (wall = v),
+    wall: () => wall,
   };
 };
 
@@ -162,21 +165,143 @@ describe("要約の発行器（T24-d）", () => {
     expect(r.digests("m1")).toHaveLength(1);
   });
 
-  it("事実が変われば、新しい要約を出し、前の要約を解決する（未解決の要約は常に 1 件）", async () => {
+  it("優先度が変わったら、新しい要約を出し、前の要約を解決する（未解決の要約は常に 1 件）", async () => {
     const r = rig();
     r.item("f1", "failure", "a");
     const i = r.issuer();
     await i.runOnce();
     const firstId = r.open("m1")[0]?.id;
     r.setMono(2 * 60_000);
-    r.item("f2", "failure", "a");
+    r.item("d1", "decision", "a"); // 優先度が failed → blocking
     const out = await i.runOnce();
     expect(out.issued).toHaveLength(1);
     expect(r.open("m1")).toHaveLength(1);
     expect(r.open("m1")[0]?.id).not.toBe(firstId);
+    expect(r.open("m1")[0]?.priority).toBe("blocking");
     expect(r.digests("m1")).toHaveLength(2);
     expect(r.digests("m1")[0]?.resolved?.by).toEqual({ system: true });
-    expect(r.open("m1")[0]?.summary).toBe(digestOf(r.log.state(), "m1", T0 + 3_600_000)?.summary);
+    expect(r.open("m1")[0]?.summary).toBe(digestOf(r.log.state(), "m1", r.wall())?.summary);
+  });
+
+  it("R1: 優先度・要判断の件数が変わらず、件数や最上位の ID が変わっただけなら、前回から 10 分たつまで、出し直さない。10 分たてば出す", async () => {
+    const r = rig();
+    r.item("f1", "failure", "a");
+    const i = r.issuer();
+    await i.runOnce();
+    r.setMono(2 * 60_000);
+    r.item("f2", "failure", "a"); // 件数と最上位の ID が変わる（優先度は failed のまま）
+    r.item("p1", "progress", "a");
+    expect((await i.runOnce()).issued).toHaveLength(0);
+    expect(r.digests("m1")).toHaveLength(1);
+    r.setMono(5 * 60_000);
+    r.setWall(r.wall() + 5 * 60_000);
+    expect((await i.runOnce()).issued).toHaveLength(0); // ログが進んでいなくても、時間がたつのを調べ直す
+    r.setMono(11 * 60_000);
+    r.setWall(r.wall() + 6 * 60_000); // 最初の要約から 11 分
+    expect((await i.runOnce()).issued).toHaveLength(1);
+    expect(r.open("m1")).toHaveLength(1);
+    expect(r.digests("m1")).toHaveLength(2);
+  });
+
+  it("R1: 要判断の件数が変わったら、10 分たたなくても、（間隔のあと）出し直す", async () => {
+    const r = rig();
+    r.item("d1", "decision", "a");
+    const i = r.issuer();
+    await i.runOnce();
+    r.setMono(2 * 60_000);
+    r.item("d2", "decision", "a"); // m1 の要判断が 1 → 2（優先度は blocking のまま）
+    expect((await i.runOnce()).issued).toHaveLength(1);
+    expect(r.digests("m1")).toHaveLength(2);
+    expect(r.open("m1")).toHaveLength(1);
+  });
+
+  it("M1: 前の要約の解決に失敗しても、同じ事実の要約を積み上げない（追記と解決を分ける）。解決は、ログが進まなくても、次の周期に再試行する", async () => {
+    const r = rig();
+    r.item("f1", "failure", "a");
+    let failResolve = false;
+    const i = r.issuer({
+      record: (requestId, body) =>
+        failResolve && body.type === "inbox.resolved"
+          ? { ok: false, error: { code: "storeFailed", cause: "x", nextActions: ["y"] } as never }
+          : r.log.append({ requestId, actor: SYS, body }),
+    });
+    await i.runOnce();
+    r.setMono(2 * 60_000);
+    failResolve = true;
+    r.item("d1", "decision", "a"); // 優先度が変わる → 新しい要約。前の要約の解決に失敗する
+    await i.runOnce();
+    expect(r.digests("m1")).toHaveLength(2);
+    expect(r.open("m1")).toHaveLength(2); // 解決に失敗した
+    for (let k = 0; k < 4; k++) {
+      r.setMono((10 + k) * 60_000);
+      await i.runOnce(); // 失敗が続いても、同じ事実の要約を追記しない
+    }
+    expect(r.digests("m1")).toHaveLength(2);
+    failResolve = false;
+    r.setMono(30 * 60_000);
+    await i.runOnce(); // ログは進んでいないが、解決を再試行する
+    expect(r.open("m1")).toHaveLength(1);
+    expect(r.digests("m1")).toHaveLength(2);
+    expect(r.notes.some((x) => x.event === "digest.resolveFailed")).toBe(true);
+  });
+
+  it("R3: 同じ要求 ID が、違う本文で再送されない（時刻が進んで文面の経過分が変わると、要求 ID も変わる）", async () => {
+    const r = rig();
+    r.item("d1", "decision", "a");
+    const seen = new Map<string, string>();
+    let failAppend = true;
+    const i = r.issuer({
+      record: (requestId, body) => {
+        const text = JSON.stringify(body);
+        const before = seen.get(requestId);
+        if (before !== undefined) expect(text).toBe(before); // 同じ要求 ID は、同じ本文
+        seen.set(requestId, text);
+        return failAppend && body.type === "inbox.added"
+          ? { ok: false, error: { code: "storeFailed", cause: "x", nextActions: ["y"] } as never }
+          : r.log.append({ requestId, actor: SYS, body });
+      },
+    });
+    for (let k = 0; k < 3; k++) {
+      r.setWall(T0 + 3_600_000 + k * 7 * 60_000); // 経過分の文面が変わる
+      r.setMono((k + 1) * 60_000);
+      await i.runOnce();
+    }
+    expect(r.digests("m1")).toHaveLength(0);
+    failAppend = false;
+    r.setMono(10 * 60_000);
+    await i.runOnce();
+    expect(r.digests("m1")).toHaveLength(1);
+    expect(seen.size).toBeGreaterThan(1); // 文面が違えば、要求 ID も違う
+  });
+
+  it("N2: stop() のあとに start() し直しても、周期が二重にならない（古い周期は、無効）", async () => {
+    const r = rig();
+    r.item("f1", "failure", "a");
+    // cancel しても、期限が来れば、約束が解決される（古い周期が、残ってしまう場合を作る）
+    const waiting: { at: number; resolve: () => void }[] = [];
+    let nowMs = T0;
+    const timers: Timers = {
+      now: () => nowMs,
+      sleep: () => Promise.resolve(),
+      after: (ms) => {
+        let resolveFn: () => void = () => {};
+        const promise = new Promise<void>((res) => {
+          resolveFn = res;
+        });
+        waiting.push({ at: nowMs + ms, resolve: resolveFn });
+        return { promise, cancel: () => {} };
+      },
+    };
+    const i = r.issuer({ timers });
+    i.start();
+    await i.stop();
+    i.start();
+    nowMs += 30_000;
+    for (const w of waiting) w.resolve();
+    for (let k = 0; k < 6; k++) await new Promise((res) => setImmediate(res));
+    expect(r.notes.filter((x) => x.event === "digest.issued")).toHaveLength(1);
+    expect(waiting).toHaveLength(3); // start 2 回分 + 新しい周期の次の 1 回分（古い周期は、次を予約しない。予約すれば 4）
+    await i.stop();
   });
 
   it("ノードごとの最短の間隔: 間隔内の変化は見送り、ログが進んでいなくても、間隔が過ぎたら出す", async () => {
@@ -184,7 +309,7 @@ describe("要約の発行器（T24-d）", () => {
     r.item("f1", "failure", "a");
     const i = r.issuer();
     await i.runOnce();
-    r.item("f2", "failure", "a");
+    r.item("d1", "decision", "a"); // 優先度が変わる
     r.setMono(30_000);
     expect((await i.runOnce()).issued).toHaveLength(0); // 間隔内
     expect(r.digests("m1")).toHaveLength(1);
