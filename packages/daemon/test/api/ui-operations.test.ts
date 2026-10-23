@@ -51,6 +51,10 @@ const start = async () => {
     credentials,
     getState: state,
     handlers: {
+      "node.reclaimInstruct": (req) => {
+        calls.push({ operation: req.operation, params: req.params, role: req.role });
+        return ok({ accepted: true });
+      },
       "decision.answer": async (req) => {
         calls.push({ operation: req.operation, params: req.params, role: req.role });
         await gate;
@@ -409,5 +413,58 @@ describe("画面からの操作（最終削除・保留・保管。T23-d）の�
     ]);
     expect([a.status, b.status]).toEqual([200, 200]);
     expect(r.calls.filter((c) => c.operation === "node.purge")).toHaveLength(1);
+  });
+
+  describe("回収の指示（node.reclaimInstruct。T23-c）", () => {
+    const SHA = "a".repeat(40);
+    const INSTRUCT = (requestId: string, params: unknown) => ({
+      requestId,
+      operation: "node.reclaimInstruct",
+      params,
+    });
+
+    it("人間のトークンで、見せた先端（expectTips）をそのまま添えれば通る。ハンドラには、そのまま渡る", async () => {
+      const r = await start();
+      r.release();
+      const origin = new URL(r.url).origin;
+      const params = { nodeId: "a", expectTips: { a: SHA, b: "b".repeat(64) } };
+      const res = await send(
+        r.url,
+        HUMAN,
+        INSTRUCT("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", params),
+        { origin },
+      );
+      expect(res.status).toBe(200);
+      expect(r.calls).toEqual([{ operation: "node.reclaimInstruct", params, role: "human" }]);
+    });
+
+    it("expectTips がない・形が不正（先端が 16 進でない・短い・大文字・キーが ID でない・数が多い）は 400（実行しない）", async () => {
+      const r = await start();
+      r.release();
+      const send2 = (params: unknown) =>
+        send(r.url, HUMAN, INSTRUCT("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", params));
+      expect((await send2({ nodeId: "a" })).status).toBe(400);
+      expect((await send2({ nodeId: "a", expectTips: "x" })).status).toBe(400);
+      expect((await send2({ nodeId: "a", expectTips: { a: "zzzz" } })).status).toBe(400);
+      expect((await send2({ nodeId: "a", expectTips: { a: "a".repeat(39) } })).status).toBe(400);
+      expect((await send2({ nodeId: "a", expectTips: { a: "A".repeat(40) } })).status).toBe(400);
+      expect((await send2({ nodeId: "a", expectTips: { "../x": SHA } })).status).toBe(400);
+      const many = Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`n${i}`, SHA]));
+      expect((await send2({ nodeId: "a", expectTips: many })).status).toBe(400);
+      expect(r.calls).toEqual([]);
+    });
+
+    it("人間のトークンだけ（子・統合ノードのトークンは 403）。誤った Origin は 403", async () => {
+      const r = await start();
+      r.release();
+      const body = INSTRUCT("cccccccc-cccc-4ccc-8ccc-cccccccccccc", {
+        nodeId: "a",
+        expectTips: {},
+      });
+      expect((await send(r.url, r.child, body)).status).toBe(403);
+      expect((await send(r.url, r.root, body)).status).toBe(403);
+      expect((await send(r.url, HUMAN, body, { origin: "http://evil.example" })).status).toBe(403);
+      expect(r.calls).toEqual([]);
+    });
   });
 });

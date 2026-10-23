@@ -56,7 +56,7 @@ main{padding:0 16px 32px;max-width:960px;margin:0 auto}
 .card.blocking{border-left:4px solid var(--blocking)}.card.failed{border-left:4px solid var(--failed)}
 .tag{display:inline-block;font-size:12px;color:var(--muted);margin-right:8px}
 .tag.blocking{color:var(--blocking);font-weight:600}.tag.failed{color:var(--failed);font-weight:600}
-.node{padding:2px 0;overflow-wrap:anywhere}.state{color:var(--muted);margin-left:8px;font-size:13px}.count{color:var(--blocking);margin-left:8px;font-size:13px}
+.node button{margin-left:8px;padding:2px 8px;font-size:13px}.node{padding:2px 0;overflow-wrap:anywhere}.state{color:var(--muted);margin-left:8px;font-size:13px}.count{color:var(--blocking);margin-left:8px;font-size:13px}
 .empty{color:var(--muted)}
 button{cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.opts{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
@@ -149,7 +149,15 @@ export const UI_JS = `'use strict';
     var e = r.body && r.body.error;
     var base = e && typeof e.code === 'string' ? e.code + ': ' + String(e.cause || '').slice(0, 300) : 'HTTP ' + r.status;
     if (r.status === 429) base += '（' + (r.retry > 0 ? r.retry + ' 秒' : 'しばらく') + '待ってから、もう一度送る）';
+    var hint = failureHint(e && e.code);
+    // 先端が変わった（または確かめられない）ときは、同じ内容では、何度送っても通らない。確かめ直させる
+    if (hint) return base + '\\n' + hint;
     return base + '\\n同じ内容で、もう一度送れます（同じ要求として扱われ、二重には実行されません）。';
+  }
+  // 失敗の種類ごとの案内。なければ ''。
+  function failureHint(code) {
+    if (code === 'tipMismatch' || code === 'tipUnknown') return '表示したあとで、先端が変わった（または確かめられない）ため、何も指示していません。もう一度、「破棄して回収を指示…」から、内容を確かめ直してください。';
+    return '';
   }
   function renderConfirm() {
     var box = document.getElementById('confirm');
@@ -416,12 +424,96 @@ export const UI_JS = `'use strict';
         row.appendChild(el('span', '', n.id));
         row.appendChild(el('span', 'state', n.role + ' / ' + name(STATE_NAMES, n.state)));
         if (n.openItems > 0) row.appendChild(el('span', 'count', '要対応 ' + n.openItems));
+        // 停止したノードだけ、破棄の判断（回収の指示。T23-c）ができる。指示済みなら、もう一度は出さない
+        if (n.state === 'stopped') {
+          if (n.discarded) row.appendChild(el('span', 'tag', '破棄を指示済み（回収は統合ノードが行う）'));
+          else if (ID_RE.test(n.id)) {
+            var reclaim = el('button', '', '破棄して回収を指示…');
+            reclaim.addEventListener('click', function () { startReclaim(n.id); });
+            row.appendChild(reclaim);
+          }
+        }
         box.appendChild(row);
         walk(n.id, depth + 1);
       });
     }
     walk('', 0);
     return seen.size;
+  }
+
+  // ---- 回収の指示（T23-c。人間による破棄の判断。取り消せない）----
+  var EXPECT_TIPS_MAX = 256;
+  var CLI_HINT = 'cli（cso reclaim <ノード ID>）で、確かめてください。';
+  var UNMET_NAMES = {
+    stateNotEligible: '状態が、回収の対象でない', discardRequired: '破棄の判断が要る', factsMissing: '事実が足りない',
+    notMerged: '統合されていない', dirty: '未保存の変更がある', dependentsIncomplete: '依存先が未完了', openDecision: '未回答の判断がある',
+    descendantsNotReclaimable: '配下が回収できない', processesRunning: 'プロセスが動いている', processesUnknown: 'プロセスを調べられない'
+  };
+  // 事前確認（node.reclaimPreview）の結果の形。tips は、あれば、ノード ID から先端（文字列）への対応。
+  function isReclaimPreview(v) {
+    if (!v || typeof v !== 'object' || typeof v.reclaimable !== 'boolean' || !Array.isArray(v.unmet) || !Array.isArray(v.blockers)) return false;
+    if (v.loss !== undefined && !Array.isArray(v.loss)) return false;
+    if (v.tips !== undefined) {
+      if (!v.tips || typeof v.tips !== 'object' || Array.isArray(v.tips)) return false;
+      if (!Object.keys(v.tips).every(function (k) { return typeof v.tips[k] === 'string'; })) return false;
+    }
+    return true;
+  }
+  // 送れない理由（フェイルクローズ）。送れるなら ''。失われるものが分からないまま、取り消せない指示は出さない。
+  function reclaimBlocked(v) {
+    if (v.loss === undefined) return '失われるものの情報が得られませんでした（古い daemon です）。' + CLI_HINT;
+    var unknown = v.loss.filter(function (l) { return l && (l.unknown === true || l.workingTreeUnknown === true); });
+    if (unknown.length) {
+      var ids = unknown.map(function (l) { return cleanText(String(l.nodeId), 128); }).join('、');
+      return '失われるものを調べられなかったノードがあります（' + ids + '）。失われるものが分からないまま、破棄は指示できません。' + CLI_HINT;
+    }
+    var n = v.tips ? Object.keys(v.tips).length : 0;
+    if (n > EXPECT_TIPS_MAX) return 'ノードが多すぎて、先端の照合ができません（' + n + ' 件。' + EXPECT_TIPS_MAX + ' 件まで）。' + CLI_HINT;
+    return '';
+  }
+  function lossText(l) {
+    var parts = [];
+    parts.push(typeof l.aheadCommits === 'number' ? '統合されていないコミット ' + l.aheadCommits + ' 件' : '統合されていないコミットの数は不明');
+    parts.push(l.uncommitted ? '追跡中のファイルの未保存の変更あり' : '未保存の変更なし');
+    parts.push('未追跡のファイル ' + Number(l.untracked) + ' 件');
+    return parts.join('。');
+  }
+  // 確認の表示（事前確認の結果）。パスは含まれない。件名は、信頼できない入力なので、整える。
+  function reclaimLines(nodeId, v) {
+    var lines = [
+      ['対象', nodeId],
+      ['内容', '破棄の判断は、取り消せません。停止したノードの作業ツリーとブランチが、強制して消えます。記録されるのは、この対象だけです（配下の停止ノードは、別に指示が必要です）']
+    ];
+    v.unmet.slice(0, 10).forEach(function (u) { lines.push(['満たしていない条件', name(UNMET_NAMES, String(u))]); });
+    v.blockers.slice(0, 10).forEach(function (b) {
+      var who = b && b.kind === 'process' ? 'プロセス ' + Number(b.pid) : 'ノード ' + cleanText(String(b && b.nodeId), 128);
+      lines.push(['原因', who + '（' + name(UNMET_NAMES, String(b && b.reason)) + '）']);
+    });
+    var loss = v.loss || [];
+    loss.slice(0, 20).forEach(function (l) {
+      lines.push(['失われるもの（' + cleanText(String(l.nodeId), 128) + '）', lossText(l)]);
+      (Array.isArray(l.untrustedSubjects) ? l.untrustedSubjects : []).slice(0, 5).forEach(function (subject) {
+        lines.push(['コミットの件名（信頼できない入力）', cleanText(String(subject), 100)]);
+      });
+    });
+    if (!loss.length) lines.push(['失われるもの', 'なし']);
+    var tips = v.tips || {};
+    Object.keys(tips).sort().slice(0, 20).forEach(function (k) {
+      lines.push(['ブランチの先端（' + cleanText(k, 128) + '）', cleanText(tips[k].slice(0, 12), 12)]);
+    });
+    lines.push(['照合', '見せた先端を、そのまま、指示に添えます。指示の時点で、先端が変わっていたら、何も記録されません']);
+    return lines;
+  }
+  function startReclaim(nodeId) {
+    readOperationResult('node.reclaimPreview', { nodeId: nodeId }).then(function (r) {
+      if (r === null) return;
+      if (!r.ok) { notice('失敗: ' + r.error.code + ': ' + r.error.cause, true); return; }
+      var v = r.value;
+      if (!isReclaimPreview(v)) { notice('事前確認の結果の形が不正です', true); return; }
+      // 見せた先端（tips）を、作り直さずに、そのまま渡す。daemon が、今の先端と照合する（違えば tipMismatch）。
+      var params = { nodeId: nodeId, expectTips: v.tips || {} };
+      openConfirm('回収の指示（破棄）', reclaimLines(nodeId, v), 'node.reclaimInstruct', params, '破棄を指示しました（' + nodeId + '）。実際の回収は、統合ノードが行います', { typed: nodeId, blocked: reclaimBlocked(v) });
+    });
   }
 
   // ---- 最終削除・保留・保管（T23-d。取り消せない操作は、対象の ID を打ち込ませる）----

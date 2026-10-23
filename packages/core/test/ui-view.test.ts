@@ -191,6 +191,20 @@ describe("uiViewOf（画面の表示モデル。T23）", () => {
     expect(view.decisions[1]?.optionsCut).toBe(true);
   });
 
+  it("ノードの discarded: 破棄の判断が記録済みなら true（画面は、指示済みと出して、もう一度は出さない）", () => {
+    const s = must(base());
+    const v = uiViewOf({
+      ...s,
+      nodes: s.nodes.map((n) =>
+        n.id === "a" ? { ...n, discarded: { seq: 1, at: AT, by: { human: true } } } : n,
+      ),
+    });
+    expect(v.nodes.map((n) => [n.id, n.discarded])).toEqual([
+      ["root", false],
+      ["a", true],
+    ]);
+  });
+
   it("件数の上限を超えたら、切って、truncated に種類を入れる", () => {
     const items = Array.from({ length: UI_LIMITS.inbox + 5 }, (_, i) =>
       added(`p${i}`, "progress", "a"),

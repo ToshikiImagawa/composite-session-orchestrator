@@ -147,6 +147,20 @@ describe("画面の資産（走査）", () => {
       "Map",
       "Set",
       "body",
+      "discarded",
+      "reclaimable",
+      "unmet",
+      "loss",
+      "tips",
+      "keys",
+      "unknown",
+      "workingTreeUnknown",
+      "aheadCommits",
+      "uncommitted",
+      "untracked",
+      "pid",
+      "untrustedSubjects",
+      "sort",
       "retryAt",
       "ceil",
       "optionsCut",
@@ -277,6 +291,18 @@ describe("画面の資産（走査）", () => {
         line("var TEXT_MAX ="),
         line("var FORBIDDEN ="),
         line("var REASON_MAX ="),
+        line("var EXPECT_TIPS_MAX ="),
+        line("var CLI_HINT ="),
+        UI_JS.slice(
+          UI_JS.indexOf("  var UNMET_NAMES = {"),
+          UI_JS.indexOf("\n  };", UI_JS.indexOf("  var UNMET_NAMES = {")) + 5,
+        ),
+        line("function name("),
+        fn("isReclaimPreview"),
+        fn("reclaimBlocked"),
+        fn("lossText"),
+        fn("reclaimLines"),
+        fn("failureHint"),
         fn("typedMatches"),
         fn("purgeRoots"),
         fn("holdUntil"),
@@ -286,7 +312,7 @@ describe("画面の資産（走査）", () => {
         fn("checkAnswer"),
         fn("waitSecondsOf"),
         fn("describeFailure"),
-        "({ checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdUntil: holdUntil, checkReason: checkReason, cleanText: cleanText })",
+        "({ isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdUntil: holdUntil, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
@@ -298,6 +324,10 @@ describe("画面の資産（走査）", () => {
       holdUntil(days: number, nowMs: number): string | undefined;
       checkReason(text: string): string;
       cleanText(text: string, max: number): string;
+      isReclaimPreview(v: unknown): boolean;
+      reclaimBlocked(v: unknown): string;
+      reclaimLines(nodeId: string, v: unknown): [string, string][];
+      failureHint(code: unknown): string;
     };
 
     it("checkAnswer: 空・空白だけ・長すぎる・制御文字・書式制御文字を拒む。タブ・改行は使える。長さは、コードポイントで数える", () => {
@@ -400,6 +430,146 @@ describe("画面の資産（走査）", () => {
       expect(api.cleanText("あ".repeat(10), 5)).toBe("ああああ…");
       expect(api.cleanText("  x   y  ", 10)).toBe("x y");
     });
+
+    // ---- 回収の指示（T23-c）----
+    const sha = (c: string): string => c.repeat(40);
+    const preview = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+      reclaimable: false,
+      unmet: ["discardRequired"],
+      blockers: [],
+      loss: [],
+      tips: { s1: sha("a") },
+      ...over,
+    });
+
+    it("isReclaimPreview: 事前確認の結果の形（loss・tips は任意。あれば、形を確かめる）", () => {
+      expect(api.isReclaimPreview(preview())).toBe(true);
+      expect(api.isReclaimPreview(preview({ loss: undefined, tips: undefined }))).toBe(true);
+      expect(api.isReclaimPreview(null)).toBe(false);
+      expect(api.isReclaimPreview(preview({ reclaimable: "yes" }))).toBe(false);
+      expect(api.isReclaimPreview(preview({ unmet: "x" }))).toBe(false);
+      expect(api.isReclaimPreview(preview({ blockers: {} }))).toBe(false);
+      expect(api.isReclaimPreview(preview({ loss: {} }))).toBe(false);
+      expect(api.isReclaimPreview(preview({ tips: [] }))).toBe(false);
+      expect(api.isReclaimPreview(preview({ tips: { s1: 1 } }))).toBe(false);
+    });
+
+    it("reclaimBlocked: loss がない・調べられなかったノードがある・先端が多すぎるときは、送れない（cli で確かめる案内つき）。それ以外は ''", () => {
+      expect(api.reclaimBlocked(preview())).toBe("");
+      expect(api.reclaimBlocked(preview({ loss: undefined }))).toContain("cso reclaim");
+      const unknown = api.reclaimBlocked(
+        preview({
+          loss: [
+            {
+              nodeId: "s2",
+              unknown: true,
+              untrustedSubjects: [],
+              uncommitted: false,
+              untracked: 0,
+            },
+          ],
+        }),
+      );
+      expect(unknown).toContain("s2");
+      expect(unknown).toContain("cso reclaim");
+      expect(
+        api.reclaimBlocked(
+          preview({
+            loss: [
+              {
+                nodeId: "s3",
+                workingTreeUnknown: true,
+                untrustedSubjects: [],
+                uncommitted: false,
+                untracked: 0,
+              },
+            ],
+          }),
+        ),
+      ).toContain("s3");
+      const many = Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`n${i}`, sha("b")]));
+      expect(api.reclaimBlocked(preview({ tips: many }))).toBe("");
+      expect(api.reclaimBlocked(preview({ tips: { ...many, extra: sha("c") } }))).toContain(
+        "多すぎ",
+      );
+      // 失われるものがない（loss が空）・先端がない（作業ツリーがない）のは、送れる
+      expect(api.reclaimBlocked(preview({ tips: undefined }))).toBe("");
+    });
+
+    it("reclaimLines: 対象・取り消せない旨・失われるもの・先端（先頭 12 桁）・照合の説明を出す。件名は整える。パスを出さない", () => {
+      const lines = api.reclaimLines(
+        "s1",
+        preview({
+          unmet: ["discardRequired", "processesRunning"],
+          blockers: [
+            { kind: "process", reason: "processesRunning", pid: 1234 },
+            { kind: "node", reason: "dirty", nodeId: "s1" },
+          ],
+          loss: [
+            {
+              nodeId: "s1",
+              aheadCommits: 2,
+              untrustedSubjects: ["fix: a\u001b[31mred\u202e", "<img src=x onerror=1>"],
+              uncommitted: true,
+              untracked: 3,
+            },
+          ],
+          tips: { s1: `${"ab12".repeat(10)}` },
+        }),
+      );
+      const text = lines.map((l) => l.join(" ")).join("\n");
+      expect(lines[0]).toEqual(["対象", "s1"]);
+      expect(text).toContain("取り消せません");
+      expect(text).toContain("配下の停止ノードは、別に指示が必要");
+      expect(text).toContain("破棄の判断が要る");
+      expect(text).toContain("プロセス 1234");
+      expect(text).toContain("統合されていないコミット 2 件");
+      expect(text).toContain("追跡中のファイルの未保存の変更あり");
+      expect(text).toContain("未追跡のファイル 3 件");
+      expect(text).toContain("ab12ab12ab12"); // 先端の先頭 12 桁
+      expect(text).not.toContain("ab12ab12ab12a"); // 13 桁目は出さない
+      expect(text).toContain("<img src=x onerror=1>"); // 文字として出す（textContent で描く）
+      expect(text).not.toContain("\u001b"); // 制御文字は除く
+      expect(text).not.toContain("\u202e");
+      expect(text).toContain("先端が変わっていたら、何も記録されません");
+    });
+
+    it("reclaimLines: 失われるものがなければ「なし」。長い一覧は切る", () => {
+      const none = api
+        .reclaimLines("s1", preview({ tips: undefined }))
+        .map((l) => l.join(" "))
+        .join("\n");
+      expect(none).toContain("失われるもの なし");
+      const many = api.reclaimLines(
+        "s1",
+        preview({
+          loss: Array.from({ length: 30 }, (_, i) => ({
+            nodeId: `n${i}`,
+            untrustedSubjects: [],
+            uncommitted: false,
+            untracked: 0,
+            aheadCommits: 0,
+          })),
+          tips: Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`n${i}`, sha("d")])),
+        }),
+      );
+      expect(many.filter((l) => l[0].startsWith("失われるもの（")).length).toBe(20);
+      expect(many.filter((l) => l[0].startsWith("ブランチの先端（")).length).toBe(20);
+    });
+
+    it("failureHint・describeFailure: tipMismatch・tipUnknown は、同じ内容の再送でなく、確かめ直しを案内する", () => {
+      expect(api.failureHint("tipMismatch")).toContain("確かめ直して");
+      expect(api.failureHint("tipUnknown")).toContain("確かめ直して");
+      expect(api.failureHint("conflict")).toBe("");
+      const mismatch = api.describeFailure({
+        status: 422,
+        body: { ok: false, error: { code: "tipMismatch", cause: "先端が違う" } },
+        retry: 0,
+      });
+      expect(mismatch).toContain("tipMismatch: 先端が違う");
+      expect(mismatch).toContain("何も指示していません");
+      expect(mismatch).not.toContain("同じ内容で、もう一度送れます");
+    });
   });
 
   describe("sendPending（vm で評価する。打ち込みが一致しないと、通信しない）", () => {
@@ -492,5 +662,24 @@ describe("画面の資産（走査）", () => {
     // 読み取りの操作は、確認なしで呼ぶのは事前確認と一覧だけ
     const reads = [...UI_JS.matchAll(/readOperation\('([^']+)'/g)].map((m) => m[1]);
     expect(new Set(reads)).toEqual(new Set(["node.purgePreview", "node.discardedList"]));
+  });
+
+  it("T23-c: 回収の指示は、打ち込みの確認（typed: 対象のノード ID）を経る。見せた先端（プレビューの tips）を、作り直さずに、そのまま expectTips に渡す", () => {
+    const start = UI_JS.indexOf("function startReclaim(");
+    expect(start).toBeGreaterThan(-1);
+    const body = UI_JS.slice(start, UI_JS.indexOf("\n  }\n", start));
+    expect(body).toContain("readOperationResult('node.reclaimPreview'");
+    expect(body).toContain("expectTips: v.tips || {}");
+    expect(body).toContain("'node.reclaimInstruct'");
+    expect(body).toContain("typed: nodeId");
+    expect(body).toContain("blocked: reclaimBlocked(v)");
+    // 先端を取り直す・作り直す経路がない（プレビューは、確認を出す前の 1 回だけ）
+    expect(body.split("node.reclaimPreview").length - 1).toBe(1);
+    expect(body).not.toMatch(/expectTips:\s*\{[^}]/);
+    // 通信は、callOperation の 1 か所だけ（reclaimInstruct も、sendPending 経由）
+    expect(UI_JS.split("fetch('/v1/request'").length - 1).toBe(1);
+    // ボタンは、停止したノードだけ。指示済みには出さない
+    expect(UI_JS).toContain("n.state === 'stopped'");
+    expect(UI_JS).toContain("n.discarded");
   });
 });

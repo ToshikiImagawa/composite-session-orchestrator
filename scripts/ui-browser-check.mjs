@@ -128,6 +128,25 @@ state = {
     },
   ],
 };
+// 停止したノード（T23-c）: s1 は破棄を指示できる、s2 は失われるものを調べられない、s3 は破棄を指示済み
+state = {
+  ...state,
+  nodes: [
+    ...state.nodes,
+    { id: "s1", role: "implement", parentId: "m1", state: "stopped", dependsOn: [] },
+    { id: "s2", role: "implement", parentId: "m1", state: "stopped", dependsOn: [] },
+    {
+      id: "s3",
+      role: "implement",
+      parentId: "m1",
+      state: "stopped",
+      dependsOn: [],
+      discarded: { seq: 1, at: "2026-10-20T00:00:00Z", by: { human: true } },
+    },
+  ],
+};
+// s1 の今のブランチの先端（見せたあとで、変える）
+const currentTips = { s1: "a".repeat(40) };
 // 操作の呼び出しの記録（画面の操作の確認用）。d2 の最初の回答は、失敗させる（失敗の表示と、同じ要求 ID での再送の確認）
 const calls = [];
 let failD2Once = true;
@@ -201,6 +220,63 @@ handlers["scope.decide"] = async (req) => {
 const credentials = createCredentialStore({ humanToken: HUMAN });
 const server = createApiServer({ credentials, getState: () => state, handlers });
 const { url } = await server.listen(0);
+handlers["node.reclaimPreview"] = async (req) => {
+  if (req.params.nodeId === "s2") {
+    return {
+      ok: true,
+      value: {
+        reclaimable: false,
+        unmet: ["discardRequired"],
+        blockers: [],
+        loss: [
+          { nodeId: "s2", unknown: true, untrustedSubjects: [], uncommitted: false, untracked: 0 },
+        ],
+        tips: {},
+      },
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      reclaimable: false,
+      unmet: ["discardRequired", "processesRunning"],
+      blockers: [{ kind: "process", reason: "processesRunning", pid: 4242 }],
+      loss: [
+        {
+          nodeId: "s1",
+          aheadCommits: 2,
+          untrustedSubjects: [XSS, "二つ目のコミット"],
+          uncommitted: true,
+          untracked: 3,
+        },
+      ],
+      tips: { ...currentTips },
+    },
+  };
+};
+handlers["node.reclaimInstruct"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  await new Promise((r) => setTimeout(r, 150));
+  // 見せた先端と、今の先端を照合する（daemon と同じ。違えば、何も記録しない）
+  if (JSON.stringify(req.params.expectTips) !== JSON.stringify(currentTips)) {
+    return {
+      ok: false,
+      error: {
+        code: "tipMismatch",
+        cause: "表示したあとで、先端が変わっている（s1）",
+        nextActions: ["確かめ直す"],
+      },
+    };
+  }
+  bump({
+    nodes: state.nodes.map((n) =>
+      n.id === req.params.nodeId
+        ? { ...n, discarded: { seq: 2, at: "2026-10-20T00:00:00Z", by: { human: true } } }
+        : n,
+    ),
+  });
+  return { ok: true, value: { accepted: true } };
+};
 const browser = await chromium.launch({
   executablePath: process.env.CSO_CHROMIUM ?? "/opt/pw-browsers/chromium",
   args: ["--no-sandbox"],
@@ -601,6 +677,114 @@ ops.keptReloadedAfterDrop = true;
 ops.errors = opErrors;
 out.operations = ops;
 
+// ---- 回収の指示（T23-c）----
+const rc = {};
+const pageR = await (await browser.newContext()).newPage();
+const rcErrors = [];
+pageR.on("pageerror", (e) => rcErrors.push(String(e)));
+pageR.on("dialog", (d) => {
+  rcErrors.push(`dialog:${d.message()}`);
+  d.dismiss();
+});
+await pageR.goto(`${url}/ui#token=${HUMAN}`);
+await pageR.waitForSelector("#view:not([hidden])", { timeout: 8000 });
+const row = (id) => pageR.locator("#tree .node", { hasText: id }).filter({ hasText: "停止" });
+const instructCalls = () => calls.filter((c) => c.operation === "node.reclaimInstruct");
+// (a) ボタンは、停止したノードで、指示済みでないものだけ
+rc.buttonOnS1 =
+  (await row("s1").getByRole("button", { name: "破棄して回収を指示…" }).count()) === 1;
+rc.noButtonOnS3 =
+  (await row("s3").getByRole("button").count()) === 0 &&
+  (await row("s3").innerText()).includes("破棄を指示済み");
+rc.noButtonOnRunning =
+  (await pageR
+    .locator("#tree .node", { hasText: "実行" })
+    .getByRole("button", { name: "破棄して回収を指示…" })
+    .count()) === 0;
+// (b) 押す → 事前確認の内容
+await row("s1").getByRole("button", { name: "破棄して回収を指示…" }).click();
+await pageR.locator("#confirm").waitFor();
+const text1 = await pageR.locator("#confirm").innerText();
+rc.confirmShowsLoss =
+  text1.includes("取り消せません") &&
+  text1.includes("プロセス 4242") &&
+  text1.includes("統合されていないコミット 2 件") &&
+  text1.includes("未追跡のファイル 3 件");
+rc.confirmShowsTip12 = text1.includes("aaaaaaaaaaaa") && !text1.includes("aaaaaaaaaaaaa");
+rc.subjectAsText =
+  text1.includes("<img src=x onerror=") &&
+  (await pageR.evaluate(() => window.__xss ?? null)) === null;
+rc.requestBeforeConfirm = instructCalls().length === 0;
+// (c) 打ち込み: 一致するまで送れない
+const rcSend = pageR.locator("#confirm button.primary");
+rc.sendDisabledInitially = await rcSend.isDisabled();
+for (const wrong of ["S1", " s1", "s1 ", "ｓ１", "s"]) {
+  await pageR.locator("#confirm textarea").fill(wrong);
+  if (await rcSend.isEnabled()) rc.wrongTypedEnabled = wrong;
+}
+// 画面の無効化を迂回しても、送らない
+await pageR.locator("#confirm textarea").fill("S1");
+await rcSend.evaluate((b) => {
+  b.disabled = false;
+  b.click();
+});
+await pageR.waitForTimeout(400);
+rc.bypassNoRequest = instructCalls().length === 0;
+// (d) 見せたあとで、先端が変わる → 送ると tipMismatch。確かめ直しを案内する（同じ内容の再送は、案内しない）
+currentTips.s1 = "b".repeat(40);
+await pageR.locator("#confirm textarea").fill("s1");
+rc.sendEnabledWhenMatched = await rcSend.isEnabled();
+await rcSend.click();
+await pageR.waitForFunction(
+  () => document.getElementById("confirm").innerText.includes("tipMismatch"),
+  null,
+  { timeout: 5000 },
+);
+const text2 = await pageR.locator("#confirm").innerText();
+rc.mismatchGuidance =
+  text2.includes("確かめ直してください") && !text2.includes("同じ内容で、もう一度送れます");
+rc.firstExpectTips =
+  JSON.stringify(instructCalls()[0]?.params.expectTips) === JSON.stringify({ s1: "a".repeat(40) });
+// (e) やり直す: 戻る → もう一度 → 新しい先端が見える → 通る。requestId は、確認ごとに新しい。二重クリックでも 1 回
+await pageR.getByRole("button", { name: "戻る" }).click();
+await row("s1").getByRole("button", { name: "破棄して回収を指示…" }).click();
+await pageR.locator("#confirm").waitFor();
+rc.newTipShown = (await pageR.locator("#confirm").innerText()).includes("bbbbbbbbbbbb");
+await pageR.locator("#confirm textarea").fill("s1");
+await rcSend.dblclick();
+await pageR.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("破棄を指示しました"),
+  null,
+  { timeout: 5000 },
+);
+const ic = instructCalls();
+rc.callsAfterRetry = ic.length; // 2（1 回目の失敗と、やり直し。二重クリックで増えない）
+rc.secondExpectTips =
+  JSON.stringify(ic[1]?.params.expectTips) === JSON.stringify({ s1: "b".repeat(40) });
+rc.newRequestId = ic.length === 2 && ic[0].requestId !== ic[1].requestId;
+await pageR.waitForFunction(
+  () =>
+    ![...document.querySelectorAll("#tree .node")].some(
+      (n) => n.textContent.includes("s1") && n.querySelector("button"),
+    ),
+  null,
+  { timeout: 5000 },
+);
+rc.s1NowMarkedDiscarded = (await row("s1").innerText()).includes("破棄を指示済み");
+// (f) 失われるものを調べられないノードは、送れない（cli で確かめる案内）
+await row("s2").getByRole("button", { name: "破棄して回収を指示…" }).click();
+await pageR.locator("#confirm").waitFor();
+const text3 = await pageR.locator("#confirm").innerText();
+rc.unknownBlocked = text3.includes("調べられなかった") && text3.includes("cso reclaim");
+rc.unknownNoTypedBox =
+  (await pageR.locator("#confirm textarea").count()) === 0 &&
+  (await pageR.locator("#confirm button.primary").isDisabled());
+rc.errors = rcErrors;
+out.reclaim = rc;
+// SSE の同時接続は 4 本まで。使い終わったページは閉じる
+await pageR.context().close();
+await pageO.context().close();
+
 // SSE が使えないとき（上限 0 で、429）は、ポーリング（ETag）に切り替わる
 const poll = createApiServer({
   credentials,
@@ -653,6 +837,11 @@ for (let i = 0; i < 30; i++) {
 }
 out.stateRequestsDuring3sOfChanges = stateRequests; // 最短 1 秒ごとなので、4 回前後（30 回ではない）
 out.throttleWindowMs = Date.now() - tt;
+// 使い終わったページを閉じる（SSE の同時接続の上限）
+await pageT.context().close();
+await page4.context().close();
+await page2.context().close();
+await page.context().close();
 // 切れたら、指数バックオフで再接続する（1 回目を中断させる）
 let eventRequests = 0;
 const page3 = await (await browser.newContext()).newPage();
