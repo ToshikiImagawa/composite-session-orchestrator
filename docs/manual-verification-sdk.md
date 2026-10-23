@@ -169,3 +169,16 @@
 ### 2026-10-22 の再確認（項目 7。T10b-a の後）
 
 判断の回答を子へ届ける変更（T10b-a）の後、同じ手順で項目 7 をやり直した（実 SDK 0.3.292）: 子が `report_decision`（「JSON か YAML か」）を呼び、人間が `decision.answer`（`choice: "YAML"`）を送ると、受信箱に `answer` が出て、子が**回答を受け取って**新しいターンを始め、`src/b.txt`（`format: yaml`）を作り、`report_done` で完了を報告した（約 45 秒）。**合格**。
+
+### 2026-10-23 の結果（T24-w。中間統合ノードを起こす。実 SDK 0.3.292）
+
+設定 `wake: { enabled: true, intervalSec: 5, minIntervalSec: 10 }`・`maxTurns: 12`・`maxBudgetUsd: 1`・`digest.enabled: false`（`wake` は既定で無効なので、有効にした）。daemon → `cso-mcp`（`--config`）の順に起動し、根の下に統合ノード（中間統合ノード）を 1 つ立てた。
+
+| 手順 | 結果 | 観測 |
+|:--|:--|:--|
+| 統合ノードが `node_spawn` で実装の子を 1 つ作り、「待機する」と言ってターンを終える | 合格 | 子の作成は、最初の 2 回は `parentId`（自分のノード ID）の取り違えで `forbidden` になったが、`tree_list` で自分の ID を調べて、3 回目に成功した（木の規則の検査が効いている。起こす機能とは無関係） |
+| 子が `src/a.txt` を作り、`report_done` を出す | 合格 | 受信箱に `done`（「完了報告（根拠 1 件）」） |
+| daemon が、統合ノードを起こす | 合格 | ログに `wake.woken`（1 回だけ）。統合ノードのセッションに、固定の 1 行（「受信箱に、配下の新しい項目が届いた。inbox_fetch で確かめて、必要な操作をしてください。」）が届き、**新しいターンが始まった** |
+| 統合ノードが `inbox_fetch` を呼ぶ | 合格 | `mcp__node__inbox_fetch` を呼び、`done` の項目 1 件を読んで、1 行で述べて終えた |
+
+起こした指示の本文は定数で、子の文字列・ID・件数を含まない。`node.instructed`（system）と配送の記録が残った。
