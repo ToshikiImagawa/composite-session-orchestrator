@@ -4,14 +4,22 @@
  * 切り詰めた名前を使って失敗するのを防ぐ。文面は固定で、ID は `isSafeId` を通ったもの（daemon が決めた識別子。子が影響できない）。
  */
 
-import { isSafeId } from "@cso/core";
+import { type Failure, isSafeId, type NodeRole, type Result } from "@cso/core";
+import { fail } from "./api/handlers/context.js";
 
-export function selfIntroLines(nodeId: string, role: string, parentId: string | null): string[] {
+export function selfIntroLines(
+  nodeId: string,
+  role: NodeRole,
+  parentId: string | null,
+): Result<string[], Failure> {
   if (!isSafeId(nodeId) || (parentId !== null && !isSafeId(parentId))) {
-    throw new Error("ノード ID が識別子の形式でない");
+    return fail("internal", "ノード ID が識別子の形式でない", "管理者（人間）に知らせる");
   }
-  return [
-    `あなたのノード ID: ${nodeId}（role: ${role}、親: ${parentId ?? "なし"}）`,
-    "ID を引数に取る操作（node_spawn の parentId など）には、この ID（または子孫の ID）を、省略・短縮せず、そのまま使う。作業ツリーのディレクトリ名は、ID ではない（切り詰めてあり、ハッシュがついている）。",
-  ];
+  return {
+    ok: true,
+    value: [
+      `あなたのノード ID: ${nodeId}（role: ${role}、親: ${parentId ?? "なし"}）`,
+      "ID を引数に取る操作（node_spawn の parentId など）には、この ID（または子孫の ID）を、省略・短縮せず、そのまま使う。作業ツリーのディレクトリ名は、ID ではない（切り詰めてあり、ハッシュがついている）。",
+    ],
+  };
 }

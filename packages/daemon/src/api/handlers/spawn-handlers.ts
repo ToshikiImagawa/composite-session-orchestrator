@@ -246,6 +246,15 @@ export function createSpawner(deps: SpawnHandlerDeps) {
         return false;
       }
     };
+    // 起動の指示の先頭（自分の ID・role・親）。組み立てられなければ、何も起動せずに、後始末して失敗にする。
+    const intro = selfIntroLines(nodeId, role, nodeOf(log.state(), nodeId)?.parentId ?? null);
+    if (!intro.ok) {
+      return abort(
+        "internal",
+        "子を起動できなかった",
+        `指示を組み立てられない: ${intro.error.cause}`,
+      );
+    }
     let token: string;
     try {
       token = credentials.issueNodeToken(nodeId, role === "integrator" ? "integrator" : "child");
@@ -261,10 +270,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
         nodeId,
         worktreePath,
         scope: brief.scope,
-        instruction: instructionOf(
-          brief,
-          selfIntroLines(nodeId, role, nodeOf(log.state(), nodeId)?.parentId ?? null),
-        ),
+        instruction: instructionOf(brief, intro.value),
         mcp: { url: ports.mcpUrl, token },
       });
       if (!started.ok) {

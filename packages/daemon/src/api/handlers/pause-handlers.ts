@@ -80,10 +80,11 @@ function instructionAfterAnswer(
   state: OrchState,
   scope: Scope,
   answer: string,
+  intro: readonly string[],
 ): string {
   const n = state.nodes.find((x) => x.id === nodeId);
   return [
-    ...(n === undefined ? [] : selfIntroLines(n.id, n.role, n.parentId)),
+    ...intro,
     `判断が出ました。回答: ${answer}`,
     "作業を再開してください。",
     ...(n?.objective === undefined ? [] : [`目的: ${n.objective}`]),
@@ -186,6 +187,9 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
     if (cwd === undefined || scope === undefined || adapter === undefined) {
       return { kind: "failed", message: `${target}（作業ツリー・範囲・ランタイムを確認できない）` };
     }
+    // 再開の指示の先頭（自分の ID・role・親）。組み立てられなければ、起動せずに失敗にする。
+    const intro = selfIntroLines(node.id, node.role, node.parentId);
+    if (!intro.ok) return { kind: "failed", message: `${target}（指示を組み立てられない）` };
     const warnings: string[] = [];
     const abort = (cause: string): ResumeOutcome => {
       note(target, cause);
@@ -228,7 +232,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
         nodeId: target,
         worktreePath: cwd,
         scope,
-        instruction: instructionAfterAnswer(node.id, before, scope, answer),
+        instruction: instructionAfterAnswer(node.id, before, scope, answer, intro.value),
         mcp: { url: ports.mcpUrl, token },
       });
       if (!started.ok) return abort(`起動に失敗: ${started.error.code}: ${started.error.cause}`);

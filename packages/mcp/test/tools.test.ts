@@ -153,6 +153,7 @@ describe("operationForTool", () => {
     const d = (n: string) => toolsFor("integrator").find((t) => t.name === n)?.description ?? "";
     for (const name of ["node_spawn", "node_split", "decision_present"]) {
       expect(d(name), name).toContain("起動の指示");
+      expect(d(name), name).toContain("tree_list");
       expect(d(name), name).toContain("短縮しない");
     }
     expect(d("tree_list")).toContain("self");
