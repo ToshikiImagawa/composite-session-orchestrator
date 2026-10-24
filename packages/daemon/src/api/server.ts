@@ -142,6 +142,12 @@ export interface ApiDeps {
   readonly credentials: CredentialStore;
   /** 認可（部分木の判定）に使う現在の状態。 */
   readonly getState: () => OrchState;
+  /**
+   * 画面の表示モデル（`/v1/ui/state`）に出す、ノードの能力表の `stopDelegated`（T22d）。省略すると、どのノードにも出さない。
+   * ハンドラと同じく、能力表だけで決める（アダプタが子を管理しているかは見ない）。表示のキャッシュは `lastSeq` を鍵にするので、
+   * 能力表がアダプタごとに固定であること（同じノードの値が、記録なしに変わらない）が前提。
+   */
+  readonly stopDelegated?: (nodeId: string) => boolean;
   readonly handlers: Handlers;
   /** 本文の上限（バイト）。既定 1 MiB。 */
   readonly maxBodyBytes?: number;
@@ -867,7 +873,15 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       uiCache = {
         seq: current.lastSeq,
         etag,
-        json: JSON.stringify({ ok: true, value: uiViewOf(current) }),
+        // 能力表（stopDelegated）は、アダプタごとに固定なので、lastSeq の鍵のままでよい。将来、能力表が記録なしに変わりうる
+        // （実機確認の結果を実行中に差し替えるなど）なら、キャッシュの鍵に能力表を含めるよう見直す。
+        json: JSON.stringify({
+          ok: true,
+          value: uiViewOf(
+            current,
+            deps.stopDelegated === undefined ? {} : { stopDelegated: deps.stopDelegated },
+          ),
+        }),
       };
     }
     const headers = {

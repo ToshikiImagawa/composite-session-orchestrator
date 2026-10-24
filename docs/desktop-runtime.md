@@ -39,3 +39,5 @@ Desktop の子は、統合セッションが Desktop のタスク生成機能で
 
 対象は、能力表の `stopDelegated` が真のノードだけ（CLI のノードは `notDelegated` で失敗し、`node.stop` の再試行を案内する）。
 同じ `requestId` の再送は同じ結果を返し、記録は 1 回。宣言の後、アダプタは、そのノードを管理から外す（`release`）。
+
+人間は、cli の `cso confirm-stopped <nodeId> [--note <根拠>]` か、画面の「止めたと宣言…」（ノード ID の打ち込みが要る。`docs/ui.md`）から宣言できる。

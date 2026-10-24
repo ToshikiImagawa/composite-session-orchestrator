@@ -6,6 +6,7 @@
  *   cso reclaim <nodeId> [--yes --expect <digest>] [--request-id <id>]
  *   cso purge-hold <nodeId> [--until <ISO 8601 UTC> | --days <1〜365>] [--reason <文>] [--request-id <id>]
  *   cso purge-release <nodeId> [--request-id <id>]
+ *   cso confirm-stopped <nodeId> [--note <根拠>] [--request-id <id>]
  *   cso discarded list
  *   cso discarded restore <nodeId|key> [--branch <名前>] [--request-id <id>]
  *   cso discarded drop <nodeId|key> [--yes] [--request-id <id>]
@@ -16,6 +17,7 @@ import {
   type DaemonRequest,
   DEFAULT_PURGE_TOMBSTONE,
   type Failure,
+  isBoundedText,
   isFailure,
   isSafeId,
   LIMITS,
@@ -55,6 +57,10 @@ const USAGE = `使い方:
       --reason  理由（200 文字まで）
   cso purge-release <nodeId> [--request-id <id>]
       保留を解除する。解除のあとは、予告から出し直し、そこから noticeDays 日たつまで消えない
+  cso confirm-stopped <nodeId> [--note <根拠>] [--request-id <id>]
+      daemon が直接止められないノード（Desktop の子。受信箱に停止の代行依頼が出ている）を、親が Desktop で止めた
+      （またはアーカイブした）あとに、止めたと宣言する（取り消せない）。停止未完了から停止済みに進み、宣言した者（人間）と根拠が記録に残る。
+      --note  根拠（200 文字まで。例: 「Desktop でアーカイブした」）
   cso discarded list
       強制の回収で破棄した成果の保管（refs/cso/discarded/*）の一覧: 名前・ノード・先端の SHA・日時・件名（コミットメッセージ由来の、信頼できない入力）。孤立（ノードがもうない）も出る。
       保管は、最終削除（cso purge）のときに、その木のノードの分が消える。数の上限（daemon の設定 discardedRefsMax）に達すると、強制の回収は失敗する
@@ -71,6 +77,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   reclaim: ["--yes", "--expect"],
   "purge-hold": ["--until", "--days", "--reason"],
   "purge-release": [],
+  "confirm-stopped": ["--note"],
   "discarded-list": [],
   "discarded-restore": ["--branch"],
   "discarded-drop": ["--yes"],
@@ -82,6 +89,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "--reason",
   "--branch",
   "--expect",
+  "--note",
 ]);
 
 export function formatFailure(f: Failure): string {
@@ -255,6 +263,10 @@ function describeDiscarded(v: { items: readonly DiscardedView[]; max: number }):
 }
 const isHeld = (v: unknown): v is { held: true; until?: string } =>
   isRecord(v) && v.held === true && (v.until === undefined || typeof v.until === "string");
+/** 停止の宣言の根拠に使えない文字（画面の FORBIDDEN と同じ: 制御文字〔改行・タブを含む〕・書式制御文字）。 */
+const NOTE_FORBIDDEN = /[\p{Cc}\p{Cf}]/u;
+const isConfirmedStopped = (v: unknown): v is { state: string } =>
+  isRecord(v) && typeof v.state === "string";
 const isReleased = (v: unknown): v is { released: true } => isRecord(v) && v.released === true;
 const isPurged = (v: unknown): v is { purged: readonly string[] } =>
   isRecord(v) && isStringArray(v.purged);
@@ -572,6 +584,36 @@ export async function runCommand(
     return {
       exitCode: 0,
       stdout: `保留を解除した: ${nodeId}（保持期間を過ぎていれば、予告から出し直し、noticeDays 日後に消える）\nrequestId: ${id}\n`,
+      stderr: "",
+    };
+  }
+
+  if (command === "confirm-stopped") {
+    // 画面と同じ規則: 1 行（改行・制御文字・書式制御文字は不可）。前後の空白を削り、連続する空白を 1 つにした値を送る。
+    const rawNote = values.get("--note");
+    const note = rawNote?.replace(/\s+/g, " ").trim();
+    if (
+      rawNote !== undefined &&
+      (note === "" ||
+        NOTE_FORBIDDEN.test(rawNote) ||
+        note === undefined ||
+        !isBoundedText(note, LIMITS.summary))
+    ) {
+      return usageError(
+        `--note は 1 行・${LIMITS.summary} 文字以下の文（空白だけ・改行・制御文字は不可）`,
+      );
+    }
+    const res = await invoke(
+      deps.client,
+      id,
+      "node.confirmStopped",
+      { nodeId, ...(note === undefined ? {} : { note }) },
+      isConfirmedStopped,
+    );
+    if (res.kind !== "ok") return fail(res);
+    return {
+      exitCode: 0,
+      stdout: `止めたと宣言した: ${nodeId}（状態: ${terminalSafe(res.value.state, 40)}）\n宣言した者（人間）と根拠を記録し、受信箱の停止の代行依頼を解決済みにした\nrequestId: ${id}\n`,
       stderr: "",
     };
   }
