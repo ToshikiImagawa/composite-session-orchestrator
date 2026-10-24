@@ -154,6 +154,11 @@ export interface DaemonConfig {
    * stateDir の下に写して、子に渡す（hooks・commands・.mcp.json は渡さない）。省略すると、子に skill を渡さない。
    */
   readonly childPluginDir?: string;
+  /**
+   * 子の実行環境（T21）。`cli`（既定）は daemon が SDK で起動する。`desktop` は、統合セッションが Desktop のタスク生成で起動し、
+   * 子が紐付けコードで結ぶ（仮置き。`docs/desktop-runtime.md`）。木全体で 1 つ（ノードごとの混在は扱わない）。
+   */
+  readonly childRuntime?: "cli" | "desktop";
   /** 子ごとの、エージェントのターン数の上限（API の往復）。省略すると 100。 */
   readonly maxTurns?: number;
   /** 子ごとの、費用の上限（USD）。省略すると 5。 */
@@ -190,6 +195,7 @@ const KEYS = [
   "childEnvAllow",
   "childHome",
   "childPluginDir",
+  "childRuntime",
 ] as const;
 
 const bad = (cause: string): { ok: false; error: Failure } => ({
@@ -541,6 +547,13 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     childPluginDir = absPath(raw.childPluginDir);
     if (childPluginDir === undefined) return bad("childPluginDir は絶対パス（.. を含まない）");
   }
+  if (
+    raw.childRuntime !== undefined &&
+    raw.childRuntime !== "cli" &&
+    raw.childRuntime !== "desktop"
+  ) {
+    return bad('childRuntime は "cli" か "desktop"');
+  }
   if (raw.childHome !== undefined && raw.childHome !== "isolated" && raw.childHome !== "inherit") {
     return bad('childHome は "isolated" か "inherit"');
   }
@@ -653,6 +666,9 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(connection === undefined ? {} : { connection }),
       ...(inProgress === undefined ? {} : { inProgress }),
       ...(childPluginDir === undefined ? {} : { childPluginDir }),
+      ...(raw.childRuntime === undefined
+        ? {}
+        : { childRuntime: raw.childRuntime as "cli" | "desktop" }),
       ...(raw.childHome === undefined
         ? {}
         : { childHome: raw.childHome as "isolated" | "inherit" }),

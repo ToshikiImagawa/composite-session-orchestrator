@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -14,6 +15,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { digestOf, type Failure, ok, planPurge, type Result } from "@cso/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deriveId } from "../src/api/handlers/context.js";
@@ -1364,5 +1366,115 @@ describe("子に渡す skill（T22-c）", () => {
     const made = createDaemon(r.config, r.deps);
     expect(made.ok).toBe(false);
     if (!made.ok) expect(made.error.code).toBe("childPluginInvalid");
+  });
+});
+
+describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
+  const brief = {
+    objective: "x",
+    acceptanceCriteria: ["x"],
+    scope: {
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: ["pnpm test"],
+    },
+  };
+
+  it("フックのゲートが有効（既定）なら、子は起動しない（起動の失敗）", async () => {
+    const r = rig({ childRuntime: "desktop" });
+    const d = await boot(r);
+    const res = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(res.json.ok).toBe(false);
+    expect(res.json.error?.code).toBe("startFailed");
+    // 原因（ゲート）は、記録（logLine）に残る
+    expect(r.logs.join("\n")).toContain("hooksUnverified");
+    expect(r.launcher.sessions).toHaveLength(0);
+  });
+
+  it("紐付けの通し: spawn → node.bindCode → POST /v1/bind → トークン → POST /v1/request。コードはログ・記録に残らない", async () => {
+    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const d = await boot(r);
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(spawned.json.ok, JSON.stringify(spawned.json)).toBe(true);
+    const nodeId = spawned.json.value.nodeId as string;
+    expect(r.launcher.sessions).toHaveLength(0); // SDK では起動しない
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    expect(bc.json.ok, JSON.stringify(bc.json)).toBe(true);
+    const instruction = bc.json.value.instruction as string;
+    expect(instruction).toContain(`${d.url}/v1/bind`);
+    const code = (/"bindCode":"([0-9A-Z-]+)"/.exec(instruction) as RegExpExecArray)[1] as string;
+    // 子: 文面のコマンドを、そのままシェルで実行する（トークンは変数に入れ、標準入力から渡す。コマンドの引数に置かない）
+    const lines = instruction.split("\n");
+    const bindLine = lines.find((l) => l.startsWith("CSO_TOKEN=")) as string;
+    const reportLine = (lines.find((l) => l.startsWith("printf 'authorization")) as string)
+      .replace("<一意な ID>", "p1")
+      .replace("<進捗>", "進んだ");
+    expect(bindLine).toContain("-d @-");
+    expect(reportLine).toContain("-H @-");
+    expect(reportLine).not.toContain('Bearer $CSO_TOKEN"');
+    // 同じプロセスの daemon が応答できるよう、非同期で実行する。プロキシの環境変数は外す（ループバックへ直接）。
+    const env = { ...process.env };
+    for (const k of [
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "http_proxy",
+      "https_proxy",
+      "ALL_PROXY",
+      "all_proxy",
+    ])
+      delete env[k];
+    const { stdout: out } = await promisify(execFile)(
+      "bash",
+      ["-c", `${bindLine}\ntest -n "$CSO_TOKEN" || exit 3\n${reportLine}`],
+      { encoding: "utf8", env, timeout: 20_000 },
+    );
+    expect(JSON.parse(out).ok, out).toBe(true);
+    const reports = await call(d.url, d.rootToken, "inbox.fetch", {});
+    expect(JSON.stringify(reports.json)).toContain("進んだ");
+    // 使ったコードは、もう使えない
+    const again = await fetch(`${d.url}/v1/bind`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId, bindCode: code }),
+    });
+    expect(again.status).toBe(401);
+    // コード（区切りあり・なし）は、イベントログ（SQLite のファイル）・記録（logLine）・受信箱に残らない
+    const raw = code.replace(/-/g, "");
+    for (const f of ["state.db", "state.db-wal"]) {
+      const p = join(r.config.stateDir, f);
+      if (!existsSync(p)) continue;
+      const bytes = readFileSync(p).toString("latin1");
+      expect(bytes.includes(raw), f).toBe(false);
+      expect(bytes.includes(code), f).toBe(false);
+    }
+    expect(r.logs.join("\n").includes(raw)).toBe(false);
+    const inbox = await call(d.url, d.rootToken, "inbox.fetch", {});
+    expect(JSON.stringify(inbox.json).includes(raw)).toBe(false);
+  });
+
+  it("画面の表示モデルで、Desktop の子は stopDelegated（停止の宣言を出せる）", async () => {
+    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const d = await boot(r);
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    const nodeId = spawned.json.value.nodeId as string;
+    const ui = await fetch(`${d.url}/v1/ui/state`, {
+      headers: { authorization: `Bearer ${d.humanToken}` },
+    });
+    const nodes = (
+      (await ui.json()) as { value: { nodes: { id: string; stopDelegated?: boolean }[] } }
+    ).value.nodes;
+    expect(nodes.find((x) => x.id === nodeId)?.stopDelegated).toBe(true);
   });
 });

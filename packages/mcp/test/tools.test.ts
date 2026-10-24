@@ -12,6 +12,7 @@ const EXPECTED: Record<McpRole, readonly string[]> = {
     "node_stop",
     "node_confirmStopped",
     "node_hookUnbind",
+    "node_bindCode",
     "inbox_fetch",
     "tree_list",
     "decision_present",

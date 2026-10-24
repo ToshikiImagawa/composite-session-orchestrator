@@ -128,6 +128,14 @@ export interface OperationMap {
     /** `duplicate`: 同じ requestId の再送で、すでに記録済み（もう一度は外さない。`unbound` は false）。 */
     result: { unbound: boolean; duplicate: boolean };
   };
+  /**
+   * Desktop の子の紐付け（FR_032。T21・仮置き）。一度きりの紐付けコードを新しく発行し（古いコードは無効）、親が Desktop の
+   * タスク生成に渡す起動の文面（ID・ブリーフ・紐付けと報告の手順）を返す。コードは記録しない（応答だけ）。
+   */
+  "node.bindCode": {
+    params: { nodeId: string };
+    result: { instruction: string; expiresAt: string };
+  };
   "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly InboxItem[] } };
   "tree.list": { params: Record<string, never>; result: { table: string } };
   "decision.present": {
@@ -322,6 +330,7 @@ export const ROLE_OPERATIONS = {
     "node.stop",
     "node.confirmStopped",
     "node.hookUnbind",
+    "node.bindCode",
     "inbox.fetch",
     "tree.list",
     "decision.present",
@@ -338,6 +347,7 @@ export const ROLE_OPERATIONS = {
   human: [
     "decision.answer",
     "node.confirmStopped",
+    "node.bindCode",
     "node.hookUnbind",
     "scope.decide",
     "node.reclaimInstruct",
@@ -380,6 +390,7 @@ export const SUBTREE_RULES: Readonly<Record<SubtreeOperation, SubtreeRule>> = {
   "node.send": "strictDescendant",
   "node.stop": "strictDescendant",
   "node.confirmStopped": "strictDescendant",
+  "node.bindCode": "strictDescendant",
   "node.hookUnbind": "strictDescendant",
   "node.split": "strictDescendant",
   "node.review": "directChild",
@@ -406,6 +417,7 @@ export const INTEGRATOR_OPERATION_CLASS: Readonly<
   "node.send": "subtree",
   "node.stop": "subtree",
   "node.confirmStopped": "subtree",
+  "node.bindCode": "subtree",
   "node.hookUnbind": "subtree",
   "inbox.fetch": "callerFiltered",
   "tree.list": "callerFiltered",

@@ -46,6 +46,8 @@ export type RedeemResult =
 export interface BindCodes {
   /** ノードに結ぶコードを発行する。そのノードの古いコードは無効になる。 */
   issue(nodeId: string): string;
+  /** `issue` と同じく発行し、有効期限（ミリ秒の時刻）も返す（`node.bindCode`。T21）。 */
+  issueWithExpiry(nodeId: string): { readonly code: string; readonly expiresAtMs: number };
   /**
    * `nodeId` のコードを使う。コードとノードが合い、`accept(nodeId)` が真のときだけ、コードを消費して成功する。
    * `accept` が偽・例外なら `rejected`（消費しない）。失敗はロックしない。
@@ -82,17 +84,21 @@ export function createBindCodes(options: BindCodesOptions = {}): BindCodes {
     return out;
   };
 
+  const issueWithExpiry = (nodeId: string): { code: string; expiresAtMs: number } => {
+    if (!isSafeId(nodeId)) throw new RangeError("nodeId が不正");
+    entries.delete(nodeId); // 古いコードを無効にし、挿入順を更新する
+    const code = generate();
+    const expiresAtMs = clock() + ttl;
+    entries.set(nodeId, { hash: sha256(code), expiresAt: expiresAtMs });
+    while (entries.size > maxOutstanding) {
+      entries.delete(entries.keys().next().value as string);
+    }
+    return { code, expiresAtMs };
+  };
+
   return {
-    issue(nodeId) {
-      if (!isSafeId(nodeId)) throw new RangeError("nodeId が不正");
-      entries.delete(nodeId); // 古いコードを無効にし、挿入順を更新する
-      const code = generate();
-      entries.set(nodeId, { hash: sha256(code), expiresAt: clock() + ttl });
-      while (entries.size > maxOutstanding) {
-        entries.delete(entries.keys().next().value as string);
-      }
-      return code;
-    },
+    issue: (nodeId) => issueWithExpiry(nodeId).code,
+    issueWithExpiry,
     redeem(nodeId, code, accept) {
       const now = clock();
       const node = typeof nodeId === "string" && isSafeId(nodeId) ? nodeId : undefined;

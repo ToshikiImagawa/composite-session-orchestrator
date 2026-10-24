@@ -61,7 +61,8 @@ export const DELEGATION_STEPS =
 
 export class DesktopRuntimeAdapter implements RuntimeAdapter {
   readonly kind = "desktop" as const;
-  private readonly scopes = new Map<string, Scope>();
+  /** 起動を受け付けた子の範囲と、起動の指示（`node.bindCode` で親に渡す。T21）。daemon の再起動で失われる。 */
+  private readonly nodes = new Map<string, { scope: Scope; instruction: string }>();
 
   constructor(private readonly deps: DesktopAdapterDeps) {}
 
@@ -70,7 +71,7 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
   }
 
   has(nodeId: string): boolean {
-    return this.scopes.has(nodeId);
+    return this.nodes.has(nodeId);
   }
 
   capabilities(_nodeId: string): Capabilities {
@@ -89,7 +90,7 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
       }
       this.deps.onWarning?.(request.nodeId, `フックのゲートを設定で外して起動した: ${UNSAFE}`);
     }
-    this.scopes.set(request.nodeId, request.scope);
+    this.nodes.set(request.nodeId, { scope: request.scope, instruction: request.instruction });
     // 子のセッション識別子は Desktop のタスク生成の戻り値にない。紐付け（T21）までは、ノードの ID で代える。
     return ok({ sessionId: request.nodeId, cwd: request.worktreePath, removedEnv: [] });
   }
@@ -102,10 +103,16 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
     );
   }
 
+  /** 起動の指示（ID・ブリーフ）。起動を受け付けていなければ（daemon の再起動のあとなど）undefined。 */
+  instructionOf(nodeId: string): string | undefined {
+    return this.nodes.get(nodeId)?.instruction;
+  }
+
+  /**
+   * 停止は、親への代行依頼なので、子を管理しているか（再起動で失われる）を問わない（能力表どおり。T21）。ノードがなければ、
+   * 記録（`stopTimeout`）が拒否される。
+   */
   async stop(nodeId: string, request: StopRequest): Promise<Result<StopValue, Failure>> {
-    if (!this.has(nodeId)) {
-      return fail("notManaged", `ノード ${nodeId} の子を管理していない`, "ノードの状態を確認する");
-    }
     const requestId = derivedRequestId({ system: true }, `desktop-stop-${request.stopSeq}`, 0);
     let r: Result<unknown, Failure>;
     try {
@@ -136,14 +143,15 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
   }
 
   release(nodeId: string): void {
-    this.scopes.delete(nodeId);
+    this.nodes.delete(nodeId);
   }
 
   updateScope(nodeId: string, scope: Scope): Result<undefined, Failure> {
     if (!this.has(nodeId)) {
       return fail("notManaged", `ノード ${nodeId} の子を管理していない`, "ノードの状態を確認する");
     }
-    this.scopes.set(nodeId, scope);
+    const cur = this.nodes.get(nodeId);
+    if (cur !== undefined) this.nodes.set(nodeId, { ...cur, scope });
     return ok(undefined);
   }
 }

@@ -2,7 +2,7 @@ import { type EventBody, type NodeEvent, type ProcessInfo, stateOf } from "@cso/
 import { describe, expect, it } from "vitest";
 import { EventLog } from "../src/eventlog.js";
 import { createMemoryStore } from "../src/memory-store.js";
-import { reconcileOnStartup } from "../src/reconcile.js";
+import { EXTERNAL_CHECK_SUMMARY, reconcileOnStartup } from "../src/reconcile.js";
 
 const SYS = { system: true } as const;
 const clock = (): string => "2026-10-20T00:00:00Z";
@@ -14,6 +14,7 @@ const rig = (
     processes?: Record<string, readonly ProcessInfo[] | null>;
     managed?: string[];
     noCwd?: string[];
+    external?: boolean;
   } = {},
 ) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
@@ -61,6 +62,7 @@ const rig = (
           : [];
       },
       has: (id) => opts.managed?.includes(id) ?? false,
+      ...(opts.external === true ? { external: () => true } : {}),
     });
   return { log, run, probed, s: () => log.state() };
 };
@@ -122,5 +124,26 @@ describe("reconcileOnStartup（再起動の後、記録と実際のプロセス�
     const seq = r.s().lastSeq;
     await r.run();
     expect(r.s().lastSeq).toBe(seq);
+  });
+});
+
+describe("daemon の外で動く子（Desktop。T21）", () => {
+  it("照合せず状態を変えない。根の受信箱に、優先度のある項目（stopIncomplete）をまとめて 1 件。再実行で重複しない", async () => {
+    const r = rig({ external: true });
+    const before = r.s().nodes.map((x) => [x.id, x.state]);
+    const out = await r.run();
+    expect(out).toEqual([]);
+    expect(r.probed).toEqual([]);
+    expect(r.s().nodes.map((x) => [x.id, x.state])).toEqual(before);
+    const asks = () =>
+      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+    expect(asks()).toHaveLength(1);
+    const [ask] = asks();
+    expect(ask).toMatchObject({ kind: "stopIncomplete", nodeId: "root" });
+    // 対象: running（a・g）・waiting（w）・stopping（s）・stopIncomplete（i）の 5 件。done（d）・pending（p）・根は対象外
+    expect(ask?.summary).toContain("5 件");
+    for (const id of ["a", "w", "s", "i", "g"]) expect(ask?.summary).toContain(id);
+    await r.run();
+    expect(asks()).toHaveLength(1);
   });
 });
