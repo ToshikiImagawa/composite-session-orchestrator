@@ -149,6 +149,11 @@ export interface DaemonConfig {
   readonly childEnvAllow?: readonly string[];
   /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
   readonly childHome?: "isolated" | "inherit";
+  /**
+   * 子に渡す skill（`cso-child`・`cso-integrator`）を持つ plugin のディレクトリ（絶対パス。T22-c）。daemon は、ここから skill だけを
+   * stateDir の下に写して、子に渡す（hooks・commands・.mcp.json は渡さない）。省略すると、子に skill を渡さない。
+   */
+  readonly childPluginDir?: string;
   /** 子ごとの、エージェントのターン数の上限（API の往復）。省略すると 100。 */
   readonly maxTurns?: number;
   /** 子ごとの、費用の上限（USD）。省略すると 5。 */
@@ -184,6 +189,7 @@ const KEYS = [
   "maxBudgetUsd",
   "childEnvAllow",
   "childHome",
+  "childPluginDir",
 ] as const;
 
 const bad = (cause: string): { ok: false; error: Failure } => ({
@@ -530,6 +536,11 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     }
     childEnvAllow = [...(v as string[])];
   }
+  let childPluginDir: string | undefined;
+  if (raw.childPluginDir !== undefined) {
+    childPluginDir = absPath(raw.childPluginDir);
+    if (childPluginDir === undefined) return bad("childPluginDir は絶対パス（.. を含まない）");
+  }
   if (raw.childHome !== undefined && raw.childHome !== "isolated" && raw.childHome !== "inherit") {
     return bad('childHome は "isolated" か "inherit"');
   }
@@ -641,6 +652,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(rateLimit === undefined ? {} : { rateLimit }),
       ...(connection === undefined ? {} : { connection }),
       ...(inProgress === undefined ? {} : { inProgress }),
+      ...(childPluginDir === undefined ? {} : { childPluginDir }),
       ...(raw.childHome === undefined
         ? {}
         : { childHome: raw.childHome as "isolated" | "inherit" }),

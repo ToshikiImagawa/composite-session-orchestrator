@@ -49,6 +49,21 @@ daemon が SDK で起動する子は、MCP の設定を daemon が組み立て�
 - **本文の上限**: 1 MiB（窓口と同じ）。超えたら 413（「本文が大きすぎる」）で、フックは拒否として扱う。
 - 応答: `{ ok: true, value: { decision: "allow" } }` か `{ ok: true, value: { decision: "deny", reason } }`。
 
+## daemon が起動する子に渡す skill（T22-c）
+
+daemon が SDK で起動する子（CLI の子）には、plugin の skill を渡せる。daemon の設定 `childPluginDir`（この plugin のディレクトリの絶対パス）を指定する。
+
+- SDK の `options.plugins` は、plugin の skills・hooks・agents・commands をまとめて読む（hooks だけを外せない）。そのまま渡すと `hooks/hooks.json` も読まれ、SDK のフックと二重の判定になる。そこで daemon は、起動のたびに、状態の置き場の下の `child-plugin/` を消して作り直し、**`skills/cso-child/SKILL.md`・`skills/cso-integrator/SKILL.md` と `plugin.json`（名前 `cso-child-skills`）だけ**を写す。hooks・commands・agents・`.mcp.json` は写さない。写す先は状態の置き場の下だけ、写す元のシンボリックリンクは辿らない、SKILL.md の `name` はディレクトリ名と一致すること。満たさなければ、daemon は起動しない。
+- 子には `plugins: [{ type: "local", path: <child-plugin>, skipMcpDiscovery: true }]` と `skills: ["cso-child-skills:<skill>"]` を渡す。中間の統合ノード（role が integrator）は `cso-integrator`、それ以外は `cso-child`。`settingSources: []`・`strictMcpConfig: true` は変わらない（利用者の設定・MCP は混ざらない）。
+- 起動の指示には手順の本文を書かず、末尾に「作業の手順は、skill「…」に従う」の 1 行だけを足す。
+- 制約: 写すのは `SKILL.md` だけなので、skill からほかのファイル（`references/`・スクリプトなど）は参照できない。skill は 1 つのファイルで完結させる。
+- 作り直すのは daemon の起動時だけ。daemon を再起動すると、その daemon が起動した子も止まるので、実行中の子が使っている plugin を消すことはない。
+- 子のフック（`hook-policy`）は、`Skill` ツール（skill を読む）を許可する。SDK のコールバックとファイルのフックの受け口（`POST /v1/hook`）で同じ判定。
+- `childPluginDir` を省略すると、子に skill を渡さない（起動時に `childPluginSkipped` を記録する）。
+- パス（NFR_012）: plugin のパスは、コード・skill に書かない。写す元は設定、写す先は状態の置き場から決める。
+
+手動確認（未。実 SDK）: 子が skill を読めた（`Skill` ツールが許可され、内容に従って動く）こと、フックが二重にならないこと（hooks.json の判定が動かないこと）。
+
 ## Desktop
 
 Desktop の子へのフックの継承と、接続設定の引き継ぎは、**実機での確認（`.sdd/` の要求の項目 4）のあと**に扱う。この版は、CLI の分だけ。

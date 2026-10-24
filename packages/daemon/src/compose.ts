@@ -77,6 +77,7 @@ import { EventLog } from "./eventlog.js";
 import type { GitPorts, LossFacts } from "./git-ports.js";
 import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
+import { buildChildPlugin, CHILD_PLUGIN_DIR } from "./sdk/child-plugin.js";
 import { createLsofProbe, nodeExec, type ProcessProbe } from "./sdk/lsof-probe.js";
 import { nodeTimers } from "./sdk/node-timers.js";
 import { nodeFsOps, resolveForWrite } from "./sdk/path-resolve.js";
@@ -432,6 +433,25 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     }
   }
 
+  // 子に渡す skill だけの plugin（T22-c）。起動のたびに作り直す。作れなければ、起動しない（フェイルクローズ）。
+  let childPluginPath: string | undefined;
+  if (config.childPluginDir === undefined) {
+    note("childPluginSkipped", {
+      reason: "childPluginDir の設定がないので、子に skill を渡していない",
+    });
+  } else {
+    const built = buildChildPlugin(
+      config.childPluginDir,
+      join(config.stateDir, CHILD_PLUGIN_DIR),
+      config.stateDir,
+    );
+    if (!built.ok) {
+      closeAll();
+      return built;
+    }
+    childPluginPath = built.value.path;
+  }
+
   const probe = deps.probe ?? createLsofProbe(nodeExec);
   const tracked = trackTimers(deps.timers ?? nodeTimers);
   const timers = tracked.timers;
@@ -445,6 +465,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     newRequestId: () => `adp-${randomBytes(12).toString("hex")}`,
     parentEnv: deps.parentEnv ?? process.env,
     ...(config.childEnvAllow === undefined ? {} : { childEnvAllow: config.childEnvAllow }),
+    ...(childPluginPath === undefined ? {} : { childPluginPath }),
     onUnexpectedExit: (nodeId, reason) => note("unexpectedExit", { nodeId, reason }),
     onFailure: (nodeId, cause) => note("handlerFailure", { nodeId, cause }),
     waitKeyOf: (nodeId) => {
