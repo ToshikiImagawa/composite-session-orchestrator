@@ -6,7 +6,7 @@ import {
   PRIORITIES,
 } from "@cso/core";
 import { describe, expect, it } from "vitest";
-import { MCP_ROLES, nextActionsFor, renderInbox, toolsFor } from "../src/index.js";
+import { inboxProblems, MCP_ROLES, nextActionsFor, renderInbox, toolsFor } from "../src/index.js";
 
 const item = (o: Partial<InboxItem> & Pick<InboxItem, "id">): InboxItem => ({
   seq: 1,
@@ -344,5 +344,70 @@ describe("不正な項目は、その項目だけを除外する（受信箱全�
     const page = run(item({ id: "a", at: "not-a-date" }), item({ id: "b" }));
     expect(page.excluded).toBe(0);
     expect(page.entries.map((e) => e.id)).toEqual(["b", "a"]);
+  });
+});
+
+describe("除外した項目の不備の理由（inboxProblems。T24-m2）", () => {
+  const XSS = '<img src=x onerror="x">';
+  const cases: [string, unknown, string][] = [
+    ["オブジェクトでない", "x", "notObject"],
+    ["id が不正", { ...item({ id: "a" }), id: "bad id" }, "badId"],
+    ["nodeId が不正", { ...item({ id: "a" }), nodeId: XSS }, "badId"],
+    ["seq が不正", { ...item({ id: "a" }), seq: -1 }, "badSeq"],
+    ["kind が不正", { ...item({ id: "a" }), kind: "zzz" }, "badKind"],
+    ["dependsOn が不正", { ...item({ id: "a" }), dependsOn: [XSS] }, "badDependsOn"],
+    ["ref が不正", { ...item({ id: "a" }), ref: XSS }, "badRef"],
+    [
+      "digest に summary がない",
+      item({ id: "a", kind: "digest", priority: "info" } as never),
+      "digestWithoutSummary",
+    ],
+    [
+      "digest でないのに priority",
+      item({ id: "a", priority: "info" } as never),
+      "priorityMisplaced",
+    ],
+    [
+      "priority が不正",
+      item({ id: "a", kind: "digest", summary: "s", priority: "zzz" } as never),
+      "badPriority",
+    ],
+  ];
+  it.each(cases)("%s は、固定の記号 %#", (_n, x, reason) => {
+    const p = inboxProblems([x]);
+    expect(p.map((e) => e.reason)).toEqual([reason]);
+    // 除外の件数は、renderInbox と同じ
+    const page = renderInbox([x] as never);
+    if (!page.ok) throw new Error("failure");
+    expect(page.value.excluded).toBe(1);
+  });
+
+  it("itemId は、識別子の形式のときだけ入る。項目の内容（summary・ref・nodeId）は入らない", () => {
+    const p = inboxProblems([
+      { ...item({ id: "a1", summary: `秘密の要約 ${XSS}` }), ref: XSS },
+      { ...item({ id: "a2" }), id: XSS },
+      "x",
+    ]);
+    expect(p).toEqual([
+      { itemId: "a1", reason: "badRef" },
+      { reason: "badId" },
+      { reason: "notObject" },
+    ]);
+    expect(JSON.stringify(p)).not.toContain("秘密");
+    expect(JSON.stringify(p)).not.toContain("<img");
+  });
+
+  it("正しい項目は含まない。配列でなければ空。件数は renderInbox の excluded と一致する", () => {
+    const items = [
+      item({ id: "ok" }),
+      { ...item({ id: "b" }), kind: "zzz" },
+      item({ id: "ok2", seq: 2 }),
+    ];
+    const page = renderInbox(items as never);
+    if (!page.ok) throw new Error("failure");
+    expect(inboxProblems(items)).toHaveLength(page.value.excluded);
+    expect(inboxProblems("x")).toEqual([]);
+    // 応答（renderInbox）は、不備の理由を持たない
+    expect(JSON.stringify(page.value)).not.toContain("badKind");
   });
 });

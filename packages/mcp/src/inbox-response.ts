@@ -109,27 +109,57 @@ const isNonNegInt = (x: unknown): x is number => Number.isInteger(x) && (x as nu
  * `at` は検査しない（`summary` は、`digest` が空でない文字列を持つことだけ検査する）: `summary` の有無・長さ・文字は、core が書き込み時に保証し、`at` は書き込み時に
  * ISO 8601 UTC を保証する（不正でも `sortInbox` が時刻の最後に置くので、整列は壊れない）。
  */
-function itemProblem(x: unknown): string | undefined {
-  if (!isRecord(x)) return "項目がオブジェクトでない";
-  if (!isSafeId(x.id) || !isSafeId(x.nodeId)) return "id・nodeId が識別子の形式でない";
-  if (!isNonNegInt(x.seq)) return `seq が不正: ${String(x.id)}`;
-  if (!(INBOX_KINDS as readonly unknown[]).includes(x.kind)) return `kind が不正: ${x.id}`;
-  if (!Array.isArray(x.dependsOn) || !x.dependsOn.every(isSafeId)) {
-    return `dependsOn が識別子の配列でない: ${x.id}`;
-  }
-  if (x.ref !== undefined && !isSafeId(x.ref)) return `ref が識別子の形式でない: ${x.id}`;
+function itemProblem(x: unknown): InboxProblemReason | undefined {
+  if (!isRecord(x)) return "notObject";
+  if (!isSafeId(x.id) || !isSafeId(x.nodeId)) return "badId";
+  if (!isNonNegInt(x.seq)) return "badSeq";
+  if (!(INBOX_KINDS as readonly unknown[]).includes(x.kind)) return "badKind";
+  if (!Array.isArray(x.dependsOn) || !x.dependsOn.every(isSafeId)) return "badDependsOn";
+  if (x.ref !== undefined && !isSafeId(x.ref)) return "badRef";
   // 要約（digest）は、空でない summary を必ず持つ（core が書き込み時に、summary があることと、その長さ・文字を保証する）。
   if (x.kind === "digest" && !(typeof x.summary === "string" && x.summary.length > 0)) {
-    return `digest が、空でない summary を持たない: ${x.id}`;
+    return "digestWithoutSummary";
   }
   // 優先度は、要約（digest）だけが持ち、必ず持つ（PRIORITIES のどれか）。
-  if ((x.kind === "digest") !== (x.priority !== undefined)) {
-    return `priority は、digest だけが持ち、必ず持つ: ${x.id}`;
-  }
+  if ((x.kind === "digest") !== (x.priority !== undefined)) return "priorityMisplaced";
   if (x.priority !== undefined && !(PRIORITIES as readonly unknown[]).includes(x.priority)) {
-    return `priority が不正: ${x.id}`;
+    return "badPriority";
   }
   return undefined;
+}
+
+/**
+ * 形が不正で除外した項目の不備の理由（T24-m2）。固定の記号だけで、項目の内容（summary・ref の値など）は含まない。
+ * mcp のログに出す（応答には出さない）。
+ */
+export type InboxProblemReason =
+  | "notObject"
+  | "badId"
+  | "badSeq"
+  | "badKind"
+  | "badDependsOn"
+  | "badRef"
+  | "digestWithoutSummary"
+  | "priorityMisplaced"
+  | "badPriority";
+
+export interface InboxProblem {
+  /** 項目の ID。識別子の形式（`isSafeId`）のときだけ入る。 */
+  readonly itemId?: string;
+  readonly reason: InboxProblemReason;
+}
+
+/** 除外する項目の、不備の理由の一覧（`renderInbox` と同じ判定。配列でなければ空）。 */
+export function inboxProblems(items: unknown): InboxProblem[] {
+  if (!Array.isArray(items)) return [];
+  const out: InboxProblem[] = [];
+  for (const it of items) {
+    const reason = itemProblem(it);
+    if (reason === undefined) continue;
+    const id = isRecord(it) && isSafeId(it.id) ? it.id : undefined;
+    out.push(id === undefined ? { reason } : { itemId: id, reason });
+  }
+  return out;
 }
 
 /** 保存データの不備（受信箱の項目が配列でない）。呼び出し側の誤りではないので `invalid_argument` にしない。 */

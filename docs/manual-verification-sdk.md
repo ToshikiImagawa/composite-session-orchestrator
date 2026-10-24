@@ -83,6 +83,8 @@
    - 人間のトークン（`$HUMAN`）: 403（MCP では、人間用の操作を公開しない）。トークンなし・無効なトークンは 401。
 4. 子に渡す MCP の設定は、daemon が組み立てる（`mcpServers.node = { type: "http", url: <mcpUrl>, headers: { Authorization: "Bearer <ノードのトークン>" } }`）。手で試すときは、この形で書く。`.mcp.json` に書くトークンは、使い捨てのリポジトリでだけにする。
 
+受信箱の不備のログ（T24-m2）: `inbox_fetch` で、形が不正な項目を除外したとき（応答の `excluded` が 0 でないとき）、標準エラーに `{"event":"inboxExcluded","count":N,"problems":[{"itemId":"…","reason":"badKind"},…],"at":"…"}` を出す。`reason` は固定の記号（`notObject`・`badId`・`badSeq`・`badKind`・`badDependsOn`・`badRef`・`digestWithoutSummary`・`priorityMisplaced`・`badPriority`）で、`itemId` は識別子の形式のときだけ入る。項目の内容（summary・ref の値・nodeId）は出さない。応答（`excluded` の件数）は変わらない。受信箱は LLM のターンごとに読まれるので、**同じ不備（項目 ID と理由）は、`cso-mcp` のプロセスの間に 1 回だけ**出す。**ID のない不備（オブジェクトでない・ID が不正）は、理由ごとに 1 回**。1 行に出すのは 20 件まで（超えたら `"truncated":true`。出さなかった分は覚えないので、次の取得で出る）。覚える数は 1000 まで。**上限に達したら、`{"event":"inboxExcludedLimit","remembered":1000,"at":"…"}` を 1 回だけ出し、以後は新しい不備も出さない**（不備が多すぎるときに、行が出続けないため。保存データの不備を、まとめて調べる）。**`cso-mcp` を再起動すると、覚えたものは消え、同じ不備がまた 1 回出る**。
+
 停止するときは、`cso-mcp` に SIGINT・SIGTERM を送る（処理中の呼び出しが終わるのを最大 8 秒待ってから止まる）。
 
 ## 確認する項目

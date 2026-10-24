@@ -2,7 +2,16 @@ import { failure, ok, type Result } from "@cso/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
-import { createToolServer, MCP_ROLES, type Relay, toolsFor, WHOAMI_TOOL } from "../src/index.js";
+import {
+  createInboxProblemReporter,
+  createToolServer,
+  type InboxExcludedLimitLog,
+  type InboxExcludedLog,
+  MCP_ROLES,
+  type Relay,
+  toolsFor,
+  WHOAMI_TOOL,
+} from "../src/index.js";
 
 const fakeRelay = (
   request: Relay["request"] = async () => ok({ accepted: true }),
@@ -267,5 +276,156 @@ describe("whoami ツール（T10m-wh）", () => {
     expect(r.isError).toBe(true);
     expect(text(r).code).toBe("whoami_role_mismatch");
     expect(text(r).nextActions.length).toBeGreaterThan(0);
+  });
+});
+
+describe("受信箱の不備のログ（T24-m2）", () => {
+  const good = (id: string, seq: number) => ({
+    seq,
+    id,
+    kind: "info",
+    nodeId: "a",
+    dependsOn: [],
+    at: "2026-01-01T00:00:00Z",
+  });
+  const XSS = '<img src=x onerror="x">';
+
+  it("除外があれば、固定の記号と項目 ID だけを 1 回ログに出す。応答は変わらない（不備の理由を含まない）", async () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const items = [
+      good("i1", 1),
+      { ...good("b1", 2), kind: "zzz", summary: `秘密 ${XSS}` },
+      { ...good("b2", 3), ref: XSS },
+    ];
+    const relay = fakeRelay(async () => ok({ items }));
+    const server = createToolServer({
+      role: "integrator",
+      relay,
+      onInboxProblems: createInboxProblemReporter({
+        log: (e) => void logs.push(e),
+        clock: () => "T",
+      }),
+    });
+    const client = new Client({ name: "t", version: "0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const page = text(await client.callTool({ name: "inbox_fetch", arguments: {} }));
+    expect(page.excluded).toBe(2);
+    expect(page.total).toBe(1);
+    expect(JSON.stringify(page)).not.toContain("badKind");
+    expect(logs).toEqual([
+      {
+        event: "inboxExcluded",
+        count: 2,
+        problems: [
+          { itemId: "b1", reason: "badKind" },
+          { itemId: "b2", reason: "badRef" },
+        ],
+        at: "T",
+      },
+    ]);
+    expect(JSON.stringify(logs)).not.toContain("秘密");
+    expect(JSON.stringify(logs)).not.toContain("<img");
+    // 同じ不備の 2 回目は出さない
+    await client.callTool({ name: "inbox_fetch", arguments: {} });
+    expect(logs).toHaveLength(1);
+  });
+
+  it("除外がなければ出さない", async () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const relay = fakeRelay(async () => ok({ items: [good("i1", 1)] }));
+    const server = createToolServer({
+      role: "integrator",
+      relay,
+      onInboxProblems: createInboxProblemReporter({ log: (e) => void logs.push(e) }),
+    });
+    const client = new Client({ name: "t", version: "0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    await client.callTool({ name: "inbox_fetch", arguments: {} });
+    expect(logs).toEqual([]);
+  });
+
+  const lines = (logs: (InboxExcludedLog | InboxExcludedLimitLog)[]) =>
+    logs.filter((l): l is InboxExcludedLog => l.event === "inboxExcluded");
+  const many = (n: number, prefix = "x") =>
+    Array.from({ length: n }, (_, i) => ({ itemId: `${prefix}${i}`, reason: "badKind" as const }));
+
+  it("報告: 新しい不備だけを出す。1 行は 20 件まで。出さなかった分は覚えず、次の取得で出る（21 件 → 2 回目に残りの 1 件）", () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const report = createInboxProblemReporter({ log: (e) => void logs.push(e), clock: () => "T" });
+    const p = many(21);
+    report(p);
+    expect(lines(logs)[0]?.count).toBe(20);
+    expect(lines(logs)[0]?.truncated).toBe(true);
+    report(p);
+    expect(lines(logs)[1]?.problems).toEqual([{ itemId: "x20", reason: "badKind" }]);
+    expect(lines(logs)[1]?.truncated).toBeUndefined();
+    report(p); // すべて出したので、もう出さない
+    expect(logs).toHaveLength(2);
+    report([{ itemId: "new", reason: "badSeq" }]);
+    expect(lines(logs)[2]?.problems).toEqual([{ itemId: "new", reason: "badSeq" }]);
+  });
+
+  it("報告: ID のない不備は、理由ごとに 1 回。同じ取得の中の重複も 1 回", () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const report = createInboxProblemReporter({ log: (e) => void logs.push(e) });
+    report([{ reason: "notObject" }, { reason: "notObject" }, { reason: "badId" }]);
+    report([{ reason: "notObject" }]);
+    expect(lines(logs).map((l) => l.problems)).toEqual([
+      [{ reason: "notObject" }, { reason: "badId" }],
+    ]);
+  });
+
+  it("報告: 覚える数の上限に達したら、inboxExcludedLimit を 1 回だけ出し、以後は黙る（1500 件を 5 回取得しても、行が出続けない）", () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const report = createInboxProblemReporter({
+      log: (e) => void logs.push(e),
+      maxRemembered: 30,
+      clock: () => "T",
+    });
+    const p = many(1500);
+    for (let i = 0; i < 5; i++) report(p);
+    // 1 回目: 20 件。2 回目: 残りの容量 10 件と、上限の 1 行。3〜5 回目: 何も出さない
+    expect(logs.map((l) => l.event)).toEqual([
+      "inboxExcluded",
+      "inboxExcluded",
+      "inboxExcludedLimit",
+    ]);
+    expect(lines(logs).map((l) => l.count)).toEqual([20, 10]);
+    expect(logs.at(-1)).toEqual({ event: "inboxExcludedLimit", remembered: 30, at: "T" });
+    report([{ itemId: "new", reason: "badSeq" }]); // 新しい不備も、もう出さない
+    expect(logs).toHaveLength(3);
+  });
+
+  it("報告: 既定の上限（1000）でも、1500 件を何度取得しても、行は有限（20 件ずつ 50 行と、上限の 1 行）", () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const report = createInboxProblemReporter({ log: (e) => void logs.push(e) });
+    const p = many(1500);
+    for (let i = 0; i < 100; i++) report(p);
+    expect(lines(logs)).toHaveLength(50);
+    expect(logs.filter((l) => l.event === "inboxExcludedLimit")).toHaveLength(1);
+  });
+
+  it("報告とツール: ログ・報告の失敗で、例外にせず、応答を変えない", async () => {
+    const broken = createInboxProblemReporter({
+      log: () => {
+        throw new Error("x");
+      },
+    });
+    expect(() => broken([{ reason: "notObject" }])).not.toThrow();
+    const relay = fakeRelay(async () => ok({ items: ["x"] }));
+    const server = createToolServer({
+      role: "integrator",
+      relay,
+      onInboxProblems: () => {
+        throw new Error("x");
+      },
+    });
+    const client = new Client({ name: "t", version: "0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const r = await client.callTool({ name: "inbox_fetch", arguments: {} });
+    expect(text(r).excluded).toBe(1);
   });
 });

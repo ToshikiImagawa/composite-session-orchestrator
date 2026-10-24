@@ -14,7 +14,12 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { IdentityVerifier } from "./identity.js";
 import { createRelay, MAX_RELAY_BYTES } from "./relay.js";
-import { openSession } from "./server.js";
+import {
+  createInboxProblemReporter,
+  type InboxExcludedLimitLog,
+  type InboxExcludedLog,
+  openSession,
+} from "./server.js";
 
 const HOST = "127.0.0.1";
 const PATH = "/mcp";
@@ -25,7 +30,11 @@ export type McpHttpLogEvent =
   /** 検証なしで動いている（起動のとき 1 度だけ）。 */
   | { readonly event: "identityUnverified"; readonly at: string }
   /** 検証のあとで、応答の送り手が、検証した daemon と違った（応答は捨てた。トークンの再発行が要る）。 */
-  | { readonly event: "identityMismatch"; readonly at: string };
+  | { readonly event: "identityMismatch"; readonly at: string }
+  /** 受信箱で除外した項目の不備（T24-m2。固定の記号と、識別子の形式の項目 ID だけ。同じ不備はプロセスの間に 1 回）。 */
+  | InboxExcludedLog
+  /** 不備を覚える数の上限に達した（1 回だけ。以後、新しい不備は出さない）。 */
+  | InboxExcludedLimitLog;
 
 /**
  * daemon の身元確認の方式。`verified`: トークンつきの要求の直前に、毎回、検証する。`unverified`: 検証しない
@@ -163,6 +172,10 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
   const maxBody = opts.maxBodyBytes ?? MAX_RELAY_BYTES;
   const bodyTimeoutMs = opts.bodyTimeoutMs ?? BODY_TIMEOUT_MS;
   const graceMs = opts.shutdownGraceMs ?? SHUTDOWN_GRACE_MS;
+  // 受信箱の不備の報告は、接続をまたいで 1 つ（同じ不備は、プロセスの間に 1 回だけ出す）
+  const reportInboxProblems = createInboxProblemReporter({
+    log: (e) => opts.logger?.(e),
+  });
   const log = (code: string): void => {
     try {
       opts.logger?.({ event: "sessionFailed", code, at: new Date().toISOString() });
@@ -285,7 +298,7 @@ export function createMcpHttpServer(opts: McpHttpOptions): Result<McpHttpServer>
         { "www-authenticate": "Bearer" },
       );
     }
-    const session = await openSession(relay.value);
+    const session = await openSession(relay.value, reportInboxProblems);
     if (!session.ok) {
       req.resume();
       log(session.error.code);
