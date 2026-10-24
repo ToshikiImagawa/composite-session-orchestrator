@@ -296,11 +296,14 @@ describe("拡張要求の対象の表示（T23-b）", () => {
       "あ",
       "'",
     ];
+    // 長さ 0〜4 の全部の組み合わせ（網羅）。長さごとに、前の長さの語だけを伸ばす（全体を毎回なめない）
     const words = [""];
+    let level = [""];
     for (let len = 0; len < 4; len++) {
-      for (const base of words.filter((x) => x.length === len)) {
-        for (const ch of alphabet) words.push(base + ch);
-      }
+      const next: string[] = [];
+      for (const base of level) for (const ch of alphabet) next.push(base + ch);
+      words.push(...next);
+      level = next;
     }
     // 長いものは、擬似乱数（固定の種）で
     let seed = 12345;
@@ -314,23 +317,40 @@ describe("拡張要求の対象の表示（T23-b）", () => {
       for (let k = 0; k < n; k++) t += alphabet[Math.floor(rnd() * alphabet.length)];
       words.push(t);
     }
+    // 判定は、件数が多い（約 23 万回）ので、expect を 1 件ずつ呼ばずに、同じ条件を素の比較で確かめ、破れた入力を集めて最後に 1 回だけ比べる
+    // （判定の条件は、以前の expect と同じ。expect の呼び出しの重さで、遅い CI の時間の上限を超えないため）
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: 制御文字が残らないことの検査
+    const CONTROL = /[\u0000-\u001f\u007f-\u009f\p{Cf}]/u;
+    const DOTDOT = /(^|[\s=,:/\\])\.\.($|[\s,:/\\])/;
+    const COMMAND = /^[A-Za-z0-9._:@%+=,/ -]+$/;
+    const broken: { kind: string; value: string; why: string }[] = [];
+    const note = (kind: string, value: string, why: string) => {
+      if (broken.length < 20) broken.push({ kind, value, why });
+    };
     let shown = 0;
+    let checked = 0;
     for (const kind of ["write", "command"] as const) {
       for (const value of words) {
+        checked++;
         const r = uiTargetOf({ kind, value });
         if (r.targetHidden) {
-          expect(r, JSON.stringify(value)).toEqual({ kind, targetHidden: true });
+          const keys = Object.keys(r).sort().join(",");
+          if (keys !== "kind,targetHidden" || r.kind !== kind || r.targetHidden !== true)
+            note(kind, value, `隠したのに余計な値がある: ${JSON.stringify(r)}`);
         } else {
           shown++;
-          expect(r.target, JSON.stringify(value)).toBe(value);
-          expect(value).toBe(value.trim());
-          // biome-ignore lint/suspicious/noControlCharactersInRegex: 制御文字が残らないことの検査
-          expect(value).not.toMatch(/[\u0000-\u001f\u007f-\u009f\p{Cf}]/u);
-          expect(value).not.toMatch(/(^|[\s=,:/\\])\.\.($|[\s,:/\\])/);
-          if (kind === "command") expect(value).toMatch(/^[A-Za-z0-9._:@%+=,/ -]+$/);
+          if (r.target !== value)
+            note(kind, value, `target が元の値と違う: ${JSON.stringify(r.target)}`);
+          if (value !== value.trim()) note(kind, value, "前後に空白がある");
+          if (CONTROL.test(value)) note(kind, value, "制御文字・書式制御文字がある");
+          if (DOTDOT.test(value)) note(kind, value, ".. の区間がある");
+          if (kind === "command" && !COMMAND.test(value))
+            note(kind, value, "コマンドに使えない文字がある");
         }
       }
     }
+    expect(broken).toEqual([]);
+    expect(checked).toBe(words.length * 2); // すべての入力を確かめた
     expect(shown).toBeGreaterThan(1000); // 表示される値も、十分に試している
   });
 
