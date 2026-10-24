@@ -172,8 +172,12 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       },
     });
     if (result.ok && result.value.state === "stopped") {
-      bodies.push(inbox("info", `停止を確認した（${result.value.outcome ?? "不明"}）`));
-    } else if (result.ok && result.value.delegation !== undefined) {
+      bodies.push(inbox("info", `停止を確認した（${result.value.outcome}）`));
+    } else if (
+      result.ok &&
+      result.value.state === "stopIncomplete" &&
+      result.value.delegation !== undefined
+    ) {
       bodies.push(inbox("stopIncomplete", result.value.delegation));
     } else if (result.ok) {
       bodies.push(
@@ -250,7 +254,15 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
         "再開してから指示する",
       );
     }
-    if (adapterFor(nodeId) === undefined) return noRuntime(nodeId);
+    const adapter = adapterFor(nodeId);
+    if (adapter === undefined) return noRuntime(nodeId);
+    if (adapter.capabilities(nodeId).send === "unsupported") {
+      return fail(
+        "unsupported",
+        `ノード ${nodeId} の実行環境（${adapter.kind}）には、daemon から直接指示を届けられない`,
+        "親（統合セッション）に、実行環境の機能で代わりに送るよう頼む",
+      );
+    }
     // 先に記録し、そのあとアダプタへ渡す（配送に成功したら、配送を記録する）。
     const recorded = appendAtomically(log, clock, req.requestId, actor, entry);
     if (!recorded.ok) return recorded;

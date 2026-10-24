@@ -47,8 +47,17 @@ const fail = (
   ...next: [string, ...string[]]
 ): { ok: false; error: Failure } => ({ ok: false, error: failure(code, cause, ...next) });
 
-const UNSAFE =
-  "Desktop の子にフックが効くか未確認のため、作業範囲外の拒否（FR_014）による安全を保証できない";
+const UNSAFE = "作業範囲外の拒否（FR_014）による安全を保証できない";
+
+const HOOKS_LABEL: Readonly<Record<Capabilities["hooks"], string>> = {
+  ok: "確認済み",
+  unverified: "未確認",
+  unsupported: "未対応",
+};
+
+/** 停止の代行依頼の手順（受信箱の要約の上限 200 文字から、最長の ID と区切りを引いた長さに収める）。 */
+export const DELEGATION_STEPS =
+  "親に停止の代行を依頼: Desktop でこのタスクを止め（停止がなければアーカイブ）、結果を報告する";
 
 export class DesktopRuntimeAdapter implements RuntimeAdapter {
   readonly kind = "desktop" as const;
@@ -73,7 +82,7 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
       if (this.deps.requireVerifiedHooks ?? true) {
         return fail(
           "hooksUnverified",
-          `${UNSAFE}。確認が済むまで、Desktop の子は動かさない`,
+          `Desktop の子のフックが${HOOKS_LABEL[this.caps.hooks]}（hooks: ${this.caps.hooks}）。${UNSAFE}。確認が済むまで、Desktop の子は動かさない`,
           "CLI の子として起動する",
           "Spike 01 の項目 4 を確認して能力表を更新する",
         );
@@ -121,9 +130,8 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
     return ok({
       state: "stopIncomplete" as const,
       blockers: [],
-      delegation:
-        `親に停止の代行を依頼: Desktop の子（ノード ${nodeId}）は daemon から止められない。` +
-        "親は Desktop でそのタスクを止め（専用の停止がなければアーカイブ）、結果を報告する",
+      // 手順を先に、ID を後ろに置く（受信箱の要約の上限で切れても、手順は残る。ID は最長 128 文字）。
+      delegation: `${DELEGATION_STEPS}。対象ノード: ${nodeId}`,
     });
   }
 

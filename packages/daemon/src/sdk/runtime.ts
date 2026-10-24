@@ -47,18 +47,29 @@ export interface StopRequest {
   readonly stopSeq: number;
 }
 
-export interface StopValue {
-  /** `stopped`: 作業ツリー配下にプロセスがないことを確認できた。`stopIncomplete`: 所定の時間を超えても残っている。 */
-  readonly state: "stopped" | "stopIncomplete";
-  /** 猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか。代行（`delegation`）のときは省略する。 */
-  readonly outcome?: StopOutcome;
+interface StopValueBase {
   /** 残っているプロセスの pid（`stopIncomplete` のときの手がかり）。 */
   readonly blockers: readonly number[];
   /** 続行した問題（手段の例外、観測の記録の失敗など）。なければ省略する。 */
   readonly warnings?: readonly string[];
-  /** 停止を親に代行してもらうときの依頼の文面（親・手順・対象のノード）。受信箱の stopIncomplete の項目に出す。 */
-  readonly delegation?: string;
 }
+
+/**
+ * 停止の結果。`stopped`: 作業ツリー配下にプロセスがないことを確認できた（`outcome` は必須）。`stopIncomplete`: 所定の時間を
+ * 超えても残っている、または停止を親に代行してもらう（`delegation`。このとき `outcome` はない）。
+ */
+export type StopValue =
+  | (StopValueBase & {
+      readonly state: "stopped";
+      /** 猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか。 */
+      readonly outcome: StopOutcome;
+    })
+  | (StopValueBase & {
+      readonly state: "stopIncomplete";
+      readonly outcome?: StopOutcome;
+      /** 停止を親に代行してもらうときの依頼の文面（手順・対象のノード）。受信箱の stopIncomplete の項目に出す。 */
+      readonly delegation?: string;
+    });
 
 export interface RuntimeAdapter {
   readonly kind: "cli" | "desktop";

@@ -1,9 +1,11 @@
 import { type EventBody, failure, isSafeId, type NodeEvent, stateOf } from "@cso/core";
 import { describe, expect, it } from "vitest";
+import { createInstructionDelivery } from "../../../src/api/handlers/instruction-delivery.js";
 import { createStateHandlers } from "../../../src/api/handlers/state-handlers.js";
 import type { HandlerRequest } from "../../../src/api/server.js";
 import { EventLog } from "../../../src/eventlog.js";
 import { createMemoryStore } from "../../../src/memory-store.js";
+import type { RuntimeAdapter } from "../../../src/sdk/runtime.js";
 
 const SYS = { system: true } as const;
 let n = 0;
@@ -561,6 +563,31 @@ describe("node.review の差し戻し（同時実行・届ける手段）", () =
       r.req("node.review", { nodeId: "a", verdict: "reject", feedback: "直して" }, M1) as never,
     )) as { ok: boolean; error?: { code: string } };
     expect(res.error?.code).toBe("noRuntime");
+    expect(r.state().lastSeq).toBe(before);
+    expect(stateOf(r.state(), "a")).toBe("done");
+  });
+});
+
+describe("node.review の差し戻し（Desktop のノード）", () => {
+  it("能力表の send が unsupported なら、差し戻しを記録せずに失敗する", async () => {
+    const r = rig();
+    const adapter = {
+      kind: "desktop",
+      capabilities: () => ({ send: "unsupported" }),
+    } as unknown as RuntimeAdapter;
+    const delivery = createInstructionDelivery({ log: r.log, clock, adapterFor: () => adapter });
+    const h = createStateHandlers({
+      log: r.log,
+      clock,
+      deliver: delivery.deliver,
+      canDeliver: delivery.available,
+    });
+    await r.call("report.done", r.req("report.done", { evidence: EVIDENCE }, A));
+    const before = r.state().lastSeq;
+    const res = (await h["node.review"](
+      r.req("node.review", { nodeId: "a", verdict: "reject", feedback: "直して" }, M1) as never,
+    )) as { ok: boolean; error?: { code: string } };
+    expect(res.ok).toBe(false);
     expect(r.state().lastSeq).toBe(before);
     expect(stateOf(r.state(), "a")).toBe("done");
   });

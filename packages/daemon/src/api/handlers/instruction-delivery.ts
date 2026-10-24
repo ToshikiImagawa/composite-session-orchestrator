@@ -12,7 +12,7 @@ import type { RuntimeAdapter } from "../../sdk/runtime.js";
 import { appendAtomically, type LogPort } from "./context.js";
 
 export interface InstructionDelivery {
-  /** 子へ届ける手段（アダプタ）があるか。ない子には、記録する前に失敗させる。 */
+  /** 子へ届ける手段（アダプタがあり、能力表の send が unsupported でない）があるか。ない子には、記録する前に失敗させる。 */
   available(nodeId: string): boolean;
   /** 指示（`node.instructed` の `seq`）を子へ届け、成功したら配送を記録する。 */
   deliver(nodeId: string, text: string, instructedSeq: number): Promise<Result<undefined, Failure>>;
@@ -31,7 +31,10 @@ export const isDelivered = (state: OrchState, instructedSeq: number): boolean =>
 
 export function createInstructionDelivery(deps: InstructionDeliveryDeps): InstructionDelivery {
   return {
-    available: (nodeId) => deps.adapterFor(nodeId) !== undefined,
+    available: (nodeId) => {
+      const adapter = deps.adapterFor(nodeId);
+      return adapter !== undefined && adapter.capabilities(nodeId).send !== "unsupported";
+    },
     async deliver(nodeId, text, instructedSeq) {
       const adapter = deps.adapterFor(nodeId);
       if (adapter === undefined) {

@@ -1,6 +1,8 @@
-import type { Scope } from "@cso/core";
+import { ID_MAX_LENGTH, type Scope } from "@cso/core";
 import { describe, expect, it } from "vitest";
+import { summarize } from "../../src/api/handlers/context.js";
 import {
+  DELEGATION_STEPS,
   DESKTOP_CAPABILITIES,
   type DesktopAdapterDeps,
   DesktopRuntimeAdapter,
@@ -44,10 +46,19 @@ describe("フックのゲート（既定で有効）", () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.code).toBe("hooksUnverified");
-    expect(r.error.cause).toContain("フック");
+    expect(r.error.cause).toContain("未確認");
+    expect(r.error.cause).toContain("hooks: unverified");
     expect(r.error.nextActions.length).toBeGreaterThan(0);
     expect(adapter.has("a")).toBe(false);
     expect(warnings).toEqual([]);
+  });
+
+  it("フックが未対応（unsupported）なら、拒否の文面に未対応と出す", async () => {
+    const { adapter } = rig({ capabilities: { ...DESKTOP_CAPABILITIES, hooks: "unsupported" } });
+    const r = await adapter.start(START);
+    if (r.ok) throw new Error("started");
+    expect(r.error.cause).toContain("未対応");
+    expect(r.error.cause).toContain("hooks: unsupported");
   });
 
   it("設定でゲートを外すと起動を受け付け、起動のたびに警告を記録する", async () => {
@@ -91,12 +102,24 @@ describe("停止（受信箱を通じた代行）", () => {
     const r = await adapter.stop("a", { mode: "immediate", stopSeq: 7 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.state).toBe("stopIncomplete");
+    if (r.value.state !== "stopIncomplete") throw new Error(r.value.state);
     expect(r.value.blockers).toEqual([]);
     expect(r.value.delegation).toContain("親");
     expect(r.value.delegation).toContain("a");
     expect(r.value.delegation).toContain("Desktop");
     expect(sink.types).toEqual(["node.stateChanged:stopTimeout"]);
+  });
+
+  it("文面は手順が先、ID が後ろ。ID が最長（128 文字）でも、受信箱の要約で手順も ID も切れない", async () => {
+    const { adapter } = rig({ requireVerifiedHooks: false });
+    const id = "n".repeat(ID_MAX_LENGTH);
+    await adapter.start({ ...START, nodeId: id });
+    const r = await adapter.stop(id, { mode: "immediate", stopSeq: 1 });
+    if (!r.ok) throw new Error(r.error.code);
+    if (r.value.state !== "stopIncomplete") throw new Error(r.value.state);
+    const shown = summarize(r.value.delegation ?? "");
+    expect(shown.startsWith(DELEGATION_STEPS)).toBe(true);
+    expect(shown.endsWith(id)).toBe(true);
   });
 
   it("同じ停止の試行（stopSeq）の再送では、同じ要求 ID で記録する（重複しない）", async () => {

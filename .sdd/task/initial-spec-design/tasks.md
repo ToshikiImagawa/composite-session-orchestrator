@@ -102,7 +102,7 @@ depends-on: ["design-initial-spec-design"]
 | ID | タスク | 手動確認依存 | 依存 | 状態 | 対応要求 |
 |:--|:--|:--|:--|:--|:--|
 | T20 | daemon: `desktop` ランタイムアダプタ（能力表は保守的な値 `unverified`/`unreliable`。`stop` は代行依頼を受信箱へ） | あり（項目 1〜7 で能力表を確定） | T08, T09 | 完了（本 PR）。能力表は控えめな値（send: unsupported・hooks: unverified・停止は代行 stopDelegated）。フックのゲート（既定有効、設定 `desktopRequireVerifiedHooks` でのみ外せる）。compose への配線は T21 | FR_032, FR_034, FR_036 |
-| T21 | Desktop の子の紐付け手順（暫定は初回メッセージ後） | あり（項目 4） | T20 | 未 ※ Desktop の子が紐付けの入口（`POST /v1/bind`）を呼ぶ手段（`curl` など）を実行できるかも、ここで確かめる | FR_032 |
+| T21 | Desktop の子の紐付け手順（暫定は初回メッセージ後） | あり（項目 4） | T20 | 未 ※ Desktop の子が紐付けの入口（`POST /v1/bind`）を呼ぶ手段（`curl` など）を実行できるかも、ここで確かめる。※ T20 の Desktop のアダプタは、子のセッション識別子（sessionId）の代わりにノード ID を返している。配線（compose）のときに、この扱いでよいか確認する | FR_032 |
 | T22 | plugin: フック設定・skill・起動コマンド（Desktop の子へのフック継承部分） | 一部あり（フック継承は未確認） | T10, T20 | 未 | IR_001, IR_002, NFR_012 |
 
 ## 実装前に決める未解決事項（設計 9.2 より）

@@ -115,6 +115,18 @@ const rig = (opts: { adapter?: FakeAdapter | null } = {}) => {
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("node.send（稼働中の子への追加指示）", () => {
+  it("能力表の send が unsupported（Desktop）なら、記録する前に、理由と代替手段つきで失敗する", async () => {
+    const r = rig();
+    if (r.adapter) r.adapter.caps = { ...r.adapter.caps, send: "unsupported" };
+    const before = r.state().lastSeq;
+    const res = await r.call("node.send", { nodeId: "a", text: "続けて" });
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("unsupported");
+    expect(res.error?.nextActions.join()).toContain("親");
+    expect(r.state().lastSeq).toBe(before);
+    expect(r.adapter?.sent).toEqual([]);
+  });
+
   it("動作中のノードの指示をアダプタへ渡し、受け付けた結果を返す", async () => {
     const r = rig();
     const res = await r.call("node.send", { nodeId: "a", text: "続けて" });
