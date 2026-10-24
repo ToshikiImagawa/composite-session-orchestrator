@@ -437,6 +437,8 @@ export const UI_JS = `'use strict';
         }
         // 停止を親に代行してもらうノード（stopDelegated。Desktop の子）が停止未完了なら、止めたと宣言できる（T22d）
         if (n.state === 'stopIncomplete' && n.stopDelegated === true && ID_RE.test(n.id)) row.appendChild(confirmStoppedBox(n.id));
+        // 動いている子だけ、フックの結び付けを外せる（T22-hub）。止まったノードにはフックが来ない。結び付けの有無は出さない（docs/ui.md）
+        if (n.role !== 'integrator' && (n.state === 'running' || n.state === 'waiting') && ID_RE.test(n.id)) row.appendChild(hookUnbindButton(n.id));
         box.appendChild(row);
         walk(n.id, depth + 1);
       });
@@ -579,6 +581,27 @@ export const UI_JS = `'use strict';
     box.appendChild(b);
     box.appendChild(problem);
     return box;
+  }
+  // フックの結び付けを外す（T22-hub）。取り消せる操作（次に来たセッションに結び直すだけ）なので、打ち込みはない
+  function hookUnbindLines(nodeId) {
+    return [
+      ['ノード', nodeId],
+      ['内容', 'フック（plugin のファイルで設定するフック）の session_id の結び付けを外す。次に来たセッションに結び直す'],
+      ['記録', '外した者（人間）を残す'],
+      ['注意', 'トークンが漏れた疑いがあるときは、外さずに、子を止めてトークンを失効させる']
+    ];
+  }
+  function hookUnbindDoneText(nodeId, value) {
+    if (value && value.duplicate === true) return 'すでに記録済みです（再送。もう一度は外していません）（' + nodeId + '）';
+    if (value && value.unbound === true) return 'フックの結び付けを外しました（' + nodeId + '）。次に来たセッションに結び直します';
+    return 'フックの結び付けはありませんでした（記録だけ残しました）（' + nodeId + '）';
+  }
+  function hookUnbindButton(nodeId) {
+    var b = el('button', '', 'フックの結び付けを外す…');
+    b.addEventListener('click', function () {
+      openConfirm('フックの結び付けを外す', hookUnbindLines(nodeId), 'node.hookUnbind', { nodeId: nodeId }, function (value) { return hookUnbindDoneText(nodeId, value); });
+    });
+    return b;
   }
   var daysDrafts = new Map();
   var keptList = null;

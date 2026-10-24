@@ -97,6 +97,9 @@ describe("画面の資産（走査）", () => {
       "discardedRefs",
       "hold",
       "until",
+      // フックの結び付けを外した結果（T22-hub。node.hookUnbind の { unbound, duplicate }）
+      "unbound",
+      "duplicate",
       "label",
       "days",
       "items",
@@ -322,7 +325,9 @@ describe("画面の資産（走査）", () => {
         fn("checkNote"),
         fn("confirmStoppedParams"),
         fn("confirmStoppedLines"),
-        "({ checkNote: checkNote, confirmStoppedParams: confirmStoppedParams, confirmStoppedLines: confirmStoppedLines, isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
+        fn("hookUnbindLines"),
+        fn("hookUnbindDoneText"),
+        "({ hookUnbindLines: hookUnbindLines, hookUnbindDoneText: hookUnbindDoneText, checkNote: checkNote, confirmStoppedParams: confirmStoppedParams, confirmStoppedLines: confirmStoppedLines, isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
@@ -340,6 +345,8 @@ describe("画面の資産（走査）", () => {
       checkNote(text: string): string;
       confirmStoppedParams(nodeId: string, note: string): Record<string, unknown>;
       confirmStoppedLines(nodeId: string, note: string): [string, string][];
+      hookUnbindLines(nodeId: string): [string, string][];
+      hookUnbindDoneText(nodeId: string, value: unknown): string;
       isReclaimPreview(v: unknown): boolean;
       reclaimBlocked(v: unknown): string;
       reclaimLines(nodeId: string, v: unknown): [string, string][];
@@ -387,6 +394,22 @@ describe("画面の資産（走査）", () => {
       expect(lines.at(-1)).toEqual(["根拠", api.confirmStoppedParams("a", raw).note]);
       expect(api.checkNote("x\ny")).toContain("使えない文字"); // 1 行だけ
       expect(api.confirmStoppedLines("a", "").at(-1)).toEqual(["根拠", "（なし）"]);
+    });
+
+    it("T22-hub: フックの結び付けを外す確認の行と、結果の 3 通りの文", () => {
+      const lines = api.hookUnbindLines("a");
+      expect(lines[0]).toEqual(["ノード", "a"]);
+      expect(lines.map((l) => l[0])).toEqual(["ノード", "内容", "記録", "注意"]);
+      expect(lines.find((l) => l[0] === "注意")?.[1]).toContain("トークンが漏れた疑い");
+      expect(api.hookUnbindDoneText("a", { unbound: true, duplicate: false })).toContain(
+        "外しました",
+      );
+      expect(api.hookUnbindDoneText("a", { unbound: false, duplicate: false })).toContain(
+        "ありませんでした",
+      );
+      const dup = api.hookUnbindDoneText("a", { unbound: false, duplicate: true });
+      expect(dup).toContain("すでに記録済み");
+      expect(dup).not.toContain("ありませんでした");
     });
 
     it("waitSecondsOf: 429 は Retry-After の秒数（なければ 5 秒）。それ以外は 0", () => {
@@ -835,6 +858,16 @@ describe("画面の資産（走査）", () => {
     // ボタンは、停止したノードだけ。指示済みには出さない
     expect(UI_JS).toContain("n.state === 'stopped'");
     expect(UI_JS).toContain("n.discarded");
+  });
+
+  it("T22-hub: フックの結び付けを外すボタンは、動いている子（統合ノードでなく running・waiting）だけに出し、打ち込みはなく { nodeId } を送る", () => {
+    expect(UI_JS).toContain(
+      "n.role !== 'integrator' && (n.state === 'running' || n.state === 'waiting') && ID_RE.test(n.id)",
+    );
+    const start = UI_JS.indexOf("function hookUnbindButton(");
+    const body = UI_JS.slice(start, UI_JS.indexOf("\n  }\n", start));
+    expect(body).toContain("'node.hookUnbind', { nodeId: nodeId }");
+    expect(body).not.toContain("typed:");
   });
 
   it("T22d: 停止の宣言は、停止未完了かつ stopDelegated のノードだけに出し、打ち込みの確認（typed: ノード ID）を経る", () => {
