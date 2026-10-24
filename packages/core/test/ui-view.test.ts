@@ -317,7 +317,7 @@ describe("拡張要求の対象の表示（T23-b）", () => {
       for (let k = 0; k < n; k++) t += alphabet[Math.floor(rnd() * alphabet.length)];
       words.push(t);
     }
-    // 判定は、件数が多い（約 23 万回）ので、expect を 1 件ずつ呼ばずに、同じ条件を素の比較で確かめ、破れた入力を集めて最後に 1 回だけ比べる
+    // 判定は、件数が多い（語の数 × 2）ので、expect を 1 件ずつ呼ばずに、同じ条件を素の比較で確かめ、破れた入力を集めて最後に 1 回だけ比べる
     // （判定の条件は、以前の expect と同じ。expect の呼び出しの重さで、遅い CI の時間の上限を超えないため）
     // biome-ignore lint/suspicious/noControlCharactersInRegex: 制御文字が残らないことの検査
     const CONTROL = /[\u0000-\u001f\u007f-\u009f\p{Cf}]/u;
