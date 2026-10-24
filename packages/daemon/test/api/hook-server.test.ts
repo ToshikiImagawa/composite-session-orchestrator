@@ -36,7 +36,13 @@ afterEach(async () => {
   server = undefined;
 });
 
-const start = async (decide: HookDecider, over: { maxBodyBytes?: number } = {}) => {
+const start = async (
+  decide: HookDecider,
+  over: {
+    maxBodyBytes?: number;
+    rateLimit?: { perPrincipal: { burst: number; perSecond: number }; monotonicMs: () => number };
+  } = {},
+) => {
   const credentials = createCredentialStore({ humanToken: HUMAN });
   const logs: ApiLogEvent[] = [];
   const s = state();
@@ -149,5 +155,21 @@ describe("POST /v1/hook（ファイルで設定するフック。T22-h）", () =
     const r = await start(policy);
     const res = await fetch(`${r.url}/v1/hook`);
     expect(res.status).toBe(405);
+  });
+
+  it("重みは 0.5: 容量 10 の bucket で、フック 10 回（5 トークン）のあとも whoami（1）が通り、残り 4 トークンでフックが 8 回通って、次で 429", async () => {
+    const r = await start(policy, {
+      rateLimit: { perPrincipal: { burst: 10, perSecond: 1 }, monotonicMs: () => 0 },
+    });
+    for (let i = 0; i < 10; i++)
+      expect((await post(r.url, r.child, pre("Read", {}))).status).toBe(200);
+    // 重み 1 なら、ここで bucket が尽きている。0.5 なので、whoami（重み 1）も通る
+    const who = await fetch(`${r.url}/v1/whoami`, {
+      headers: { authorization: `Bearer ${r.child}` },
+    });
+    expect(who.status).toBe(200);
+    for (let i = 0; i < 8; i++)
+      expect((await post(r.url, r.child, pre("Read", {}))).status).toBe(200);
+    expect((await post(r.url, r.child, pre("Read", {}))).status).toBe(429);
   });
 });

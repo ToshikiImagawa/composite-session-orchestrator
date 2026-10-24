@@ -61,7 +61,7 @@ const walk = (dir) => {
 const TOOL_RE = /mcp__node__([A-Za-z_]*[A-Za-z])/g;
 /**
  * NFR_012: 一般の絶対パス（行頭・空白・引用符・`(`・`=` の直後の `/<英数字>/…`）・ホームのパス・Windows のパス・file URL を拒否する。
- * 例外は、URL のパス（`://host` の後）と `${CLAUDE_PLUGIN_ROOT}`（とそれに続く plugin の中のパス）だけ（先に取り除いてから、検査する）。
+ * 例外は、URL のパス（`://host` の後）と `${CLAUDE_PLUGIN_ROOT}`（とそれに続く plugin の中のパス。`..` を含むものは除く）だけ（先に取り除いてから、検査する）。
  */
 const URL_RE = /\b(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`)\]>]*/g;
 const PATH_RES = [
@@ -71,6 +71,8 @@ const PATH_RES = [
   /file:\/\//,
 ];
 const pathViolation = (line) => {
+  // `${CLAUDE_PLUGIN_ROOT}` のあとに `..` が続くもの（plugin の外へ出るパス）は、例外にしない（hooks.json の command と対称）。
+  if (/\$\{CLAUDE_PLUGIN_ROOT\}[^\s"'`]*(?:^|\/)\.\.(?:\/|[\s"'`]|$)/.test(line)) return true;
   const rest = line.replaceAll(URL_RE, " ").replaceAll(/\$\{CLAUDE_PLUGIN_ROOT\}[^\s"'`]*/g, " ");
   return PATH_RES.some((re) => re.test(rest));
 };

@@ -37,9 +37,9 @@ daemon が SDK で起動する子は、MCP の設定を daemon が組み立て�
 
 ### 受け口 `POST /v1/hook`
 
-- **認証**: 子のノードのトークン（`Authorization: Bearer`）。人間・統合ノードのトークンは 403（範囲を持たない）。認証・主体の検査（失効・止まったノードは 401）・同時数・主体ごとの回数の制限は、`/v1/request` と同じ（`docs/rate-limit.md`。同じ bucket を使う。重み 1）。要求の重複の扱い（`requestId`）はない（判定は冪等）。
+- **認証**: 子のノードのトークン（`Authorization: Bearer`）。人間・統合ノードのトークンは 403（範囲を持たない）。認証・主体の検査（失効・止まったノードは 401）・同時数・主体ごとの回数の制限は、`/v1/request` と同じ（`docs/rate-limit.md`。同じ bucket を使う。**重みは 0.5**〔ほかの要求は 1〕。フックはツール呼び出しのたびに来るので、子のほかの要求を締め出しにくくする）。要求の重複の扱い（`requestId`）はない（判定は冪等）。
 - **判定**: PreToolUse だけを、SDK のコールバックと同じ判定（`packages/daemon/src/sdk/hook-policy.ts`）に流す。基準は、daemon が持つノードの範囲と作業ツリーで、入力の `cwd` は使わない。**記録も同じ**（範囲違反は `scope.violation` と受信箱〔同じ違反は 1 度だけ〕、未知のツールは `node.toolDenied`。数え上げも SDK と共有する）。daemon が作業ツリーを知らないノード（daemon が起動していないノード）は、拒否する。
-- **`session_id` とノード**: ノードはトークンで決める。最初に来た `session_id` をノードに結び、別の値は 403 で拒否する（記録は `hookSessionMismatch`。ID は書かない）。**結び付けはメモリだけなので、daemon を再起動すると、結び直しになる**（再起動のあと、最初に来たセッションに結ぶ）。
+- **`session_id` とノード**: ノードはトークンで決める。最初に来た `session_id` をノードに結び、別の値は 403 で拒否する（記録は `hookSessionMismatch`。ID は書かない）。**結び付けはメモリだけなので、daemon を再起動すると、結び直しになる**（再起動のあと、最初に来たセッションに結ぶ）。**同じノードで `session_id` が変わる操作（`/clear`・`--resume` など）をすると、daemon を再起動するまで、そのノードのフックは拒否される**（結び付けを解除する手段は、後続のタスク T22-hu）。
 - **本文の上限**: 1 MiB（窓口と同じ）。超えたら 413（「本文が大きすぎる」）で、フックは拒否として扱う。
 - 応答: `{ ok: true, value: { decision: "allow" } }` か `{ ok: true, value: { decision: "deny", reason } }`。
 

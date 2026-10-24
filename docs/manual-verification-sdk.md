@@ -119,10 +119,12 @@
 |:--|:--|:--|:--|
 | H1 | フックが発火する | PreToolUse・PostToolUse・Stop で `cso-hook.mjs` が動く | `claude --debug` の出力に、フックの実行が出る。範囲内の `Write`（`src/a.txt`）は許可される |
 | H2 | 範囲外の書き込みの拒否と記録 | `Write`（`b.txt`）が拒否され、理由がモデルに伝わる。`scope.violation` が記録され、親の受信箱に violation が 1 件載る | 子に `b.txt` を書くよう頼み、`cso inbox` と記録を見る。未知のツール（例: `WebFetch`）は `node.toolDenied` |
-| H3 | `settingSources` の混入がない | daemon が SDK で起動する子（`settingSources: []`）には、利用者が入れた plugin のフックが混ざらない（受け口に、その子からの要求が来ない） | 子を SDK で起動し、受け口の記録（`hookSessionMismatch` が出ない、受け口への要求がない）を見る。H1 の CLI セッションを止めてから確かめる |
+| H3 | `settingSources` の混入がない | daemon が SDK で起動する子（`settingSources: []`）には、利用者が入れた plugin のフックが混ざらない（受け口に、その子からの要求が来ない） | 子を SDK で起動し、受け口の記録（`hookSessionMismatch` が出ない、受け口への要求がない）を見る。H1 の CLI セッションを止めてから確かめる。**api のカウンタでも確かめる**: 窓口の件数のまとめ（daemon の記録の `apiSummary`。窓は 1 分）で、子のトークンの `/v1/hook` の要求が増えないこと、`authFailed`・`rateLimited` が増えないこと |
 | H4 | daemon 停止のときのフェイルクローズ | daemon を止めると、PreToolUse はすべて拒否される（「届かない」）。Stop は止めない（セッションを終えられる） | daemon を止めて、`Read` と `Write` を頼む。ツールが実行されないこと |
 | H5 | 環境変数 | 両方なし: 素通しし、標準エラーに一言出る（CSO のフックは働かない）。片方だけ: 拒否 | `CSO_NODE_TOKEN` だけを外して起動し、ツールが拒否されること |
-| H6 | `session_id` の結び付け | 同じトークンで別のセッションを起動すると、403 で拒否される（`hookSessionMismatch`）。daemon を再起動すると、最初に来たセッションに結び直す | 2 つ目の CLI セッションを、同じ環境変数で起動する |
+| H6 | `session_id` の結び付け | 同じトークンで別のセッションを起動すると、403 で拒否される（`hookSessionMismatch`）。daemon を再起動すると、最初に来たセッションに結び直す | 2 つ目の CLI セッションを、同じ環境変数で起動する。同じセッションで `/clear`・`--resume` をして `session_id` が変わると、daemon を再起動するまで拒否されることも確かめる |
+
+注: 本文の上限（1 MiB）を超えた要求の 413 は、daemon が本文を読まずに接続を閉じるため、スクリプトからは「届かない」扱いになることがある（どちらでも PreToolUse は拒否）。
 
 Desktop の子への継承は、項目 4 の結果のあと（T22 の Desktop の分）。
 

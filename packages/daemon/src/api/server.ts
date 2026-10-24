@@ -232,6 +232,8 @@ const UI_ASSETS: Readonly<Record<string, UiAsset>> = {
 /** 本文を読まずに返す応答には、接続を閉じさせる（読んでいない本文が、次の要求と混ざらない。遅い本文で接続を占有されない）。 */
 const CLOSE = { connection: "close" } as const;
 const DEFAULT_MAX_BODY = 1024 * 1024;
+/** `POST /v1/hook` の、主体ごとの bucket の重み（T22-h。ほかの要求は 1）。 */
+const HOOK_WEIGHT = 0.5;
 /** bind の本文は { nodeId, bindCode } だけなので小さく。 */
 const BIND_MAX_BODY = 1024;
 
@@ -801,7 +803,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
   const sessions = createSessionBinder();
   /**
    * ファイルで設定するフックの受け口（T22-h。`docs/plugin.md` の「フック」）。子のノードのトークンだけ（ほかは 403）。
-   * 認証・主体の検査・同時数・回数の制限は、`/v1/request` と同じ。重複の扱い（requestId）はない（判定は冪等）。
+   * 認証・主体の検査・同時数・回数の制限は、`/v1/request` と同じ（重みは 0.5）。重複の扱い（requestId）はない（判定は冪等）。
    * 応答は `{ decision: "allow" | "deny", reason? }`。判定するのは PreToolUse だけで、PostToolUse・Stop は受けて allow を返す。
    */
   async function handleHook(
@@ -845,7 +847,8 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       return tooMany(res, 1, true);
     }
     try {
-      const used = principalLimiter.tryConsume(key, 1);
+      // フックはツール呼び出しのたびに来るので、軽い重み（0.5）。同じ bucket の、子のほかの要求を締め出しにくくする。
+      const used = principalLimiter.tryConsume(key, HOOK_WEIGHT);
       if (!used.ok) {
         counters.count("rateLimited", "principal");
         req.resume();

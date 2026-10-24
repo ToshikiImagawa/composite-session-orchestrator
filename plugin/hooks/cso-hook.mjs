@@ -2,7 +2,7 @@
 // - 受け口の URL とトークンは、環境変数 `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` で受ける（パスを埋め込まない。NFR_012）。
 // - どちらもないときは、CSO の子ではないセッションとみなし、素通しする（標準エラーに一言出す）。片方だけなら、設定の誤りとして拒否する。
 // - PreToolUse は、フェイルクローズ: daemon に届かない・時間切れ・200 以外・応答の形が違う、のどれでも拒否する（終了コード 2）。
-// - PostToolUse・Stop は、判定しない（拒否すると、作業を止められなくなるため）。失敗は、標準エラーに出すだけ（終了コード 0）。
+// - PostToolUse・Stop は（それ以外のイベント名・欠けた入力は、PreToolUse と同じく拒否する）、判定しない（拒否すると、作業を止められなくなるため）。失敗は、標準エラーに出すだけ（終了コード 0）。
 // 終了コード 2 のとき、標準エラーの文が、拒否の理由として、モデルに伝わる。
 
 import { pathToFileURL } from "node:url";
@@ -20,7 +20,9 @@ export async function runHook({ env, input, fetchImpl = fetch, timeoutMs = TIMEO
   } catch {
     body = undefined;
   }
-  const guarding = event === "PreToolUse" || body === undefined;
+  // 受動のイベント（判定しない）だけを列挙し、それ以外（欠けている・未知・表記が違う）は、判定するものとして扱う（フェイルクローズ）。
+  const passive = event === "PostToolUse" || event === "Stop";
+  const guarding = !passive;
   const fail = (why) =>
     guarding
       ? { code: 2, stderr: `${PREFIX} 拒否: ${why}` }

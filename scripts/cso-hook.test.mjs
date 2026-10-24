@@ -116,3 +116,25 @@ test("実プロセス: 時間切れも拒否（応答しない受け口）", asy
     server.close();
   }
 });
+
+test("イベント名が欠けている・未知・表記が違う入力は、拒否する（フェイルクローズ）", async () => {
+  const ok = reply(200, { ok: true, value: { decision: "deny", reason: "x" } });
+  const down = () => Promise.reject(new Error("x"));
+  for (const name of [undefined, "Unknown", "pretooluse"]) {
+    const input = JSON.stringify({ hook_event_name: name, session_id: "s", tool_name: "Write" });
+    assert.equal((await runHook({ env: ENV, input, fetchImpl: down })).code, 2, String(name));
+    assert.equal((await runHook({ env: ENV, input, fetchImpl: ok })).code, 2, String(name));
+  }
+});
+
+test("受動のイベント（Stop・PostToolUse）は、入力が壊れていて daemon が 400 を返しても、終了コード 0", async () => {
+  for (const name of ["Stop", "PostToolUse"]) {
+    const input = JSON.stringify({ hook_event_name: name });
+    const r = await runHook({
+      env: ENV,
+      input,
+      fetchImpl: reply(400, { ok: false, error: { cause: "x" } }),
+    });
+    assert.equal(r.code, 0, name);
+  }
+});
