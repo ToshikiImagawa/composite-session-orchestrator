@@ -276,6 +276,7 @@ describe("node.purgePreview・node.purge（最終削除）", () => {
       purgeTree: () => ({ ok: false as const, error: failure("storeIntegrity", "x", "y") }),
       checkPurge: () => ({ ok: true as const, value: { deleteCount: 0 } }),
       appendAll: () => ({ ok: true as const, value: [] }),
+      firstEventOf: () => undefined,
     };
     const audits: string[] = [];
     const failures: string[] = [];
