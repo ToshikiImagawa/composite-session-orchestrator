@@ -210,6 +210,11 @@ const VALIDATORS: Validators = {
     }
     return { nodeId, mode, graceMs: g as number };
   },
+  "node.confirmStopped": (p) => {
+    const o = strict(p, ["nodeId", "note"]);
+    const nodeId = id(o, "nodeId");
+    return o.note === undefined ? { nodeId } : { nodeId, note: text(o, "note", LIMITS.summary) };
+  },
   "inbox.fetch": (p) => {
     const o = strict(p, ["sinceSeq"]);
     const s = o.sinceSeq;

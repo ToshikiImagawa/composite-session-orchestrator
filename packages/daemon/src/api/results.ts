@@ -14,6 +14,7 @@ export const RESULT_KEYS: ResultKeys = {
   "node.spawn": ["nodeId", "status", "waitingFor"],
   "node.send": ["status", "duplicate"],
   "node.stop": ["state"],
+  "node.confirmStopped": ["state"],
   "inbox.fetch": ["items"],
   "tree.list": ["table"],
   "decision.present": ["decisionId"],

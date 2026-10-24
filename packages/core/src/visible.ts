@@ -23,6 +23,7 @@ export function visibleState(state: OrchState, callerId: string): OrchState {
       stopRequests: Object.freeze(mine(state.stopRequests)),
       stopObservations: Object.freeze(mine(state.stopObservations)),
       toolDenials: Object.freeze(mine(state.toolDenials)),
+      stopDeclarations: Object.freeze(mine(state.stopDeclarations)),
       exits: Object.freeze(mine(state.exits)),
       // 最終削除の標識は、人間（daemon）が直接読む。呼び出し元には見せない。
       tombstones: Object.freeze([]),

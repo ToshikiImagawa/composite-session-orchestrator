@@ -23,7 +23,7 @@ const NEXT_ACTIONS: Record<InboxKind, readonly string[]> = {
   answer: ["decision_get", "node_send"],
   violation: ["scope_decide", "node_send", "node_stop"],
   failure: ["report_get", "node_send", "node_split", "node_stop"],
-  stopIncomplete: ["node_stop", "node_capabilities", "decision_present"],
+  stopIncomplete: ["node_stop", "node_confirmStopped", "node_capabilities", "decision_present"],
   done: ["report_get", "node_review"],
   progress: ["report_get"],
   info: [],

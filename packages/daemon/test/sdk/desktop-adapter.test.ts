@@ -156,3 +156,12 @@ describe("範囲の更新", () => {
     expect(adapter.updateScope("x", SCOPE).ok).toBe(false);
   });
 });
+
+describe("管理から外す（release。停止の宣言の後）", () => {
+  it("外したノードは管理していない扱いになる", async () => {
+    const { adapter } = rig({ requireVerifiedHooks: false });
+    await adapter.start(START);
+    adapter.release("a");
+    expect(adapter.has("a")).toBe(false);
+  });
+});

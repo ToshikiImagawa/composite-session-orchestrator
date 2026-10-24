@@ -26,3 +26,16 @@ Desktop の子は、統合セッションが Desktop のタスク生成機能で
 ## 停止の代行依頼の文面
 
 手順を先に、対象のノードの ID を後ろに置く。受信箱の要約の上限（200 文字）で切られても、手順は残る。ID が最長（128 文字）でも、手順と ID の両方が収まる。
+
+## 停止の宣言（`node.confirmStopped`）
+
+親が代行依頼に従って Desktop でタスクを止めた（またはアーカイブした）ら、人間か、そのノードの祖先の統合ノードが `node.confirmStopped`
+（`{ nodeId, note? }`）で宣言する。1 トランザクションで、次を記録する。
+
+1. `node.stopDeclared`（宣言した者は封筒の `actor`、根拠は `note`）。状態の `stopDeclarations` に残る。
+2. `confirmStopped`（`stopIncomplete` → `stopped`）。
+3. そのノードの未解決の `stopIncomplete` の項目（代行依頼）を、すべて解決済みにする。
+4. 受信箱に info（宣言者と根拠）。
+
+対象は、能力表の `stopDelegated` が真のノードだけ（CLI のノードは `notDelegated` で失敗し、`node.stop` の再試行を案内する）。
+同じ `requestId` の再送は同じ結果を返し、記録は 1 回。宣言の後、アダプタは、そのノードを管理から外す（`release`）。

@@ -121,6 +121,7 @@ describe("操作の契約（NFR_004, DC_003）", () => {
       "node.spawn": "selfOrDescendant", // parentId。自分の子を作れる
       "node.send": "strictDescendant",
       "node.stop": "strictDescendant", // 自分の停止は、親か人間だけができる
+      "node.confirmStopped": "strictDescendant", // 停止の宣言は、祖先の統合ノードか人間だけ
       "node.split": "strictDescendant",
       "node.review": "directChild", // 完了の判定は親だけ
       "node.reclaimPreview": "strictDescendant",

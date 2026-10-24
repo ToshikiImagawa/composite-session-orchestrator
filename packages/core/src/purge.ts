@@ -120,6 +120,7 @@ export function purgeEventSeqs(
       case "node.stateChanged":
       case "scope.violation":
       case "node.stopObserved":
+      case "node.stopDeclared":
       case "node.toolDenied":
       case "node.exited":
       case "node.discardDecided":

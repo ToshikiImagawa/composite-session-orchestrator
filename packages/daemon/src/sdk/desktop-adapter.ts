@@ -135,6 +135,10 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
     });
   }
 
+  release(nodeId: string): void {
+    this.scopes.delete(nodeId);
+  }
+
   updateScope(nodeId: string, scope: Scope): Result<undefined, Failure> {
     if (!this.has(nodeId)) {
       return fail("notManaged", `ノード ${nodeId} の子を管理していない`, "ノードの状態を確認する");

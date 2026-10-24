@@ -83,6 +83,18 @@ export type EventBody =
       };
     }
   | {
+      /**
+       * 停止の宣言（FR_036）。daemon が直接止められないノード（能力表の `stopDelegated`）を、親が代わりに止めたと、人間か祖先の
+       * 統合ノードが宣言した記録。宣言した者は封筒の `actor`。状態は変えない（同じトランザクションの `confirmStopped` で変える）。
+       */
+      readonly type: "node.stopDeclared";
+      readonly payload: {
+        readonly nodeId: string;
+        /** 根拠のメモ（`LIMITS.summary` 文字以下。例: 「Desktop でアーカイブした」）。 */
+        readonly note?: string;
+      };
+    }
+  | {
       /** 停止の観測の記録（猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか）。状態は変えない。 */
       readonly type: "node.stopObserved";
       readonly payload: {
@@ -402,6 +414,15 @@ export interface ViolationRecord {
   readonly actor: Actor;
 }
 
+/** 停止の宣言の記録（`node.stopDeclared`）。 */
+export interface StopDeclarationRecord {
+  readonly seq: number;
+  readonly at: string;
+  readonly nodeId: string;
+  readonly note?: string;
+  readonly actor: Actor;
+}
+
 export interface ToolDenialRecord {
   readonly seq: number;
   readonly at: string;
@@ -475,6 +496,8 @@ export interface OrchState {
   readonly stopObservations: readonly StopObservation[];
   /** 許可していないツールの拒否の記録（範囲違反ではない。受信箱には載せない）。 */
   readonly toolDenials: readonly ToolDenialRecord[];
+  /** 停止の宣言の記録（誰が、何を根拠に、止めたと宣言したか）。 */
+  readonly stopDeclarations: readonly StopDeclarationRecord[];
   /** 子の予期しない終了の記録。 */
   readonly exits: readonly ExitRecord[];
   /** 保存した報告（受信箱の項目の `ref` で参照する）。 */
@@ -556,6 +579,7 @@ export const initialState = (): OrchState => ({
   stopRequests: [],
   stopObservations: [],
   toolDenials: [],
+  stopDeclarations: [],
   exits: [],
   reports: [],
   extensions: [],
@@ -646,6 +670,7 @@ interface Draft {
   stopRequests: StopRequestRecord[];
   stopObservations: StopObservation[];
   toolDenials: ToolDenialRecord[];
+  stopDeclarations: StopDeclarationRecord[];
   exits: ExitRecord[];
   reports: ReportRecord[];
   reportIdx: Map<string, ReportRecord>;
@@ -723,6 +748,12 @@ const toolDenialShape = (r: unknown): boolean =>
   isId(r.nodeId) &&
   typeof r.tool === "string" &&
   r.tool !== "" &&
+  parseActor(r.actor) !== undefined;
+const stopDeclarationShape = (r: unknown): boolean =>
+  isRec(r) &&
+  Number.isInteger(r.seq) &&
+  isId(r.nodeId) &&
+  (r.note === undefined || isBoundedText(r.note, LIMITS.summary)) &&
   parseActor(r.actor) !== undefined;
 const exitShape = (r: unknown): boolean =>
   isRec(r) &&
@@ -802,6 +833,10 @@ function toDraft(state: OrchState): Draft | undefined {
   const stopRequests = arrayOf<StopRequestRecord>(state.stopRequests, stopRequestShape);
   const stopObservations = arrayOf<StopObservation>(state.stopObservations, observationShape);
   const toolDenials = arrayOf<ToolDenialRecord>(state.toolDenials, toolDenialShape);
+  const stopDeclarations = arrayOf<StopDeclarationRecord>(
+    state.stopDeclarations,
+    stopDeclarationShape,
+  );
   const exits = arrayOf<ExitRecord>(state.exits, exitShape);
   const reports = arrayOf<ReportRecord>(state.reports, reportShape);
   const extensions = arrayOf<ExtensionRecord>(state.extensions, extensionShape);
@@ -815,6 +850,7 @@ function toDraft(state: OrchState): Draft | undefined {
     !stopRequests ||
     !stopObservations ||
     !toolDenials ||
+    !stopDeclarations ||
     !exits ||
     !reports ||
     !extensions ||
@@ -835,6 +871,7 @@ function toDraft(state: OrchState): Draft | undefined {
     stopRequests: [...stopRequests],
     stopObservations: [...stopObservations],
     toolDenials: [...toolDenials],
+    stopDeclarations: [...stopDeclarations],
     exits: [...exits],
     reports: [...reports],
     reportIdx: new Map(reports.map((r) => [r.reportId, r])),
@@ -888,6 +925,7 @@ function toState(d: Draft): OrchState {
     stopRequests: Object.freeze(d.stopRequests),
     stopObservations: Object.freeze(d.stopObservations),
     toolDenials: Object.freeze(d.toolDenials),
+    stopDeclarations: Object.freeze(d.stopDeclarations),
     exits: Object.freeze(d.exits),
     reports: Object.freeze(d.reports),
     extensions: Object.freeze(d.extensions),
@@ -1370,6 +1408,26 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
       if (node === undefined) return unknownNode(seq, nodeId);
       if (!RECORDABLE_STATES.has(node.state)) return notRecordable(seq, node, "node.toolDenied");
       d.toolDenials.push(freezeRecord({ seq, at: raw.at, nodeId, tool, actor }));
+      return commit();
+    }
+
+    case "node.stopDeclared": {
+      const { nodeId, note } = p;
+      if (!isId(nodeId) || (note !== undefined && !isBoundedText(note, LIMITS.summary)))
+        return invalid(seq, "node.stopDeclared の payload");
+      const node = nodeAt(d, nodeId);
+      if (node === undefined) return unknownNode(seq, nodeId);
+      if (node.state !== "stopIncomplete") {
+        return reject(
+          seq,
+          "invalidTransition",
+          `状態 ${node.state} のノードに停止の宣言は記録できない（stopIncomplete のとき）`,
+          "ノードの状態を確認する",
+        );
+      }
+      d.stopDeclarations.push(
+        freezeRecord({ seq, at: raw.at, nodeId, ...(note === undefined ? {} : { note }), actor }),
+      );
       return commit();
     }
 

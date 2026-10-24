@@ -118,6 +118,8 @@ export function operationsFor(
     ) {
       candidates.push("node.stop");
     }
+    if (s === "stopIncomplete" && caps.stopDelegated === true)
+      candidates.push("node.confirmStopped");
     if (s === "running") candidates.push("node.split");
     if ((s === "running" || s === "waiting") && node.role === "integrator")
       candidates.push("node.spawn");
@@ -344,6 +346,73 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
         }
       }
       return { ok: true, value: { state: stateOf(after, nodeId) as NodeState } };
+    },
+
+    /**
+     * 停止の宣言（FR_036）。能力表の `stopDelegated` のノードだけ。1 トランザクションで、宣言（`node.stopDeclared`。宣言者は
+     * 封筒の actor）・`confirmStopped`（stopIncomplete → stopped）・そのノードの未解決の stopIncomplete の項目（代行依頼）の解決・
+     * 受信箱の info を記録する。同じ requestId の再送は、同じ結果（記録は 1 回）。
+     */
+    "node.confirmStopped": (
+      req: HandlerRequest<"node.confirmStopped">,
+    ): R<"node.confirmStopped"> => {
+      const { nodeId, note } = req.params;
+      const human = req.role === "human";
+      if (!human) {
+        const outside = outsideSubtree(callerOf(req), nodeId);
+        if (outside) return outside;
+      }
+      const state = log.state();
+      const node = nodeOf(state, nodeId);
+      if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
+      const actor = human ? ({ human: true } as const) : { nodeId: callerOf(req) };
+      // 同じ要求の再送は、記録済みの結果（今の状態）を返す。
+      if (alreadyApplied(state, actor, req.requestId))
+        return { ok: true, value: { state: stateOf(state, nodeId) as NodeState } };
+      const adapter = adapterFor(nodeId);
+      if (adapter?.capabilities(nodeId).stopDelegated !== true) {
+        return fail(
+          "notDelegated",
+          `ノード ${nodeId} は daemon が直接止めるノードで、停止を宣言できない（能力表の stopDelegated のノードだけ）`,
+          "node.stop で停止を再試行する",
+        );
+      }
+      if (node.state !== "stopIncomplete") {
+        return fail(
+          "invalidTransition",
+          `ノード ${nodeId} は ${node.state} で、停止を宣言できない（stopIncomplete のとき）`,
+          "ノードの状態を確認する",
+        );
+      }
+      const who = human ? "人間" : `統合ノード ${callerOf(req)}`;
+      const bodies: EventBody[] = [
+        { type: "node.stopDeclared", payload: { nodeId, ...(note === undefined ? {} : { note }) } },
+        { type: "node.stateChanged", payload: { nodeId, event: { type: "confirmStopped" } } },
+        ...state.inbox
+          .filter(
+            (i) => i.kind === "stopIncomplete" && i.nodeId === nodeId && i.resolved === undefined,
+          )
+          .map((i): EventBody => ({ type: "inbox.resolved", payload: { itemId: i.id } })),
+        {
+          type: "inbox.added",
+          payload: {
+            id: deriveId("inbox", human ? "human" : callerOf(req), req.requestId, "declared"),
+            kind: "info",
+            nodeId,
+            summary: summarize(
+              `停止の宣言を記録した（宣言者: ${who}${note === undefined ? "" : `。根拠: ${note}`}）`,
+            ),
+          },
+        },
+      ];
+      const r = appendAtomically(log, clock, req.requestId, actor, bodies);
+      if (!r.ok) return r;
+      try {
+        adapter.release?.(nodeId);
+      } catch {
+        // 管理から外す処理の失敗は、宣言の記録を取り消さない
+      }
+      return { ok: true, value: { state: stateOf(r.value.state, nodeId) as NodeState } };
     },
 
     "node.capabilities": (req: HandlerRequest<"node.capabilities">): R<"node.capabilities"> => {

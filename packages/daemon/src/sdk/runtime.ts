@@ -76,6 +76,8 @@ export interface RuntimeAdapter {
   /** そのノードの子を、このアダプタが管理しているか（再起動の後の整合で使う。省略すると、管理していないものとして扱う）。 */
   has?(nodeId: string): boolean;
   capabilities(nodeId: string): Capabilities;
+  /** 停止の宣言（`node.confirmStopped`）の後に、そのノードの子を管理から外す（省略可。直接止められるアダプタには不要）。 */
+  release?(nodeId: string): void;
   start(request: StartRequest): Promise<Result<StartValue, Failure>>;
   send(nodeId: string, text: string): Promise<Result<DeliveryValue, Failure>>;
   stop(nodeId: string, request: StopRequest): Promise<Result<StopValue, Failure>>;
