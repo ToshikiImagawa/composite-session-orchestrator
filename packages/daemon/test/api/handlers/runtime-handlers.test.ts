@@ -98,13 +98,15 @@ const rig = (opts: { adapter?: FakeAdapter | null } = {}) => {
     params: Record<string, unknown>,
     requestId = `q-${++n}`,
   ) => {
-    const req = {
-      requestId,
-      operation: op,
-      role: "integrator",
-      caller: { nodeId: caller },
-      params,
-    } as unknown as HandlerRequest<never>;
+    const req = (caller === "human"
+      ? { requestId, operation: op, role: "human", params }
+      : {
+          requestId,
+          operation: op,
+          role: "integrator",
+          caller: { nodeId: caller },
+          params,
+        }) as unknown as HandlerRequest<never>;
     // biome-ignore lint/suspicious/noExplicitAny: 操作ごとの型は呼び出し側で保証
     return (await (h[op] as any)(req)) as { ok: boolean; value?: any; error?: Failure };
   };
@@ -115,6 +117,18 @@ const rig = (opts: { adapter?: FakeAdapter | null } = {}) => {
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("node.send（稼働中の子への追加指示）", () => {
+  it("能力表の send が unsupported（Desktop）なら、記録する前に、理由と代替手段つきで失敗する", async () => {
+    const r = rig();
+    if (r.adapter) r.adapter.caps = { ...r.adapter.caps, send: "unsupported" };
+    const before = r.state().lastSeq;
+    const res = await r.call("node.send", { nodeId: "a", text: "続けて" });
+    expect(res.ok).toBe(false);
+    expect(res.error?.code).toBe("unsupported");
+    expect(res.error?.nextActions.join()).toContain("親");
+    expect(r.state().lastSeq).toBe(before);
+    expect(r.adapter?.sent).toEqual([]);
+  });
+
   it("動作中のノードの指示をアダプタへ渡し、受け付けた結果を返す", async () => {
     const r = rig();
     const res = await r.call("node.send", { nodeId: "a", text: "続けて" });
@@ -457,6 +471,23 @@ describe("バックグラウンドの停止の堅牢化（onStopSettled・アダ
     expect(inbox(r2).at(-1)).toMatchObject({ kind: "info", nodeId: "a" });
   });
 
+  it("アダプタが代行（delegation）を返したら、受信箱の stopIncomplete の項目に、代行の文面をそのまま出す", async () => {
+    const r = rig();
+    if (r.adapter) {
+      r.adapter.stopResult = ok({
+        state: "stopIncomplete",
+        blockers: [],
+        delegation: "親に停止の代行を依頼: Desktop でノード a のタスクを止める",
+      });
+    }
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" });
+    await flush();
+    await flush();
+    const item = inbox(r).at(-1);
+    expect(item).toMatchObject({ kind: "stopIncomplete", nodeId: "a" });
+    expect(item?.summary).toBe("親に停止の代行を依頼: Desktop でノード a のタスクを止める");
+  });
+
   it("受信箱の項目は、停止の試行ごとに 1 件（同じ結果を二重に出さない）", async () => {
     const r = rig();
     await r.call("node.stop", { nodeId: "a", mode: "immediate" }, "same");
@@ -504,10 +535,116 @@ describe("node.capabilities の絞り込み（呼び出し元との関係・ア�
     expect(o2).toContain("node.stop");
   });
 
+  it("停止の手段がなくても、代行（stopDelegated）があれば stop を出す", async () => {
+    const r = rig();
+    if (r.adapter)
+      r.adapter.caps = {
+        ...r.adapter.caps,
+        stopGraceful: false,
+        stopImmediate: false,
+        stopDelegated: true,
+      };
+    expect(await ops(r, "a")).toContain("node.stop");
+  });
+
   it("停止未完了からは、停止（再試行＝即時）が出る", async () => {
     const r = rig();
     await r.call("node.stop", { nodeId: "a", mode: "immediate" });
     r.ev("a", { type: "stopTimeout" });
     expect(await ops(r, "a")).toContain("node.stop");
+  });
+});
+
+describe("node.confirmStopped（停止の宣言。stopDelegated のノードだけ）", () => {
+  const delegated = () => {
+    const r = rig();
+    if (r.adapter) {
+      r.adapter.caps = {
+        ...r.adapter.caps,
+        stopGraceful: false,
+        stopImmediate: false,
+        stopDelegated: true,
+      };
+      r.adapter.stopResult = ok({
+        state: "stopIncomplete",
+        blockers: [],
+        delegation: "親に停止の代行を依頼: 手順。対象ノード: a",
+      });
+    }
+    return r;
+  };
+  const toIncomplete = async (r: ReturnType<typeof rig>) => {
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" });
+    r.ev("a", { type: "stopTimeout" });
+    await flush();
+    await flush();
+  };
+  const ops = async (r: ReturnType<typeof rig>, nodeId: string) =>
+    ((await r.call("node.capabilities", { nodeId })).value?.operations ?? []) as string[];
+  const inbox = (r: ReturnType<typeof rig>) => r.state().inbox;
+
+  it("祖先の統合ノードが宣言すると stopped に進み、宣言者を記録し、代行依頼の項目を解決する", async () => {
+    const r = delegated();
+    await toIncomplete(r);
+    const open = inbox(r).filter((i) => i.kind === "stopIncomplete" && i.nodeId === "a");
+    expect(open.length).toBeGreaterThan(0);
+    const res = await r.call("node.confirmStopped", { nodeId: "a", note: "アーカイブした" });
+    expect(res).toEqual({ ok: true, value: { state: "stopped" } });
+    expect(r.state().stopDeclarations).toMatchObject([
+      { nodeId: "a", note: "アーカイブした", actor: { nodeId: "m1" } },
+    ]);
+    for (const i of r.state().inbox.filter((x) => x.kind === "stopIncomplete" && x.nodeId === "a"))
+      expect(i.resolved).toBeDefined();
+    expect(inbox(r).at(-1)?.summary).toContain("統合ノード m1");
+  });
+
+  it("人間も宣言できる（部分木の制限なし）。宣言者は human", async () => {
+    const r = delegated();
+    await toIncomplete(r);
+    const res = await r.callAs("human", "node.confirmStopped", { nodeId: "a" });
+    expect(res.ok).toBe(true);
+    expect(r.state().stopDeclarations[0]?.actor).toEqual({ human: true });
+  });
+
+  it("同じ requestId の再送は同じ結果で、記録は 1 回", async () => {
+    const r = delegated();
+    await toIncomplete(r);
+    await r.call("node.confirmStopped", { nodeId: "a" }, "same");
+    const last = r.state().lastSeq;
+    const again = await r.call("node.confirmStopped", { nodeId: "a" }, "same");
+    expect(again).toEqual({ ok: true, value: { state: "stopped" } });
+    expect(r.state().lastSeq).toBe(last);
+    const other = await r.call("node.confirmStopped", { nodeId: "a" });
+    expect(other.error?.code).toBe("invalidTransition");
+  });
+
+  it("CLI のノード（stopDelegated なし）には使えない（notDelegated。node.stop を案内）", async () => {
+    const r = rig();
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" });
+    r.ev("a", { type: "stopTimeout" });
+    const before = r.state().lastSeq;
+    const res = await r.call("node.confirmStopped", { nodeId: "a" });
+    expect(res.error?.code).toBe("notDelegated");
+    expect(res.error?.nextActions.join()).toContain("node.stop");
+    expect(r.state().lastSeq).toBe(before);
+    expect(await ops(r, "a")).not.toContain("node.confirmStopped");
+  });
+
+  it("部分木の外の統合ノードは宣言できない。stopIncomplete でなければ失敗", async () => {
+    const r = delegated();
+    expect((await r.call("node.confirmStopped", { nodeId: "a" })).error?.code).toBe(
+      "invalidTransition",
+    );
+    await toIncomplete(r);
+    expect((await r.callAs("m2", "node.confirmStopped", { nodeId: "a" })).error?.code).toBe(
+      "forbidden",
+    );
+  });
+
+  it("一覧: stopIncomplete かつ stopDelegated のときだけ node.confirmStopped を出す", async () => {
+    const r = delegated();
+    expect(await ops(r, "a")).not.toContain("node.confirmStopped");
+    await toIncomplete(r);
+    expect(await ops(r, "a")).toContain("node.confirmStopped");
   });
 });

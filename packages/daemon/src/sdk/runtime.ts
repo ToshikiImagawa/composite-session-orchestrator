@@ -9,6 +9,8 @@ export interface Capabilities {
   readonly send: "ok" | "delayed" | "unreliable" | "unsupported";
   readonly stopGraceful: boolean;
   readonly stopImmediate: boolean;
+  /** 直接は止められないが、受信箱を通じて親に停止の代行を依頼できる（Desktop。FR_036）。省略すると false。 */
+  readonly stopDelegated?: boolean;
   readonly hooks: "ok" | "unverified" | "unsupported";
   readonly sessionId: boolean;
 }
@@ -45,22 +47,37 @@ export interface StopRequest {
   readonly stopSeq: number;
 }
 
-export interface StopValue {
-  /** `stopped`: 作業ツリー配下にプロセスがないことを確認できた。`stopIncomplete`: 所定の時間を超えても残っている。 */
-  readonly state: "stopped" | "stopIncomplete";
-  /** 猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか。 */
-  readonly outcome: StopOutcome;
+interface StopValueBase {
   /** 残っているプロセスの pid（`stopIncomplete` のときの手がかり）。 */
   readonly blockers: readonly number[];
   /** 続行した問題（手段の例外、観測の記録の失敗など）。なければ省略する。 */
   readonly warnings?: readonly string[];
 }
 
+/**
+ * 停止の結果。`stopped`: 作業ツリー配下にプロセスがないことを確認できた（`outcome` は必須）。`stopIncomplete`: 所定の時間を
+ * 超えても残っている、または停止を親に代行してもらう（`delegation`。このとき `outcome` はない）。
+ */
+export type StopValue =
+  | (StopValueBase & {
+      readonly state: "stopped";
+      /** 猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか。 */
+      readonly outcome: StopOutcome;
+    })
+  | (StopValueBase & {
+      readonly state: "stopIncomplete";
+      readonly outcome?: StopOutcome;
+      /** 停止を親に代行してもらうときの依頼の文面（手順・対象のノード）。受信箱の stopIncomplete の項目に出す。 */
+      readonly delegation?: string;
+    });
+
 export interface RuntimeAdapter {
   readonly kind: "cli" | "desktop";
   /** そのノードの子を、このアダプタが管理しているか（再起動の後の整合で使う。省略すると、管理していないものとして扱う）。 */
   has?(nodeId: string): boolean;
   capabilities(nodeId: string): Capabilities;
+  /** 停止の宣言（`node.confirmStopped`）の後に、そのノードの子を管理から外す（省略可。直接止められるアダプタには不要）。 */
+  release?(nodeId: string): void;
   start(request: StartRequest): Promise<Result<StartValue, Failure>>;
   send(nodeId: string, text: string): Promise<Result<DeliveryValue, Failure>>;
   stop(nodeId: string, request: StopRequest): Promise<Result<StopValue, Failure>>;

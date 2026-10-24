@@ -30,7 +30,7 @@ const NEXT_ACTIONS: Readonly<Record<InboxKind, readonly IntegratorOperation[]>> 
   answer: ["decision.get", "node.send"],
   violation: ["scope.decide", "node.send", "node.stop"],
   failure: ["report.get", "node.send", "node.split", "node.stop"],
-  stopIncomplete: ["node.stop", "node.capabilities", "decision.present"],
+  stopIncomplete: ["node.stop", "node.confirmStopped", "node.capabilities", "decision.present"],
   done: ["report.get", "node.review"],
   progress: ["report.get"],
   info: [],

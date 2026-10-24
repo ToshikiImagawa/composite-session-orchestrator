@@ -110,6 +110,14 @@ export interface OperationMap {
     params: { nodeId: string } & ({ mode: "graceful"; graceMs?: number } | { mode: "immediate" });
     result: { state: NodeState };
   };
+  /**
+   * 停止の宣言（FR_036）。daemon が直接止められないノード（能力表の `stopDelegated`）を、親が代わりに止めたと宣言し、
+   * 停止未完了（stopIncomplete）から停止済み（stopped）に進める。宣言した者を記録に残す（`node.stopDeclared`）。
+   */
+  "node.confirmStopped": {
+    params: { nodeId: string; note?: string };
+    result: { state: NodeState };
+  };
   "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly InboxItem[] } };
   "tree.list": { params: Record<string, never>; result: { table: string } };
   "decision.present": {
@@ -302,6 +310,7 @@ export const ROLE_OPERATIONS = {
     "node.spawn",
     "node.send",
     "node.stop",
+    "node.confirmStopped",
     "inbox.fetch",
     "tree.list",
     "decision.present",
@@ -317,6 +326,7 @@ export const ROLE_OPERATIONS = {
   child: ["report.progress", "report.decision", "report.outOfScope", "report.done", "scope.extend"],
   human: [
     "decision.answer",
+    "node.confirmStopped",
     "scope.decide",
     "node.reclaimInstruct",
     "node.reclaimPreview",
@@ -357,6 +367,7 @@ export const SUBTREE_RULES: Readonly<Record<SubtreeOperation, SubtreeRule>> = {
   "node.spawn": "selfOrDescendant",
   "node.send": "strictDescendant",
   "node.stop": "strictDescendant",
+  "node.confirmStopped": "strictDescendant",
   "node.split": "strictDescendant",
   "node.review": "directChild",
   "node.reclaimPreview": "strictDescendant",
@@ -381,6 +392,7 @@ export const INTEGRATOR_OPERATION_CLASS: Readonly<
   "node.spawn": "subtree",
   "node.send": "subtree",
   "node.stop": "subtree",
+  "node.confirmStopped": "subtree",
   "inbox.fetch": "callerFiltered",
   "tree.list": "callerFiltered",
   "decision.present": "subtree",

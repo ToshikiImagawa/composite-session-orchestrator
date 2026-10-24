@@ -29,6 +29,7 @@ ID は、短縮せずに、そのまま渡します（作業ツリーのディ�
 - `mcp__node__node_spawn`: 子を作る。`parentId`（自分か子孫の ID）・`role`・`objective`・`acceptanceCriteria`（確かめられる形で書く）・`scope`（`writableLocations`・`forbiddenLocations` は作業ツリー内の相対パス、`allowedCommands`）・`dependsOn`（任意）を渡す。範囲は必要最小限にする。依存先が未完了なら `pending` になる。
 - `mcp__node__node_send`: 稼働中の子へ追加の指示を送る。`queued` は受け付けただけなので、届いたかは受信箱や状態で確かめる。
 - `mcp__node__node_stop`: 子を止める。`graceful` は穏当、`immediate` は即時。`graceMs` は `graceful` のときだけ指定できる。
+- `mcp__node__node_confirmStopped`: daemon が直接止められない子（能力表の `stopDelegated`。Desktop の子）を、受信箱の停止の代行依頼に従って止めた後に、止めたと宣言する。停止未完了から停止済みに進む。`note` に根拠を書ける。
 - `mcp__node__node_split`: 脱線した部分を、新しい子へ移す。元の子は、`keep` で、本筋に戻す（`mainline`）か止める（`stop`）。
 
 報告・判断を受ける:

@@ -93,7 +93,7 @@ const ruleHolds = (
 /**
  * ノードについて、呼び出した統合ノード（`caller`）が取れる操作を導く（FR_034）。次の 3 つで絞る:
  * (1) ノードの状態（core の遷移表）、(2) アダプタの能力表（アダプタがなければ、指示・停止・切り出し・子の生成は出さない。
- * 停止は、穏当か即時のどちらかが可能なときだけ。指示は `send` が unsupported でないときだけ）、
+ * 停止は、穏当か即時のどちらかが可能か、代行（`stopDelegated`）できるときだけ。指示は `send` が unsupported でないときだけ）、
  * (3) 呼び出し元との関係（`SUBTREE_RULES`。例: 完了の判定は直接の親だけ、自分自身には何もない）。
  * `node.reclaimPreview`・`node.reclaim` は、回収の入口に立てる状態（verified・stopped）で出す。実際に回収できるかは、
  * `node.reclaimPreview` の判定（回収可能判定。条件 1〜6）で決まる。停止未完了（stopIncomplete）からの `node.stop` は、
@@ -110,7 +110,7 @@ export function operationsFor(
   const candidates: DaemonOperation[] = ["node.capabilities"];
   if (caps !== undefined) {
     if (SENDABLE.has(s) && caps.send !== "unsupported") candidates.push("node.send");
-    const canStop = caps.stopGraceful || caps.stopImmediate;
+    const canStop = caps.stopGraceful || caps.stopImmediate || caps.stopDelegated === true;
     if (
       canStop &&
       (s === "stopIncomplete" ||
@@ -118,6 +118,8 @@ export function operationsFor(
     ) {
       candidates.push("node.stop");
     }
+    if (s === "stopIncomplete" && caps.stopDelegated === true)
+      candidates.push("node.confirmStopped");
     if (s === "running") candidates.push("node.split");
     if ((s === "running" || s === "waiting") && node.role === "integrator")
       candidates.push("node.spawn");
@@ -157,6 +159,7 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
    * 停止の結果を、イベントログへ反映する（アダプタが記録しない分）。停止の試行（`stopSeq`）ごとに 1 回（冪等）。
    * - 停止を確認した（stopped）: 受信箱に info。
    * - 停止未完了（stopIncomplete。残っているプロセスの pid つき）: 受信箱に stopIncomplete。
+   * - 代行（`delegation` つき。Desktop）: 受信箱に stopIncomplete（代行の文面）。
    * - アダプタの失敗: まだ stopping なら、`stopTimeout` を記録して stopIncomplete にし、受信箱に stopIncomplete。
    */
   const settle = (nodeId: string, stopSeq: number, result: Result<StopValue, Failure>): void => {
@@ -172,6 +175,12 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
     });
     if (result.ok && result.value.state === "stopped") {
       bodies.push(inbox("info", `停止を確認した（${result.value.outcome}）`));
+    } else if (
+      result.ok &&
+      result.value.state === "stopIncomplete" &&
+      result.value.delegation !== undefined
+    ) {
+      bodies.push(inbox("stopIncomplete", result.value.delegation));
     } else if (result.ok) {
       bodies.push(
         inbox(
@@ -247,7 +256,15 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
         "再開してから指示する",
       );
     }
-    if (adapterFor(nodeId) === undefined) return noRuntime(nodeId);
+    const adapter = adapterFor(nodeId);
+    if (adapter === undefined) return noRuntime(nodeId);
+    if (adapter.capabilities(nodeId).send === "unsupported") {
+      return fail(
+        "unsupported",
+        `ノード ${nodeId} の実行環境（${adapter.kind}）には、daemon から直接指示を届けられない`,
+        "親（統合セッション）に、実行環境の機能で代わりに送るよう頼む",
+      );
+    }
     // 先に記録し、そのあとアダプタへ渡す（配送に成功したら、配送を記録する）。
     const recorded = appendAtomically(log, clock, req.requestId, actor, entry);
     if (!recorded.ok) return recorded;
@@ -329,6 +346,73 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
         }
       }
       return { ok: true, value: { state: stateOf(after, nodeId) as NodeState } };
+    },
+
+    /**
+     * 停止の宣言（FR_036）。能力表の `stopDelegated` のノードだけ。1 トランザクションで、宣言（`node.stopDeclared`。宣言者は
+     * 封筒の actor）・`confirmStopped`（stopIncomplete → stopped）・そのノードの未解決の stopIncomplete の項目（代行依頼）の解決・
+     * 受信箱の info を記録する。同じ requestId の再送は、同じ結果（記録は 1 回）。
+     */
+    "node.confirmStopped": (
+      req: HandlerRequest<"node.confirmStopped">,
+    ): R<"node.confirmStopped"> => {
+      const { nodeId, note } = req.params;
+      const human = req.role === "human";
+      if (!human) {
+        const outside = outsideSubtree(callerOf(req), nodeId);
+        if (outside) return outside;
+      }
+      const state = log.state();
+      const node = nodeOf(state, nodeId);
+      if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
+      const actor = human ? ({ human: true } as const) : { nodeId: callerOf(req) };
+      // 同じ要求の再送は、記録済みの結果（今の状態）を返す。
+      if (alreadyApplied(state, actor, req.requestId))
+        return { ok: true, value: { state: stateOf(state, nodeId) as NodeState } };
+      const adapter = adapterFor(nodeId);
+      if (adapter?.capabilities(nodeId).stopDelegated !== true) {
+        return fail(
+          "notDelegated",
+          `ノード ${nodeId} は daemon が直接止めるノードで、停止を宣言できない（能力表の stopDelegated のノードだけ）`,
+          "node.stop で停止を再試行する",
+        );
+      }
+      if (node.state !== "stopIncomplete") {
+        return fail(
+          "invalidTransition",
+          `ノード ${nodeId} は ${node.state} で、停止を宣言できない（stopIncomplete のとき）`,
+          "ノードの状態を確認する",
+        );
+      }
+      const who = human ? "人間" : `統合ノード ${callerOf(req)}`;
+      const bodies: EventBody[] = [
+        { type: "node.stopDeclared", payload: { nodeId, ...(note === undefined ? {} : { note }) } },
+        { type: "node.stateChanged", payload: { nodeId, event: { type: "confirmStopped" } } },
+        ...state.inbox
+          .filter(
+            (i) => i.kind === "stopIncomplete" && i.nodeId === nodeId && i.resolved === undefined,
+          )
+          .map((i): EventBody => ({ type: "inbox.resolved", payload: { itemId: i.id } })),
+        {
+          type: "inbox.added",
+          payload: {
+            id: deriveId("inbox", human ? "human" : callerOf(req), req.requestId, "declared"),
+            kind: "info",
+            nodeId,
+            summary: summarize(
+              `停止の宣言を記録した（宣言者: ${who}${note === undefined ? "" : `。根拠: ${note}`}）`,
+            ),
+          },
+        },
+      ];
+      const r = appendAtomically(log, clock, req.requestId, actor, bodies);
+      if (!r.ok) return r;
+      try {
+        adapter.release?.(nodeId);
+      } catch {
+        // 管理から外す処理の失敗は、宣言の記録を取り消さない
+      }
+      return { ok: true, value: { state: stateOf(r.value.state, nodeId) as NodeState } };
     },
 
     "node.capabilities": (req: HandlerRequest<"node.capabilities">): R<"node.capabilities"> => {

@@ -39,6 +39,8 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
     "稼働中の子へ追加指示を送る。結果は { status: queued, duplicate }（受け付けた。duplicate は同じ要求の重複。届いたかは受信箱・状態で確認する）",
   "node.stop":
     "子を停止する。mode は graceful（穏当）か immediate（即時）。graceMs（1〜3600000 ミリ秒の整数）は graceful のときだけ指定でき、省略すると既定の猶予になる",
+  "node.confirmStopped":
+    "daemon が直接止められない子（能力表の stopDelegated。Desktop の子）を、代わりに止めたと宣言し、停止未完了から停止済みに進める。受信箱の停止の代行依頼に従って止めた後に使う。note（省略可）に根拠を書く。結果は { state }",
   "inbox.fetch":
     "受信箱を取得する。優先度・依存関係・時刻の順（中間統合ノードの配下の要約 digest は、配下の未解決の項目の最高の優先度の帯に並ぶ）。detail と limit で量を絞れる",
   "tree.list":

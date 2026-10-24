@@ -46,6 +46,8 @@ const rig = (
     maxPerRun?: number;
     maxPerHour?: number;
     managed?: (id: string) => boolean;
+    /** アダプタの能力表の send（既定 ok）。 */
+    send?: "ok" | "unsupported";
     /** true なら、`startMonoMs` を渡さない（`start()` で、起動の時刻を決める）。 */
     noStartMono?: boolean;
   } = {},
@@ -83,7 +85,7 @@ const rig = (
   const flags = { sendFails: false };
   const adapter = {
     kind: "cli" as const,
-    capabilities: () => ({ send: "ok" }),
+    capabilities: () => ({ send: opts.send ?? "ok" }),
     async send(nodeId: string, text: string): Promise<Result<{ status: "queued" }, Failure>> {
       if (flags.sendFails) return { ok: false, error: failure("sendFailed", "x", "y") };
       sent.push({ nodeId, text });
@@ -109,7 +111,7 @@ const rig = (
       minIntervalMs: opts.minIntervalMs ?? 60_000,
       maxPerRun: opts.maxPerRun ?? 10,
       deliver: delivery.deliver,
-      canDeliver: opts.managed ?? (() => true),
+      canDeliver: opts.managed ?? delivery.available,
       timers: mt.timers,
       note: (event, data) => notes.push({ event, data }),
       isStopped: () => false,
@@ -208,6 +210,16 @@ describe("起こす（T24-w）", () => {
     const out = await r.waker().runOnce();
     expect(out.woken).toEqual([]);
     expect(r.sent).toEqual([]);
+  });
+
+  it("能力表の send が unsupported（Desktop）のノードは起こさない（記録しない）", async () => {
+    const r = rig({ send: "unsupported" });
+    r.item("f1", "failure", "a");
+    r.setMono(60_000);
+    const out = await r.waker().runOnce();
+    expect(out.woken).toEqual([]);
+    expect(r.sent).toEqual([]);
+    expect(r.instructions()).toEqual([]);
   });
 
   it("完了したノードは起こさない", async () => {

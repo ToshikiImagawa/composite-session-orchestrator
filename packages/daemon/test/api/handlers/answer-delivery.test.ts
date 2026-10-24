@@ -25,7 +25,9 @@ let n = 0;
 const SCOPE: Scope = { writableLocations: ["src"], forbiddenLocations: [], allowedCommands: [] };
 
 /** root ─ m1(統合) ─ a(running の子)。a が report.decision で判断を出す */
-const rig = (opts: { live?: boolean; withCanDeliver?: boolean } = {}) => {
+const rig = (
+  opts: { live?: boolean; withCanDeliver?: boolean; send?: "ok" | "unsupported" } = {},
+) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
   const log = opened.value;
@@ -69,7 +71,7 @@ const rig = (opts: { live?: boolean; withCanDeliver?: boolean } = {}) => {
   const adapter = {
     kind: "cli" as const,
     capabilities: () => ({
-      send: "ok",
+      send: opts.send ?? "ok",
       stopGraceful: true,
       stopImmediate: true,
       hooks: "ok",
@@ -388,6 +390,15 @@ describe("#58 のレビュー対応", () => {
 
   it("R4: canDeliver を渡さないときは、届けない（安全側）", async () => {
     const r = rig({ withCanDeliver: false });
+    const id = await r.decide();
+    const res = await r.answer(id, { choice: "YAML" });
+    expect(res.ok).toBe(true);
+    expect(r.sent).toHaveLength(0);
+    expect(r.log.state().instructions).toHaveLength(0);
+  });
+
+  it("能力表の send が unsupported（Desktop）の判断者には、記録せず届けない", async () => {
+    const r = rig({ send: "unsupported" });
     const id = await r.decide();
     const res = await r.answer(id, { choice: "YAML" });
     expect(res.ok).toBe(true);

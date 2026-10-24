@@ -1060,3 +1060,11 @@ describe("フック: リンクの解決", () => {
     ]);
   });
 });
+
+describe("停止の宣言の release（Desktop だけ）", () => {
+  it("CLI のアダプタは release を持たず、能力表に stopDelegated を出さない（停止の宣言の対象外）", () => {
+    const { adapter } = rig();
+    expect((adapter as { release?: unknown }).release).toBeUndefined();
+    expect(adapter.capabilities("a").stopDelegated).not.toBe(true);
+  });
+});

@@ -230,6 +230,7 @@ describe("createHandlers の組み立て", () => {
         started.push(req.nodeId);
         return ok({ sessionId: "s", cwd: req.worktreePath, removedEnv: [] });
       },
+      capabilities: () => ({ send: "ok" }),
     } as unknown as RuntimeAdapter;
     const h = createHandlers({ log, clock }, { adapterFor: () => adapter }, undefined, {
       ...spawnDeps,

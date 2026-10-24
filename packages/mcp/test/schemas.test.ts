@@ -20,6 +20,7 @@ const VALID: Record<string, unknown> = {
   node_spawn: { parentId: "root", role: "integrator", ...brief },
   node_send: { nodeId: "n1", text: "追加指示" },
   node_stop: { nodeId: "n1", mode: "graceful", graceMs: 1000 },
+  node_confirmStopped: { nodeId: "n1", note: "Desktop でアーカイブした" },
   inbox_fetch: { sinceSeq: 3, detail: "full", limit: 10, offset: 0, asOfSeq: 9 },
   tree_list: {},
   decision_present: { question: "どちら?", options: ["a", "b"], pauseNodeIds: ["n1"] },
