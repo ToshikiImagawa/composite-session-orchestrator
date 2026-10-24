@@ -111,6 +111,23 @@
 | 15 | `.mcp.json`・`settings.json` が読まれない | 子の作業ツリーに `.mcp.json`（別の MCP サーバーを書いたもの）と `.claude/settings.json`（フック・許可を書いたもの）を置いても、使われない（`strictMcpConfig`・`settingSources: []`） | 作業ツリーに置いて子を起動し、init の MCP サーバーの一覧に `node` 以外がないこと、置いた設定のフックが動かないこと |
 | 16 | 環境変数の漏れ（T10e で許可リスト方式になった） | 子のプロセスの環境に、許可していない秘密（例: `GH_TOKEN`・`GITHUB_TOKEN`・`ANTHROPIC_API_KEY`）が、必要以上に渡っていないこと | 子の環境変数を、`/proc/<子の pid>/environ` で確認する（値は表示せず、名前だけ）。除く規則は `child-env.ts`（セッション識別子だけ）なので、**ほかの秘密は、そのまま渡る**。必要なら、許可リスト方式への変更を検討する |
 
+## ファイルで設定するフック（T22-h。CLI のセッション）
+
+前提: daemon が起動していて、範囲を持つ子（例: `writableLocations: ["src"]`）が daemon の管理下にある（受け口は、daemon が作業ツリーを知っているノードだけを判定する。ほかは拒否）。その子のトークン（bind で取得したもの）を使い、**その子の作業ツリーで**、plugin つきの CLI のセッションを起動する: `CSO_DAEMON_URL=<窓口の URL> CSO_NODE_TOKEN=<子のトークン> claude --plugin-dir <plugin のパス>`。トークンは、チャット・設定ファイルに書かない。
+
+| # | 確認 | 期待 | 確認の方法 |
+|:--|:--|:--|:--|
+| H1 | フックが発火する | PreToolUse・PostToolUse・Stop で `cso-hook.mjs` が動く | `claude --debug` の出力に、フックの実行が出る。範囲内の `Write`（`src/a.txt`）は許可される |
+| H2 | 範囲外の書き込みの拒否と記録 | `Write`（`b.txt`）が拒否され、理由がモデルに伝わる。`scope.violation` が記録され、親の受信箱に violation が 1 件載る | 子に `b.txt` を書くよう頼み、`cso inbox` と記録を見る。未知のツール（例: `WebFetch`）は `node.toolDenied` |
+| H3 | `settingSources` の混入がない | daemon が SDK で起動する子（`settingSources: []`）には、利用者が入れた plugin のフックが混ざらない（受け口に、その子からの要求が来ない） | 子を SDK で起動し、受け口の記録（`hookSessionMismatch` が出ない、受け口への要求がない）を見る。H1 の CLI セッションを止めてから確かめる。**api のカウンタでも確かめる**: 窓口の件数のまとめ（daemon の記録の `apiSummary`。窓は 1 分）で、子のトークンの `/v1/hook` の要求が増えないこと、`authFailed`・`rateLimited` が増えないこと |
+| H4 | daemon 停止のときのフェイルクローズ | daemon を止めると、PreToolUse はすべて拒否される（「届かない」）。Stop は止めない（セッションを終えられる） | daemon を止めて、`Read` と `Write` を頼む。ツールが実行されないこと |
+| H5 | 環境変数 | 両方なし: 素通しし、標準エラーに一言出る（CSO のフックは働かない）。片方だけ: 拒否 | `CSO_NODE_TOKEN` だけを外して起動し、ツールが拒否されること |
+| H6 | `session_id` の結び付け | 同じトークンで別のセッションを起動すると、403 で拒否される（`hookSessionMismatch`）。daemon を再起動すると、最初に来たセッションに結び直す | 2 つ目の CLI セッションを、同じ環境変数で起動する。同じセッションで `/clear`・`--resume` をして `session_id` が変わると、daemon を再起動するまで拒否されることも確かめる |
+
+注: 本文の上限（1 MiB）を超えた要求の 413 は、daemon が本文を読まずに接続を閉じるため、スクリプトからは「届かない」扱いになることがある（どちらでも PreToolUse は拒否）。
+
+Desktop の子への継承は、項目 4 の結果のあと（T22 の Desktop の分）。
+
 ## 結果の記録
 
 実施するたびに、次の形で追記する（日付・SDK の版・CLI の版・OS・確認した項目と結果・見つかった問題）。

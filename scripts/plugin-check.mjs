@@ -1,6 +1,6 @@
 // plugin/ の検証（`validate-plugin.mjs` から使う。試験は plugin-check.test.mjs）。依存なし。
 // - plugin.json の構文と必須項目・name・version
-// - agents・hooks・skills のディレクトリ、skills・commands の frontmatter、hooks/hooks.json（あれば JSON として正しいこと）
+// - agents・hooks・skills のディレクトリ、skills・commands の frontmatter、hooks/hooks.json（あれば JSON として正しく、形が正しいこと。T22-h）
 // - skill・command に書いた MCP のツール名（mcp__node__*）が実在すること。skill は、そのロールの全ツールを書いていること
 // - NFR_012: plugin に、リポジトリ・利用者の場所（絶対パス）を埋め込まないこと
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -61,7 +61,7 @@ const walk = (dir) => {
 const TOOL_RE = /mcp__node__([A-Za-z_]*[A-Za-z])/g;
 /**
  * NFR_012: 一般の絶対パス（行頭・空白・引用符・`(`・`=` の直後の `/<英数字>/…`）・ホームのパス・Windows のパス・file URL を拒否する。
- * 例外は、URL のパス（`://host` の後）と `${CLAUDE_PLUGIN_ROOT}` だけ（先に取り除いてから、検査する）。
+ * 例外は、URL のパス（`://host` の後）と `${CLAUDE_PLUGIN_ROOT}`（とそれに続く plugin の中のパス。`..` を含むものは除く）だけ（先に取り除いてから、検査する）。
  */
 const URL_RE = /\b(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`)\]>]*/g;
 const PATH_RES = [
@@ -71,8 +71,71 @@ const PATH_RES = [
   /file:\/\//,
 ];
 const pathViolation = (line) => {
-  const rest = line.replaceAll(URL_RE, " ").replaceAll(/\$\{CLAUDE_PLUGIN_ROOT\}/g, " ");
+  // `${CLAUDE_PLUGIN_ROOT}` のあとに `..` が続くもの（plugin の外へ出るパス）は、例外にしない（hooks.json の command と対称）。
+  if (/\$\{CLAUDE_PLUGIN_ROOT\}[^\s"'`]*(?:^|\/)\.\.(?:\/|[\s"'`]|$)/.test(line)) return true;
+  const rest = line.replaceAll(URL_RE, " ").replaceAll(/\$\{CLAUDE_PLUGIN_ROOT\}[^\s"'`]*/g, " ");
   return PATH_RES.some((re) => re.test(rest));
+};
+
+const HOOK_EVENTS = new Set(["PreToolUse", "PostToolUse", "Stop"]);
+/** `node "${CLAUDE_PLUGIN_ROOT}/<相対パス>"`（引用符は任意）。NFR_012: パスは plugin の中だけ。 */
+const HOOK_COMMAND_RE = /^node "?\$\{CLAUDE_PLUGIN_ROOT\}\/([A-Za-z0-9_./-]+\.mjs)"?$/;
+const isObj = (x) => typeof x === "object" && x !== null && !Array.isArray(x);
+
+/** hooks.json の形（T22-h）。イベントは PreToolUse・PostToolUse・Stop だけ。command は plugin の中のスクリプトを node で起動する。 */
+const checkHooks = (json, pluginDir) => {
+  const errors = [];
+  const at = "plugin/hooks/hooks.json";
+  if (!isObj(json)) return [`${at}: 全体がオブジェクトではありません`];
+  if (!isObj(json.hooks)) return [`${at}: hooks（オブジェクト）がありません`];
+  for (const [event, entries] of Object.entries(json.hooks)) {
+    if (!HOOK_EVENTS.has(event)) {
+      errors.push(`${at}: 未知のイベント ${event}（PreToolUse・PostToolUse・Stop だけ）`);
+      continue;
+    }
+    if (!Array.isArray(entries)) {
+      errors.push(`${at}: ${event} が配列ではありません`);
+      continue;
+    }
+    for (const [i, e] of entries.entries()) {
+      const where = `${at}: ${event}[${i}]`;
+      if (!isObj(e)) {
+        errors.push(`${where} がオブジェクトではありません`);
+        continue;
+      }
+      if (event === "Stop" && e.matcher !== undefined) {
+        errors.push(`${where}: Stop には matcher を書きません`);
+      } else if (e.matcher !== undefined && (typeof e.matcher !== "string" || e.matcher === "")) {
+        errors.push(`${where}: matcher は空でない文字列です`);
+      }
+      if (!Array.isArray(e.hooks) || e.hooks.length === 0) {
+        errors.push(`${where}: hooks（1 つ以上）がありません`);
+        continue;
+      }
+      for (const [j, h] of e.hooks.entries()) {
+        const w = `${where}.hooks[${j}]`;
+        if (!isObj(h) || h.type !== "command" || typeof h.command !== "string") {
+          errors.push(`${w}: type は "command"、command は文字列です`);
+          continue;
+        }
+        const m = HOOK_COMMAND_RE.exec(h.command);
+        if (m === null || m[1].split("/").includes("..")) {
+          errors.push(
+            `${w}: command は node "\${CLAUDE_PLUGIN_ROOT}/<plugin の中の .mjs>" の形です`,
+          );
+        } else if (!existsSync(join(pluginDir, m[1]))) {
+          errors.push(`${w}: command のファイル ${m[1]} が plugin の中にありません`);
+        }
+        if (
+          h.timeout !== undefined &&
+          !(Number.isInteger(h.timeout) && h.timeout >= 1 && h.timeout <= 60)
+        ) {
+          errors.push(`${w}: timeout は 1〜60 の整数（秒）です`);
+        }
+      }
+    }
+  }
+  return errors;
 };
 
 export function checkPlugin({ pluginDir, tools, forbidden = [] }) {
@@ -118,11 +181,13 @@ export function checkPlugin({ pluginDir, tools, forbidden = [] }) {
   // hooks/hooks.json（なければ空。あれば、JSON として正しいこと）
   const hooksFile = join(pluginDir, "hooks", "hooks.json");
   if (existsSync(hooksFile)) {
+    let parsed;
     try {
-      JSON.parse(readFileSync(hooksFile, "utf8"));
+      parsed = JSON.parse(readFileSync(hooksFile, "utf8"));
     } catch (e) {
       errors.push(`plugin/hooks/hooks.json を読み込めません: ${e.message}`);
     }
+    if (parsed !== undefined) errors.push(...checkHooks(parsed, pluginDir));
   }
 
   const known = new Set([...tools.integrator, ...tools.child, ...tools.common]);

@@ -637,6 +637,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   const server = createApiServer({
     identity: () => currentIdentity,
     credentials,
+    // ファイルで設定するフック（plugin の hooks.json。T22-h）。SDK のコールバックと同じ判定・同じ記録。
+    hook: (nodeId, toolName, toolInput) => adapter.decideHook(nodeId, toolName, toolInput),
     getState: () => log.state(),
     // 画面の停止の宣言（T22d）。ハンドラ（node.confirmStopped）と同じく、能力表の stopDelegated だけで決める（管理しているか
     // は見ない。再起動の後も出す）。いまは CLI のアダプタだけなので、常に false（Desktop の配線は T21）。

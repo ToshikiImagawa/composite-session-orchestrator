@@ -158,9 +158,62 @@ test("NFR_012: 一般の絶対パスを拒否する。例外は、URL のパス�
   assert.match(named.join("\n"), /NFR_012[\s\S]*secret-repo/);
 });
 
+// biome-ignore lint/suspicious/noTemplateCurlyInString: hooks.json に書く、Claude Code が展開する変数の参照
+const CMD = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/cso-hook.mjs"';
+const entry = (extra = {}) => ({
+  hooks: [{ type: "command", command: CMD, timeout: 10 }],
+  ...extra,
+});
+const hooksJson = (h) => JSON.stringify({ hooks: h });
+const withScript = (h) => ({ "hooks/hooks.json": hooksJson(h), "hooks/cso-hook.mjs": "" });
+
 test("hooks.json: ない（空）ならよい。あれば、JSON として正しいこと", () => {
-  assert.deepEqual(run({ "hooks/hooks.json": "{}" }), []);
+  assert.deepEqual(run({ "hooks/hooks.json": hooksJson({}) }), []);
   assert.match(text({ "hooks/hooks.json": "{" }), /hooks\.json/);
+});
+
+test("hooks.json の形: 正しい形（PreToolUse・PostToolUse・Stop、command は CLAUDE_PLUGIN_ROOT 起点で、実在するファイル）", () => {
+  assert.deepEqual(
+    run(
+      withScript({
+        PreToolUse: [entry({ matcher: "*" })],
+        PostToolUse: [entry({ matcher: "*" })],
+        Stop: [entry()],
+      }),
+    ),
+    [],
+  );
+});
+
+test("hooks.json の形の誤りを検出する", () => {
+  const bad = [
+    [{ "hooks/hooks.json": "[]" }, /オブジェクト/],
+    [{ "hooks/hooks.json": JSON.stringify({ hooks: [] }) }, /hooks/],
+    [withScript({ SessionStart: [entry()] }), /SessionStart/],
+    [withScript({ PreToolUse: entry() }), /配列/],
+    [withScript({ PreToolUse: [{ matcher: 1, hooks: [] }] }), /matcher/],
+    [withScript({ PreToolUse: [{ hooks: [] }] }), /1 つ以上/],
+    [withScript({ PreToolUse: [{ hooks: [{ type: "http", command: CMD }] }] }), /command/],
+    [
+      withScript({ PreToolUse: [{ hooks: [{ type: "command", command: "node hook.mjs" }] }] }),
+      /CLAUDE_PLUGIN_ROOT/,
+    ],
+    [
+      withScript({
+        PreToolUse: [entry({ hooks: [{ type: "command", command: CMD, timeout: 0 }] })],
+      }),
+      /timeout/,
+    ],
+    [
+      withScript({
+        PreToolUse: [entry({ hooks: [{ type: "command", command: CMD, timeout: 600 }] })],
+      }),
+      /timeout/,
+    ],
+    [withScript({ Stop: [entry({ matcher: "*" })] }), /Stop/],
+    [{ "hooks/hooks.json": hooksJson({ PreToolUse: [entry()] }) }, /cso-hook\.mjs/],
+  ];
+  for (const [files, re] of bad) assert.match(text(files), re, JSON.stringify(files));
 });
 
 test("agents・hooks・skills のディレクトリがない、を検出する", () => {
@@ -180,4 +233,14 @@ test("frontmatter: 複数行の値（> | と、字下げの続き）は、検出
     });
     assert.match(e, /複数行/, desc);
   }
+});
+
+test("NFR_012: skill・command の ${CLAUDE_PLUGIN_ROOT} のあとに .. が続くパスは拒否する（hooks.json と対称）", () => {
+  const cmd = (body) => ({ "commands/x.md": `---\ndescription: d\n---\n${body}\n` });
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: plugin に書く、Claude Code が展開する変数の参照
+  assert.deepEqual(run(cmd("`${CLAUDE_PLUGIN_ROOT}/hooks/a.mjs` を見る")), []);
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 同上
+  assert.match(text(cmd("`${CLAUDE_PLUGIN_ROOT}/../secret` を見る")), /NFR_012/);
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 同上
+  assert.match(text(cmd("`${CLAUDE_PLUGIN_ROOT}/a/../../x` を見る")), /NFR_012/);
 });

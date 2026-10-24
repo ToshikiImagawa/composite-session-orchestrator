@@ -22,9 +22,26 @@ plugin の名前空間のため、コマンドは `/composite-session-orchestrat
 
 daemon が SDK で起動する子は、MCP の設定を daemon が組み立てて渡す（`docs/manual-verification-sdk.md` の 4）。子が `cso-child` の skill を使うには、子の起動に plugin を渡す必要があるが、これはこの版の範囲外（子は、起動の指示に手順が入っている）。
 
-## フック
+## フック（T22-h）
 
-この版の `plugin/hooks/` は、**空**（`.gitkeep` だけ）です。CLI の子の記録と拒否は、これまでどおり、daemon が SDK で起動するときに渡すコールバックで行われる（`options.hooks`。`docs/spikes/02-agent-sdk-headless.md` の 5）。ファイルで設定するフック（plugin の `hooks/hooks.json`）と、daemon の受け口（`POST /v1/hook`）は、**T22-h** で別に作る（受け口のない雛形は動作を確かめられず、契約が先に固まってしまうため）。
+`plugin/hooks/hooks.json` は、PreToolUse・PostToolUse・Stop で、`node "${CLAUDE_PLUGIN_ROOT}/hooks/cso-hook.mjs"` を呼ぶ（依存なしのスクリプト）。スクリプトは、フック入力（標準入力の JSON）を、daemon の受け口 `POST /v1/hook` にそのまま送り、判定を返す。
+
+**CSO の子は、必ず `CSO_DAEMON_URL`（窓口の URL）と `CSO_NODE_TOKEN`（その子のノードのトークン）の両方を設定して起動する。どちらもない場合、フックは働かない**（CSO の子ではないセッションを壊さないため、素通しして、標準エラーに一言出す）。片方だけのときは、設定の誤りとして、拒否する。
+
+| 場面 | PreToolUse | PostToolUse・Stop |
+|:--|:--|:--|
+| 環境変数が両方ない | 素通し（標準エラーに一言） | 素通し |
+| 片方だけ | 拒否（終了コード 2） | 止めない（標準エラーに出す） |
+| daemon に届かない・時間切れ（5 秒）・200 以外・応答の形が違う | **拒否**（フェイルクローズ） | 止めない（拒否すると、作業を止められなくなる） |
+| 判定が許可・拒否 | 許可は終了コード 0、拒否は終了コード 2（理由がモデルに伝わる） | 判定しない（allow） |
+
+### 受け口 `POST /v1/hook`
+
+- **認証**: 子のノードのトークン（`Authorization: Bearer`）。人間・統合ノードのトークンは 403（範囲を持たない）。認証・主体の検査（失効・止まったノードは 401）・同時数・主体ごとの回数の制限は、`/v1/request` と同じ（`docs/rate-limit.md`。同じ bucket を使う。**重みは 0.5**〔ほかの要求は 1〕。フックはツール呼び出しのたびに来るので、子のほかの要求を締め出しにくくする）。要求の重複の扱い（`requestId`）はない（判定は冪等）。
+- **判定**: PreToolUse だけを、SDK のコールバックと同じ判定（`packages/daemon/src/sdk/hook-policy.ts`）に流す。基準は、daemon が持つノードの範囲と作業ツリーで、入力の `cwd` は使わない。**記録も同じ**（範囲違反は `scope.violation` と受信箱〔同じ違反は 1 度だけ〕、未知のツールは `node.toolDenied`。数え上げも SDK と共有する）。daemon が作業ツリーを知らないノード（daemon が起動していないノード）は、拒否する。
+- **`session_id` とノード**: ノードはトークンで決める。最初に来た `session_id` をノードに結び、別の値は 403 で拒否する（記録は `hookSessionMismatch`。ID は書かない）。**結び付けはメモリだけなので、daemon を再起動すると、結び直しになる**（再起動のあと、最初に来たセッションに結ぶ）。**同じノードで `session_id` が変わる操作（`/clear`・`--resume` など）をすると、daemon を再起動するまで、そのノードのフックは拒否される**（結び付けを解除する手段は、後続のタスク T22-hu）。
+- **本文の上限**: 1 MiB（窓口と同じ）。超えたら 413（「本文が大きすぎる」）で、フックは拒否として扱う。
+- 応答: `{ ok: true, value: { decision: "allow" } }` か `{ ok: true, value: { decision: "deny", reason } }`。
 
 ## Desktop
 
@@ -35,8 +52,8 @@ Desktop の子へのフックの継承と、接続設定の引き継ぎは、**�
 `node scripts/validate-plugin.mjs`（`pnpm validate:plugin`。先に `pnpm build` が要る）が、次を検査する。検査の中身は `scripts/plugin-check.mjs`、試験は `scripts/plugin-check.test.mjs`（`node --test scripts/*.test.mjs`）。
 
 - plugin.json の必須項目・name（kebab-case）・version（semver）。`agents/`・`hooks/`・`skills/` がある。
-- skill（`SKILL.md`）と command の frontmatter（`name` は、skill ではディレクトリ名と同じ。`description` は必須）。`hooks/hooks.json` があれば、JSON として正しい。
+- skill（`SKILL.md`）と command の frontmatter（`name` は、skill ではディレクトリ名と同じ。`description` は必須）。`hooks/hooks.json` があれば、JSON として正しく、形が正しい（イベントは PreToolUse・PostToolUse・Stop だけ、Stop に matcher を書かない、`type: "command"`、command は `node "${CLAUDE_PLUGIN_ROOT}/<plugin の中の .mjs>"` でそのファイルがある、timeout は 1〜60 秒）。スクリプトの試験は `scripts/cso-hook.test.mjs`。
 - skill・command に書いた `mcp__node__<ツール名>` が、実際に公開されているツール（`packages/mcp` の `toolsFor`・`whoami`）にある。skill は、そのロールのツールだけを書き、**そのロールの全ツールを説明している**（ツールが増えたのに skill が古い、を防ぐ）。「説明している」とみなすのは、**行頭の箇条書きで、ツール名のあとに `:` と 10 文字以上の説明が続く行**（`- ` `` `mcp__node__<名前>` `` `: 説明…`）がある場合だけ。「使わない」と書いただけの言及は、説明にならない。
-- NFR_012: plugin/ の中に、絶対パスがない。行頭・空白・引用符・`(`・`=` の直後の `/<英数字>/…` は、すべて拒否する（`/home/`・`/workspace/`・`/app/`・`/Volumes/`・`/c/Users/` など。`~/`・Windows のパス・`file://`・このリポジトリの絶対パスも）。**例外は、URL のパス（`://host` の後。例: `http://127.0.0.1:7777/v1/whoami`）と `${CLAUDE_PLUGIN_ROOT}` だけ**。
+- NFR_012: plugin/ の中に、絶対パスがない。行頭・空白・引用符・`(`・`=` の直後の `/<英数字>/…` は、すべて拒否する（`/home/`・`/workspace/`・`/app/`・`/Volumes/`・`/c/Users/` など。`~/`・Windows のパス・`file://`・このリポジトリの絶対パスも）。**例外は、URL のパス（`://host` の後。例: `http://127.0.0.1:7777/v1/whoami`）と `${CLAUDE_PLUGIN_ROOT}`（とそれに続く plugin の中のパス）だけ**。
 - frontmatter は、1 行の `key: value` だけ。複数行の値（`>`・`|`）は、検出できないので、エラーにする。
 - `packages/mcp/dist/tools.js` が `src/tools.ts` より古ければ、「先に `pnpm build`」と表示して失敗する。
