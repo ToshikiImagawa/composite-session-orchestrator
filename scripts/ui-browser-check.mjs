@@ -15,6 +15,8 @@ const { chromium } = require(playwrightPath);
 const { foldEvents } = await import(`${R}/core/dist/index.js`);
 const { createCredentialStore } = await import(`${R}/daemon/dist/api/credentials.js`);
 const { createApiServer } = await import(`${R}/daemon/dist/api/server.js`);
+const { stopDelegatedOf } = await import(`${R}/daemon/dist/compose.js`);
+const { DesktopRuntimeAdapter } = await import(`${R}/daemon/dist/sdk/desktop-adapter.js`);
 const HUMAN = "human-token-human-token-human-token-1234";
 let n = 0;
 const ev = (b) => ({
@@ -943,6 +945,51 @@ cs.buttonGoneAfterStopped = true;
 cs.errors = csErrors;
 out.confirmStopped = cs;
 await pageC.context().close();
+
+// ---- Desktop のアダプタを配線した daemon（T21。compose と同じ stopDelegatedOf）----
+// 木全体が Desktop の子なので、停止未完了の子（c1・c2）のどちらにも、停止の宣言が出る。daemon の再起動のあと（アダプタが何も
+// 管理していない）を想定して、起動していないアダプタで確かめる。
+const desktop = new DesktopRuntimeAdapter({
+  sink: { record: () => ({ ok: true }), recordAll: () => ({ ok: true }) },
+});
+const dsrv = createApiServer({
+  credentials,
+  getState: () => state,
+  handlers,
+  stopDelegated: stopDelegatedOf(desktop),
+});
+const dUrl = (await dsrv.listen(0)).url;
+const dk = {};
+const pageD = await (await browser.newContext()).newPage();
+const dkErrors = [];
+pageD.on("pageerror", (e) => dkErrors.push(String(e)));
+await pageD.goto(`${dUrl}/ui#token=${HUMAN}`);
+await pageD.waitForSelector("#view:not([hidden])", { timeout: 8000 });
+const drow = (id) =>
+  pageD.locator("#tree .node", { hasText: id }).filter({ hasText: "停止未完了" });
+dk.buttonOnC2 = (await drow("c2").getByRole("button", { name: "止めたと宣言…" }).count()) === 1;
+dk.noButtonOnRunning =
+  (await pageD
+    .locator("#tree .node", { hasText: "実行" })
+    .getByRole("button", { name: "止めたと宣言…" })
+    .count()) === 0;
+const before = confirmCalls().length;
+await drow("c2").getByRole("button", { name: "止めたと宣言…" }).click();
+await pageD.locator("#confirm").waitFor();
+await pageD.locator("#confirm textarea").fill("c2");
+await pageD.locator("#confirm button.primary").click();
+await pageD.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("止めたと宣言しました"),
+  null,
+  { timeout: 5000 },
+);
+const dcalls = confirmCalls().slice(before);
+dk.params =
+  dcalls.length === 1 && JSON.stringify(dcalls[0].params) === JSON.stringify({ nodeId: "c2" });
+dk.errors = dkErrors;
+out.desktopWired = dk;
+await pageD.context().close();
+await dsrv.close();
 
 // ---- フックの結び付けを外す（T22-hub）----
 const hu = {};

@@ -2,7 +2,7 @@ import { type EventBody, type NodeEvent, type ProcessInfo, stateOf } from "@cso/
 import { describe, expect, it } from "vitest";
 import { EventLog } from "../src/eventlog.js";
 import { createMemoryStore } from "../src/memory-store.js";
-import { reconcileOnStartup } from "../src/reconcile.js";
+import { EXTERNAL_CHECK_SUMMARY, reconcileOnStartup } from "../src/reconcile.js";
 
 const SYS = { system: true } as const;
 const clock = (): string => "2026-10-20T00:00:00Z";
@@ -14,6 +14,7 @@ const rig = (
     processes?: Record<string, readonly ProcessInfo[] | null>;
     managed?: string[];
     noCwd?: string[];
+    external?: boolean;
   } = {},
 ) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
@@ -61,6 +62,7 @@ const rig = (
           : [];
       },
       has: (id) => opts.managed?.includes(id) ?? false,
+      ...(opts.external === true ? { external: () => true } : {}),
     });
   return { log, run, probed, s: () => log.state() };
 };
@@ -122,5 +124,26 @@ describe("reconcileOnStartup（再起動の後、記録と実際のプロセス�
     const seq = r.s().lastSeq;
     await r.run();
     expect(r.s().lastSeq).toBe(seq);
+  });
+});
+
+describe("daemon の外で動く子（Desktop。T21）", () => {
+  it("照合せず状態を変えない。動作中・停止途中の子ごとに、受信箱に人に確かめてもらう info を 1 件。再実行で重複しない", async () => {
+    const r = rig({ external: true });
+    const before = r.s().nodes.map((x) => [x.id, x.state]);
+    const out = await r.run();
+    expect(out).toEqual([]);
+    expect(r.probed).toEqual([]);
+    expect(r.s().nodes.map((x) => [x.id, x.state])).toEqual(before);
+    const asks = () =>
+      r.s().inbox.filter((i) => i.kind === "info" && i.summary === EXTERNAL_CHECK_SUMMARY);
+    // 対象: running（a・g）・waiting（w）・stopping（s）・stopIncomplete（i）。done（d）・pending（p）・根は対象外
+    expect(
+      asks()
+        .map((i) => i.nodeId)
+        .sort(),
+    ).toEqual(["a", "g", "i", "s", "w"]);
+    await r.run();
+    expect(asks()).toHaveLength(5);
   });
 });

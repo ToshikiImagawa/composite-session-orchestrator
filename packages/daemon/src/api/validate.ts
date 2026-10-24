@@ -210,6 +210,7 @@ const VALIDATORS: Validators = {
     }
     return { nodeId, mode, graceMs: g as number };
   },
+  "node.bindCode": (p) => ({ nodeId: id(strict(p, ["nodeId"]), "nodeId") }),
   "node.confirmStopped": (p) => {
     const o = strict(p, ["nodeId", "note"]);
     const nodeId = id(o, "nodeId");

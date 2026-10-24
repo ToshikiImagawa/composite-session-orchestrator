@@ -139,12 +139,23 @@ describe("停止（受信箱を通じた代行）", () => {
     expect(r.ok).toBe(false);
   });
 
-  it("管理していないノードは notManaged で失敗する", async () => {
-    const { adapter } = rig();
+  it("管理していないノード（daemon の再起動のあと）でも、代行依頼を出せる（能力表どおり。T21）", async () => {
+    const { adapter, sink } = rig();
+    expect(adapter.has("x")).toBe(false);
     const r = await adapter.stop("x", { mode: "immediate", stopSeq: 1 });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.error.code).toBe("notManaged");
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.state !== "stopIncomplete") throw new Error("not delegated");
+    expect(r.value.delegation).toContain("x");
+    expect(sink.types).toEqual(["node.stateChanged:stopTimeout"]);
+  });
+
+  it("起動の指示を保持し（instructionOf）、release で消える", async () => {
+    const { adapter } = rig({ requireVerifiedHooks: false });
+    expect(adapter.instructionOf("a")).toBeUndefined();
+    await adapter.start(START);
+    expect(adapter.instructionOf("a")).toBe("作業する");
+    adapter.release("a");
+    expect(adapter.instructionOf("a")).toBeUndefined();
   });
 });
 

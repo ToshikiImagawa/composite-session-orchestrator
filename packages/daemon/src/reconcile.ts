@@ -46,6 +46,11 @@ export interface ReconcileDeps {
   readonly worktreeRoot?: string;
   /** アダプタが、そのノードの子を管理しているか。 */
   readonly has?: (nodeId: string) => boolean;
+  /**
+   * daemon の外で動く子（Desktop の子。T21）か。真のノードは、プロセスで照合せず（作業ツリーのプロセスでは確かめられない）、
+   * 状態を変えずに、受信箱に、人に確かめてもらう info を 1 件出す（未解決の同じ項目があれば、出さない）。
+   */
+  readonly external?: (nodeId: string) => boolean;
   readonly onFailure?: (nodeId: string, cause: string) => void;
 }
 
@@ -57,14 +62,39 @@ export interface ReconcileOutcome {
 
 const TARGETS = new Set(["running", "waiting", "stopping", "stopIncomplete"]);
 
+/** daemon の外で動く子（Desktop）を、再起動のあとに人に確かめてもらう依頼の文面（固定。重複の判定にも使う）。 */
+export const EXTERNAL_CHECK_SUMMARY =
+  "daemon の再起動のあと、Desktop の子の状態は daemon から確かめられない。Desktop で確かめ、止まっていれば停止して、止めたと宣言する（仮置き）";
+
 export async function reconcileOnStartup(deps: ReconcileDeps): Promise<ReconcileOutcome[]> {
   const { log } = deps;
   const start: OrchState = log.state();
   const run = start.lastSeq;
   const outcomes: ReconcileOutcome[] = [];
-  const nodes = start.nodes.filter(
+  const candidates = start.nodes.filter(
     (n) => n.parentId !== null && TARGETS.has(n.state) && deps.has?.(n.id) !== true,
   );
+  const nodes = candidates.filter((n) => deps.external?.(n.id) !== true);
+  for (const n of candidates) {
+    if (deps.external?.(n.id) !== true) continue;
+    const already = start.inbox.some(
+      (i) => i.nodeId === n.id && i.resolved === undefined && i.summary === EXTERNAL_CHECK_SUMMARY,
+    );
+    if (already) continue;
+    const key = `reconcile-external-${n.id}-${run}`;
+    const r = appendAtomically(log, deps.clock, key, { system: true }, [
+      {
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", key, "info"),
+          kind: "info",
+          nodeId: n.id,
+          summary: EXTERNAL_CHECK_SUMMARY,
+        },
+      },
+    ]);
+    if (!r.ok) deps.onFailure?.(n.id, `確かめる依頼を記録できない: ${r.error.cause}`);
+  }
   // 置き場全体を 1 回だけ調べて共有する（調べられなければ null。全ノードを安全側にする）。
   let shared: readonly ProcessInfo[] | null | undefined;
   if (deps.worktreeRoot !== undefined && nodes.length > 0) {

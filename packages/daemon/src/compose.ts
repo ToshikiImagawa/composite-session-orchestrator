@@ -33,6 +33,7 @@ import {
 } from "@cso/core";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import { recoverAnswerDeliveries } from "./api/handlers/answer-delivery.js";
+import { createBindHandlers } from "./api/handlers/bind-handlers.js";
 import { waitRequestKey } from "./api/handlers/context.js";
 import { createHookHandlers } from "./api/handlers/hook-handlers.js";
 import { createInstructionDelivery } from "./api/handlers/instruction-delivery.js";
@@ -78,6 +79,7 @@ import type { GitPorts, LossFacts } from "./git-ports.js";
 import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
 import { buildChildPlugin, CHILD_PLUGIN_DIR } from "./sdk/child-plugin.js";
+import { DesktopRuntimeAdapter } from "./sdk/desktop-adapter.js";
 import { createLsofProbe, nodeExec, type ProcessProbe } from "./sdk/lsof-probe.js";
 import { nodeTimers } from "./sdk/node-timers.js";
 import { nodeFsOps, resolveForWrite } from "./sdk/path-resolve.js";
@@ -455,7 +457,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   const probe = deps.probe ?? createLsofProbe(nodeExec);
   const tracked = trackTimers(deps.timers ?? nodeTimers);
   const timers = tracked.timers;
-  const adapter = new SdkRuntimeAdapter({
+  const sdkAdapter = new SdkRuntimeAdapter({
     launcher: deps.launcher,
     probe,
     realpath: (p) => realpath(p),
@@ -484,6 +486,17 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           },
         }),
   });
+
+  // Desktop の子（設定 childRuntime が desktop。T21・仮置き）。木全体で 1 つのアダプタ。フックのゲート（T20）は既定で有効。
+  const desktopAdapter =
+    config.childRuntime === "desktop"
+      ? new DesktopRuntimeAdapter({
+          sink: { record: (r) => log.append(r), recordAll: (rs) => log.appendAll(rs) },
+          requireVerifiedHooks: config.desktopRequireVerifiedHooks ?? true,
+          onWarning: (nodeId, text) => note("desktopHooksGateDisabled", { nodeId, text }),
+        })
+      : undefined;
+  const adapter: RuntimeAdapter & { has(nodeId: string): boolean } = desktopAdapter ?? sdkAdapter;
 
   const cwdOf = async (nodeId: string): Promise<string | undefined> =>
     nodeId === config.rootNodeId ? config.rootCwd : deps.worktree.cwdOf(nodeId);
@@ -666,16 +679,30 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     identity: () => currentIdentity,
     credentials,
     // ファイルで設定するフック（plugin の hooks.json。T22-h）。SDK のコールバックと同じ判定・同じ記録。
-    hook: (nodeId, toolName, toolInput) => adapter.decideHook(nodeId, toolName, toolInput),
+    // Desktop の子のフックの継承は未確認（Spike 01 の項目 4）。確認までは、受け口では許可しない（仮置き）。
+    hook: (nodeId, toolName, toolInput) =>
+      desktopAdapter === undefined
+        ? sdkAdapter.decideHook(nodeId, toolName, toolInput)
+        : Promise.resolve({
+            allow: false as const,
+            reason: "Desktop の子のフックの受け口は、実機確認までは使わない（仮置き）",
+          }),
     hookSessions,
     getState: () => log.state(),
     // 画面の停止の宣言（T22d）。ハンドラ（node.confirmStopped）と同じく、能力表の stopDelegated だけで決める（管理しているか
-    // は見ない。再起動の後も出す）。いまは CLI のアダプタだけなので、常に false（Desktop の配線は T21）。
+    // は見ない。再起動の後も出す）。childRuntime が desktop のとき、Desktop のアダプタの能力表から真になる（T21）。
     stopDelegated: stopDelegatedOf(adapter),
     handlers: {
       ...handlers,
       // フックの結び付けを外す（人間・祖先の統合ノード。T22-hu）。
       ...createHookHandlers({ log, sessions: hookSessions }),
+      // Desktop の子の紐付けの文面（T21・仮置き）。コードは記録しない（応答だけ）。
+      ...createBindHandlers({
+        log,
+        bind,
+        ...(desktopAdapter === undefined ? {} : { desktop: desktopAdapter }),
+        baseUrl: () => running?.url,
+      }),
       // 保管している、破棄した成果の操作（人間のみ。T13f-r）。git の口が、保管の操作を持つときだけ有効。
       ...(deps.worktree.discardedList === undefined ||
       deps.worktree.discardedKeyOf === undefined ||
@@ -717,6 +744,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           probe,
           worktreeRoot: config.worktreeRoot,
           has: (id) => adapter.has(id),
+          // Desktop の子は、daemon の外で動くので、プロセスで照合せず、受信箱で人に確かめてもらう（T21）。
+          ...(desktopAdapter === undefined ? {} : { external: () => true }),
           onFailure: (nodeId, cause) => note("reconcileFailure", { nodeId, cause }),
         });
         for (const o of outcomes) note("reconciled", { ...o });

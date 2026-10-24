@@ -39,6 +39,8 @@ const DESCRIPTIONS: Readonly<Record<McpOperation, string>> = {
     "稼働中の子へ追加指示を送る。結果は { status: queued, duplicate }（受け付けた。duplicate は同じ要求の重複。届いたかは受信箱・状態で確認する）",
   "node.stop":
     "子を停止する。mode は graceful（穏当）か immediate（即時）。graceMs（1〜3600000 ミリ秒の整数）は graceful のときだけ指定でき、省略すると既定の猶予になる",
+  "node.bindCode":
+    "Desktop の子（設定 childRuntime が desktop の木）の紐付けの文面を受け取る（仮置き）。子を node_spawn で作ったあと（pending なら起動してから）呼び、返った instruction を、そのまま Desktop のタスク生成（spawn_task）に渡す。呼ぶたびに新しい一度きりのコードになり、前のコードは無効になる。instruction には紐付けコードが入るので、ほかへ書き写さない。結果は { instruction, expiresAt }",
   "node.confirmStopped":
     "daemon が直接止められない子（能力表の stopDelegated。Desktop の子）を、代わりに止めたと宣言し、停止未完了から停止済みに進める。受信箱の停止の代行依頼に従って止めた後に使う。note（省略可）に根拠を書く。結果は { state }",
   "node.hookUnbind":

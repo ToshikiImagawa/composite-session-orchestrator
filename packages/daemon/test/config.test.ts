@@ -441,6 +441,14 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("childRuntime は cli（既定）か desktop", () => {
+    const none = parseConfig(JSON.stringify(base));
+    expect(none.ok && none.value.childRuntime).toBeUndefined();
+    const dk = parseConfig(JSON.stringify({ ...base, childRuntime: "desktop" }));
+    expect(dk.ok && dk.value.childRuntime).toBe("desktop");
+    for (const v of ["sdk", 1, null]) bad({ childRuntime: v }, "childRuntime");
+  });
+
   it("childPluginDir は、絶対パス（任意。.. を含まない）", () => {
     const none = parseConfig(JSON.stringify(base));
     expect(none.ok && none.value.childPluginDir).toBeUndefined();
