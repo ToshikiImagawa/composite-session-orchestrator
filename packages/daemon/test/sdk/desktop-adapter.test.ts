@@ -1,6 +1,8 @@
 import { ID_MAX_LENGTH, type Scope } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { summarize } from "../../src/api/handlers/context.js";
+import { EventLog } from "../../src/eventlog.js";
+import { createMemoryStore } from "../../src/memory-store.js";
 import {
   DELEGATION_STEPS,
   DESKTOP_CAPABILITIES,
@@ -147,6 +149,22 @@ describe("停止（受信箱を通じた代行）", () => {
     if (!r.ok || r.value.state !== "stopIncomplete") throw new Error("not delegated");
     expect(r.value.delegation).toContain("x");
     expect(sink.types).toEqual(["node.stateChanged:stopTimeout"]);
+  });
+
+  it("ノードがなければ、記録（stopTimeout）が拒否され、理由つきで失敗する", async () => {
+    const opened = EventLog.open(createMemoryStore().open(), {
+      clock: () => "2026-10-20T00:00:00Z",
+    });
+    if (!opened.ok) throw new Error(opened.error.code);
+    const log = opened.value;
+    const adapter = new DesktopRuntimeAdapter({
+      sink: { record: (q) => log.append(q), recordAll: (qs) => log.appendAll(qs) },
+    });
+    const r = await adapter.stop("nothing", { mode: "immediate", stopSeq: 1 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("recordFailed");
+    expect(log.state().lastSeq).toBe(0);
   });
 
   it("起動の指示を保持し（instructionOf）、release で消える", async () => {

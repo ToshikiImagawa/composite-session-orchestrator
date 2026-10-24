@@ -31,7 +31,7 @@ ID は、短縮せずに、そのまま渡します（作業ツリーのディ�
 - `mcp__node__node_stop`: 子を止める。`graceful` は穏当、`immediate` は即時。`graceMs` は `graceful` のときだけ指定できる。
 - `mcp__node__node_hookUnbind`: 子のフック（plugin のファイルで設定するフック）が、`/clear`・`--resume` で session_id が変わって拒否され続けるときに、結び付けを外す。次に来たセッションに結び直す。子のトークンが漏れた疑いがあるときは使わず、人間に知らせる。
 - `mcp__node__node_confirmStopped`: daemon が直接止められない子（能力表の `stopDelegated`。Desktop の子）を、受信箱の停止の代行依頼に従って止めた後に、止めたと宣言する。停止未完了から停止済みに進む。`note` に根拠を書ける。
-- `mcp__node__node_bindCode`: Desktop の子（設定 `childRuntime` が `desktop` の木）を作ったあとに呼び、返った `instruction` を、そのまま Desktop のタスク生成に渡す（仮置き）。呼ぶたびに新しい一度きりの紐付けコードになり、前のコードは無効になる。`instruction` には紐付けコードが入るので、ほかへ書き写さない。
+- `mcp__node__node_bindCode`: Desktop の子（設定 `childRuntime` が `desktop` の木）を作ったあとに呼び、返った `instruction` を、そのまま Desktop のタスク生成に渡す（仮置き）。呼ぶたびに新しい一度きりの紐付けコードになり、前のコードは無効になる。`instruction` には紐付けコードが入るので、ほかへ書き写さない。何度か呼んだときは、最後に受け取った `instruction` だけを使う（前のものはコードが無効）。Desktop の中間の統合ノードは紐付けできない（仮置き）。
 - `mcp__node__node_split`: 脱線した部分を、新しい子へ移す。元の子は、`keep` で、本筋に戻す（`mainline`）か止める（`stop`）。
 
 報告・判断を受ける:

@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -14,6 +15,7 @@ import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { digestOf, type Failure, ok, planPurge, type Result } from "@cso/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deriveId } from "../src/api/handlers/context.js";
@@ -1409,26 +1411,34 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     const instruction = bc.json.value.instruction as string;
     expect(instruction).toContain(`${d.url}/v1/bind`);
     const code = (/"bindCode":"([0-9A-Z-]+)"/.exec(instruction) as RegExpExecArray)[1] as string;
-    // 子: コードでトークンを受け取る
-    const bound = await fetch(`${d.url}/v1/bind`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId, bindCode: code }),
-    });
-    expect(bound.status).toBe(200);
-    const token = ((await bound.json()) as { value: { token: string } }).value.token;
-    // 子: トークンで報告する
-    const rep = await fetch(`${d.url}/v1/request`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        requestId: "p1",
-        role: "child",
-        operation: "report.progress",
-        params: { text: "進んだ" },
-      }),
-    });
-    expect(rep.status).toBe(200);
+    // 子: 文面のコマンドを、そのままシェルで実行する（トークンは変数に入れ、標準入力から渡す。コマンドの引数に置かない）
+    const lines = instruction.split("\n");
+    const bindLine = lines.find((l) => l.startsWith("CSO_TOKEN=")) as string;
+    const reportLine = (lines.find((l) => l.startsWith("printf 'authorization")) as string)
+      .replace("<一意な ID>", "p1")
+      .replace("<進捗>", "進んだ");
+    expect(bindLine).toContain("-d @-");
+    expect(reportLine).toContain("-H @-");
+    expect(reportLine).not.toContain('Bearer $CSO_TOKEN"');
+    // 同じプロセスの daemon が応答できるよう、非同期で実行する。プロキシの環境変数は外す（ループバックへ直接）。
+    const env = { ...process.env };
+    for (const k of [
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "http_proxy",
+      "https_proxy",
+      "ALL_PROXY",
+      "all_proxy",
+    ])
+      delete env[k];
+    const { stdout: out } = await promisify(execFile)(
+      "bash",
+      ["-c", `${bindLine}\ntest -n "$CSO_TOKEN" || exit 3\n${reportLine}`],
+      { encoding: "utf8", env, timeout: 20_000 },
+    );
+    expect(JSON.parse(out).ok, out).toBe(true);
+    const reports = await call(d.url, d.rootToken, "inbox.fetch", {});
+    expect(JSON.stringify(reports.json)).toContain("進んだ");
     // 使ったコードは、もう使えない
     const again = await fetch(`${d.url}/v1/bind`, {
       method: "POST",
@@ -1446,7 +1456,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       expect(bytes.includes(code), f).toBe(false);
     }
     expect(r.logs.join("\n").includes(raw)).toBe(false);
-    const inbox = await call(d.url, d.humanToken, "inbox.fetch", {});
+    const inbox = await call(d.url, d.rootToken, "inbox.fetch", {});
     expect(JSON.stringify(inbox.json).includes(raw)).toBe(false);
   });
 

@@ -81,6 +81,30 @@ describe("node.bindCode（Desktop の子の紐付けの文面。T21・仮置き�
     expect(code(cli.call("m1", "a"))).toBe("notDesktop");
   });
 
+  it("中間の統合ノードは、紐付けできない（理由と代わりの手段つき。仮置き）", () => {
+    const r = rig({ instructions: { m1: "x" } });
+    const res = r.call("root", "m1");
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error.code).toBe("integratorNotSupported");
+    expect(res.error.nextActions.length).toBeGreaterThan(0);
+  });
+
+  it("文面のコマンドは、トークン・コードを引数に置かない（標準入力から渡す）", () => {
+    const r = rig();
+    const res = r.call("m1", "a");
+    if (!res.ok) throw new Error(res.error.code);
+    const lines = res.value.instruction.split("\n");
+    const bind = lines.find((l) => l.startsWith("CSO_TOKEN=")) as string;
+    const report = lines.find((l) => l.startsWith("printf 'authorization")) as string;
+    expect(bind).toMatch(/^CSO_TOKEN=\$\(printf '%s' '\{.*\}' \| curl .* -d @- \|/);
+    expect(report).toContain("-H @-");
+    // curl の引数に、トークン（$CSO_TOKEN）・コードを置かない
+    const curlArgs = (line: string) => line.slice(line.indexOf("curl "));
+    expect(curlArgs(report)).not.toContain("CSO_TOKEN");
+    expect(curlArgs(bind)).not.toContain("bindCode");
+  });
+
   it("呼ぶたびに新しいコード（古いものは使えない）。同じ requestId の再送も、新しいコードを出す", () => {
     const r = rig();
     const first = r.call("m1", "a", "same");

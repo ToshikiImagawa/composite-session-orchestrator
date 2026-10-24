@@ -34,7 +34,16 @@ export interface BindHandlerDeps {
 
 const LIVE = new Set(["running", "waiting"]);
 
-/** 子が紐付けと報告に使う手順（仮置き: curl が使えるかは、実機確認〔Spike 01 の項目 4〕で確かめる）。 */
+/**
+ * 子が紐付けと報告に使う手順（仮置き: curl が使えるかは、実機確認〔Spike 01 の項目 4〕で確かめる）。
+ *
+ * トークンとコードを、コマンドの引数に置かない（`ps` のプロセス一覧に出さない）: ヘッダーと本文は、シェルの組み込みの `printf` で
+ * 標準入力から渡す（`-H @-`・`-d @-`）。トークンは、応答から直接シェルの変数（`CSO_TOKEN`）に入れ、画面に出さない。
+ *
+ * 注意: `nodeId` は `isSafeId`（英数字と `. _ : -`）を通ったものなので、シェルの単一引用符・JSON の中にそのまま置ける。
+ * ノード ID の文字種を広げるときは、ここで引用・エスケープを見直す（`'`・`"`・`\`・`$`・改行が入ると、コマンドが壊れるか、
+ * 別のコマンドとして解釈される）。
+ */
 export function bindInstruction(
   start: string,
   nodeId: string,
@@ -47,12 +56,11 @@ export function bindInstruction(
     start,
     "",
     "---- daemon への紐付け（仮置きの手順）----",
-    `最初のメッセージを受けたら、次のコマンドで、このノードのトークンを受け取る（コードは一度きり。${expiresAt} まで）:`,
-    `curl -sS -X POST ${baseUrl}/v1/bind -H 'content-type: application/json' -d '${bindBody}'`,
-    "応答の value.token が、このノードのトークン。トークンは、ファイルやほかの場所へ書き写さない。",
-    "以後の報告（report.progress・report.decision・report.outOfScope・report.done・scope.extend）は、トークンを付けて送る:",
-    `curl -sS -X POST ${baseUrl}/v1/request -H "authorization: Bearer $CSO_TOKEN" -H 'content-type: application/json' -d '{"requestId":"<一意な ID>","role":"child","operation":"report.progress","params":{"text":"<進捗>"}}'`,
-    "（CSO_TOKEN は、受け取ったトークンを入れたシェルの変数。コマンドの行に、トークンを直接書かない）",
+    `最初のメッセージを受けたら、次のコマンドで、このノードのトークンをシェルの変数 CSO_TOKEN に受け取る（コードは一度きり。${expiresAt} まで）:`,
+    `CSO_TOKEN=$(printf '%s' '${bindBody}' | curl -sS -X POST ${baseUrl}/v1/bind -H 'content-type: application/json' -d @- | sed -n 's/.*"token":"\\([^"]*\\)".*/\\1/p')`,
+    "トークンは、画面・ファイル・ほかの場所へ書き出さない。",
+    "以後の報告（report.progress・report.decision・report.outOfScope・report.done・scope.extend）は、トークンのヘッダーを標準入力から渡して送る（コマンドの引数にトークンを置かない）:",
+    `printf 'authorization: Bearer %s\\n' "$CSO_TOKEN" | curl -sS -X POST ${baseUrl}/v1/request -H @- -H 'content-type: application/json' -d '{"requestId":"<一意な ID>","role":"child","operation":"report.progress","params":{"text":"<進捗>"}}'`,
   ].join("\n");
 }
 
@@ -72,6 +80,15 @@ export function createBindHandlers(deps: BindHandlerDeps) {
       }
       const s = stateOf(state, nodeId);
       if (s === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
+      // 紐付けで渡すトークンは子のロールだけ（`POST /v1/bind`）。Desktop の中間の統合ノードは、まだ紐付けできない（仮置き）。
+      if (state.nodes.find((x) => x.id === nodeId)?.role === "integrator") {
+        return fail(
+          "integratorNotSupported",
+          `ノード ${nodeId} は統合ノードで、Desktop の子としては紐付けできない（紐付けで渡すのは子のトークンだけ。仮置き）`,
+          "中間の統合ノードを使わず、統合ノードの直下に作業の子を作る",
+          "中間の統合ノードが要るなら、childRuntime を cli にする",
+        );
+      }
       if (deps.desktop === undefined) {
         return fail(
           "notDesktop",
