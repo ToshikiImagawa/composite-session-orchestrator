@@ -379,9 +379,13 @@ describe("画面の資産（走査）", () => {
       expect(api.checkNote("a".repeat(200))).toBe("");
       expect(api.checkNote("a".repeat(201))).toContain("長すぎ");
       expect(api.checkNote("a\u202eb")).toContain("使えない文字");
-      const lines = api.confirmStoppedLines("a", "x\ny");
+      // 見せたものを送る: 確認の表示と、送る値は、同じ整えた値
+      const raw = "  アーカイブ   した  ";
+      expect(api.confirmStoppedParams("a", raw)).toEqual({ nodeId: "a", note: "アーカイブ した" });
+      const lines = api.confirmStoppedLines("a", raw);
       expect(lines[0]).toEqual(["ノード", "a"]);
-      expect(lines.at(-1)).toEqual(["根拠", "x y"]);
+      expect(lines.at(-1)).toEqual(["根拠", api.confirmStoppedParams("a", raw).note]);
+      expect(api.checkNote("x\ny")).toContain("使えない文字"); // 1 行だけ
       expect(api.confirmStoppedLines("a", "").at(-1)).toEqual(["根拠", "（なし）"]);
     });
 

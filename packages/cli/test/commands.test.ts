@@ -1086,6 +1086,9 @@ describe("confirm-stopped（停止の宣言。T22d）", () => {
       ["confirm-stopped", "a", "--note", "x".repeat(201)],
       ["confirm-stopped", "a", "--note", "  "],
       ["confirm-stopped", "a", "--note", "a\u0007b"],
+      ["confirm-stopped", "a", "--note", "一行目\n二行目"],
+      ["confirm-stopped", "a", "--note", "a\tb"],
+      ["confirm-stopped", "a", "--note", "a\u202eb"],
       ["confirm-stopped", "a", "--note"],
       ["confirm-stopped", "a", "--yes"],
       ["confirm-stopped"],
@@ -1109,6 +1112,12 @@ describe("confirm-stopped（停止の宣言。T22d）", () => {
     const u = await runCommand(["confirm-stopped", "a", "--note", "a b"], deps(bad.client));
     expect(u.exitCode).toBe(1);
     expect(u.stderr).toContain("cso confirm-stopped a --note 'a b' --request-id req-1");
+  });
+
+  it("根拠は、前後の空白を削り、連続する空白を 1 つにして送る（画面と同じ）", async () => {
+    const { client, sent } = fakeClient({ "node.confirmStopped": ok({ state: "stopped" }) });
+    await runCommand(["confirm-stopped", "a", "--note", "  アーカイブ   した "], deps(client));
+    expect(sent[0]?.params).toEqual({ nodeId: "a", note: "アーカイブ した" });
   });
 
   it("--request-id を渡すと、その識別子で送る（再実行）", async () => {

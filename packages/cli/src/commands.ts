@@ -263,6 +263,8 @@ function describeDiscarded(v: { items: readonly DiscardedView[]; max: number }):
 }
 const isHeld = (v: unknown): v is { held: true; until?: string } =>
   isRecord(v) && v.held === true && (v.until === undefined || typeof v.until === "string");
+/** 停止の宣言の根拠に使えない文字（画面の FORBIDDEN と同じ: 制御文字〔改行・タブを含む〕・書式制御文字）。 */
+const NOTE_FORBIDDEN = /[\p{Cc}\p{Cf}]/u;
 const isConfirmedStopped = (v: unknown): v is { state: string } =>
   isRecord(v) && typeof v.state === "string";
 const isReleased = (v: unknown): v is { released: true } => isRecord(v) && v.released === true;
@@ -587,9 +589,19 @@ export async function runCommand(
   }
 
   if (command === "confirm-stopped") {
-    const note = values.get("--note");
-    if (note !== undefined && (note.trim() === "" || !isBoundedText(note, LIMITS.summary))) {
-      return usageError(`--note は ${LIMITS.summary} 文字以下の文（空白だけ・制御文字は不可）`);
+    // 画面と同じ規則: 1 行（改行・制御文字・書式制御文字は不可）。前後の空白を削り、連続する空白を 1 つにした値を送る。
+    const rawNote = values.get("--note");
+    const note = rawNote?.replace(/\s+/g, " ").trim();
+    if (
+      rawNote !== undefined &&
+      (note === "" ||
+        NOTE_FORBIDDEN.test(rawNote) ||
+        note === undefined ||
+        !isBoundedText(note, LIMITS.summary))
+    ) {
+      return usageError(
+        `--note は 1 行・${LIMITS.summary} 文字以下の文（空白だけ・改行・制御文字は不可）`,
+      );
     }
     const res = await invoke(
       deps.client,

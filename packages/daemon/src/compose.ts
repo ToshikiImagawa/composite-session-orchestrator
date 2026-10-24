@@ -78,7 +78,7 @@ import type { AgentLauncher } from "./sdk/agent.js";
 import { createLsofProbe, nodeExec, type ProcessProbe } from "./sdk/lsof-probe.js";
 import { nodeTimers } from "./sdk/node-timers.js";
 import { nodeFsOps, resolveForWrite } from "./sdk/path-resolve.js";
-import type { Timers } from "./sdk/runtime.js";
+import type { RuntimeAdapter, Timers } from "./sdk/runtime.js";
 import { SdkRuntimeAdapter } from "./sdk/sdk-adapter.js";
 import { openSqliteStore } from "./sqlite-store.js";
 import { createWaker } from "./wake.js";
@@ -638,8 +638,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     identity: () => currentIdentity,
     credentials,
     getState: () => log.state(),
-    // 画面の停止の宣言（T22d）。いまは CLI のアダプタだけなので、常に false（Desktop の配線は T21）。
-    stopDelegated: (id) => adapter.has(id) && adapter.capabilities(id).stopDelegated === true,
+    // 画面の停止の宣言（T22d）。ハンドラ（node.confirmStopped）と同じく、能力表の stopDelegated だけで決める（管理しているか
+    // は見ない。再起動の後も出す）。いまは CLI のアダプタだけなので、常に false（Desktop の配線は T21）。
+    stopDelegated: stopDelegatedOf(adapter),
     handlers: {
       ...handlers,
       // 保管している、破棄した成果の操作（人間のみ。T13f-r）。git の口が、保管の操作を持つときだけ有効。
@@ -740,3 +741,12 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     },
   };
 }
+
+/**
+ * 画面に停止の宣言を出すかの判定（T22d）。ハンドラ（`node.confirmStopped`）と同じく、能力表の `stopDelegated` だけで決める
+ * （アダプタが子を管理しているかは見ない。daemon の再起動の後、管理が空でも、停止未完了のノードに出す）。
+ */
+export const stopDelegatedOf =
+  (adapter: Pick<RuntimeAdapter, "capabilities">) =>
+  (nodeId: string): boolean =>
+    adapter.capabilities(nodeId).stopDelegated === true;

@@ -543,15 +543,17 @@ export const UI_JS = `'use strict';
     if (Array.from(text).some(function (ch) { return FORBIDDEN.test(ch); })) return '根拠に、使えない文字（制御文字・書式制御文字）が含まれています';
     return '';
   }
+  // 見せたものを送る: 確認に出す根拠と、送る根拠は、同じ整えた値（前後の空白を削り、連続する空白を 1 つにする）
   function confirmStoppedParams(nodeId, note) {
-    return note.trim() === '' ? { nodeId: nodeId } : { nodeId: nodeId, note: note };
+    var shown = cleanText(note, REASON_MAX);
+    return shown === '' ? { nodeId: nodeId } : { nodeId: nodeId, note: shown };
   }
   function confirmStoppedLines(nodeId, note) {
     return [
       ['ノード', nodeId],
       ['内容', '親が Desktop でこのノードのタスクを止めた（またはアーカイブした）と宣言し、停止未完了から停止済みに進める'],
       ['記録', '宣言した者（人間）と根拠を残し、受信箱の停止の代行依頼を解決済みにする'],
-      ['根拠', note.trim() === '' ? '（なし）' : cleanText(note, REASON_MAX)]
+      ['根拠', cleanText(note, REASON_MAX) === '' ? '（なし）' : cleanText(note, REASON_MAX)]
     ];
   }
   function confirmStoppedBox(nodeId) {

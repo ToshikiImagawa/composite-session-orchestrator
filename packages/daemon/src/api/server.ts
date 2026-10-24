@@ -144,7 +144,8 @@ export interface ApiDeps {
   readonly getState: () => OrchState;
   /**
    * 画面の表示モデル（`/v1/ui/state`）に出す、ノードの能力表の `stopDelegated`（T22d）。省略すると、どのノードにも出さない。
-   * 表示のキャッシュは `lastSeq` を鍵にするので、能力表がアダプタごとに固定であること（同じノードの値が、記録なしに変わらない）が前提。
+   * ハンドラと同じく、能力表だけで決める（アダプタが子を管理しているかは見ない）。表示のキャッシュは `lastSeq` を鍵にするので、
+   * 能力表がアダプタごとに固定であること（同じノードの値が、記録なしに変わらない）が前提。
    */
   readonly stopDelegated?: (nodeId: string) => boolean;
   readonly handlers: Handlers;
