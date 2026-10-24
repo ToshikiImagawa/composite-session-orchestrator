@@ -34,8 +34,10 @@ import {
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import { recoverAnswerDeliveries } from "./api/handlers/answer-delivery.js";
 import { waitRequestKey } from "./api/handlers/context.js";
+import { createHookHandlers } from "./api/handlers/hook-handlers.js";
 import { createInstructionDelivery } from "./api/handlers/instruction-delivery.js";
 import { createPurger, type PurgeHandlerDeps } from "./api/handlers/purge-handlers.js";
+import { createSessionBinder } from "./api/hook.js";
 import {
   createIdentity,
   IDENTITY_FILE,
@@ -369,6 +371,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     return rootMismatch(`状態: ${existing.state}`);
   }
 
+  // フックの受け口の session_id の結び付け（T22-hu）。トークンを発行し直した・失効させたら外す。
+  const hookSessions = createSessionBinder();
   // 認証。
   let humanToken: string;
   let credentials: ReturnType<typeof createCredentialStore>;
@@ -380,6 +384,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       humanToken,
       repository: new FileTokenRepository(join(config.stateDir, "node-tokens.json")),
       clock,
+      onNodeTokenChanged: (nodeId) => {
+        if (hookSessions.unbind(nodeId)) note("hookUnbound", { reason: "tokenReissued" });
+      },
     });
     // 根のトークン: ファイルがあり、認証に通るならそのまま。なければ・通らなければ、発行し直して、一時ファイルに書いてから置き換える。
     let current: string | undefined;
@@ -639,12 +646,15 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     credentials,
     // ファイルで設定するフック（plugin の hooks.json。T22-h）。SDK のコールバックと同じ判定・同じ記録。
     hook: (nodeId, toolName, toolInput) => adapter.decideHook(nodeId, toolName, toolInput),
+    hookSessions,
     getState: () => log.state(),
     // 画面の停止の宣言（T22d）。ハンドラ（node.confirmStopped）と同じく、能力表の stopDelegated だけで決める（管理しているか
     // は見ない。再起動の後も出す）。いまは CLI のアダプタだけなので、常に false（Desktop の配線は T21）。
     stopDelegated: stopDelegatedOf(adapter),
     handlers: {
       ...handlers,
+      // フックの結び付けを外す（人間・祖先の統合ノード。T22-hu）。
+      ...createHookHandlers({ log, sessions: hookSessions }),
       // 保管している、破棄した成果の操作（人間のみ。T13f-r）。git の口が、保管の操作を持つときだけ有効。
       ...(deps.worktree.discardedList === undefined ||
       deps.worktree.discardedKeyOf === undefined ||

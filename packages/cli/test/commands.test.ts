@@ -892,6 +892,18 @@ describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h�
     expect(u.stderr).toContain("cso purge-hold t --reason 'a b' --request-id req-1");
   });
 
+  it("hook-unbind は、node.hookUnbind を送り、外したか・なかったかを表示する（T22-hu）", async () => {
+    const a = fakeClient({ "node.hookUnbind": ok({ unbound: true }) });
+    const r = await runCommand(["hook-unbind", "a"], deps(a.client));
+    expect(ops(a.sent)).toEqual(["node.hookUnbind"]);
+    expect(a.sent[0]?.params).toEqual({ nodeId: "a" });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("外した");
+    const b = fakeClient({ "node.hookUnbind": ok({ unbound: false }) });
+    expect((await runCommand(["hook-unbind", "a"], deps(b.client))).stdout).toContain("なかった");
+    expect((await runCommand(["hook-unbind", "a", "--yes"], deps(b.client))).exitCode).toBe(2);
+  });
+
   it("purge-release は、node.purgeRelease を送る", async () => {
     const { client, sent } = heldClient();
     const r = await runCommand(["purge-release", "t"], deps(client));

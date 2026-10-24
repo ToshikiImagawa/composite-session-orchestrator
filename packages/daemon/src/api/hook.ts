@@ -4,7 +4,8 @@
  *
  * - 入力は Claude Code のフック入力（`hook_event_name`・`session_id`・`tool_name`・`tool_input`。`cwd` は判定に使わない）。
  * - `session_id` は、ノードごとに最初に来た値に結ぶ（メモリだけ。daemon を再起動すると結び直しになる）。別の値は拒否する
- *   （同じトークンを、別のセッションで使い回させない）。
+ *   （同じトークンを、別のセッションで使い回させない）。結び付けは、`node.hookUnbind`（人間・祖先の統合ノード）と、
+ *   トークンの発行し直し・失効で外れる（T22-hu）。
  */
 
 import { type Failure, failure, type Result } from "@cso/core";
@@ -61,6 +62,10 @@ export function parseHookRequest(body: unknown): Result<HookRequest, Failure> {
 export interface SessionBinder {
   /** 最初の値なら結び、結んだ値と同じなら真。別の値なら偽。 */
   check(nodeId: string, sessionId: string): boolean;
+  /** 結び付けを外す（T22-hu）。外したら真（結び付けがなければ偽）。次に来た session_id に結び直す。 */
+  unbind(nodeId: string): boolean;
+  /** 結び付けがあるか（記録の `hadBinding` 用）。 */
+  has(nodeId: string): boolean;
 }
 
 export function createSessionBinder(): SessionBinder {
@@ -73,6 +78,12 @@ export function createSessionBinder(): SessionBinder {
         return true;
       }
       return s === sessionId;
+    },
+    unbind(nodeId) {
+      return bound.delete(nodeId);
+    },
+    has(nodeId) {
+      return bound.has(nodeId);
     },
   };
 }

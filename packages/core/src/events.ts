@@ -212,6 +212,18 @@ export type EventBody =
       };
     }
   | {
+      /**
+       * フックの受け口の `session_id` の結び付けを外した記録（T22-hu）。外した者は封筒の `actor`（人間か祖先の統合ノード）。
+       * 結び付けは daemon のメモリだけにあるので、状態は変えない（記録のみ）。session_id は書かない。
+       */
+      readonly type: "node.hookUnbound";
+      readonly payload: {
+        readonly nodeId: string;
+        /** 外したときに、結び付けがあったか。 */
+        readonly hadBinding: boolean;
+      };
+    }
+  | {
       /** 自動の最終削除の保留の解除（T13f-h）。保留がなければ拒否する。 */
       readonly type: "node.purgeHoldReleased";
       readonly payload: { readonly nodeId: string };
@@ -1858,6 +1870,14 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           ...(reason === undefined ? {} : { reason }),
         }),
       });
+      return commit();
+    }
+
+    case "node.hookUnbound": {
+      const { nodeId, hadBinding } = p;
+      if (!isId(nodeId) || typeof hadBinding !== "boolean")
+        return invalid(seq, "node.hookUnbound の payload");
+      if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
       return commit();
     }
 

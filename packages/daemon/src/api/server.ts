@@ -41,7 +41,12 @@ import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
 import { type BindCodes, createThrottle, type Throttle } from "./bind.js";
 import { type CredentialStore, type Principal, parseBearer } from "./credentials.js";
 import { fingerprintOf } from "./dedupe.js";
-import { createSessionBinder, type HookDecider, parseHookRequest } from "./hook.js";
+import {
+  createSessionBinder,
+  type HookDecider,
+  parseHookRequest,
+  type SessionBinder,
+} from "./hook.js";
 import { type Identity, isValidNonce, NONCE_MAX_HEX, NONCE_MIN_HEX, proofOf } from "./identity.js";
 import {
   type ApiCounters,
@@ -162,6 +167,8 @@ export interface ApiDeps {
   readonly bind?: BindCodes;
   /** ファイルで設定するフックの受け口（`POST /v1/hook`。T22-h）の判定。省略すると、この入口はない（404）。 */
   readonly hook?: HookDecider;
+  /** フックの受け口の session_id の結び付け（T22-hu で外から外せるように渡す）。省略すると、このサーバーの中だけのもの。 */
+  readonly hookSessions?: SessionBinder;
   /** bind の入口の、全体のスロットル（1 秒あたりの失敗）。省略すると 1 秒に 10 回。 */
   readonly bindThrottle?: Throttle;
   /** 記録の時刻（ISO 8601 UTC）。既定は現在時刻。 */
@@ -806,7 +813,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     });
   }
 
-  const sessions = createSessionBinder();
+  const sessions = deps.hookSessions ?? createSessionBinder();
   /**
    * ファイルで設定するフックの受け口（T22-h。`docs/plugin.md` の「フック」）。子のノードのトークンだけ（ほかは 403）。
    * 認証・主体の検査・同時数・回数の制限は、`/v1/request` と同じ（重みは 0.5）。重複の扱い（requestId）はない（判定は冪等）。

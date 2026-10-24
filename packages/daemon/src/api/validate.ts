@@ -376,6 +376,7 @@ const VALIDATORS: Validators = {
     };
   },
   "node.purgeRelease": nodeIdOnly,
+  "node.hookUnbind": nodeIdOnly,
   "node.discardedList": (p) => {
     strict(p, []);
     return {};

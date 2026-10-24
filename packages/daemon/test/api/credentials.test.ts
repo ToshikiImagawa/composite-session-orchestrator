@@ -99,3 +99,25 @@ describe("generateHumanToken（人間のトークンの生成。randomBytes(32).
     expect(c.nodeIds()).toEqual(["b"]);
   });
 });
+
+describe("トークンの発行し直し・失効の通知（T22-hu。フックの結び付けを外す）", () => {
+  it("古いトークンを無効にしたあとで通知する（通知の時点で、古いトークンは通らない）", () => {
+    const seen: [string, unknown][] = [];
+    let old = "";
+    const s = createCredentialStore({
+      humanToken: HUMAN,
+      onNodeTokenChanged: (nodeId) => seen.push([nodeId, s.authenticate(old)]),
+    });
+    old = s.issueNodeToken("a", "child");
+    seen.length = 0;
+    const fresh = s.issueNodeToken("a", "child");
+    expect(seen).toEqual([["a", undefined]]);
+    expect(s.authenticate(fresh)).toEqual({ role: "child", nodeId: "a" });
+    old = fresh;
+    s.revokeNode("a");
+    expect(seen).toEqual([
+      ["a", undefined],
+      ["a", undefined],
+    ]);
+  });
+});

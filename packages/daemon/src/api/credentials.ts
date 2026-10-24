@@ -49,6 +49,11 @@ export function createCredentialStore(options: {
   readonly repository?: TokenRepository;
   /** 発行日時（ISO 8601 UTC）。既定は現在時刻。 */
   readonly clock?: () => string;
+  /**
+   * ノードのトークンを発行し直した・失効させた直後に呼ぶ（T22-hu。フックの受け口の session_id の結び付けを外す）。
+   * 古いトークンを無効にしたあと、同じ同期の処理の中で呼ぶので、古いトークンのセッションが、その間に結び直すことはない。
+   */
+  readonly onNodeTokenChanged?: (nodeId: string) => void;
 }): CredentialStore {
   if (typeof options.humanToken !== "string" || options.humanToken.length < MIN_HUMAN_TOKEN) {
     throw new RangeError(`人間のトークンは ${MIN_HUMAN_TOKEN} 文字以上が必要`);
@@ -85,6 +90,7 @@ export function createCredentialStore(options: {
       if (old !== undefined) byHash.delete(old);
       byHash.set(h, { role, nodeId });
       byNode.set(nodeId, h);
+      options.onNodeTokenChanged?.(nodeId);
       return token;
     },
     nodeIds: () => [...byNode.keys()],
@@ -95,6 +101,7 @@ export function createCredentialStore(options: {
       repository?.remove(nodeId);
       byHash.delete(h);
       byNode.delete(nodeId);
+      options.onNodeTokenChanged?.(nodeId);
     },
   };
 }
