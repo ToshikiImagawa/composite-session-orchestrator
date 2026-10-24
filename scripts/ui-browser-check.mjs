@@ -248,6 +248,19 @@ handlers["node.confirmStopped"] = async (req) => {
   });
   return { ok: true, value: { state: "stopped" } };
 };
+// フックの結び付けを外す（T22-hub）: a は 1 回目は外し、2 回目は再送として返す。constructor は結び付けがない
+const hookUnbindCount = new Map();
+handlers["node.hookUnbind"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  await new Promise((r) => setTimeout(r, 100));
+  const n = (hookUnbindCount.get(req.params.nodeId) ?? 0) + 1;
+  hookUnbindCount.set(req.params.nodeId, n);
+  if (req.params.nodeId !== "a") return { ok: true, value: { unbound: false, duplicate: false } };
+  return {
+    ok: true,
+    value: n === 1 ? { unbound: true, duplicate: false } : { unbound: false, duplicate: true },
+  };
+};
 const { url } = await server.listen(0);
 handlers["node.reclaimPreview"] = async (req) => {
   if (req.params.nodeId === "s2") {
@@ -930,6 +943,87 @@ cs.buttonGoneAfterStopped = true;
 cs.errors = csErrors;
 out.confirmStopped = cs;
 await pageC.context().close();
+
+// ---- フックの結び付けを外す（T22-hub）----
+const hu = {};
+const pageH = await (await browser.newContext({ viewport: { width: 900, height: 900 } })).newPage();
+const huErrors = [];
+pageH.on("pageerror", (e) => huErrors.push(String(e)));
+pageH.on("dialog", (d) => {
+  huErrors.push(`dialog:${d.message()}`);
+  d.dismiss();
+});
+await pageH.goto(`${url}/ui#token=${HUMAN}`);
+await pageH.waitForSelector("#view:not([hidden])", { timeout: 8000 });
+const HU = "フックの結び付けを外す…";
+const hrow = (id) =>
+  pageH
+    .locator("#tree .node")
+    .filter({ has: pageH.locator("span", { hasText: new RegExp(`^${id}$`) }) });
+const unbindCalls = () => calls.filter((c) => c.operation === "node.hookUnbind");
+// (a) 出し分け: 動いている子（a・constructor）だけ。統合ノード（root・m1）・停止未完了（c1）・停止（s1）には出さない
+hu.buttonOnA = (await hrow("a").getByRole("button", { name: HU }).count()) === 1;
+hu.buttonOnConstructor =
+  (await hrow("constructor").getByRole("button", { name: HU }).count()) === 1;
+hu.noButtonOnIntegrators =
+  (await hrow("root").getByRole("button", { name: HU }).count()) === 0 &&
+  (await hrow("m1").getByRole("button", { name: HU }).count()) === 0;
+hu.noButtonOnStopped =
+  (await hrow("c1").getByRole("button", { name: HU }).count()) === 0 &&
+  (await hrow("s1").getByRole("button", { name: HU }).count()) === 0;
+hu.buttonCount = await pageH.getByRole("button", { name: HU }).count();
+// (b) 確認（2 段）。打ち込みの欄はなく、押すまで送らない。XSS の文字列（a の受信箱の要約）は、文字として出るだけ
+await hrow("a").getByRole("button", { name: HU }).click();
+await pageH.locator("#confirm").waitFor();
+const htext = await pageH.locator("#confirm").innerText();
+hu.confirmShowsNode =
+  htext.includes("a") &&
+  htext.includes("次に来たセッションに結び直す") &&
+  htext.includes("/clear・--resume で session_id が変わって");
+hu.confirmShowsWarning = htext.includes("トークンが漏れた疑い");
+hu.noTypedBox = (await pageH.locator("#confirm textarea").count()) === 0;
+hu.requestBeforeConfirm = unbindCalls().length === 0;
+hu.noXss =
+  (await pageH.evaluate(() => window.__xss ?? null)) === null &&
+  (await pageH.locator("#confirm img, #confirm script, #tree img, #tree script").count()) === 0;
+// (c) 送る。params は { nodeId: "a" }。二重クリックでも 1 回。結果は「外しました」
+await pageH.locator("#confirm button.primary").dblclick();
+await pageH.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("外しました"),
+  null,
+  { timeout: 5000 },
+);
+hu.texts = [await pageH.locator("#notice").innerText()];
+hu.calls = unbindCalls().length;
+hu.params = JSON.stringify(unbindCalls()[0]?.params) === JSON.stringify({ nodeId: "a" });
+// (d) 2 回目（daemon が再送として返す）は「すでに記録済み」。別の確認なので、requestId は新しい
+await hrow("a").getByRole("button", { name: HU }).click();
+await pageH.locator("#confirm button.primary").click();
+await pageH.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("すでに記録済み"),
+  null,
+  { timeout: 5000 },
+);
+hu.texts.push(await pageH.locator("#notice").innerText());
+hu.newRequestId = unbindCalls()[1]?.requestId !== unbindCalls()[0]?.requestId;
+// (e) 結び付けがない（constructor）は「ありませんでした」
+await hrow("constructor").getByRole("button", { name: HU }).click();
+await pageH.locator("#confirm button.primary").click();
+await pageH.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("ありませんでした"),
+  null,
+  { timeout: 5000 },
+);
+hu.texts.push(await pageH.locator("#notice").innerText());
+// 3 つの通知の全文（外した・再送・なかった）
+hu.threeTexts =
+  hu.texts.length === 3 &&
+  hu.texts[0].includes("外しました") &&
+  hu.texts[1].includes("すでに記録済み") &&
+  hu.texts[2].includes("ありませんでした");
+hu.errors = huErrors;
+out.hookUnbind = hu;
+await pageH.context().close();
 await pageO.context().close();
 
 // SSE が使えないとき（上限 0 で、429）は、ポーリング（ETag）に切り替わる

@@ -84,6 +84,12 @@ daemon の窓口が、状態を見るための HTML 画面を配る。**状態�
 
 `stopDelegated` は、daemon がアダプタの能力表から埋める（`ApiDeps.stopDelegated` → `uiViewOf(state, { stopDelegated })`）。表示のキャッシュは `lastSeq` を鍵にするので、能力表がアダプタごとに固定であることが前提。能力表が記録なしに変わりうるようになったら、キャッシュの鍵を見直す。いまは Desktop のアダプタを配線していない（T21）ので、どのノードにも出ない。
 
+### フックの結び付けを外す（T22-hub）
+
+木の行のうち、**統合ノードでなく、状態が `running`・`waiting` の子**に、「フックの結び付けを外す…」を出す（止まったノードには、フックが来ない）。押すと確認（2 段）を出し、送ると `node.hookUnbind`（`{ nodeId }`）を呼ぶ。**打ち込みはない**: 外しても失うものがなく（次に来たセッションに結び直すだけ）、外した者（人間）が記録 `node.hookUnbound` に残るため。確認には、トークンが漏れた疑いがあるときは外さずに子を止めてトークンを失効させる、という注意を出す。結果は 3 通り（外した・結び付けがなかった〔記録だけ残した〕・すでに記録済み〔再送〕）。cli では `cso hook-unbind <nodeId>`（`docs/plugin.md` の「フック」）。
+
+**結び付けの有無は、画面に出さない**: 結び付けは daemon のメモリだけにあり、最初のフックの呼び出しで、イベントなしに変わる。表示モデルのキャッシュ（ETag）と SSE の通知は `lastSeq` で更新するので、出すと古い表示になる。session_id も出さない。
+
 ## XSS・CSP
 
 - 画面は、`textContent` と `createElement`（タグは `div`・`span`・`p` の許可リストだけ。実行時にも拒む）だけで描く。`innerHTML`・`outerHTML`・`insertAdjacentHTML`・`document.write`・`eval`・`new Function`・`setAttribute`・`on*` への代入・`location` への代入・`srcdoc`・storage・cookie・`postMessage`・`window.open`・動的 import は使わない（`ui-assets.test.ts` が走査で守らせる）。ブラケット記法の文字列キー、HTML を解釈する API（`setHTMLUnsafe`・`parseHTMLUnsafe`・`setHTML`・`createContextualFragment`・`DOMParser`）、`.href`・`.src`・`.action`・`.formAction` への代入、危ないタグ（`script`・`iframe`・`a`・`img`・`link`・`object`・`embed`・`form` など）の生成も禁じる。さらに、**許可リスト**として、`.` の後ろのプロパティ名を抜き出し、安全な集合にあるものだけを許す（新しい API を使うと、試験が落ちるので、意識して足す）。HTML にインラインの script・style・イベント属性を置かない。
