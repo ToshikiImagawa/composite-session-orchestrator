@@ -1,6 +1,6 @@
 // plugin/ を検証する（`pnpm check` の最後の段階。`pnpm build` が済んでいること: MCP のツール名を packages/mcp/dist から読む）。
 // 検査の中身は plugin-check.mjs（試験: plugin-check.test.mjs）。
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkPlugin } from "./plugin-check.mjs";
@@ -10,6 +10,14 @@ const toolsModule = join(root, "packages", "mcp", "dist", "tools.js");
 if (!existsSync(toolsModule)) {
   console.error(
     "NG: packages/mcp/dist/tools.js がありません（先に pnpm build を実行してください）",
+  );
+  process.exit(1);
+}
+// 古い dist を読むと、ツールの追加・変更を見落とす。ソースより古ければ、失敗にする
+const toolsSource = join(root, "packages", "mcp", "src", "tools.ts");
+if (existsSync(toolsSource) && statSync(toolsModule).mtimeMs < statSync(toolsSource).mtimeMs) {
+  console.error(
+    "NG: packages/mcp/dist/tools.js が src/tools.ts より古いです（先に pnpm build を実行してください）",
   );
   process.exit(1);
 }

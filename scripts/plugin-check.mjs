@@ -14,14 +14,36 @@ const isDir = (p) => {
   }
 };
 
-/** 先頭の frontmatter（`---` で囲んだ `key: value` の行）を読む。なければ undefined。 */
+/**
+ * 先頭の frontmatter（`---` で囲んだ、1 行の `key: value`）を読む。なければ undefined。
+ * 複数行の値（`>`・`|`、字下げの続きの行）は、読めないので、`multiline` に key を入れる（呼び出し側が、エラーにする）。
+ */
 const frontmatter = (text) => {
   const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (m === null) return undefined;
   const out = {};
+  const multiline = [];
+  let last = "";
   for (const line of m[1].split(/\r?\n/)) {
     const kv = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(line);
-    if (kv !== null) out[kv[1]] = kv[2].trim();
+    if (kv !== null) {
+      last = kv[1];
+      const value = kv[2].trim();
+      if (/^[>|][+-]?\d*$/.test(value)) multiline.push(last);
+      out[last] = value;
+    } else if (/^\s+\S/.test(line)) {
+      multiline.push(last);
+    }
+  }
+  return { values: out, multiline: [...new Set(multiline)] };
+};
+/** 説明の行: 行頭の箇条書きで、ツール名のあとに `:` と 10 文字以上の説明が続く。 */
+const DESCRIBED_RE = /^\s*[-*]\s+`?mcp__node__([A-Za-z_]*[A-Za-z])`?\s*:\s*(\S.*)$/;
+const describedTools = (text) => {
+  const out = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    const m = DESCRIBED_RE.exec(line);
+    if (m !== null && Array.from(m[2].trim()).length >= 10) out.add(m[1]);
   }
   return out;
 };
@@ -37,13 +59,21 @@ const walk = (dir) => {
 };
 
 const TOOL_RE = /mcp__node__([A-Za-z_]*[A-Za-z])/g;
-/** NFR_012: 絶対パス・ホームのパス・Windows のパス・file URL。URL のパス（/v1/ など）と `${CLAUDE_PLUGIN_ROOT}` は、対象外。 */
+/**
+ * NFR_012: 一般の絶対パス（行頭・空白・引用符・`(`・`=` の直後の `/<英数字>/…`）・ホームのパス・Windows のパス・file URL を拒否する。
+ * 例外は、URL のパス（`://host` の後）と `${CLAUDE_PLUGIN_ROOT}` だけ（先に取り除いてから、検査する）。
+ */
+const URL_RE = /\b(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`)\]>]*/g;
 const PATH_RES = [
-  /(?:^|[\s"'`(=])\/(?:home|Users|root|tmp|var|opt|usr|etc|mnt|srv|private)\//,
+  /(?:^|[\s"'`(=])\/[A-Za-z0-9_.-]+\//,
   /(?:^|[\s"'`(=])~\//,
   /\b[A-Za-z]:\\/,
   /file:\/\//,
 ];
+const pathViolation = (line) => {
+  const rest = line.replaceAll(URL_RE, " ").replaceAll(/\$\{CLAUDE_PLUGIN_ROOT\}/g, " ");
+  return PATH_RES.some((re) => re.test(rest));
+};
 
 export function checkPlugin({ pluginDir, tools, forbidden = [] }) {
   const errors = [];
@@ -112,10 +142,16 @@ export function checkPlugin({ pluginDir, tools, forbidden = [] }) {
         continue;
       }
       const text = readFileSync(file, "utf8");
-      const fm = frontmatter(text);
-      if (fm === undefined) {
+      const parsed = frontmatter(text);
+      if (parsed === undefined) {
         errors.push(`${rel(file)}: frontmatter（---）がありません`);
         continue;
+      }
+      const fm = parsed.values;
+      for (const key of parsed.multiline) {
+        errors.push(
+          `${rel(file)}: frontmatter の ${key} は複数行の値です（検出できないので、1 行で書いてください）`,
+        );
       }
       if (fm.name !== e.name) {
         errors.push(`${rel(file)}: name はディレクトリ名（${e.name}）と同じにしてください`);
@@ -130,9 +166,17 @@ export function checkPlugin({ pluginDir, tools, forbidden = [] }) {
             errors.push(`${rel(file)}: ${e.name} のロールに公開されていないツール mcp__node__${t}`);
           }
         }
-        const roleOnly = e.name === "cso-child" ? tools.child : tools.integrator;
+        const described = describedTools(text);
+        const roleOnly = [
+          ...(e.name === "cso-child" ? tools.child : tools.integrator),
+          ...tools.common,
+        ];
         for (const t of roleOnly) {
-          if (!used.has(t)) errors.push(`${rel(file)}: ツール mcp__node__${t} の説明がありません`);
+          if (!described.has(t)) {
+            errors.push(
+              `${rel(file)}: ツール mcp__node__${t} の説明がありません（行頭の箇条書きで「- \`mcp__node__名前\`: 説明（10 文字以上）」の形）`,
+            );
+          }
         }
       }
     }
@@ -142,9 +186,14 @@ export function checkPlugin({ pluginDir, tools, forbidden = [] }) {
   const commandsDir = join(pluginDir, "commands");
   if (isDir(commandsDir)) {
     for (const file of walk(commandsDir).filter((f) => f.endsWith(".md"))) {
-      const fm = frontmatter(readFileSync(file, "utf8"));
-      if (fm === undefined || !fm.description) {
+      const parsed = frontmatter(readFileSync(file, "utf8"));
+      if (parsed === undefined || !parsed.values.description) {
         errors.push(`${rel(file)}: frontmatter の description がありません`);
+      }
+      for (const key of parsed?.multiline ?? []) {
+        errors.push(
+          `${rel(file)}: frontmatter の ${key} は複数行の値です（検出できないので、1 行で書いてください）`,
+        );
       }
     }
   }
@@ -158,7 +207,7 @@ export function checkPlugin({ pluginDir, tools, forbidden = [] }) {
     }
     const lines = text.split(/\r?\n/);
     lines.forEach((line, i) => {
-      if (PATH_RES.some((re) => re.test(line))) {
+      if (pathViolation(line)) {
         errors.push(
           `${rel(file)}:${i + 1}: NFR_012 絶対パス・ホームのパスを埋め込まないでください（環境変数か引数で受けます）`,
         );
