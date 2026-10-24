@@ -34,6 +34,8 @@ export interface LogPort {
   purgeTree?(request: PurgeRequest): Result<PurgeOutcome, Failure>;
   /** 最終削除の事前確認（ドライラン）。何も書かない。 */
   checkPurge?(request: PurgeRequest): Result<{ deleteCount: number }, Failure>;
+  /** 同じ `requestId` で最初に記録されたイベント（なければ `undefined`）。再送で、最初に決めた値（期限など）を返すのに使う。ないログでは、再計算する。 */
+  firstEventOf?(requestId: string): OrchEvent | undefined;
 }
 
 /** 呼び出し元・要求 ID・用途から、決定的で `isSafeId` を満たす ID を導く。 */

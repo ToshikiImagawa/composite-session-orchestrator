@@ -737,6 +737,38 @@ describe("createDaemon（自動の最終削除。設定 autoPurge）", () => {
     expect(logs.indexOf("autoPurge.purged")).toBeLessThan(logs.lastIndexOf('"event":"stopped"'));
   });
 
+  it("実 HTTP（T23-d3）: 同じ requestId の days を、時計を進めて 2 回送っても、最初の期限が返り、記録は増えない（requestIdConflict にならない）", async () => {
+    const r = rig();
+    seedArchivedTree(r);
+    const m = manual();
+    r.deps = { ...r.deps, timers: m.timers, clock: m.clock, monotonicMs: () => m.timers.now() };
+    const d = await boot(r);
+    const first = await call(
+      d.url,
+      d.humanToken,
+      "node.purgeHold",
+      { nodeId: "t", days: 30 },
+      "hold-days-1",
+    );
+    expect(first.status).toBe(200);
+    expect(first.json.value.until).toBe("2026-07-01T00:00:00Z"); // 2026-06-01 + 30 日
+    const seq = d.daemon.log.state().lastSeq;
+    m.fire(10 * 24 * 60 * 60_000); // 10 日後に、同じ requestId で再送する
+    const again = await call(
+      d.url,
+      d.humanToken,
+      "node.purgeHold",
+      { nodeId: "t", days: 30 },
+      "hold-days-1",
+    );
+    expect(again.status).toBe(200);
+    expect(again.json.value.until).toBe(first.json.value.until);
+    expect(d.daemon.log.state().lastSeq).toBe(seq);
+    // 別の requestId の days は、いまの時計で決め直す
+    const next = await call(d.url, d.humanToken, "node.purgeHold", { nodeId: "t", days: 30 });
+    expect(next.json.value.until).toBe("2026-07-11T00:00:00Z");
+  });
+
   it("intervalMinutes を指定できる。stop の後は、周期が来ても消さない", async () => {
     const r = rig({ autoPurge: { enabled: true, intervalMinutes: 5 } });
     seedArchivedTree(r);

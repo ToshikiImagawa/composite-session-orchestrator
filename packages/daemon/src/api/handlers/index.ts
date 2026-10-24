@@ -133,12 +133,16 @@ export function createHandlersWithScheduler(
     };
   const purgeTree = deps.log.purgeTree?.bind(deps.log);
   const checkPurge = deps.log.checkPurge?.bind(deps.log);
+  const firstEventOf = deps.log.firstEventOf?.bind(deps.log);
   const built = {
     ...createReadHandlers(() => deps.log.state()),
     ...state,
     ...(rt === undefined ? {} : rt),
     ...(reclaim === undefined ? {} : createReclaimHandlers({ ...deps, ports: reclaim })),
-    ...(purgeTree === undefined || checkPurge === undefined || purge === undefined
+    ...(purgeTree === undefined ||
+    checkPurge === undefined ||
+    firstEventOf === undefined ||
+    purge === undefined
       ? {}
       : createPurgeHandlers({
           ...purge,
@@ -147,6 +151,7 @@ export function createHandlersWithScheduler(
             purgeTree,
             checkPurge,
             appendAll: (rs) => deps.log.appendAll(rs),
+            firstEventOf,
           },
         })),
     ...(!full

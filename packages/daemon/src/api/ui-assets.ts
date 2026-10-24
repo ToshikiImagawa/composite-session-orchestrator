@@ -149,8 +149,6 @@ export const UI_JS = `'use strict';
     var e = r.body && r.body.error;
     var base = e && typeof e.code === 'string' ? e.code + ': ' + String(e.cause || '').slice(0, 300) : 'HTTP ' + r.status;
     if (r.status === 429) base += '（' + (r.retry > 0 ? r.retry + ' 秒' : 'しばらく') + '待ってから、もう一度送る）';
-    // 保留の期限は、この端末の時計で決めている。サーバーの時計と合わないと、範囲外になる。
-    if (e && e.code === 'invalidPurgeHoldUntil') base += '\\n日数を小さくするか、この端末の時計を合わせてください（期限は、この端末の時計で決めています）。';
     var hint = failureHint(e && e.code);
     // 先端が変わった（または確かめられない）ときは、同じ内容では、何度送っても通らない。確かめ直させる
     if (hint) return base + '\\n' + hint;
@@ -217,7 +215,7 @@ export const UI_JS = `'use strict';
     box.appendChild(actions);
   }
   // 確認を出す。確認のたびに requestId を新しく作る（その確認の間は、同じ ID で再送する）。
-  // opts.typed: 打ち込ませる文字列（取り消せない操作）。opts.blocked: 送れない理由（出して、送らせない）。opts.after: 成功のあとに呼ぶ関数。
+  // done: 成功の通知（文字列、または、結果の値を受け取って文字列を返す関数）。opts.typed: 打ち込ませる文字列（取り消せない操作）。opts.blocked: 送れない理由（出して、送らせない）。opts.after: 成功のあとに呼ぶ関数。
   function openConfirm(title, lines, operation, params, done, opts) {
     if (pending && pending.sending) return;
     if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）', true); return; }
@@ -282,7 +280,7 @@ export const UI_JS = `'use strict';
         if (r.status === 200 && r.body && r.body.ok === true) {
           pending = null;
           renderConfirm();
-          notice(p.done);
+          notice(typeof p.done === 'function' ? p.done(r.body.value) : p.done);
           if (p.after) p.after();
           refresh();
           return;
@@ -550,12 +548,17 @@ export const UI_JS = `'use strict';
       return !parent || parent.state !== 'archived';
     });
   }
-  // 保留の期限（ISO 8601 UTC。ミリ秒なし）。days が 0 なら、期限なし（undefined）。
-  // 365 日（サーバーの上限）のときだけ、時計のずれを見込んで 10 分短くする（cli の --days と同じ）。
-  function holdUntil(days, nowMs) {
-    if (!(days > 0)) return undefined;
-    var ms = nowMs + days * 86400000 - (days >= HOLD_MAX_DAYS ? 600000 : 0);
-    return new Date(ms).toISOString().replace(/\\.\\d{3}Z$/, 'Z');
+  // 保留の成功の通知。daemon が決めた期限（結果の until）を出す。無期限なら、その旨。
+  function holdDoneText(nodeId, value) {
+    var until = value && typeof value.until === 'string' ? cleanText(value.until, 40) : '';
+    return '保留しました（' + nodeId + '）。期限: ' + (until === '' ? '無期限' : until);
+  }
+  // 保留の params。日数は days で送り、期限は daemon の時計で決める（T23-d3。端末の時計は使わない）。days が 0 なら、無期限（days なし）。
+  function holdParams(nodeId, days, reason) {
+    var params = { nodeId: nodeId };
+    if (days > 0) params.days = days;
+    if (reason.trim() !== '') params.reason = reason;
+    return params;
   }
   // 日数の入力（「その他」）: 1〜365 の整数だけ。不正なら 0。
   function parseDays(text) {
@@ -662,13 +665,10 @@ export const UI_JS = `'use strict';
         problem.textContent = why;
         problem.hidden = why === '';
         if (why !== '') return;
-        var until = holdUntil(days, Date.now());
-        var params = { nodeId: id };
-        if (until !== undefined) params.until = until;
-        if (area.value.trim() !== '') params.reason = area.value;
+        var params = holdParams(id, days, area.value);
         var reason = area.value;
         holdStatusLine(id).then(function (current) {
-          openConfirm('自動の最終削除の保留', [['木の根', id], ['今の保留', current], ['新しい期限', until === undefined ? '無期限' : until + ' まで（' + label + '）。今の保留は、置き換わる'], ['理由', reason.trim() === '' ? '（なし）' : reason]], 'node.purgeHold', params, '保留しました（' + id + '）');
+          openConfirm('自動の最終削除の保留', [['木の根', id], ['今の保留', current], ['新しい期限', days > 0 ? '保留した時点から ' + label + ' 後（期限は、daemon の時計で決める。実際の期限は、保留した直後の通知に出る）。今の保留は、置き換わる' : '無期限。今の保留は、置き換わる'], ['理由', reason.trim() === '' ? '（なし）' : reason]], 'node.purgeHold', params, function (value) { return holdDoneText(id, value); });
         });
       };
       HOLD_CHOICES.forEach(function (c) {
