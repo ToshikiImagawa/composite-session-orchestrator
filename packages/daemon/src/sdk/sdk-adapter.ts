@@ -260,6 +260,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
           }
         : undefined;
 
+      // role の省略は、統合ノードでない子として扱う（StartRequest.role の既定）。統合ノードの起動（spawn・再開）は、必ず role を渡す。
       const skill =
         d.childPluginPath === undefined ? undefined : skillFor(request.role ?? "implement");
       let session: AgentSession;
@@ -274,7 +275,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
             ? { initialPrompt: request.instruction }
             : {
                 // 手順は skill に任せる（指示には手順の本文を書かない。食い違いを避ける）。
-                initialPrompt: `${request.instruction}\n作業の手順（報告・判断の求め方など）は、skill「${skill}」に従う。`,
+                initialPrompt: `${request.instruction}\n作業の手順（報告・判断の求め方など）は、skill「${qualifiedSkill(skill)}」に従う。`,
                 plugin: { path: d.childPluginPath as string, skill: qualifiedSkill(skill) },
               }),
         });

@@ -1346,7 +1346,7 @@ describe("子に渡す skill（T22-c）", () => {
     const [impl, integ] = r.launcher.sessions.map((x) => x.options);
     expect(impl?.plugin).toEqual({ path: dest, skill: "cso-child-skills:cso-child" });
     expect(integ?.plugin).toEqual({ path: dest, skill: "cso-child-skills:cso-integrator" });
-    expect(impl?.initialPrompt).toContain("skill「cso-child」に従う");
+    expect(impl?.initialPrompt).toContain("skill「cso-child-skills:cso-child」に従う");
     expect(impl?.settingSources).toEqual([]);
   });
 

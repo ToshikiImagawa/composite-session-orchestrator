@@ -49,6 +49,8 @@ const READ_TOOLS: ReadonlySet<string> = new Set([
   "TodoWrite",
   "ToolSearch",
   "BashOutput",
+  // skill を読む（T22-c）。中身は SKILL.md の文で、書き込み・コマンドの実行は、それぞれのツールの判定を通る。
+  "Skill",
 ]);
 /** 書き込み系のツール → 対象のパスを持つ入力のキー。 */
 const WRITE_TOOLS: Readonly<Record<string, string>> = {

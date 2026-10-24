@@ -1070,6 +1070,14 @@ describe("停止の宣言の release（Desktop だけ）", () => {
 });
 
 describe("ファイルで設定するフックの判定（decideHook。T22-h）", () => {
+  it("Skill（子に渡した skill を読む。T22-c）は、受け口（decideHook）でも許可する", async () => {
+    const r = rig();
+    await startNode(r);
+    expect(
+      await r.adapter.decideHook("a", "Skill", { skill: "cso-child-skills:cso-child" }),
+    ).toEqual({ allow: true });
+  });
+
   it("SDK のコールバックと同じ判定・同じ記録をする（範囲外の書き込みは拒否して scope.violation と受信箱。未知のツールは node.toolDenied）", async () => {
     const r = rig();
     await startNode(r);
@@ -1122,7 +1130,7 @@ describe("子に渡す skill（T22-c）", () => {
       skill: "cso-child-skills:cso-integrator",
     });
     expect(a?.initialPrompt.startsWith("do the task\n")).toBe(true);
-    expect(a?.initialPrompt).toContain("skill「cso-child」に従う");
+    expect(a?.initialPrompt).toContain("skill「cso-child-skills:cso-child」に従う");
     expect(a?.settingSources).toEqual([]);
   });
 
