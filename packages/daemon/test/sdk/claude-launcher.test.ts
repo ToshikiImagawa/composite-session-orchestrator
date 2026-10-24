@@ -312,3 +312,27 @@ describe("createClaudeLauncher（実 SDK の query() への結線。フェイク
     });
   });
 });
+
+describe("子に渡す skill の plugin（T22-c）", () => {
+  it("plugin があれば、plugins（.mcp.json を読まない）と skills（その 1 つ）を渡す。設定の読み込みなし・strictMcpConfig は変わらない", () => {
+    const f = fakeQuery();
+    launcherWith(f.query).launch(
+      options({ plugin: { path: "/state/child-plugin", skill: "cso-child-skills:cso-child" } }),
+    );
+    const o = f.calls[0]?.options as Record<string, unknown>;
+    expect(o.plugins).toEqual([
+      { type: "local", path: "/state/child-plugin", skipMcpDiscovery: true },
+    ]);
+    expect(o.skills).toEqual(["cso-child-skills:cso-child"]);
+    expect(o.settingSources).toEqual([]);
+    expect(o.strictMcpConfig).toBe(true);
+  });
+
+  it("plugin がなければ、plugins・skills を渡さない", () => {
+    const f = fakeQuery();
+    launcherWith(f.query).launch(options());
+    const o = f.calls[0]?.options as Record<string, unknown>;
+    expect(o).not.toHaveProperty("plugins");
+    expect(o).not.toHaveProperty("skills");
+  });
+});

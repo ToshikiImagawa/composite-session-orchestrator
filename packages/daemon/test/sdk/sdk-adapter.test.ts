@@ -581,7 +581,7 @@ describe("stop: 堅牢化（例外・戻らない・result が来ない）", () 
     await settle();
     await r.timers.advance(1000);
     const res = await p;
-    expect(session(r).calls).toEqual(expect.arrayContaining(["interrupt", "abort"]));
+    expect(sessionOf(r).calls).toEqual(expect.arrayContaining(["interrupt", "abort"]));
     expect(res.ok && res.value).toMatchObject({ state: "stopped", outcome: "aborted" });
   });
 
@@ -592,12 +592,12 @@ describe("stop: 堅牢化（例外・戻らない・result が来ない）", () 
     const p = r.adapter.stop("a", { mode: "graceful", graceMs: 1000, stopSeq: STOP_SEQ });
     await settle();
     await r.timers.advance(1000);
-    expect(session(r).calls).not.toContain("abort");
+    expect(sessionOf(r).calls).not.toContain("abort");
     await r.timers.advance(9_999);
-    expect(session(r).calls).not.toContain("abort");
+    expect(sessionOf(r).calls).not.toContain("abort");
     await r.timers.advance(1);
     const res = await p;
-    expect(session(r).calls).toContain("abort");
+    expect(sessionOf(r).calls).toContain("abort");
     expect(res.ok && res.value.outcome).toBe("aborted");
     expect(r.timers.pendingCount).toBe(0);
   });
@@ -1070,6 +1070,14 @@ describe("停止の宣言の release（Desktop だけ）", () => {
 });
 
 describe("ファイルで設定するフックの判定（decideHook。T22-h）", () => {
+  it("Skill（子に渡した skill を読む。T22-c）は、受け口（decideHook）でも許可する", async () => {
+    const r = rig();
+    await startNode(r);
+    expect(
+      await r.adapter.decideHook("a", "Skill", { skill: "cso-child-skills:cso-child" }),
+    ).toEqual({ allow: true });
+  });
+
   it("SDK のコールバックと同じ判定・同じ記録をする（範囲外の書き込みは拒否して scope.violation と受信箱。未知のツールは node.toolDenied）", async () => {
     const r = rig();
     await startNode(r);
@@ -1096,5 +1104,43 @@ describe("ファイルで設定するフックの判定（decideHook。T22-h）"
     const d = await r.adapter.decideHook("zzz", "Read", { file_path: "a" });
     expect(d.allow).toBe(false);
     expect(r.sink.records).toHaveLength(0);
+  });
+});
+
+describe("子に渡す skill（T22-c）", () => {
+  it("childPluginPath があれば、role に応じた skill の plugin を渡し、指示の末尾に skill に従う旨を足す", async () => {
+    const r = rig({ childPluginPath: "/state/child-plugin" });
+    for (const [nodeId, role] of [
+      ["a", "implement"],
+      ["b", "integrator"],
+    ] as const) {
+      const res = await r.adapter.start({
+        nodeId,
+        role,
+        worktreePath: "/link/a",
+        scope: SCOPE,
+        instruction: "do the task",
+      });
+      expect(res.ok).toBe(true);
+    }
+    const [a, b] = r.launcher.sessions.map((x) => x.options);
+    expect(a?.plugin).toEqual({ path: "/state/child-plugin", skill: "cso-child-skills:cso-child" });
+    expect(b?.plugin).toEqual({
+      path: "/state/child-plugin",
+      skill: "cso-child-skills:cso-integrator",
+    });
+    expect(a?.initialPrompt.startsWith("do the task\n")).toBe(true);
+    expect(a?.initialPrompt).toContain("skill「cso-child-skills:cso-child」に従う");
+    expect(a?.settingSources).toEqual([]);
+  });
+
+  it("childPluginPath がなければ、plugin を渡さず、指示も変えない（role の省略は統合ノードでない子）", async () => {
+    const r = rig();
+    await startNode(r);
+    expect(sessionOf(r).options.plugin).toBeUndefined();
+    expect(sessionOf(r).options.initialPrompt).toBe("do the task");
+    const r2 = rig({ childPluginPath: "/p" });
+    await startNode(r2);
+    expect(sessionOf(r2).options.plugin?.skill).toBe("cso-child-skills:cso-child");
   });
 });

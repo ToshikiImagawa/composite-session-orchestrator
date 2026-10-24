@@ -21,6 +21,10 @@ describe("読み込み系のツールは許可（FR_014: 読み込みは制限�
     expect((await decide("Grep", { pattern: "x", path: "/" })).allow).toBe(true);
     expect((await decide("NotebookRead", { notebook_path: "/x.ipynb" })).allow).toBe(true);
   });
+
+  it("Skill（子に渡した skill を読む。T22-c）は許可する", async () => {
+    expect((await decide("Skill", { skill: "cso-child-skills:cso-child" })).allow).toBe(true);
+  });
 });
 
 describe("書き込み系のツールは、作業範囲の場所で判定する", () => {

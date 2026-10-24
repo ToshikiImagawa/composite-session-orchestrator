@@ -3,7 +3,7 @@
  * 不可能な操作は、理由と代替手段を含む失敗を返す（FR_034, NFR_010）。
  */
 
-import type { Actor, EventBody, Failure, Result, Scope, StopOutcome } from "@cso/core";
+import type { Actor, EventBody, Failure, NodeRole, Result, Scope, StopOutcome } from "@cso/core";
 
 export interface Capabilities {
   readonly send: "ok" | "delayed" | "unreliable" | "unsupported";
@@ -17,6 +17,8 @@ export interface Capabilities {
 
 export interface StartRequest {
   readonly nodeId: string;
+  /** ノードの役割（子に渡す skill を選ぶ。T22-c）。省略すると、統合ノードでない子として扱う。 */
+  readonly role?: NodeRole;
   /** 作業ツリーのパス（絶対）。アダプタが実パスにして使う。 */
   readonly worktreePath: string;
   readonly scope: Scope;

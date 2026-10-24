@@ -13,6 +13,7 @@ import {
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { digestOf, type Failure, ok, planPurge, type Result } from "@cso/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deriveId } from "../src/api/handlers/context.js";
@@ -1313,5 +1314,55 @@ describe("createDaemon（配下の要約の発行。T24-d）", () => {
     expect(instructions(d2.daemon)).toHaveLength(0);
     await d2.daemon.stop();
     await m2.advance(60_000); // 止めたあとは、何も起きない（例外にならない）
+  });
+});
+
+describe("子に渡す skill（T22-c）", () => {
+  const PLUGIN = fileURLToPath(new URL("../../../plugin", import.meta.url));
+  const brief = {
+    objective: "x",
+    acceptanceCriteria: ["x"],
+    scope: {
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: ["pnpm test"],
+    },
+  };
+
+  it("childPluginDir があれば、skill だけの plugin を stateDir に作り、role に応じた skill を子に渡す", async () => {
+    const r = rig({ childPluginDir: PLUGIN });
+    const d = await boot(r);
+    const dest = join(r.config.stateDir, "child-plugin");
+    expect(existsSync(join(dest, "skills", "cso-child", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(dest, "hooks"))).toBe(false);
+    for (const role of ["implement", "integrator"]) {
+      const res = await call(d.url, d.rootToken, "node.spawn", {
+        parentId: "root",
+        role,
+        ...brief,
+      });
+      expect(res.json.ok, JSON.stringify(res.json)).toBe(true);
+    }
+    const [impl, integ] = r.launcher.sessions.map((x) => x.options);
+    expect(impl?.plugin).toEqual({ path: dest, skill: "cso-child-skills:cso-child" });
+    expect(integ?.plugin).toEqual({ path: dest, skill: "cso-child-skills:cso-integrator" });
+    expect(impl?.initialPrompt).toContain("skill「cso-child-skills:cso-child」に従う");
+    expect(impl?.settingSources).toEqual([]);
+  });
+
+  it("childPluginDir がなければ、plugin を渡さず、起動時に一言記録する", async () => {
+    const r = rig();
+    const d = await boot(r);
+    expect(r.logs.some((l) => l.includes("childPluginSkipped"))).toBe(true);
+    await call(d.url, d.rootToken, "node.spawn", { parentId: "root", role: "implement", ...brief });
+    expect(r.launcher.sessions[0]?.options.plugin).toBeUndefined();
+    expect(r.launcher.sessions[0]?.options.initialPrompt).not.toContain("skill「");
+  });
+
+  it("plugin のディレクトリが不正なら、起動しない（フェイルクローズ）", () => {
+    const r = rig({ childPluginDir: join(tmp(), "nothing") });
+    const made = createDaemon(r.config, r.deps);
+    expect(made.ok).toBe(false);
+    if (!made.ok) expect(made.error.code).toBe("childPluginInvalid");
   });
 });

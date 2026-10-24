@@ -32,6 +32,11 @@ export interface LaunchOptions {
   readonly hooks: { readonly preToolUse: (input: HookInput) => Promise<HookOutcome> };
   /** 最初の指示（ブリーフ）。 */
   readonly initialPrompt: string;
+  /**
+   * 子に渡す skill だけの plugin（T22-c。`child-plugin.ts`）と、使わせる skill（plugin で修飾した名前）。省略すると、plugin を渡さない。
+   * plugin の .mcp.json は読ませない（MCP は `mcpServers` だけ）。
+   */
+  readonly plugin?: { readonly path: string; readonly skill: string };
 }
 
 /**
