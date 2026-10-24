@@ -22,11 +22,16 @@ const rig = (
     onPurgedThrows?: boolean;
     /** イベントの時刻を、daemon の時計（`nowMs`）に合わせる（本番は、同じ時計）。 */
     syncClock?: boolean;
+    /** `syncClock` のとき、イベントの時刻を、`nowMs` より何ミリ秒遅らせるか（秒の切り捨てで、時刻がわずかに前になる場合）。 */
+    clockLagMs?: number;
   } = {},
 ) => {
   let nowMs = ARCHIVED_AT;
   const opened = EventLog.open(createMemoryStore().open(), {
-    clock: over.syncClock === true ? () => new Date(nowMs).toISOString() : clock,
+    clock:
+      over.syncClock === true
+        ? () => new Date(nowMs - (over.clockLagMs ?? 0)).toISOString()
+        : clock,
   });
   if (!opened.ok) throw new Error(opened.error.code);
   const log = opened.value;
@@ -412,23 +417,31 @@ describe("node.purgeHold・node.purgeRelease（自動の最終削除の保留。
     expect(r.log.state().lastSeq).toBe(seq);
   });
 
-  it("days: 期限は、daemon の時計で、いまから days 日後（秒に切り捨て）。365 日も、短縮なしで通る", () => {
+  it("days: 期限は、daemon の時計で、いまから days 日後（秒に切り捨て）。365 日のときだけ、1 秒短い（上限 now + 365 日 − 1 秒）", () => {
     const r = rig({ syncClock: true });
     for (const days of [1, 30, 364, 365]) {
       const res = r.call("node.purgeHold", { nodeId: "t", days });
-      const until = new Date(ARCHIVED_AT + days * DAY).toISOString().replace(/\.\d{3}Z$/, "Z");
+      const ms = ARCHIVED_AT + days * DAY - (days === 365 ? 1000 : 0);
+      const until = new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
       expect(res, String(days)).toEqual({ ok: true, value: { held: true, until } });
       expect(r.log.state().nodes.find((x) => x.id === "t")?.purgeHold?.until).toBe(until);
     }
   });
 
-  it("days: 時計の端数（ミリ秒）は切り捨てる。365 日でも、イベントの時刻から 365 日以内に収まる", () => {
+  it("days: 時計の端数（ミリ秒）は切り捨てる", () => {
     const r = rig({ syncClock: true });
     r.advance(0.5 / DAY); // 0.5 ミリ秒
-    const res = r.call("node.purgeHold", { nodeId: "t", days: 365 });
+    const res = r.call("node.purgeHold", { nodeId: "t", days: 30 });
     expect(res.value.until).toBe(
-      new Date(ARCHIVED_AT + 365 * DAY).toISOString().replace(".000Z", "Z"),
+      new Date(ARCHIVED_AT + 30 * DAY).toISOString().replace(".000Z", "Z"),
     );
+  });
+
+  it("days: イベントの時刻が、計算に使った時刻より 1 秒近く前でも、365 日が範囲に収まる（now + 365 日 − 1 秒の上限）", () => {
+    const r = rig({ syncClock: true, clockLagMs: 999 });
+    const res = r.call("node.purgeHold", { nodeId: "t", days: 365 });
+    expect(res.ok, JSON.stringify(res.error)).toBe(true);
+    expect(r.log.state().nodes.find((x) => x.id === "t")?.purgeHold?.until).toBe(res.value.until);
   });
 
   it("days: 同じ requestId の再送は、重複して記録せず、最初の期限を返す（再計算しない）", () => {

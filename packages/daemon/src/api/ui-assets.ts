@@ -215,7 +215,7 @@ export const UI_JS = `'use strict';
     box.appendChild(actions);
   }
   // 確認を出す。確認のたびに requestId を新しく作る（その確認の間は、同じ ID で再送する）。
-  // opts.typed: 打ち込ませる文字列（取り消せない操作）。opts.blocked: 送れない理由（出して、送らせない）。opts.after: 成功のあとに呼ぶ関数。
+  // done: 成功の通知（文字列、または、結果の値を受け取って文字列を返す関数）。opts.typed: 打ち込ませる文字列（取り消せない操作）。opts.blocked: 送れない理由（出して、送らせない）。opts.after: 成功のあとに呼ぶ関数。
   function openConfirm(title, lines, operation, params, done, opts) {
     if (pending && pending.sending) return;
     if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）', true); return; }
@@ -280,7 +280,7 @@ export const UI_JS = `'use strict';
         if (r.status === 200 && r.body && r.body.ok === true) {
           pending = null;
           renderConfirm();
-          notice(p.done);
+          notice(typeof p.done === 'function' ? p.done(r.body.value) : p.done);
           if (p.after) p.after();
           refresh();
           return;
@@ -548,6 +548,11 @@ export const UI_JS = `'use strict';
       return !parent || parent.state !== 'archived';
     });
   }
+  // 保留の成功の通知。daemon が決めた期限（結果の until）を出す。無期限なら、その旨。
+  function holdDoneText(nodeId, value) {
+    var until = value && typeof value.until === 'string' ? cleanText(value.until, 40) : '';
+    return '保留しました（' + nodeId + '）。期限: ' + (until === '' ? '無期限' : until);
+  }
   // 保留の params。日数は days で送り、期限は daemon の時計で決める（T23-d3。端末の時計は使わない）。days が 0 なら、無期限（days なし）。
   function holdParams(nodeId, days, reason) {
     var params = { nodeId: nodeId };
@@ -663,7 +668,7 @@ export const UI_JS = `'use strict';
         var params = holdParams(id, days, area.value);
         var reason = area.value;
         holdStatusLine(id).then(function (current) {
-          openConfirm('自動の最終削除の保留', [['木の根', id], ['今の保留', current], ['新しい期限', days > 0 ? '保留した時点から ' + label + ' 後（期限は、daemon の時計で決める。実際の期限は、保留したあとの木の一覧に出る）。今の保留は、置き換わる' : '無期限。今の保留は、置き換わる'], ['理由', reason.trim() === '' ? '（なし）' : reason]], 'node.purgeHold', params, '保留しました（' + id + '）');
+          openConfirm('自動の最終削除の保留', [['木の根', id], ['今の保留', current], ['新しい期限', days > 0 ? '保留した時点から ' + label + ' 後（期限は、daemon の時計で決める。実際の期限は、保留した直後の通知に出る）。今の保留は、置き換わる' : '無期限。今の保留は、置き換わる'], ['理由', reason.trim() === '' ? '（なし）' : reason]], 'node.purgeHold', params, function (value) { return holdDoneText(id, value); });
         });
       };
       HOLD_CHOICES.forEach(function (c) {

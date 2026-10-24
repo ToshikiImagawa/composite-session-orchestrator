@@ -16,6 +16,7 @@ import {
   activePurgeHold,
   type EventBody,
   type Failure,
+  LIMITS,
   type OperationMap,
   type OrchEvent,
   planPurge,
@@ -44,8 +45,8 @@ export interface PurgeMarkerInfo {
 }
 
 export interface PurgeHandlerDeps {
-  readonly log: Pick<LogPort, "state" | "firstEventOf"> &
-    Required<Pick<LogPort, "purgeTree" | "checkPurge" | "appendAll">>;
+  readonly log: Pick<LogPort, "state"> &
+    Required<Pick<LogPort, "purgeTree" | "checkPurge" | "appendAll" | "firstEventOf">>;
   /** 現在時刻（ミリ秒）。 */
   readonly nowMs: () => number;
   /** 保持期間（日）。 */
@@ -223,6 +224,18 @@ export function createPurger(deps: PurgeHandlerDeps) {
   return { purgeTreeOf, retentionBlocker, audit };
 }
 
+/**
+ * `days` から決める保留の期限（ISO 8601 UTC。ミリ秒なし）。いまから days 日後だが、**計算した時点の now + 上限日数（365）− 1 秒を超えない**
+ * （イベントの時刻が、計算に使った時刻より最大 1 秒ほど前でも、「365 日先まで」の検査に収まる。365 日のときだけ、1 秒短くなる）。
+ */
+export const holdDeadline = (nowMs: number, days: number): string => {
+  const ms = Math.min(
+    nowMs + days * 86_400_000,
+    nowMs + LIMITS.purgeHoldMaxDays * 86_400_000 - 1000,
+  );
+  return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+};
+
 export function createPurgeHandlers(deps: PurgeHandlerDeps) {
   const { log } = deps;
   const { purgeTreeOf, retentionBlocker, audit } = createPurger(deps);
@@ -301,15 +314,13 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
       // `days` は、daemon の時計で、いまから days 日後（秒に切り捨て）。イベントの時刻も同じ時計なので、365 日でも範囲に収まる。
       // 同じ requestId の再送は、最初に記録した期限を使う（再計算すると、内容が違って、requestIdConflict になる）。
       const holdRequestId = derivedRequestId(human, req.requestId, 0);
-      const prior = days === undefined ? undefined : log.firstEventOf?.(holdRequestId);
+      const prior = days === undefined ? undefined : log.firstEventOf(holdRequestId);
       const until =
         days === undefined
           ? req.params.until
           : prior?.type === "node.purgeHeld" && prior.payload.nodeId === nodeId
             ? prior.payload.until
-            : new Date(Math.floor((deps.nowMs() + days * 86_400_000) / 1000) * 1000)
-                .toISOString()
-                .replace(/\.\d{3}Z$/, "Z");
+            : holdDeadline(deps.nowMs(), days);
       const system: Actor = { system: true };
       // 予告の識別子は、`planPurge` の `archivedAt`（木の中で最大のもの）から作られる。根自身の `archivedAt` とは違いうるので、両方の鍵で探す。
       const plan = planPurge(state, nodeId, deps.nowMs());

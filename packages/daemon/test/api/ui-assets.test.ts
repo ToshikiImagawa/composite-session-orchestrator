@@ -311,13 +311,14 @@ describe("画面の資産（走査）", () => {
         fn("typedMatches"),
         fn("purgeRoots"),
         fn("holdParams"),
+        fn("holdDoneText"),
         fn("checkReason"),
         fn("cleanText"),
         fn("hasForbidden"),
         fn("checkAnswer"),
         fn("waitSecondsOf"),
         fn("describeFailure"),
-        "({ isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
+        "({ isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
@@ -327,6 +328,7 @@ describe("画面の資産（走査）", () => {
       typedMatches(typed: unknown, input: unknown): boolean;
       purgeRoots(nodes: { id: string; parentId: string | null; state: string }[]): { id: string }[];
       holdParams(nodeId: string, days: number, reason: string): Record<string, unknown>;
+      holdDoneText(nodeId: string, value: unknown): string;
       parseDays(text: string): number;
       checkDays(text: string): string;
       checkReason(text: string): string;
@@ -452,6 +454,16 @@ describe("画面の資産（走査）", () => {
       // 365 日も、そのまま送る（端末の時計で、10 分短くしない）
       expect(api.holdParams("t", 365, "  ")).toEqual({ nodeId: "t", days: 365 });
       expect(api.holdParams("t", 90, "x")).not.toHaveProperty("until");
+    });
+
+    it("holdDoneText: 成功の通知に、daemon が決めた期限を出す（until がなければ無期限）。制御文字は除く", () => {
+      expect(api.holdDoneText("t", { held: true, until: "2026-11-22T12:00:00Z" })).toBe(
+        "保留しました（t）。期限: 2026-11-22T12:00:00Z",
+      );
+      expect(api.holdDoneText("t", { held: true })).toBe("保留しました（t）。期限: 無期限");
+      expect(api.holdDoneText("t", undefined)).toBe("保留しました（t）。期限: 無期限");
+      const dirty = api.holdDoneText("t", { until: "2026\u001b[2J-11-22" });
+      expect(dirty).not.toContain("\u001b");
     });
 
     it("parseDays・checkDays: 1〜365 の整数だけ（前後の空白は可）。0・366・小数・負・全角・文字・空は不正", () => {
