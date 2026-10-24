@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createInboxProblemReporter,
   createToolServer,
+  type InboxExcludedLimitLog,
   type InboxExcludedLog,
   MCP_ROLES,
   type Relay,
@@ -290,7 +291,7 @@ describe("受信箱の不備のログ（T24-m2）", () => {
   const XSS = '<img src=x onerror="x">';
 
   it("除外があれば、固定の記号と項目 ID だけを 1 回ログに出す。応答は変わらない（不備の理由を含まない）", async () => {
-    const logs: InboxExcludedLog[] = [];
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
     const items = [
       good("i1", 1),
       { ...good("b1", 2), kind: "zzz", summary: `秘密 ${XSS}` },
@@ -331,7 +332,7 @@ describe("受信箱の不備のログ（T24-m2）", () => {
   });
 
   it("除外がなければ出さない", async () => {
-    const logs: InboxExcludedLog[] = [];
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
     const relay = fakeRelay(async () => ok({ items: [good("i1", 1)] }));
     const server = createToolServer({
       role: "integrator",
@@ -345,34 +346,86 @@ describe("受信箱の不備のログ（T24-m2）", () => {
     expect(logs).toEqual([]);
   });
 
-  it("報告: 新しい不備だけを出す。1 行は 20 件まで（超えたら truncated）。覚える数の上限を超えたら、古いものは忘れる", () => {
-    const logs: InboxExcludedLog[] = [];
+  const lines = (logs: (InboxExcludedLog | InboxExcludedLimitLog)[]) =>
+    logs.filter((l): l is InboxExcludedLog => l.event === "inboxExcluded");
+  const many = (n: number, prefix = "x") =>
+    Array.from({ length: n }, (_, i) => ({ itemId: `${prefix}${i}`, reason: "badKind" as const }));
+
+  it("報告: 新しい不備だけを出す。1 行は 20 件まで。出さなかった分は覚えず、次の取得で出る（21 件 → 2 回目に残りの 1 件）", () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const report = createInboxProblemReporter({ log: (e) => void logs.push(e), clock: () => "T" });
+    const p = many(21);
+    report(p);
+    expect(lines(logs)[0]?.count).toBe(20);
+    expect(lines(logs)[0]?.truncated).toBe(true);
+    report(p);
+    expect(lines(logs)[1]?.problems).toEqual([{ itemId: "x20", reason: "badKind" }]);
+    expect(lines(logs)[1]?.truncated).toBeUndefined();
+    report(p); // すべて出したので、もう出さない
+    expect(logs).toHaveLength(2);
+    report([{ itemId: "new", reason: "badSeq" }]);
+    expect(lines(logs)[2]?.problems).toEqual([{ itemId: "new", reason: "badSeq" }]);
+  });
+
+  it("報告: ID のない不備は、理由ごとに 1 回。同じ取得の中の重複も 1 回", () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const report = createInboxProblemReporter({ log: (e) => void logs.push(e) });
+    report([{ reason: "notObject" }, { reason: "notObject" }, { reason: "badId" }]);
+    report([{ reason: "notObject" }]);
+    expect(lines(logs).map((l) => l.problems)).toEqual([
+      [{ reason: "notObject" }, { reason: "badId" }],
+    ]);
+  });
+
+  it("報告: 覚える数の上限に達したら、inboxExcludedLimit を 1 回だけ出し、以後は黙る（1500 件を 5 回取得しても、行が出続けない）", () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
     const report = createInboxProblemReporter({
       log: (e) => void logs.push(e),
       maxRemembered: 30,
       clock: () => "T",
     });
-    const many = Array.from({ length: 25 }, (_, i) => ({
-      itemId: `x${i}`,
-      reason: "badKind" as const,
-    }));
-    report(many);
-    expect(logs[0]?.count).toBe(20);
-    expect(logs[0]?.truncated).toBe(true);
-    report(many); // すべて覚えている
-    expect(logs).toHaveLength(1);
-    report([{ itemId: "new", reason: "badSeq" }]);
-    expect(logs[1]?.problems).toEqual([{ itemId: "new", reason: "badSeq" }]);
-    // 上限（30）を超えたので、いちばん古い x0 は忘れていて、また 1 回出る
-    report(Array.from({ length: 5 }, (_, i) => ({ itemId: `y${i}`, reason: "badKind" as const })));
-    report([{ itemId: "x0", reason: "badKind" }]);
-    expect(logs.at(-1)?.problems).toEqual([{ itemId: "x0", reason: "badKind" }]);
-    // ログの失敗は、例外にしない
+    const p = many(1500);
+    for (let i = 0; i < 5; i++) report(p);
+    // 1 回目: 20 件。2 回目: 残りの容量 10 件と、上限の 1 行。3〜5 回目: 何も出さない
+    expect(logs.map((l) => l.event)).toEqual([
+      "inboxExcluded",
+      "inboxExcluded",
+      "inboxExcludedLimit",
+    ]);
+    expect(lines(logs).map((l) => l.count)).toEqual([20, 10]);
+    expect(logs.at(-1)).toEqual({ event: "inboxExcludedLimit", remembered: 30, at: "T" });
+    report([{ itemId: "new", reason: "badSeq" }]); // 新しい不備も、もう出さない
+    expect(logs).toHaveLength(3);
+  });
+
+  it("報告: 既定の上限（1000）でも、1500 件を何度取得しても、行は有限（20 件ずつ 50 行と、上限の 1 行）", () => {
+    const logs: (InboxExcludedLog | InboxExcludedLimitLog)[] = [];
+    const report = createInboxProblemReporter({ log: (e) => void logs.push(e) });
+    const p = many(1500);
+    for (let i = 0; i < 100; i++) report(p);
+    expect(lines(logs)).toHaveLength(50);
+    expect(logs.filter((l) => l.event === "inboxExcludedLimit")).toHaveLength(1);
+  });
+
+  it("報告とツール: ログ・報告の失敗で、例外にせず、応答を変えない", async () => {
     const broken = createInboxProblemReporter({
       log: () => {
         throw new Error("x");
       },
     });
     expect(() => broken([{ reason: "notObject" }])).not.toThrow();
+    const relay = fakeRelay(async () => ok({ items: ["x"] }));
+    const server = createToolServer({
+      role: "integrator",
+      relay,
+      onInboxProblems: () => {
+        throw new Error("x");
+      },
+    });
+    const client = new Client({ name: "t", version: "0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+    const r = await client.callTool({ name: "inbox_fetch", arguments: {} });
+    expect(text(r).excluded).toBe(1);
   });
 });

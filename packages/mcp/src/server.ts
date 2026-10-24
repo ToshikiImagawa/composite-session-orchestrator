@@ -35,13 +35,22 @@ export interface InboxExcludedLog {
   readonly at: string;
 }
 
+/** 覚える数の上限に達した（T24-m2。1 回だけ出す。以後、新しい不備は出さない）。 */
+export interface InboxExcludedLimitLog {
+  readonly event: "inboxExcludedLimit";
+  /** 覚えている不備の数（上限）。 */
+  readonly remembered: number;
+  readonly at: string;
+}
+
 /**
- * 受信箱の不備を、プロセスの間に 1 回だけログに出す（T24-m2）。受信箱は LLM のターンごとに読まれるので、同じ不備（項目 ID と理由）は
- * 2 回目から出さない。覚える数には上限があり（既定 1000）、超えたら古いものから忘れる（忘れた不備は、また 1 回出る）。
- * プロセスを再起動すると、覚えたものは消える（また 1 回出る）。1 行に出すのは 20 件まで（超えたら `truncated`）。
+ * 受信箱の不備を、プロセスの間に 1 回だけログに出す（T24-m2）。受信箱は LLM のターンごとに読まれるので、同じ不備（項目 ID と理由。
+ * 項目 ID のない不備は、理由ごとに 1 つ）は 2 回目から出さない。1 行に出すのは 20 件まで（超えたら `truncated`。出さなかった分は、
+ * 覚えないので、次の取得で出る）。覚える数が上限（既定 1000）に達したら、`inboxExcludedLimit` を 1 回だけ出し、以後は出さない
+ * （不備が多すぎるときに、行が出続けないため）。プロセスを再起動すると、覚えたものは消える（また 1 回出る）。
  */
 export function createInboxProblemReporter(opts: {
-  readonly log: (e: InboxExcludedLog) => void;
+  readonly log: (e: InboxExcludedLog | InboxExcludedLimitLog) => void;
   readonly maxRemembered?: number;
   readonly perLine?: number;
   readonly clock?: () => string;
@@ -50,31 +59,41 @@ export function createInboxProblemReporter(opts: {
   const perLine = opts.perLine ?? 20;
   const clock = opts.clock ?? (() => new Date().toISOString());
   const seen = new Set<string>();
-  return (problems) => {
-    const fresh: InboxProblem[] = [];
-    for (const p of problems) {
-      // 項目 ID がない不備（オブジェクトでない・ID が不正）は、理由だけで 1 つと数える
-      const key = `${p.itemId ?? ""}\0${p.reason}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (seen.size > max) {
-        const oldest = seen.values().next().value;
-        if (oldest !== undefined) seen.delete(oldest);
-      }
-      fresh.push(p);
-    }
-    if (fresh.length === 0) return;
-    const shown = fresh.slice(0, perLine);
+  let full = false;
+  const emit = (e: InboxExcludedLog | InboxExcludedLimitLog): void => {
     try {
-      opts.log({
-        event: "inboxExcluded",
-        count: shown.length,
-        problems: shown,
-        ...(fresh.length > perLine ? { truncated: true as const } : {}),
-        at: clock(),
-      });
+      opts.log(e);
     } catch {
       // ログの失敗で、ツールの応答を変えない
+    }
+  };
+  return (problems) => {
+    if (full) return;
+    const fresh: { key: string; p: InboxProblem }[] = [];
+    const inBatch = new Set<string>();
+    for (const p of problems) {
+      const key = `${p.itemId ?? ""}\0${p.reason}`;
+      if (seen.has(key) || inBatch.has(key)) continue;
+      inBatch.add(key);
+      fresh.push({ key, p });
+    }
+    if (fresh.length === 0) return;
+    // 覚えるのは、実際に出した分だけ（出さなかった分は、次の取得で出る）。上限を超える分は出さない
+    const room = max - seen.size;
+    const shown = fresh.slice(0, Math.min(perLine, room));
+    for (const f of shown) seen.add(f.key);
+    if (shown.length > 0) {
+      emit({
+        event: "inboxExcluded",
+        count: shown.length,
+        problems: shown.map((f) => f.p),
+        ...(fresh.length > shown.length ? { truncated: true as const } : {}),
+        at: clock(),
+      });
+    }
+    if (seen.size >= max && fresh.length > shown.length) {
+      full = true;
+      emit({ event: "inboxExcludedLimit", remembered: seen.size, at: clock() });
     }
   };
 }
@@ -154,7 +173,13 @@ export function createToolServer(deps: ToolServerDeps): Server {
         const items = (r.value as { items?: unknown } | null)?.items;
         const page = renderInbox(items as never, view);
         // 除外した項目があれば、不備の理由をログに出す（応答には出さない。T24-m2）
-        if (page.ok && page.value.excluded > 0) deps.onInboxProblems?.(inboxProblems(items));
+        if (page.ok && page.value.excluded > 0) {
+          try {
+            deps.onInboxProblems?.(inboxProblems(items));
+          } catch {
+            // 報告の失敗で、ツールの応答を変えない
+          }
+        }
         return page.ok ? asValue(page.value) : asError(page.error);
       }
       return asValue(r.value);

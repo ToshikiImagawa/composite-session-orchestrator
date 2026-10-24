@@ -14,7 +14,12 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { IdentityVerifier } from "./identity.js";
 import { createRelay, MAX_RELAY_BYTES } from "./relay.js";
-import { createInboxProblemReporter, type InboxExcludedLog, openSession } from "./server.js";
+import {
+  createInboxProblemReporter,
+  type InboxExcludedLimitLog,
+  type InboxExcludedLog,
+  openSession,
+} from "./server.js";
 
 const HOST = "127.0.0.1";
 const PATH = "/mcp";
@@ -27,7 +32,9 @@ export type McpHttpLogEvent =
   /** 検証のあとで、応答の送り手が、検証した daemon と違った（応答は捨てた。トークンの再発行が要る）。 */
   | { readonly event: "identityMismatch"; readonly at: string }
   /** 受信箱で除外した項目の不備（T24-m2。固定の記号と、識別子の形式の項目 ID だけ。同じ不備はプロセスの間に 1 回）。 */
-  | InboxExcludedLog;
+  | InboxExcludedLog
+  /** 不備を覚える数の上限に達した（1 回だけ。以後、新しい不備は出さない）。 */
+  | InboxExcludedLimitLog;
 
 /**
  * daemon の身元確認の方式。`verified`: トークンつきの要求の直前に、毎回、検証する。`unverified`: 検証しない
