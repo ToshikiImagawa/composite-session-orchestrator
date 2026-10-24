@@ -401,6 +401,9 @@ describe("画面の資産（走査）", () => {
       expect(lines[0]).toEqual(["ノード", "a"]);
       expect(lines.map((l) => l[0])).toEqual(["ノード", "内容", "記録", "注意"]);
       expect(lines.find((l) => l[0] === "注意")?.[1]).toContain("トークンが漏れた疑い");
+      expect(lines.find((l) => l[0] === "内容")?.[1]).toContain(
+        "（/clear・--resume で session_id が変わって、フックが拒否され続けるとき）",
+      );
       expect(api.hookUnbindDoneText("a", { unbound: true, duplicate: false })).toContain(
         "外しました",
       );

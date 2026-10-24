@@ -976,7 +976,10 @@ hu.buttonCount = await pageH.getByRole("button", { name: HU }).count();
 await hrow("a").getByRole("button", { name: HU }).click();
 await pageH.locator("#confirm").waitFor();
 const htext = await pageH.locator("#confirm").innerText();
-hu.confirmShowsNode = htext.includes("a") && htext.includes("次に来たセッションに結び直す");
+hu.confirmShowsNode =
+  htext.includes("a") &&
+  htext.includes("次に来たセッションに結び直す") &&
+  htext.includes("/clear・--resume で session_id が変わって");
 hu.confirmShowsWarning = htext.includes("トークンが漏れた疑い");
 hu.noTypedBox = (await pageH.locator("#confirm textarea").count()) === 0;
 hu.requestBeforeConfirm = unbindCalls().length === 0;
@@ -990,6 +993,7 @@ await pageH.waitForFunction(
   null,
   { timeout: 5000 },
 );
+hu.texts = [await pageH.locator("#notice").innerText()];
 hu.calls = unbindCalls().length;
 hu.params = JSON.stringify(unbindCalls()[0]?.params) === JSON.stringify({ nodeId: "a" });
 // (d) 2 回目（daemon が再送として返す）は「すでに記録済み」。別の確認なので、requestId は新しい
@@ -1000,6 +1004,7 @@ await pageH.waitForFunction(
   null,
   { timeout: 5000 },
 );
+hu.texts.push(await pageH.locator("#notice").innerText());
 hu.newRequestId = unbindCalls()[1]?.requestId !== unbindCalls()[0]?.requestId;
 // (e) 結び付けがない（constructor）は「ありませんでした」
 await hrow("constructor").getByRole("button", { name: HU }).click();
@@ -1009,7 +1014,13 @@ await pageH.waitForFunction(
   null,
   { timeout: 5000 },
 );
-hu.threeTexts = true;
+hu.texts.push(await pageH.locator("#notice").innerText());
+// 3 つの通知の全文（外した・再送・なかった）
+hu.threeTexts =
+  hu.texts.length === 3 &&
+  hu.texts[0].includes("外しました") &&
+  hu.texts[1].includes("すでに記録済み") &&
+  hu.texts[2].includes("ありませんでした");
 hu.errors = huErrors;
 out.hookUnbind = hu;
 await pageH.context().close();

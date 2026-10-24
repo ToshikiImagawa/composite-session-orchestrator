@@ -586,7 +586,7 @@ export const UI_JS = `'use strict';
   function hookUnbindLines(nodeId) {
     return [
       ['ノード', nodeId],
-      ['内容', 'フック（plugin のファイルで設定するフック）の session_id の結び付けを外す。次に来たセッションに結び直す'],
+      ['内容', '（/clear・--resume で session_id が変わって、フックが拒否され続けるとき）フック（plugin のファイルで設定するフック）の session_id の結び付けを外す。次に来たセッションに結び直す'],
       ['記録', '外した者（人間）を残す'],
       ['注意', 'トークンが漏れた疑いがあるときは、外さずに、子を止めてトークンを失効させる']
     ];
