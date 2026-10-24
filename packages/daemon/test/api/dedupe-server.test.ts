@@ -7,6 +7,7 @@ import {
   createApiServer,
   type Handlers,
 } from "../../src/api/server.js";
+import { sleep, waitFor } from "./helpers.js";
 
 let n = 0;
 const ev = (body: EventBody): OrchEvent =>
@@ -60,6 +61,12 @@ interface Rig {
   mono: { now: () => number; advance: (ms: number) => void };
   g: ReturnType<typeof gate>;
   mode: { current: Mode };
+  /**
+   * 重複の件数の合計（種類別）。件数のまとめの予約を手動にして、その場でまとめを出させ、出たまとめを足し合わせる。
+   * 重複の要求が、サーバーに届いて処理されたことを、固定の待ちなしに確かめるための観測点（サーバー本体は変えない）。
+   * **呼ぶと、窓がリセットされる**（まとめが出て、件数が数え直しになる）。「窓の最初の 1 件」を確かめる試験では使わない。
+   */
+  deduped: (kind: string) => number;
 }
 let rig: Rig | undefined;
 afterEach(async () => {
@@ -81,6 +88,13 @@ const start = async (
   const mono = { now: () => t, advance: (ms: number) => (t += ms) };
   const g = gate();
   const mode: { current: Mode } = { current: "ok" };
+  const scheduled = new Set<() => void>();
+  const deduped = (kind: string): number => {
+    for (const fn of [...scheduled]) fn(); // 窓の終わりを、その場で迎える
+    let sum = 0;
+    for (const e of logs) if (e.event === "apiSummary") sum += e.deduped[kind] ?? 0;
+    return sum;
+  };
   const count = (op: string): void => {
     calls[op] = (calls[op] ?? 0) + 1;
   };
@@ -127,6 +141,10 @@ const start = async (
       perPrincipal: { burst: over.burst ?? 100, perSecond: 100 },
       authFailures: { burst: 5, perSecond: 0.1 },
       monotonicMs: mono.now,
+      summaryScheduler: (fn) => {
+        scheduled.add(fn);
+        return { cancel: () => scheduled.delete(fn) };
+      },
     },
   });
   const { url } = await server.listen(0);
@@ -138,6 +156,7 @@ const start = async (
     mono,
     g,
     mode,
+    deduped,
     tokens: {
       human: HUMAN,
       m1: credentials.issueNodeToken("m1", "integrator"),
@@ -179,16 +198,27 @@ const preview = (id: string) => ({
   operation: "node.purgePreview",
   params: { nodeId: "x" },
 });
-const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
+const handlerStarted = (r: Rig, op: string, n: number) =>
+  waitFor(
+    `${op} のハンドラが ${n} 件動く`,
+    () => r.calls[op] ?? 0,
+    (v) => v >= n,
+  );
+const dedupedReached = (r: Rig, kind: string, n: number) =>
+  waitFor(
+    `重複（${kind}）が ${n} 件に届く`,
+    () => r.deduped(kind),
+    (v) => v >= n,
+  );
 
 describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("同じ主体・同じ requestId の要求が処理中なら、2 つ目はハンドラを呼ばず、最初の結果と同じ結果を返す（probe の再現: ハンドラは 1 回）", async () => {
     const r = await start();
     const first = post(r, progress("same"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     const second = post(r, progress("same"), r.tokens.a);
     const third = post(r, progress("same"), r.tokens.a);
-    await sleep(50);
+    await dedupedReached(r, "coalesced", 2);
     expect(r.calls["report.progress"]).toBe(1);
     r.g.open();
     const [x, y, z] = await Promise.all([first, second, third]);
@@ -203,9 +233,9 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
       const r = await start();
       r.mode.current = mode;
       const first = post(r, progress("e1"), r.tokens.a);
-      await sleep(50);
+      await handlerStarted(r, "report.progress", 1);
       const second = post(r, progress("e1"), r.tokens.a);
-      await sleep(50);
+      await dedupedReached(r, "coalesced", 1);
       r.g.open();
       const [x, y] = await Promise.all([first, second]);
       expect(x.status).toBe(mode === "fail" ? 422 : 500);
@@ -223,7 +253,7 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("本文（操作・引数）が違う同じ requestId は、待たずに 422 requestIdConflict（実行しない）。最初の要求は影響されない", async () => {
     const r = await start();
     const first = post(r, progress("c1", "first"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     const other = await post(r, progress("c1", "different"), r.tokens.a);
     expect(other.status).toBe(422);
     expect(other.json.error?.code).toBe("requestIdConflict");
@@ -239,13 +269,13 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
       { requestId: "k1", operation: "node.purge", params: { nodeId: "x" } },
       r.tokens.human,
     );
-    await sleep(50);
+    await handlerStarted(r, "node.purge", 1);
     const b = post(
       r,
       { params: { nodeId: "x" }, operation: "node.purge", requestId: "k1" },
       r.tokens.human,
     );
-    await sleep(50);
+    await dedupedReached(r, "coalesced", 1);
     r.g.open();
     const [x, y] = await Promise.all([a, b]);
     expect(y).toEqual(x);
@@ -255,7 +285,7 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("申告（role・caller）が食い違う要求は、処理中の要求の結果に相乗りせず、重複の判定より前に 403 で拒否される（probe D3）", async () => {
     const r = await start();
     const first = post(r, progress("claims"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     const wrongRole = await post(
       r,
       withClaims(progress("claims"), { role: "integrator" }),
@@ -295,7 +325,8 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
     const r = await start();
     const a = post(r, progress("shared"), r.tokens.a);
     const m = post(r, list("shared"), r.tokens.m1);
-    await sleep(80);
+    await handlerStarted(r, "report.progress", 1);
+    await handlerStarted(r, "tree.list", 1);
     expect(r.calls["report.progress"]).toBe(1);
     expect(r.calls["tree.list"]).toBe(1);
     r.g.open();
@@ -314,7 +345,7 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("待つ上限を超えたら、409 inProgress と短い Retry-After（実行していない）。最初の要求は続いて、完了する", async () => {
     const r = await start({ inProgress: { waitMs: 150 } });
     const first = post(r, progress("slow"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     const second = await post(r, progress("slow"), r.tokens.a);
     expect(second.status).toBe(409);
     expect(second.json.error?.code).toBe("inProgress");
@@ -327,9 +358,9 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("待てる重複の数に上限がある: 超えた分は、すぐに 409 inProgress", async () => {
     const r = await start({ inProgress: { maxWaiters: 2, waitMs: 5000 } });
     const first = post(r, progress("w"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     const waiting = [post(r, progress("w"), r.tokens.a), post(r, progress("w"), r.tokens.a)];
-    await sleep(50);
+    await dedupedReached(r, "coalesced", 2);
     const over = await post(r, progress("w"), r.tokens.a);
     expect(over.status).toBe(409);
     r.g.open();
@@ -341,17 +372,17 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("古い項目（5 分超）は外す: 外したあとに届いた同じ組の要求は実行されうるので、apiInProgressStale をすぐに記録する。古い項目の終了が、新しい項目を消さない", async () => {
     const r = await start({ inProgress: { staleMs: 5 * 60_000 } });
     const first = post(r, progress("stale"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     r.mono.advance(6 * 60_000);
     const second = post(r, progress("stale"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 2);
     expect(r.calls["report.progress"]).toBe(2); // 外したので、実行された
     const staleEvents = r.logs.filter((e) => e.event === "apiInProgressStale");
     expect(staleEvents).toHaveLength(1); // 件数のまとめではなく、すぐに 1 件
     expect(JSON.stringify(staleEvents)).not.toContain('stale"');
     // 3 つ目は、新しい項目（2 つ目）に重なる
     const third = post(r, progress("stale"), r.tokens.a);
-    await sleep(50);
+    await dedupedReached(r, "coalesced", 1); // 重なったことを見届けてから、実行されていないことを確かめる
     expect(r.calls["report.progress"]).toBe(2);
     r.g.open();
     await Promise.all([first, second, third]);
@@ -361,11 +392,11 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("重複は、同時数の枠を重ねて使わない: 1 件処理中に重複 5 件を待たせても、別の要求を 7 件（合計 8）まで通せる。9 件目は 429", async () => {
     const r = await start();
     const first = post(r, progress("base"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     const dups = Array.from({ length: 5 }, () => post(r, progress("base"), r.tokens.a));
-    await sleep(80);
+    await dedupedReached(r, "coalesced", 5);
     const others = Array.from({ length: 7 }, (_, i) => post(r, progress(`o${i}`), r.tokens.a));
-    await sleep(120);
+    await handlerStarted(r, "report.progress", 8);
     expect(r.calls["report.progress"]).toBe(8); // 1 + 7（重複は、実行も、枠の占有もしていない）
     const ninth = await post(r, progress("o-extra"), r.tokens.a);
     expect(ninth.status).toBe(429);
@@ -377,10 +408,9 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("重い操作の重複は、追加の重みを重ねて使わない（基本の 1 トークンだけ）", async () => {
     const r = await start({ burst: 10 });
     const first = post(r, purge("heavy"), r.tokens.human); // 5 トークン
-    await sleep(50);
-    expect(
-      (await Promise.race([post(r, purge("heavy"), r.tokens.human), sleep(100)])) ?? null,
-    ).toBeNull(); // 重複は待つ
+    await handlerStarted(r, "node.purge", 1);
+    const dup = post(r, purge("heavy"), r.tokens.human);
+    await dedupedReached(r, "coalesced", 1); // 重複は待っている（最初が終わるまで返らない）
     // 残りは 10 - 5 - 1 = 4。重複が重みを重ねていたら、0 になっている
     const reads: number[] = [];
     for (let i = 0; i < 4; i++)
@@ -388,7 +418,7 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
     expect(reads).toEqual([200, 200, 200, 200]);
     expect((await post(r, preview("p-over"), r.tokens.human)).status).toBe(429);
     r.g.open();
-    await first;
+    await Promise.all([first, dup]);
   });
 
   it("同時数の枠は、接続が切れても、ハンドラが終わるまで使い続ける（ハンドラが終わった時点で返す）", async () => {
@@ -402,22 +432,35 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
         signal: c.signal,
       }).catch(() => undefined),
     );
-    await sleep(100);
+    await handlerStarted(r, "report.progress", 8);
     expect(r.calls["report.progress"]).toBe(8); // 8 件とも、ハンドラが動いている
     for (const c of controllers) c.abort(); // 接続を切る
     await Promise.all(inflight);
-    await sleep(100);
-    // 接続は切れたが、ハンドラは動いているので、枠は戻っていない
-    expect((await post(r, progress("while-held"), r.tokens.a)).status).toBe(429);
+    // 「枠が戻らないこと」の確認: サーバーが切断に気づく時間は観測できないので、切断のあと約 300ms の間、短い間隔で確かめ続ける。
+    // 一度でも 429 以外が返れば（枠が戻ってしまった）失敗。切断の検知が遅れても、その間に確かめ続けるので、見逃しにくい。
+    const until = Date.now() + 300;
+    let probes = 0;
+    do {
+      // 接続は切れたが、ハンドラは動いているので、枠は戻っていない
+      expect((await post(r, progress(`while-held${probes++}`), r.tokens.a)).status).toBe(429);
+      await sleep(7);
+    } while (Date.now() < until);
     r.g.open(); // ハンドラが終わる
-    await sleep(100);
-    expect((await post(r, progress("after-held"), r.tokens.a)).status).toBe(200);
+    // ハンドラが終わって枠が戻るまで、新しい requestId で試す（戻るまでは 429。戻ったら 200）。
+    // 注: 通った送信は、ハンドラが動くので calls に数えられる（429 は、ハンドラを呼ばないので数えられない）。
+    let after = 0;
+    const last = await waitFor(
+      "枠が戻って、新しい要求が通る",
+      async () => (await post(r, progress(`after-held${after++}`), r.tokens.a)).status,
+      (status) => status !== 429,
+    );
+    expect(last).toBe(200);
   });
 
   it("表の項目の数に上限がある: 超える新しい要求は、実行せずに 429。完了すれば、また通る", async () => {
     const r = await start({ inProgress: { maxEntries: 1 } });
     const first = post(r, progress("e1"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     const second = await post(r, list("e2"), r.tokens.m1);
     expect(second.status).toBe(429);
     expect(r.calls["tree.list"] ?? 0).toBe(0);
@@ -429,10 +472,15 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("記録: 重複の件数は、窓の最初の 1 件と、窓の終わりのまとめに出る。requestId・トークン・nodeId は出ない", async () => {
     const r = await start();
     const first = post(r, progress("secret-request-id"), r.tokens.a);
-    await sleep(50);
+    await handlerStarted(r, "report.progress", 1);
     const dup = post(r, progress("secret-request-id"), r.tokens.a);
     const conflict = post(r, progress("secret-request-id", "other"), r.tokens.a);
-    await sleep(50);
+    // 窓の最初の 1 件は、すぐに記録される（まとめを出させない: 終わりのまとめで、件数をまとめて確かめるため）
+    await waitFor(
+      "重複と食い違いが届く",
+      () => r.logs.flatMap((e) => (e.event === "apiDeduped" ? [e.kind] : [])).sort(),
+      (kinds) => kinds.includes("coalesced") && kinds.includes("conflict"),
+    );
     r.g.open();
     await Promise.all([first, dup, conflict]);
     expect(r.logs.some((e) => e.event === "apiDeduped" && e.kind === "coalesced")).toBe(true);
