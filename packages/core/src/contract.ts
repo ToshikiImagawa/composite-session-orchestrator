@@ -245,11 +245,13 @@ export interface OperationMap {
   };
   /**
    * 自動の最終削除の保留（T13f-h。人間のみ）。`nodeId` は、予告の `nodeId` と同じもの: 自動の最終削除の対象になる木の根
-   * （アーカイブ済みで、親がアーカイブされていないノード）。`until`（ISO 8601 UTC。現在より後、365 日先まで）を省略すると無期限。
-   * 既にある保留は置き換える（延期）。有効な予告は、その場で取り下げる。
+   * （アーカイブ済みで、親がアーカイブされていないノード）。期限は、2 通りで指定できる（T23-d3）。`days`（1〜365 の整数）は、
+   * **daemon の時計**で、いまから `days` 日後（秒に切り捨て）に決める（端末の時計のずれに左右されない）。`until`（ISO 8601 UTC。
+   * 現在より後、365 日先まで）は、呼び出し側が決めた時刻（互換）。**両方を指定すると拒否する**（400）。どちらも省略すると無期限。
+   * 返す `until` は、記録された期限（同じ requestId の再送でも、最初の期限）。既にある保留は置き換える（延期）。有効な予告は、その場で取り下げる。
    */
   "node.purgeHold": {
-    params: { nodeId: string; until?: string; reason?: string };
+    params: { nodeId: string; until?: string; days?: number; reason?: string };
     result: { held: true; until?: string };
   };
   /**

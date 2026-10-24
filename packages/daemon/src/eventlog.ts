@@ -282,6 +282,13 @@ export class EventLog {
     return out;
   }
 
+  /** 同じ `requestId` で最初に記録されたイベント。なければ（読み出せない行も）`undefined`。 */
+  firstEventOf(requestId: string): OrchEvent | undefined {
+    const stored = this.store.findByRequestId(requestId);
+    const parsed = stored === undefined ? undefined : parseRow(stored);
+    return parsed?.ok === true ? parsed.value : undefined;
+  }
+
   /** 最後のイベントの時刻（`at`）。空なら `undefined`。時計の異常の検知（自動の最終削除）に使う。 */
   lastEventAt(): string | undefined {
     return this.store.findBySeq(this.store.lastSeq())?.at;

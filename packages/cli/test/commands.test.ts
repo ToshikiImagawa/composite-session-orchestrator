@@ -13,7 +13,6 @@ import { describe, expect, it } from "vitest";
 import {
   type DaemonClient,
   formatFailure,
-  holdDeadline,
   nodeIdsDigest,
   runCommand,
   tipsDigest,
@@ -785,35 +784,31 @@ describe("cso purge の照合（T23-d2。--yes には --expect）", () => {
   });
 });
 
-describe("cso purge-hold --days（T23-d2）", () => {
-  const NOW = Date.UTC(2026, 9, 23, 12, 0, 0, 345);
-  const withNow = (client: DaemonClient) => ({ ...deps(client), nowMs: () => NOW });
-
-  it("期限は、いまから数えた日数後（ミリ秒なしの ISO 8601 UTC）。365 日のときだけ、10 分短い", () => {
-    expect(holdDeadline(1, NOW)).toBe("2026-10-24T12:00:00Z");
-    expect(holdDeadline(30, NOW)).toBe("2026-11-22T12:00:00Z");
-    expect(holdDeadline(364, NOW)).toBe("2027-10-22T12:00:00Z");
-    expect(holdDeadline(365, NOW)).toBe("2027-10-23T11:50:00Z");
-  });
-
-  it("--days は、計算した期限を until で送る。結果に、実際の期限が出る", async () => {
+describe("cso purge-hold --days（T23-d2・T23-d3）", () => {
+  it("--days は、days を送る（until は送らない。期限は daemon の時計で決める）。結果に、daemon が決めた期限が出る", async () => {
     const { client, sent } = fakeClient({
       "node.purgeHold": ok({ held: true, until: "2026-11-22T12:00:00Z" }),
     });
     const r = await runCommand(
       ["purge-hold", "t", "--days", "30", "--reason", "調査"],
-      withNow(client),
+      deps(client),
     );
-    expect(sent[0]?.params).toEqual({ nodeId: "t", until: "2026-11-22T12:00:00Z", reason: "調査" });
+    expect(sent[0]?.params).toEqual({ nodeId: "t", days: 30, reason: "調査" });
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("2026-11-22T12:00:00Z");
+  });
+
+  it("365 日も、そのまま送る（端末の時計で、10 分短くしない）", async () => {
+    const { client, sent } = fakeClient({ "node.purgeHold": ok({ held: true }) });
+    await runCommand(["purge-hold", "t", "--days", "365"], deps(client));
+    expect(sent[0]?.params).toEqual({ nodeId: "t", days: 365 });
   });
 
   it.each([["0"], ["366"], ["1.5"], ["-1"], ["abc"], ["１０"], ["0030x"], ["1000"]])(
     "--days %j は範囲外・不正で、終了コード 2（窓口を呼ばない）",
     async (v) => {
       const { client, sent } = fakeClient({ "node.purgeHold": ok({ held: true }) });
-      const r = await runCommand(["purge-hold", "t", "--days", v], withNow(client));
+      const r = await runCommand(["purge-hold", "t", "--days", v], deps(client));
       expect(r.exitCode).toBe(2);
       expect(sent).toEqual([]);
     },
@@ -823,40 +818,21 @@ describe("cso purge-hold --days（T23-d2）", () => {
     const { client, sent } = fakeClient({ "node.purgeHold": ok({ held: true }) });
     const r = await runCommand(
       ["purge-hold", "t", "--until", "2026-12-01T00:00:00Z", "--days", "30"],
-      withNow(client),
+      deps(client),
     );
     expect(r.exitCode).toBe(2);
     expect(sent).toEqual([]);
   });
 
-  it("R3: invalidPurgeHoldUntil で失敗したら、--days を小さくするか時計を合わせる案内を足す", async () => {
-    const { client } = fakeClient({
-      "node.purgeHold": {
-        ok: false,
-        error: {
-          code: "invalidPurgeHoldUntil",
-          cause: "保留の期限は、現在より後で、365 日先まで",
-          nextActions: ["期限を指定し直す（無期限にするときは省略する）"],
-        },
-      } as never,
-    });
-    const r = await runCommand(["purge-hold", "t", "--days", "365"], withNow(client));
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("invalidPurgeHoldUntil");
-    expect(r.stderr).toContain("--days を小さくするか");
-    expect(r.stderr).toContain("時計を合わせて");
-    expect(r.stderr).toContain("期限を指定し直す");
-  });
-
-  it("結果が確認できないとき、再実行の案内は、計算した期限を --until で指定する（同じ requestId で、内容が変わらないように）", async () => {
+  it("結果が確認できないとき、再実行の案内は、同じコマンド（--days のまま）。同じ requestId の再送で、最初の期限が返る", async () => {
     const boom = () => {
       throw new Error("ECONNRESET");
     };
     const { client } = fakeClient({ "node.purgeHold": boom });
-    const r = await runCommand(["purge-hold", "t", "--days", "30"], withNow(client));
+    const r = await runCommand(["purge-hold", "t", "--days", "30"], deps(client));
     expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("--until '2026-11-22T12:00:00Z'");
-    expect(r.stderr).not.toContain("--days");
+    expect(r.stderr).toContain("--days '30'");
+    expect(r.stderr).not.toContain("--until");
   });
 });
 

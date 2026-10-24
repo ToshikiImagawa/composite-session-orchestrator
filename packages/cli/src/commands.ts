@@ -26,8 +26,6 @@ export interface CommandDeps {
   readonly client: DaemonClient;
   /** 要求の識別子（冪等性）。時刻・乱数を持たないよう、呼び出し側が渡す。 */
   readonly newRequestId: () => string;
-  /** 現在の時刻（ミリ秒。保留の `--days` の期限の計算用。省略すると `Date.now`）。 */
-  readonly nowMs?: () => number;
 }
 
 export interface CommandResult {
@@ -315,12 +313,6 @@ export const nodeIdsDigest = (nodeIds: readonly string[]): string =>
       .join(""),
   );
 
-/** 保留の期限（`--days`）。いまから `days` 日後（ISO 8601 UTC。ミリ秒なし）。365 日のときだけ、時計のずれを見込んで 10 分短くする。 */
-export const holdDeadline = (days: number, nowMs: number): string => {
-  const ms = nowMs + days * 86_400_000 - (days >= LIMITS.purgeHoldMaxDays ? 10 * 60_000 : 0);
-  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
-};
-
 function describeReclaim(nodeId: string, p: ReclaimPreview): string {
   const tipLines = Object.entries(p.tips ?? {}).map(
     ([id, tip]) => `  ${terminalSafe(id, 128)}: ${tip.slice(0, 12)}`,
@@ -540,8 +532,9 @@ export async function runCommand(
   }
 
   if (command === "purge-hold") {
-    let until = values.get("--until");
+    const until = values.get("--until");
     const daysText = values.get("--days");
+    let days: number | undefined;
     if (daysText !== undefined) {
       if (until !== undefined) return usageError("--until と --days は同時に指定できない");
       if (
@@ -551,7 +544,7 @@ export async function runCommand(
       ) {
         return usageError(`--days は 1〜${LIMITS.purgeHoldMaxDays} の整数`);
       }
-      until = holdDeadline(Number(daysText), (deps.nowMs ?? Date.now)());
+      days = Number(daysText); // 期限は、daemon の時計で決める（T23-d3）
     }
     const reason = values.get("--reason");
     const res = await invoke(
@@ -561,30 +554,12 @@ export async function runCommand(
       {
         nodeId,
         ...(until === undefined ? {} : { until }),
+        ...(days === undefined ? {} : { days }),
         ...(reason === undefined ? {} : { reason }),
       },
       isHeld,
     );
-    if (res.kind !== "ok") {
-      // `--days` は、再実行のたびに期限が変わる（同じ requestId で、内容が違ってしまう）。計算した期限を、`--until` で指定し直す。
-      if (res.kind === "unconfirmed" && daysText !== undefined && until !== undefined) {
-        return unconfirmed(
-          res.reason,
-          rerun.replace(/--days '[0-9]+'/, `--until ${shellQuote(until)}`),
-          id,
-        );
-      }
-      if (res.kind === "failure" && res.failure.code === "invalidPurgeHoldUntil") {
-        return failed({
-          ...res.failure,
-          nextActions: [
-            "--days を小さくするか、この端末の時計を合わせて、もう一度実行する（期限は、この端末の時計で決めている）",
-            ...res.failure.nextActions,
-          ] as unknown as Failure["nextActions"],
-        } as Failure);
-      }
-      return fail(res);
-    }
+    if (res.kind !== "ok") return fail(res);
     return {
       exitCode: 0,
       stdout: `自動の最終削除を保留した: ${nodeId}（${res.value.until === undefined ? "無期限" : `${res.value.until} まで`}）\n有効な予告は取り下げた。人間の cso purge は、保留に関係なく実行できる\nrequestId: ${id}\n`,

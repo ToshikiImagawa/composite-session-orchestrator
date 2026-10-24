@@ -310,14 +310,14 @@ describe("画面の資産（走査）", () => {
         fn("checkDays"),
         fn("typedMatches"),
         fn("purgeRoots"),
-        fn("holdUntil"),
+        fn("holdParams"),
         fn("checkReason"),
         fn("cleanText"),
         fn("hasForbidden"),
         fn("checkAnswer"),
         fn("waitSecondsOf"),
         fn("describeFailure"),
-        "({ isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdUntil: holdUntil, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
+        "({ isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
@@ -326,7 +326,7 @@ describe("画面の資産（走査）", () => {
       describeFailure(r: { status: number; body: unknown; retry: number }): string;
       typedMatches(typed: unknown, input: unknown): boolean;
       purgeRoots(nodes: { id: string; parentId: string | null; state: string }[]): { id: string }[];
-      holdUntil(days: number, nowMs: number): string | undefined;
+      holdParams(nodeId: string, days: number, reason: string): Record<string, unknown>;
       parseDays(text: string): number;
       checkDays(text: string): string;
       checkReason(text: string): string;
@@ -385,13 +385,13 @@ describe("画面の資産（走査）", () => {
       expect(long).toContain(`x: ${"あ".repeat(300)}`);
       expect(long).not.toContain("あ".repeat(301));
       expect(api.describeFailure({ status: 500, body: null, retry: 0 })).toContain("HTTP 500");
-      // 保留の期限が範囲外（端末とサーバーの時計のずれ）: 日数を小さくするか、時計を合わせる案内
+      // 保留の期限は、daemon の時計で決める（T23-d3）: 端末の時計のずれの案内は、もう出さない
       const clock = api.describeFailure({
         status: 422,
         body: { ok: false, error: { code: "invalidPurgeHoldUntil", cause: "範囲外" } },
         retry: 0,
       });
-      expect(clock).toContain("日数を小さくするか、この端末の時計を合わせて");
+      expect(clock).not.toContain("この端末の時計");
       expect(
         api.describeFailure({
           status: 422,
@@ -442,14 +442,16 @@ describe("画面の資産（走査）", () => {
       expect(api.purgeRoots([])).toEqual([]);
     });
 
-    it("holdUntil: 0 日は期限なし。日数は、ミリ秒なしの ISO 8601 UTC（サーバーの検証に合う形）", () => {
-      const now = Date.UTC(2026, 9, 23, 12, 0, 0, 345);
-      expect(api.holdUntil(0, now)).toBeUndefined();
-      expect(api.holdUntil(30, now)).toBe("2026-11-22T12:00:00Z");
-      expect(api.holdUntil(90, now)).toBe("2027-01-21T12:00:00Z");
-      // 365 日（サーバーの上限）のときだけ、時計のずれを見込んで 10 分短い（cli の holdDeadline と同じ）
-      expect(api.holdUntil(364, now)).toBe("2027-10-22T12:00:00Z");
-      expect(api.holdUntil(365, now)).toBe("2027-10-23T11:50:00Z");
+    it("holdParams: 日数は days で送る（期限は、daemon の時計で決める。until は送らない）。0 日は無期限（days なし）。空白だけの理由は送らない", () => {
+      expect(api.holdParams("t", 0, "")).toEqual({ nodeId: "t" });
+      expect(api.holdParams("t", 30, "調査中")).toEqual({
+        nodeId: "t",
+        days: 30,
+        reason: "調査中",
+      });
+      // 365 日も、そのまま送る（端末の時計で、10 分短くしない）
+      expect(api.holdParams("t", 365, "  ")).toEqual({ nodeId: "t", days: 365 });
+      expect(api.holdParams("t", 90, "x")).not.toHaveProperty("until");
     });
 
     it("parseDays・checkDays: 1〜365 の整数だけ（前後の空白は可）。0・366・小数・負・全角・文字・空は不正", () => {

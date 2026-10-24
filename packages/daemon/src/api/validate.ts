@@ -124,6 +124,13 @@ const isoUtc = (o: Rec, key: string): string => {
     fail(`${key} が不正（ISO 8601 UTC。例: 2026-12-01T00:00:00Z）`);
   return v as string;
 };
+/** 保留の日数（1〜`LIMITS.purgeHoldMaxDays` の整数）。 */
+const holdDays = (o: Rec): number => {
+  const v = o.days;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > LIMITS.purgeHoldMaxDays)
+    fail(`days は 1〜${LIMITS.purgeHoldMaxDays} の整数`);
+  return v as number;
+};
 const oneOf = <T extends string>(o: Rec, key: string, values: readonly T[]): T => {
   const v = o[key];
   if (typeof v !== "string" || !values.includes(v as T))
@@ -349,14 +356,17 @@ const VALIDATORS: Validators = {
   },
   "node.purgePreview": nodeIdOnly,
   "node.purgeHold": (p) => {
-    const o = strict(p, ["nodeId", "until", "reason"]);
+    const o = strict(p, ["nodeId", "until", "days", "reason"]);
     const nodeId = id(o, "nodeId");
+    if (o.until !== undefined && o.days !== undefined) fail("until と days は同時に指定できない");
     const until = o.until === undefined ? undefined : isoUtc(o, "until");
+    const days = o.days === undefined ? undefined : holdDays(o);
     const reason =
       o.reason === undefined ? undefined : nonBlank(o, "reason", LIMITS.purgeHoldReason);
     return {
       nodeId,
       ...(until === undefined ? {} : { until }),
+      ...(days === undefined ? {} : { days }),
       ...(reason === undefined ? {} : { reason }),
     };
   },

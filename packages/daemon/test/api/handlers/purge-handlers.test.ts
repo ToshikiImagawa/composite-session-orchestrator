@@ -20,9 +20,14 @@ const rig = (
     discarded?: boolean;
     lastCommit?: string;
     onPurgedThrows?: boolean;
+    /** イベントの時刻を、daemon の時計（`nowMs`）に合わせる（本番は、同じ時計）。 */
+    syncClock?: boolean;
   } = {},
 ) => {
-  const opened = EventLog.open(createMemoryStore().open(), { clock });
+  let nowMs = ARCHIVED_AT;
+  const opened = EventLog.open(createMemoryStore().open(), {
+    clock: over.syncClock === true ? () => new Date(nowMs).toISOString() : clock,
+  });
   if (!opened.ok) throw new Error(opened.error.code);
   const log = opened.value;
   const add = (body: EventBody): void => {
@@ -82,7 +87,6 @@ const rig = (
     failures: [] as string[],
     purged: [] as string[][],
   };
-  let nowMs = ARCHIVED_AT;
   const h = createPurgeHandlers({
     log,
     nowMs: () => nowMs,
@@ -405,6 +409,35 @@ describe("node.purgeHold・node.purgeRelease（自動の最終削除の保留。
     r.call("node.purgeHold", { nodeId: "t" }, "human", "same");
     const seq = r.log.state().lastSeq;
     expect(r.call("node.purgeHold", { nodeId: "t" }, "human", "same").ok).toBe(true);
+    expect(r.log.state().lastSeq).toBe(seq);
+  });
+
+  it("days: 期限は、daemon の時計で、いまから days 日後（秒に切り捨て）。365 日も、短縮なしで通る", () => {
+    const r = rig({ syncClock: true });
+    for (const days of [1, 30, 364, 365]) {
+      const res = r.call("node.purgeHold", { nodeId: "t", days });
+      const until = new Date(ARCHIVED_AT + days * DAY).toISOString().replace(/\.\d{3}Z$/, "Z");
+      expect(res, String(days)).toEqual({ ok: true, value: { held: true, until } });
+      expect(r.log.state().nodes.find((x) => x.id === "t")?.purgeHold?.until).toBe(until);
+    }
+  });
+
+  it("days: 時計の端数（ミリ秒）は切り捨てる。365 日でも、イベントの時刻から 365 日以内に収まる", () => {
+    const r = rig({ syncClock: true });
+    r.advance(0.5 / DAY); // 0.5 ミリ秒
+    const res = r.call("node.purgeHold", { nodeId: "t", days: 365 });
+    expect(res.value.until).toBe(
+      new Date(ARCHIVED_AT + 365 * DAY).toISOString().replace(".000Z", "Z"),
+    );
+  });
+
+  it("days: 同じ requestId の再送は、重複して記録せず、最初の期限を返す（再計算しない）", () => {
+    const r = rig({ syncClock: true });
+    const first = r.call("node.purgeHold", { nodeId: "t", days: 30 }, "human", "same-days");
+    const seq = r.log.state().lastSeq;
+    r.advance(10); // 10 日後の再送
+    const again = r.call("node.purgeHold", { nodeId: "t", days: 30 }, "human", "same-days");
+    expect(again).toEqual(first);
     expect(r.log.state().lastSeq).toBe(seq);
   });
 

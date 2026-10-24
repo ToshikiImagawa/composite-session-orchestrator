@@ -44,7 +44,7 @@ export interface PurgeMarkerInfo {
 }
 
 export interface PurgeHandlerDeps {
-  readonly log: Pick<LogPort, "state"> &
+  readonly log: Pick<LogPort, "state" | "firstEventOf"> &
     Required<Pick<LogPort, "purgeTree" | "checkPurge" | "appendAll">>;
   /** 現在時刻（ミリ秒）。 */
   readonly nowMs: () => number;
@@ -293,11 +293,23 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
     "node.purgeHold": (req: HandlerRequest<"node.purgeHold">): R<"node.purgeHold"> => {
       const denied = humanOnly(req.role);
       if (denied) return denied;
-      const { nodeId, until, reason } = req.params;
+      const { nodeId, days, reason } = req.params;
       const state = log.state();
       const node = state.nodes.find((n) => n.id === nodeId);
       if (node === undefined) return fail("notFound", "ノードが見つからない", "ID を確認する");
       const human: Actor = { human: true };
+      // `days` は、daemon の時計で、いまから days 日後（秒に切り捨て）。イベントの時刻も同じ時計なので、365 日でも範囲に収まる。
+      // 同じ requestId の再送は、最初に記録した期限を使う（再計算すると、内容が違って、requestIdConflict になる）。
+      const holdRequestId = derivedRequestId(human, req.requestId, 0);
+      const prior = days === undefined ? undefined : log.firstEventOf?.(holdRequestId);
+      const until =
+        days === undefined
+          ? req.params.until
+          : prior?.type === "node.purgeHeld" && prior.payload.nodeId === nodeId
+            ? prior.payload.until
+            : new Date(Math.floor((deps.nowMs() + days * 86_400_000) / 1000) * 1000)
+                .toISOString()
+                .replace(/\.\d{3}Z$/, "Z");
       const system: Actor = { system: true };
       // 予告の識別子は、`planPurge` の `archivedAt`（木の中で最大のもの）から作られる。根自身の `archivedAt` とは違いうるので、両方の鍵で探す。
       const plan = planPurge(state, nodeId, deps.nowMs());
@@ -309,7 +321,7 @@ export function createPurgeHandlers(deps: PurgeHandlerDeps) {
         .filter((n) => !n.resolved);
       const r = log.appendAll([
         {
-          requestId: derivedRequestId(human, req.requestId, 0),
+          requestId: holdRequestId,
           actor: human,
           body: {
             type: "node.purgeHeld",

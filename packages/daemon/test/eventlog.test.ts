@@ -73,6 +73,13 @@ describe("追記", () => {
     expect(store.readAll()).toHaveLength(1);
   });
 
+  it("firstEventOf: 同じ requestId で最初に記録されたイベントを返す。ない requestId は undefined", () => {
+    const log = openLog(createMemoryStore().open());
+    const first = must(append(log, "r1", created("root", "integrator", null)));
+    expect(log.firstEventOf("r1")).toEqual(first.event);
+    expect(log.firstEventOf("none")).toBeUndefined();
+  });
+
   it("矛盾するイベントは追記前に拒否され、何も書かれず、seq も消費されない", () => {
     const store = createMemoryStore().open();
     const log = openLog(store);
