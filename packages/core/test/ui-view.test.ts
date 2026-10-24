@@ -46,6 +46,16 @@ const base = (): OrchEvent[] => {
   ];
 };
 
+describe("uiViewOf の stopDelegated（T22d）", () => {
+  it("渡した判定が真のノードにだけ stopDelegated を付ける。省略すると付けない", () => {
+    const s = must(base());
+    const v = uiViewOf(s, { stopDelegated: (id) => id === "a" });
+    expect(v.nodes.find((x) => x.id === "a")?.stopDelegated).toBe(true);
+    expect(v.nodes.find((x) => x.id === "root")).not.toHaveProperty("stopDelegated");
+    for (const x of uiViewOf(s).nodes) expect(x).not.toHaveProperty("stopDelegated");
+  });
+});
+
 describe("uiViewOf（画面の表示モデル。T23）", () => {
   it("ノード・未解決の項目（優先度の降順）・件数を返す。解決済みの項目は含めない", () => {
     const s = must([

@@ -149,6 +149,7 @@ describe("画面の資産（走査）", () => {
       "Set",
       "body",
       "discarded",
+      "stopDelegated",
       "reclaimable",
       "unmet",
       "loss",
@@ -318,7 +319,10 @@ describe("画面の資産（走査）", () => {
         fn("checkAnswer"),
         fn("waitSecondsOf"),
         fn("describeFailure"),
-        "({ isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
+        fn("checkNote"),
+        fn("confirmStoppedParams"),
+        fn("confirmStoppedLines"),
+        "({ checkNote: checkNote, confirmStoppedParams: confirmStoppedParams, confirmStoppedLines: confirmStoppedLines, isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
@@ -333,6 +337,9 @@ describe("画面の資産（走査）", () => {
       checkDays(text: string): string;
       checkReason(text: string): string;
       cleanText(text: string, max: number): string;
+      checkNote(text: string): string;
+      confirmStoppedParams(nodeId: string, note: string): Record<string, unknown>;
+      confirmStoppedLines(nodeId: string, note: string): [string, string][];
       isReclaimPreview(v: unknown): boolean;
       reclaimBlocked(v: unknown): string;
       reclaimLines(nodeId: string, v: unknown): [string, string][];
@@ -359,6 +366,23 @@ describe("画面の資産（走査）", () => {
         expect(api.checkAnswer(bad), JSON.stringify(bad)).toContain("使えない文字");
       }
       expect(api.checkAnswer("一行目\n\t二行目")).toBe("");
+    });
+
+    it("停止の宣言（T22d）: 根拠は任意（空白だけなら送らない）。長すぎ・制御文字は拒む。確認の表示は根拠を整えて出す", () => {
+      expect(api.confirmStoppedParams("a", "")).toEqual({ nodeId: "a" });
+      expect(api.confirmStoppedParams("a", "  ")).toEqual({ nodeId: "a" });
+      expect(api.confirmStoppedParams("a", "アーカイブした")).toEqual({
+        nodeId: "a",
+        note: "アーカイブした",
+      });
+      expect(api.checkNote("")).toBe("");
+      expect(api.checkNote("a".repeat(200))).toBe("");
+      expect(api.checkNote("a".repeat(201))).toContain("長すぎ");
+      expect(api.checkNote("a\u202eb")).toContain("使えない文字");
+      const lines = api.confirmStoppedLines("a", "x\ny");
+      expect(lines[0]).toEqual(["ノード", "a"]);
+      expect(lines.at(-1)).toEqual(["根拠", "x y"]);
+      expect(api.confirmStoppedLines("a", "").at(-1)).toEqual(["根拠", "（なし）"]);
     });
 
     it("waitSecondsOf: 429 は Retry-After の秒数（なければ 5 秒）。それ以外は 0", () => {
@@ -807,5 +831,17 @@ describe("画面の資産（走査）", () => {
     // ボタンは、停止したノードだけ。指示済みには出さない
     expect(UI_JS).toContain("n.state === 'stopped'");
     expect(UI_JS).toContain("n.discarded");
+  });
+
+  it("T22d: 停止の宣言は、停止未完了かつ stopDelegated のノードだけに出し、打ち込みの確認（typed: ノード ID）を経る", () => {
+    expect(UI_JS).toContain(
+      "n.state === 'stopIncomplete' && n.stopDelegated === true && ID_RE.test(n.id)",
+    );
+    const start = UI_JS.indexOf("function confirmStoppedBox(");
+    const body = UI_JS.slice(start, UI_JS.indexOf("\n  }\n", start));
+    expect(body).toContain("'node.confirmStopped'");
+    expect(body).toContain("typed: nodeId");
+    expect(body).toContain("confirmStoppedParams(nodeId, note)");
+    expect(UI_JS.split("fetch('/v1/request'").length - 1).toBe(1);
   });
 });

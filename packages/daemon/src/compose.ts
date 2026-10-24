@@ -638,6 +638,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     identity: () => currentIdentity,
     credentials,
     getState: () => log.state(),
+    // 画面の停止の宣言（T22d）。いまは CLI のアダプタだけなので、常に false（Desktop の配線は T21）。
+    stopDelegated: (id) => adapter.has(id) && adapter.capabilities(id).stopDelegated === true,
     handlers: {
       ...handlers,
       // 保管している、破棄した成果の操作（人間のみ。T13f-r）。git の口が、保管の操作を持つときだけ有効。

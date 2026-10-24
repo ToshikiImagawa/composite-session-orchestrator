@@ -78,6 +78,12 @@ daemon の窓口が、状態を見るための HTML 画面を配る。**状態�
   - 「保管を消す…」: `node.discardedDrop`。**保管の名前（key）を打ち込ませる**。**一覧で見せた先端を `expectTip` として渡す**ので、見たあとで先端が変わっていたら、daemon が消さない（`tipMismatch`）。
 - 確認の共通の部品: `openConfirm(title, lines, operation, params, done, opts)` の `opts` に、`typed`（打ち込ませる文字列）・`blocked`（送れない理由）・`after`（成功のあとの処理）を指定できる。T23-c（回収の指示）も、これを使う（上の節）。読み取りは、`readOperationResult(operation, params)`（`{ ok, value }` か `{ ok: false, error: { code, cause, status } }`。通知は出さない。`tipMismatch` などの失敗の種類を、呼び出し側が区別できる。ネットワークの失敗は `code: 'network'`）と、通知を出す `readOperation`。失敗の通知は赤（`.notice.bad`）。保管の確認の行は `cleanText` を通し、ID の形でない key には、操作を出さない。
 
+### 停止の宣言（T22d）
+
+木の行のうち、**状態が `stopIncomplete` で、表示モデルの `stopDelegated` が真のノード**（daemon が直接止められず、親に停止を代行してもらうノード。Desktop の子）に、根拠の入力欄（任意。200 文字まで）と「止めたと宣言…」を出す。押すと確認を出し、**対象のノード ID を打ち込ませる**（取り消せない。`node.confirmStopped`。`docs/desktop-runtime.md`）。根拠は信頼できない入力なので、確認の表示では `cleanText` で整え、`textContent` で描く。cli では `cso confirm-stopped <nodeId> [--note <根拠>]`。
+
+`stopDelegated` は、daemon がアダプタの能力表から埋める（`ApiDeps.stopDelegated` → `uiViewOf(state, { stopDelegated })`）。表示のキャッシュは `lastSeq` を鍵にするので、能力表がアダプタごとに固定であることが前提。能力表が記録なしに変わりうるようになったら、キャッシュの鍵を見直す。いまは Desktop のアダプタを配線していない（T21）ので、どのノードにも出ない。
+
 ## XSS・CSP
 
 - 画面は、`textContent` と `createElement`（タグは `div`・`span`・`p` の許可リストだけ。実行時にも拒む）だけで描く。`innerHTML`・`outerHTML`・`insertAdjacentHTML`・`document.write`・`eval`・`new Function`・`setAttribute`・`on*` への代入・`location` への代入・`srcdoc`・storage・cookie・`postMessage`・`window.open`・動的 import は使わない（`ui-assets.test.ts` が走査で守らせる）。ブラケット記法の文字列キー、HTML を解釈する API（`setHTMLUnsafe`・`parseHTMLUnsafe`・`setHTML`・`createContextualFragment`・`DOMParser`）、`.href`・`.src`・`.action`・`.formAction` への代入、危ないタグ（`script`・`iframe`・`a`・`img`・`link`・`object`・`embed`・`form` など）の生成も禁じる。さらに、**許可リスト**として、`.` の後ろのプロパティ名を抜き出し、安全な集合にあるものだけを許す（新しい API を使うと、試験が落ちるので、意識して足す）。HTML にインラインの script・style・イベント属性を置かない。

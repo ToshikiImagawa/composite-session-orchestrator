@@ -435,6 +435,8 @@ export const UI_JS = `'use strict';
             row.appendChild(reclaim);
           }
         }
+        // 停止を親に代行してもらうノード（stopDelegated。Desktop の子）が停止未完了なら、止めたと宣言できる（T22d）
+        if (n.state === 'stopIncomplete' && n.stopDelegated === true && ID_RE.test(n.id)) row.appendChild(confirmStoppedBox(n.id));
         box.appendChild(row);
         walk(n.id, depth + 1);
       });
@@ -533,6 +535,49 @@ export const UI_JS = `'use strict';
   var EXPECT_NODE_IDS_MAX = 2000;
   var ID_RE = /^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/;
   var reasonDrafts = new Map();
+  var noteDrafts = new Map();
+  // ---- 停止の宣言（T22d。取り消せないので、対象のノード ID を打ち込ませる）----
+  function checkNote(text) {
+    if (text.trim() === '') return '';
+    if (Array.from(text).length > REASON_MAX) return '根拠が長すぎます（' + REASON_MAX + ' 文字以下）';
+    if (Array.from(text).some(function (ch) { return FORBIDDEN.test(ch); })) return '根拠に、使えない文字（制御文字・書式制御文字）が含まれています';
+    return '';
+  }
+  function confirmStoppedParams(nodeId, note) {
+    return note.trim() === '' ? { nodeId: nodeId } : { nodeId: nodeId, note: note };
+  }
+  function confirmStoppedLines(nodeId, note) {
+    return [
+      ['ノード', nodeId],
+      ['内容', '親が Desktop でこのノードのタスクを止めた（またはアーカイブした）と宣言し、停止未完了から停止済みに進める'],
+      ['記録', '宣言した者（人間）と根拠を残し、受信箱の停止の代行依頼を解決済みにする'],
+      ['根拠', note.trim() === '' ? '（なし）' : cleanText(note, REASON_MAX)]
+    ];
+  }
+  function confirmStoppedBox(nodeId) {
+    var box = el('div', 'opts');
+    var area = el('textarea', '');
+    area.rows = 1;
+    area.maxLength = REASON_MAX;
+    area.placeholder = '止めた根拠（任意。' + REASON_MAX + ' 文字まで）';
+    area.value = noteDrafts.get(nodeId) || '';
+    area.addEventListener('input', function () { noteDrafts.set(nodeId, area.value); });
+    var problem = el('p', 'error', '');
+    problem.hidden = true;
+    var b = el('button', '', '止めたと宣言…');
+    b.addEventListener('click', function () {
+      var why = checkNote(area.value);
+      problem.textContent = why;
+      problem.hidden = why === '';
+      if (why !== '') return;
+      var note = area.value;
+      openConfirm('停止の宣言', confirmStoppedLines(nodeId, note), 'node.confirmStopped', confirmStoppedParams(nodeId, note), '止めたと宣言しました（' + nodeId + '）', { typed: nodeId, after: function () { noteDrafts.delete(nodeId); } });
+    });
+    box.appendChild(area);
+    box.appendChild(b);
+    box.appendChild(problem);
+    return box;
+  }
   var daysDrafts = new Map();
   var keptList = null;
   var purgeSignature = null;

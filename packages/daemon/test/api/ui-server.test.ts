@@ -53,9 +53,14 @@ afterEach(async () => {
   await server?.close();
   server = undefined;
 });
-const start = async () => {
+const start = async (stopDelegated?: (nodeId: string) => boolean) => {
   const credentials = createCredentialStore({ humanToken: HUMAN });
-  server = createApiServer({ credentials, getState: state, handlers: {} });
+  server = createApiServer({
+    credentials,
+    getState: state,
+    handlers: {},
+    ...(stopDelegated === undefined ? {} : { stopDelegated }),
+  });
   const { url, port } = await server.listen(0);
   return {
     url,
@@ -109,6 +114,21 @@ describe("画面の資産（GET /ui ほか）", () => {
       req.end();
     });
     expect(status).toBe(403); // DNS rebinding 対策（Host の検査）
+  });
+});
+
+describe("GET /v1/ui/state の stopDelegated（T22d）", () => {
+  it("渡した判定のとおりにノードへ付ける。省略すると付けない", async () => {
+    const auth = { authorization: `Bearer ${HUMAN}` };
+    const r = await start((id) => id === "a");
+    const body = await (await fetch(`${r.url}/v1/ui/state`, { headers: auth })).json();
+    const nodes = body.value.nodes as { id: string; stopDelegated?: boolean }[];
+    expect(nodes.find((x) => x.id === "a")?.stopDelegated).toBe(true);
+    expect(nodes.find((x) => x.id === "root")?.stopDelegated).toBeUndefined();
+    await server?.close();
+    const r2 = await start();
+    const body2 = await (await fetch(`${r2.url}/v1/ui/state`, { headers: auth })).json();
+    for (const x of body2.value.nodes) expect(x.stopDelegated).toBeUndefined();
   });
 });
 
