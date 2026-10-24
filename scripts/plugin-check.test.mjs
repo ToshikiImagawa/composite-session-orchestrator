@@ -235,7 +235,7 @@ test("frontmatter: 複数行の値（> | と、字下げの続き）は、検出
   }
 });
 
-test("NFR_012: skill・command の ${CLAUDE_PLUGIN_ROOT} のあとに .. が続くパスは拒否する（hooks.json と対称）", () => {
+test("NFR_012: skill・command の CLAUDE_PLUGIN_ROOT のあとに .. が続くパスは拒否する（hooks.json と対称）", () => {
   const cmd = (body) => ({ "commands/x.md": `---\ndescription: d\n---\n${body}\n` });
   // biome-ignore lint/suspicious/noTemplateCurlyInString: plugin に書く、Claude Code が展開する変数の参照
   assert.deepEqual(run(cmd("`${CLAUDE_PLUGIN_ROOT}/hooks/a.mjs` を見る")), []);

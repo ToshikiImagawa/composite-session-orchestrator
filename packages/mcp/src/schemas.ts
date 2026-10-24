@@ -68,6 +68,7 @@ const SCHEMAS: Readonly<Record<McpOperation, z.ZodType>> = {
     z.strictObject({ nodeId: id, mode: z.literal("immediate") }),
   ]),
   "node.confirmStopped": z.strictObject({ nodeId: id, note: text(LIMITS.summary).optional() }),
+  "node.hookUnbind": z.strictObject({ nodeId: id }),
   "inbox.fetch": z.strictObject({
     sinceSeq: seq.optional(),
     detail: z.enum(["brief", "full"]).optional(),

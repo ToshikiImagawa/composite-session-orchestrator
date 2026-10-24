@@ -1,7 +1,8 @@
+import { request as httpRequest } from "node:http";
 import { type EventBody, foldEvents, type OrchEvent, type OrchState } from "@cso/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCredentialStore } from "../../src/api/credentials.js";
-import type { HookDecider } from "../../src/api/hook.js";
+import { createSessionBinder, type HookDecider } from "../../src/api/hook.js";
 import { type ApiLogEvent, type ApiServer, createApiServer } from "../../src/api/server.js";
 
 let n = 0;
@@ -171,5 +172,78 @@ describe("POST /v1/hook（ファイルで設定するフック。T22-h）", () =
     for (let i = 0; i < 8; i++)
       expect((await post(r.url, r.child, pre("Read", {}))).status).toBe(200);
     expect((await post(r.url, r.child, pre("Read", {}))).status).toBe(429);
+  });
+
+  it("トークンを発行し直すと、結び付けが外れる。古いトークンのセッションは、その間も後も結び直せない（T22-hu）", async () => {
+    const sessions = createSessionBinder();
+    const credentials = createCredentialStore({
+      humanToken: HUMAN,
+      onNodeTokenChanged: (nodeId) => void sessions.unbind(nodeId),
+    });
+    const s = state();
+    server = createApiServer({
+      credentials,
+      getState: () => s,
+      handlers: {},
+      hook: policy,
+      hookSessions: sessions,
+    });
+    const { url } = await server.listen(0);
+    const old = credentials.issueNodeToken("a", "child");
+    expect((await post(url, old, pre("Read", {}, "s-old"))).status).toBe(200);
+    expect((await post(url, old, pre("Read", {}, "s-new"))).status).toBe(403);
+    const fresh = credentials.issueNodeToken("a", "child");
+    // 古いトークンは、発行し直した時点で無効（結び付けを外したあとに、古いトークンで結ぶことはできない）
+    expect((await post(url, old, pre("Read", {}, "s-old"))).status).toBe(401);
+    expect((await post(url, fresh, pre("Read", {}, "s-new"))).status).toBe(200);
+    expect((await post(url, fresh, pre("Read", {}, "s-old"))).status).toBe(403);
+  });
+
+  it("本文を読んでいるあいだにトークンを発行し直すと、古い要求は 401 になり、結び付けも起きない（T22-hu の R1）", async () => {
+    const sessions = createSessionBinder();
+    const credentials = createCredentialStore({
+      humanToken: HUMAN,
+      onNodeTokenChanged: (nodeId) => void sessions.unbind(nodeId),
+    });
+    const s = state();
+    server = createApiServer({
+      credentials,
+      getState: () => s,
+      handlers: {},
+      hook: policy,
+      hookSessions: sessions,
+    });
+    const { port } = await server.listen(0);
+    const old = credentials.issueNodeToken("a", "child");
+    const body = JSON.stringify(pre("Read", {}, "s-old"));
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          path: "/v1/hook",
+          method: "POST",
+          headers: {
+            host: `127.0.0.1:${port}`,
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(body),
+            authorization: `Bearer ${old}`,
+          },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      // 本文の前半だけ送り、認証を済ませたところで、トークンを発行し直してから、残りを送る
+      req.write(body.slice(0, 10));
+      setTimeout(() => {
+        credentials.issueNodeToken("a", "child");
+        req.end(body.slice(10));
+      }, 100);
+    });
+    expect(status).toBe(401);
+    expect(sessions.has("a")).toBe(false);
   });
 });

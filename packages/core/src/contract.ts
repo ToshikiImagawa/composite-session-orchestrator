@@ -118,6 +118,16 @@ export interface OperationMap {
     params: { nodeId: string; note?: string };
     result: { state: NodeState };
   };
+  /**
+   * フックの受け口（`POST /v1/hook`）の `session_id` の結び付けを外す（T22-hu）。`/clear`・`--resume` で session_id が変わったときに使う。
+   * 次に来た session_id に結び直す。人間と祖先の統合ノードだけ（本人の子は使えない: 盗まれたトークンで結び直させない）。
+   * 結び付けがなくても成功する（`unbound: false`）。外した者を記録に残す（`node.hookUnbound`）。
+   */
+  "node.hookUnbind": {
+    params: { nodeId: string };
+    /** `duplicate`: 同じ requestId の再送で、すでに記録済み（もう一度は外さない。`unbound` は false）。 */
+    result: { unbound: boolean; duplicate: boolean };
+  };
   "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly InboxItem[] } };
   "tree.list": { params: Record<string, never>; result: { table: string } };
   "decision.present": {
@@ -311,6 +321,7 @@ export const ROLE_OPERATIONS = {
     "node.send",
     "node.stop",
     "node.confirmStopped",
+    "node.hookUnbind",
     "inbox.fetch",
     "tree.list",
     "decision.present",
@@ -327,6 +338,7 @@ export const ROLE_OPERATIONS = {
   human: [
     "decision.answer",
     "node.confirmStopped",
+    "node.hookUnbind",
     "scope.decide",
     "node.reclaimInstruct",
     "node.reclaimPreview",
@@ -368,6 +380,7 @@ export const SUBTREE_RULES: Readonly<Record<SubtreeOperation, SubtreeRule>> = {
   "node.send": "strictDescendant",
   "node.stop": "strictDescendant",
   "node.confirmStopped": "strictDescendant",
+  "node.hookUnbind": "strictDescendant",
   "node.split": "strictDescendant",
   "node.review": "directChild",
   "node.reclaimPreview": "strictDescendant",
@@ -393,6 +406,7 @@ export const INTEGRATOR_OPERATION_CLASS: Readonly<
   "node.send": "subtree",
   "node.stop": "subtree",
   "node.confirmStopped": "subtree",
+  "node.hookUnbind": "subtree",
   "inbox.fetch": "callerFiltered",
   "tree.list": "callerFiltered",
   "decision.present": "subtree",
