@@ -145,6 +145,15 @@ state = {
     },
   ],
 };
+// 停止の宣言（T22d）: c1 は停止未完了で、親に代行してもらうノード（stopDelegated）。c2 は停止未完了だが、daemon が直接止める
+state = {
+  ...state,
+  nodes: [
+    ...state.nodes,
+    { id: "c1", role: "implement", parentId: "m1", state: "stopIncomplete", dependsOn: [] },
+    { id: "c2", role: "implement", parentId: "m1", state: "stopIncomplete", dependsOn: [] },
+  ],
+};
 // s1 の今のブランチの先端（見せたあとで、変える）
 const currentTips = { s1: "a".repeat(40) };
 // 操作の呼び出しの記録（画面の操作の確認用）。d2 の最初の回答は、失敗させる（失敗の表示と、同じ要求 ID での再送の確認）
@@ -225,7 +234,20 @@ handlers["scope.decide"] = async (req) => {
   return { ok: true, value: { state: "running" } };
 };
 const credentials = createCredentialStore({ humanToken: HUMAN });
-const server = createApiServer({ credentials, getState: () => state, handlers });
+const server = createApiServer({
+  credentials,
+  getState: () => state,
+  handlers,
+  stopDelegated: (id) => id === "c1",
+});
+handlers["node.confirmStopped"] = async (req) => {
+  calls.push({ operation: req.operation, requestId: req.requestId, params: req.params });
+  await new Promise((r) => setTimeout(r, 150));
+  bump({
+    nodes: state.nodes.map((x) => (x.id === req.params.nodeId ? { ...x, state: "stopped" } : x)),
+  });
+  return { ok: true, value: { state: "stopped" } };
+};
 const { url } = await server.listen(0);
 handlers["node.reclaimPreview"] = async (req) => {
   if (req.params.nodeId === "s2") {
@@ -836,6 +858,78 @@ rc.errors = rcErrors;
 out.reclaim = rc;
 // SSE の同時接続は 4 本まで。使い終わったページは閉じる
 await pageR.context().close();
+
+// ---- 停止の宣言（T22d）----
+const cs = {};
+const pageC = await (await browser.newContext({ viewport: { width: 900, height: 900 } })).newPage();
+const csErrors = [];
+pageC.on("pageerror", (e) => csErrors.push(String(e)));
+pageC.on("dialog", (d) => {
+  csErrors.push(`dialog:${d.message()}`);
+  d.dismiss();
+});
+await pageC.goto(`${url}/ui#token=${HUMAN}`);
+await pageC.waitForSelector("#view:not([hidden])", { timeout: 8000 });
+const crow = (id) =>
+  pageC.locator("#tree .node", { hasText: id }).filter({ hasText: "停止未完了" });
+const confirmCalls = () => calls.filter((c) => c.operation === "node.confirmStopped");
+// (a) 出し分け: stopDelegated の c1 だけに出す（c2・停止したノード・実行中のノードには出さない）
+cs.buttonOnC1 = (await crow("c1").getByRole("button", { name: "止めたと宣言…" }).count()) === 1;
+cs.noButtonOnC2 = (await crow("c2").getByRole("button", { name: "止めたと宣言…" }).count()) === 0;
+cs.onlyOneButton = (await pageC.getByRole("button", { name: "止めたと宣言…" }).count()) === 1;
+// (b) 根拠に XSS の文字列と余分な空白。確認には、整えた値を文字として出す
+const NOTE = `  ${XSS}   アーカイブ した  `;
+const CLEAN = `${XSS} アーカイブ した`;
+await crow("c1").locator("textarea").fill(NOTE);
+await crow("c1").getByRole("button", { name: "止めたと宣言…" }).click();
+await pageC.locator("#confirm").waitFor();
+const ctext = await pageC.locator("#confirm").innerText();
+cs.confirmShowsNoteAsText =
+  ctext.includes(CLEAN) && (await pageC.evaluate(() => window.__xss ?? null)) === null;
+cs.noInjectedElements = (await pageC.locator("#confirm img, #confirm script").count()) === 0;
+cs.confirmShowsIrreversible = ctext.includes("取り消せません") && ctext.includes("c1");
+cs.requestBeforeConfirm = confirmCalls().length === 0;
+// 確認の表示（打ち込みの欄を含む）を、1 枚に撮る
+await pageC.locator("#confirm").scrollIntoViewIfNeeded();
+await pageC
+  .locator("#confirm")
+  .screenshot({ path: join(process.env.CSO_OUT ?? ".", "ui-confirm-stopped.png") });
+// (c) 打ち込みの誤りでは送れない。disabled を外して押しても送らない
+const csSend = pageC.locator("#confirm button.primary");
+cs.sendDisabledInitially = await csSend.isDisabled();
+for (const wrong of ["C1", " c1", "c1 ", "ｃ１", "c"]) {
+  await pageC.locator("#confirm textarea").fill(wrong);
+  if (await csSend.isEnabled()) cs.wrongTypedEnabled = wrong;
+}
+await pageC.locator("#confirm textarea").fill("C1");
+await csSend.evaluate((b) => {
+  b.disabled = false;
+  b.click();
+});
+await pageC.waitForTimeout(400);
+cs.bypassNoRequest = confirmCalls().length === 0;
+// (d) 一致すれば送る。params は、見せた値（整えた根拠）と一致する。二重クリックでも 1 回
+await pageC.locator("#confirm textarea").fill("c1");
+await csSend.dblclick();
+await pageC.waitForFunction(
+  () => document.getElementById("notice").innerText.includes("止めたと宣言しました"),
+  null,
+  { timeout: 5000 },
+);
+const cc = confirmCalls();
+cs.calls = cc.length;
+cs.params = JSON.stringify(cc[0]?.params) === JSON.stringify({ nodeId: "c1", note: CLEAN });
+// (e) 停止済みになったら、ボタンは消える
+await pageC.waitForFunction(
+  () =>
+    ![...document.querySelectorAll("#tree button")].some((b) => b.textContent === "止めたと宣言…"),
+  null,
+  { timeout: 5000 },
+);
+cs.buttonGoneAfterStopped = true;
+cs.errors = csErrors;
+out.confirmStopped = cs;
+await pageC.context().close();
 await pageO.context().close();
 
 // SSE が使えないとき（上限 0 で、429）は、ポーリング（ETag）に切り替わる

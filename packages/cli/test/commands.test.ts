@@ -1059,3 +1059,70 @@ describe("discarded（T13f-r レビュー）", () => {
     expect(r.stdout).toContain("残り 3 件");
   });
 });
+
+describe("confirm-stopped（停止の宣言。T22d）", () => {
+  it("node.confirmStopped を送る（--note つき・なし）。結果の状態と requestId を出す", async () => {
+    const { client, sent } = fakeClient({ "node.confirmStopped": ok({ state: "stopped" }) });
+    const r = await runCommand(["confirm-stopped", "a", "--note", "アーカイブした"], deps(client));
+    expect(sent).toEqual([
+      {
+        requestId: "req-1",
+        role: "human",
+        operation: "node.confirmStopped",
+        params: { nodeId: "a", note: "アーカイブした" },
+      },
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("stopped");
+    expect(r.stdout).toContain("req-1");
+    const plain = fakeClient({ "node.confirmStopped": ok({ state: "stopped" }) });
+    await runCommand(["confirm-stopped", "a"], deps(plain.client));
+    expect(plain.sent[0]?.params).toEqual({ nodeId: "a" });
+  });
+
+  it("--note の長さ超え・空白だけ・制御文字・値なし・未知のオプションは、終了コード 2（送らない）", async () => {
+    const { client, sent } = fakeClient({ "node.confirmStopped": ok({ state: "stopped" }) });
+    for (const argv of [
+      ["confirm-stopped", "a", "--note", "x".repeat(201)],
+      ["confirm-stopped", "a", "--note", "  "],
+      ["confirm-stopped", "a", "--note", "a\u0007b"],
+      ["confirm-stopped", "a", "--note", "一行目\n二行目"],
+      ["confirm-stopped", "a", "--note", "a\tb"],
+      ["confirm-stopped", "a", "--note", "a\u202eb"],
+      ["confirm-stopped", "a", "--note"],
+      ["confirm-stopped", "a", "--yes"],
+      ["confirm-stopped"],
+    ]) {
+      expect((await runCommand(argv, deps(client))).exitCode, JSON.stringify(argv)).toBe(2);
+    }
+    expect(sent).toEqual([]);
+  });
+
+  it("失敗（notDelegated など）は原因と次の操作を出す。結果が確認できなければ、同じ requestId での再実行を案内する", async () => {
+    const f = fakeClient({
+      "node.confirmStopped": err(
+        failure("notDelegated", "daemon が直接止めるノード", "node.stop で停止を再試行する"),
+      ),
+    });
+    const r = await runCommand(["confirm-stopped", "a"], deps(f.client));
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("notDelegated");
+    expect(r.stderr).toContain("node.stop");
+    const bad = fakeClient({ "node.confirmStopped": ok({ unexpected: 1 }) });
+    const u = await runCommand(["confirm-stopped", "a", "--note", "a b"], deps(bad.client));
+    expect(u.exitCode).toBe(1);
+    expect(u.stderr).toContain("cso confirm-stopped a --note 'a b' --request-id req-1");
+  });
+
+  it("根拠は、前後の空白を削り、連続する空白を 1 つにして送る（画面と同じ）", async () => {
+    const { client, sent } = fakeClient({ "node.confirmStopped": ok({ state: "stopped" }) });
+    await runCommand(["confirm-stopped", "a", "--note", "  アーカイブ   した "], deps(client));
+    expect(sent[0]?.params).toEqual({ nodeId: "a", note: "アーカイブ した" });
+  });
+
+  it("--request-id を渡すと、その識別子で送る（再実行）", async () => {
+    const { client, sent } = fakeClient({ "node.confirmStopped": ok({ state: "stopped" }) });
+    await runCommand(["confirm-stopped", "a", "--request-id", "again-1"], deps(client));
+    expect(sent[0]?.requestId).toBe("again-1");
+  });
+});

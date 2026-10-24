@@ -42,6 +42,17 @@ export interface UiNode {
   readonly openItems: number;
   /** 破棄の判断（`node.reclaimInstruct`）が記録済みか。画面は、停止したノードで、指示済みなら、もう一度は出さない。 */
   readonly discarded: boolean;
+  /**
+   * daemon が直接止められず、停止を親に代行してもらうノード（能力表の `stopDelegated`。Desktop の子）か。真のときだけ付ける。
+   * 画面は、停止未完了のこのノードに、停止の宣言（`node.confirmStopped`）を出す。
+   */
+  readonly stopDelegated?: true;
+}
+
+/** 表示モデルを作るときの、状態の外の情報（daemon が渡す）。 */
+export interface UiViewOptions {
+  /** そのノードの能力表の `stopDelegated`（アダプタの能力表から。省略すると、どのノードにも付けない）。 */
+  readonly stopDelegated?: (nodeId: string) => boolean;
 }
 
 export interface UiInboxItem {
@@ -164,7 +175,7 @@ export function uiTargetOf(t: unknown): Pick<UiExtension, "kind" | "target" | "t
 /** 識別子の形でなければ、空にする（画面に、形の崩れた文字列を出さない）。 */
 const idOf = (x: unknown): string => (typeof x === "string" && ID_PATTERN.test(x) ? x : "");
 
-export function uiViewOf(state: OrchState): UiView {
+export function uiViewOf(state: OrchState, options: UiViewOptions = {}): UiView {
   const truncated: string[] = [];
   const cap = <T>(name: string, xs: readonly T[], max: number): readonly T[] => {
     if (xs.length <= max) return xs;
@@ -187,6 +198,7 @@ export function uiViewOf(state: OrchState): UiView {
       dependsOn: n.dependsOn.map(idOf).filter((d) => d !== ""),
       openItems: counts.get(n.id) ?? 0,
       discarded: n.discarded !== undefined,
+      ...(options.stopDelegated?.(n.id) === true ? { stopDelegated: true as const } : {}),
     }),
   );
 
