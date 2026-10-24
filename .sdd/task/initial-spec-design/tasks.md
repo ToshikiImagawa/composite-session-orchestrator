@@ -103,7 +103,8 @@ depends-on: ["design-initial-spec-design"]
 |:--|:--|:--|:--|:--|:--|
 | T20 | daemon: `desktop` ランタイムアダプタ（能力表は保守的な値 `unverified`/`unreliable`。`stop` は代行依頼を受信箱へ） | あり（項目 1〜7 で能力表を確定） | T08, T09 | 未 | FR_032, FR_034, FR_036 |
 | T21 | Desktop の子の紐付け手順（暫定は初回メッセージ後） | あり（項目 4） | T20 | 未 ※ Desktop の子が紐付けの入口（`POST /v1/bind`）を呼ぶ手段（`curl` など）を実行できるかも、ここで確かめる | FR_032 |
-| T22 | plugin: フック設定・skill・起動コマンド（Desktop の子へのフック継承部分） | 一部あり（フック継承は未確認） | T10, T20 | 未 | IR_001, IR_002, NFR_012 |
+| T22 | 一部済（CLI の分。2026-10 の PR）。plugin: skill（`cso-integrator`・`cso-child`。ロールの全ツールを説明）・起動コマンド（`start`・`status`。設定のパスと窓口の URL は、環境変数 `CSO_CONFIG`・`CSO_DAEMON_URL` か質問で受ける）。検証を拡張（`scripts/plugin-check.mjs`。skill・command の frontmatter、ツール名の実在とロール別の網羅、NFR_012〔絶対パスなし〕を `pnpm check` で必ず検査。試験 `scripts/plugin-check.test.mjs`）。`docs/plugin.md`。**フック設定は T22-h**（hooks.json は空）。**Desktop の分（子へのフック継承）は、実機確認〔項目 4〕のあと**。T10m の「起動の手配」は、起動の案内（`start`）で済 | 一部あり（フック継承は未確認） | T10, T20 | CLI の分 済・Desktop の分 保留 | IR_001, IR_002, NFR_012 |
+| T22-h | plugin・daemon: ファイルで設定するフック。(1) daemon の受け口 `POST /v1/hook`: 認証（ノードのトークン）・フック入力（`session_id`・`cwd`・ツール名・引数）を `hook-policy` に流して許可・拒否を返す。拒否は `node.toolDenied`・`scope.violation` として記録（SDK のコールバックと同じ判定・同じ記録）。回数の制限・処理中の重複の扱い（T10l）との関係、`session_id` とノードの対応づけ（bind。T21）、本文の上限を決める。契約の変更なので、設計の要約を先に出す。(2) plugin の `hooks/hooks.json`（PreToolUse・PostToolUse・Stop。受け口の URL とトークンは環境変数で受け、パスを埋め込まない。NFR_012）。(3) **手動確認の項目**: 利用者が plugin を入れた CLI のセッションで、フックが発火し、範囲外の書き込みが拒否されて記録されること。`settingSources` の混入がないこと。受け口に届かないとき（daemon 停止）の挙動（フェイルクローズ）。Desktop の子への継承は、項目 4 の結果のあと。`validate:plugin` に、hooks.json の形の検査を足す | あり（受け口・hooks.json）。手動確認あり | T22（CLI の分）, T10, T21, T20（Desktop の分） | 未 | FR_014, IR_002, NFR_012 |
 
 ## 実装前に決める未解決事項（設計 9.2 より）
 

@@ -1,50 +1,30 @@
-// plugin/.claude-plugin/plugin.json の JSON 構文と必須項目を検証する。
-import { readFileSync, statSync } from "node:fs";
+// plugin/ を検証する（`pnpm check` の最後の段階。`pnpm build` が済んでいること: MCP のツール名を packages/mcp/dist から読む）。
+// 検査の中身は plugin-check.mjs（試験: plugin-check.test.mjs）。
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { checkPlugin } from "./plugin-check.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const file = join(root, "plugin", ".claude-plugin", "plugin.json");
-const required = ["name", "version", "description"];
-
-let json;
-try {
-  json = JSON.parse(readFileSync(file, "utf8"));
-} catch (e) {
-  console.error(`NG: ${file} を読み込めません（JSON 構文を確認してください）: ${e.message}`);
+const toolsModule = join(root, "packages", "mcp", "dist", "tools.js");
+if (!existsSync(toolsModule)) {
+  console.error(
+    "NG: packages/mcp/dist/tools.js がありません（先に pnpm build を実行してください）",
+  );
   process.exit(1);
 }
-
-if (json === null || typeof json !== "object" || Array.isArray(json)) {
-  console.error("NG: plugin.json のトップレベルは JSON オブジェクトにしてください");
-  process.exit(1);
-}
-
-const missing = required.filter((k) => typeof json[k] !== "string" || json[k].trim() === "");
-if (missing.length > 0) {
-  console.error(`NG: plugin.json に必須項目がありません、または空です: ${missing.join(", ")}`);
-  process.exit(1);
-}
-const errors = [];
-if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(json.name)) {
-  errors.push(`name は kebab-case にしてください: ${json.name}`);
-}
-if (
-  !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(
-    json.version,
-  )
-) {
-  errors.push(`version は semver にしてください: ${json.version}`);
-}
-for (const dir of ["agents", "hooks", "skills"]) {
-  try {
-    if (!statSync(join(root, "plugin", dir)).isDirectory()) throw new Error("not a directory");
-  } catch {
-    errors.push(`plugin/${dir}/ ディレクトリがありません`);
-  }
-}
+const { toolsFor, WHOAMI_TOOL } = await import(pathToFileURL(toolsModule).href);
+const names = (role) => toolsFor(role).map((t) => t.name);
+const errors = checkPlugin({
+  pluginDir: join(root, "plugin"),
+  tools: { integrator: names("integrator"), child: names("child"), common: [WHOAMI_TOOL] },
+  forbidden: [root],
+});
 if (errors.length > 0) {
   for (const e of errors) console.error(`NG: ${e}`);
   process.exit(1);
 }
-console.log(`OK: plugin.json (${json.name}@${json.version})`);
+const json = JSON.parse(
+  readFileSync(join(root, "plugin", ".claude-plugin", "plugin.json"), "utf8"),
+);
+console.log(`OK: plugin.json (${json.name}@${json.version})・skills・commands・ツール名・NFR_012`);
