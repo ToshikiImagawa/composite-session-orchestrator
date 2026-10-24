@@ -7,6 +7,7 @@ import {
   createApiServer,
   type Handlers,
 } from "../../src/api/server.js";
+import { sleep, waitFor } from "./helpers.js";
 
 let n = 0;
 const ev = (body: EventBody): OrchEvent =>
@@ -63,6 +64,7 @@ interface Rig {
   /**
    * 重複の件数の合計（種類別）。件数のまとめの予約を手動にして、その場でまとめを出させ、出たまとめを足し合わせる。
    * 重複の要求が、サーバーに届いて処理されたことを、固定の待ちなしに確かめるための観測点（サーバー本体は変えない）。
+   * **呼ぶと、窓がリセットされる**（まとめが出て、件数が数え直しになる）。「窓の最初の 1 件」を確かめる試験では使わない。
    */
   deduped: (kind: string) => number;
 }
@@ -196,26 +198,18 @@ const preview = (id: string) => ({
   operation: "node.purgePreview",
   params: { nodeId: "x" },
 });
-const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
-/**
- * 条件が成り立つまで待つ（上限つき）。固定の `sleep` は、負荷が高いと、要求がサーバーに届く前に終わってしまうので、
- * 「届いた・動いた」は、観測できる事実（ハンドラの呼び出し数・件数・記録）で待つ。上限を超えたら失敗する（黙って進めない）。
- */
-const waitFor = async (
-  what: string,
-  cond: () => boolean | Promise<boolean>,
-  timeoutMs = 10_000,
-): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await cond())) {
-    if (Date.now() > deadline) throw new Error(`待ちきれなかった: ${what}`);
-    await sleep(2);
-  }
-};
 const handlerStarted = (r: Rig, op: string, n: number) =>
-  waitFor(`${op} のハンドラが ${n} 件動く`, () => (r.calls[op] ?? 0) >= n);
+  waitFor(
+    `${op} のハンドラが ${n} 件動く`,
+    () => r.calls[op] ?? 0,
+    (v) => v >= n,
+  );
 const dedupedReached = (r: Rig, kind: string, n: number) =>
-  waitFor(`重複（${kind}）が ${n} 件に届く`, () => r.deduped(kind) >= n);
+  waitFor(
+    `重複（${kind}）が ${n} 件に届く`,
+    () => r.deduped(kind),
+    (v) => v >= n,
+  );
 
 describe("同じ要求の処理中の重複（T10l-d）", () => {
   it("同じ主体・同じ requestId の要求が処理中なら、2 つ目はハンドラを呼ばず、最初の結果と同じ結果を返す（probe の再現: ハンドラは 1 回）", async () => {
@@ -442,19 +436,24 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
     expect(r.calls["report.progress"]).toBe(8); // 8 件とも、ハンドラが動いている
     for (const c of controllers) c.abort(); // 接続を切る
     await Promise.all(inflight);
-    // 「枠が戻らないこと」の確認: サーバーが切断に気づく時間を、固定で与える（待つ対象の事実が、観測できない）。
-    // 負荷で足りなくても、偽の成功（枠が戻らないのに 429 を見る）にはならず、枠を誤って戻す不具合を見逃す側にだけ倒れる。
-    await sleep(100);
-    // 接続は切れたが、ハンドラは動いているので、枠は戻っていない
-    expect((await post(r, progress("while-held"), r.tokens.a)).status).toBe(429);
+    // 「枠が戻らないこと」の確認: サーバーが切断に気づく時間は観測できないので、切断のあと約 300ms の間、短い間隔で確かめ続ける。
+    // 一度でも 429 以外が返れば（枠が戻ってしまった）失敗。切断の検知が遅れても、その間に確かめ続けるので、見逃しにくい。
+    const until = Date.now() + 300;
+    let probes = 0;
+    do {
+      // 接続は切れたが、ハンドラは動いているので、枠は戻っていない
+      expect((await post(r, progress(`while-held${probes++}`), r.tokens.a)).status).toBe(429);
+      await sleep(7);
+    } while (Date.now() < until);
     r.g.open(); // ハンドラが終わる
-    // ハンドラが終わって枠が戻るまで、新しい requestId で試す（戻るまでは 429。戻ったら 200）
+    // ハンドラが終わって枠が戻るまで、新しい requestId で試す（戻るまでは 429。戻ったら 200）。
+    // 注: 通った送信は、ハンドラが動くので calls に数えられる（429 は、ハンドラを呼ばないので数えられない）。
     let after = 0;
-    let last = 0;
-    await waitFor("枠が戻って、新しい要求が通る", async () => {
-      last = (await post(r, progress(`after-held${after++}`), r.tokens.a)).status;
-      return last !== 429;
-    });
+    const last = await waitFor(
+      "枠が戻って、新しい要求が通る",
+      async () => (await post(r, progress(`after-held${after++}`), r.tokens.a)).status,
+      (status) => status !== 429,
+    );
     expect(last).toBe(200);
   });
 
@@ -477,10 +476,10 @@ describe("同じ要求の処理中の重複（T10l-d）", () => {
     const dup = post(r, progress("secret-request-id"), r.tokens.a);
     const conflict = post(r, progress("secret-request-id", "other"), r.tokens.a);
     // 窓の最初の 1 件は、すぐに記録される（まとめを出させない: 終わりのまとめで、件数をまとめて確かめるため）
-    await waitFor("重複と食い違いが届く", () =>
-      ["coalesced", "conflict"].every((k) =>
-        r.logs.some((e) => e.event === "apiDeduped" && e.kind === k),
-      ),
+    await waitFor(
+      "重複と食い違いが届く",
+      () => r.logs.flatMap((e) => (e.event === "apiDeduped" ? [e.kind] : [])).sort(),
+      (kinds) => kinds.includes("coalesced") && kinds.includes("conflict"),
     );
     r.g.open();
     await Promise.all([first, dup, conflict]);

@@ -9,6 +9,7 @@ import {
   createApiServer,
   type Handlers,
 } from "../../src/api/server.js";
+import { waitFor } from "./helpers.js";
 
 let n = 0;
 const ev = (body: EventBody): OrchEvent =>
@@ -342,20 +343,6 @@ const closedWithin = (s: Socket, ms: number): Promise<boolean> =>
       resolve(true);
     });
   });
-const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
-/** 条件が成り立つまで待つ（上限つき）。固定の `sleep` は、負荷が高いと、サーバーが受け付ける前に終わるので、観測できる事実で待つ。上限を超えたら失敗する。 */
-const waitFor = async (
-  what: string,
-  cond: () => boolean | Promise<boolean>,
-  timeoutMs = 10_000,
-): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await cond())) {
-    if (Date.now() > deadline) throw new Error(`待ちきれなかった: ${what}`);
-    await sleep(2);
-  }
-};
-
 /** `agent: false`（接続を使い回さない）で送って、応答のヘッダと、接続が閉じたかを返す。 */
 const rawPost = (
   r: Rig,
@@ -429,13 +416,17 @@ describe("遅い要求・接続の占有への対策（T10l）", () => {
     const slow: Socket[] = [];
     for (let i = 0; i < 8; i++) slow.push(await slowRequest(r, r.tokens.m1));
     // サーバーが 8 件を受け付けるのを待つ。枠が埋まると、本文を読まずに 429 になる（埋まる前は、本文が JSON でないので 415 で、実行されない）
-    await waitFor("8 件が枠を埋める", async () => {
-      const probe = await rawPost(r, "x", {
-        "content-type": "text/plain",
-        authorization: `Bearer ${r.tokens.m1}`,
-      });
-      return probe.status === 429;
-    });
+    await waitFor(
+      "8 件が枠を埋める",
+      async () =>
+        (
+          await rawPost(r, "x", {
+            "content-type": "text/plain",
+            authorization: `Bearer ${r.tokens.m1}`,
+          })
+        ).status,
+      (status) => status === 429,
+    );
     const ninth = await post(r, list("ninth"), r.tokens.m1);
     expect(ninth.status).toBe(429);
     expect(Number(ninth.retryAfter)).toBeGreaterThanOrEqual(1);
@@ -443,11 +434,11 @@ describe("遅い要求・接続の占有への対策（T10l）", () => {
     expect((await post(r, preview("other"), r.tokens.human)).status).toBe(200); // 別の主体は通る
     for (const s of slow) s.destroy();
     let after = 0;
-    let last = 0;
-    await waitFor("切れた接続の枠が戻る", async () => {
-      last = (await post(r, list(`after${after++}`), r.tokens.m1)).status;
-      return last !== 429;
-    });
+    const last = await waitFor(
+      "切れた接続の枠が戻る",
+      async () => (await post(r, list(`after${after++}`), r.tokens.m1)).status,
+      (status) => status !== 429,
+    );
     expect(last).toBe(200); // 枠が戻った
   });
 
@@ -487,7 +478,9 @@ describe("遅い要求・接続の占有への対策（T10l）", () => {
         }),
       );
     }
-    // サーバーが 2 本を数え終えると、3 本目は閉じられる。数え終える前に受け付けられた接続は、こちらで切って、やり直す
+    // サーバーが 2 本を数え終えると、3 本目は閉じられる。数え終える前に受け付けられた接続は、こちらで切って、やり直す。
+    // 前提: この試験は、既定のタイムアウト（要求・ヘッダ）で動かす。短いタイムアウトを指定すると、サーバーが 3 本目を
+    // タイムアウトで閉じるので、上限で閉じられたのと見分けがつかず、偽の成功になりうる。
     await waitFor("上限を超えた接続が閉じられる", async () => {
       const third = await new Promise<Socket>((resolve) => {
         const sock = connect(r.port, "127.0.0.1", () => resolve(sock));
