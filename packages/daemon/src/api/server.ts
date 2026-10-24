@@ -41,6 +41,7 @@ import { authorizeRole, authorizeScope, checkPrincipal } from "./authorize.js";
 import { type BindCodes, createThrottle, type Throttle } from "./bind.js";
 import { type CredentialStore, type Principal, parseBearer } from "./credentials.js";
 import { fingerprintOf } from "./dedupe.js";
+import { createSessionBinder, type HookDecider, parseHookRequest } from "./hook.js";
 import { type Identity, isValidNonce, NONCE_MAX_HEX, NONCE_MIN_HEX, proofOf } from "./identity.js";
 import {
   type ApiCounters,
@@ -95,6 +96,8 @@ export type ApiLogEvent =
       readonly at: string;
     }
   | { readonly event: "bindSucceeded"; readonly nodeId: string; readonly at: string }
+  /** `POST /v1/hook`（T22-h）: 結んだものと別の `session_id` を拒否した。ID は書かない。 */
+  | { readonly event: "hookSessionMismatch"; readonly at: string }
   | {
       readonly event: "bindFailed";
       readonly reason: "invalid" | "rejected" | "malformed";
@@ -151,6 +154,8 @@ export interface ApiDeps {
   readonly identity?: () => Identity | undefined;
   /** bind 専用の入口（`POST /v1/bind`）の bind コード。省略すると、この入口はない（404）。 */
   readonly bind?: BindCodes;
+  /** ファイルで設定するフックの受け口（`POST /v1/hook`。T22-h）の判定。省略すると、この入口はない（404）。 */
+  readonly hook?: HookDecider;
   /** bind の入口の、全体のスロットル（1 秒あたりの失敗）。省略すると 1 秒に 10 回。 */
   readonly bindThrottle?: Throttle;
   /** 記録の時刻（ISO 8601 UTC）。既定は現在時刻。 */
@@ -473,6 +478,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     }
     const path = (req.url ?? "").split("?")[0];
     if (path === "/v1/bind" && deps.bind !== undefined) return handleBind(req, res, deps.bind);
+    if (path === "/v1/hook" && deps.hook !== undefined) return handleHook(req, res, deps.hook);
     if (path === "/v1/whoami") return handleWhoami(req, res);
     if (path === "/v1/ui/state") return handleUiState(req, res);
     if (path === "/v1/events") return handleEvents(req, res);
@@ -790,6 +796,117 @@ export function createApiServer(deps: ApiDeps): ApiServer {
           ? { role: principal.role }
           : { role: principal.role, nodeId: principal.nodeId },
     });
+  }
+
+  const sessions = createSessionBinder();
+  /**
+   * ファイルで設定するフックの受け口（T22-h。`docs/plugin.md` の「フック」）。子のノードのトークンだけ（ほかは 403）。
+   * 認証・主体の検査・同時数・回数の制限は、`/v1/request` と同じ。重複の扱い（requestId）はない（判定は冪等）。
+   * 応答は `{ decision: "allow" | "deny", reason? }`。判定するのは PreToolUse だけで、PostToolUse・Stop は受けて allow を返す。
+   */
+  async function handleHook(
+    req: IncomingMessage,
+    res: ServerResponse,
+    decide: HookDecider,
+  ): Promise<void> {
+    if (req.method !== "POST") {
+      return reject(res, failure("methodNotAllowed", "POST だけを受け付ける", "POST で呼び出す"), {
+        allow: "POST",
+      });
+    }
+    const token = parseBearer(req.headers.authorization);
+    const principal = deps.credentials.authenticate(token);
+    if (principal === undefined) {
+      return authFailed(req, res, token === undefined ? "missing" : "invalid");
+    }
+    const valid = checkPrincipal(principal, deps.getState());
+    if (!valid.ok) {
+      counters.count("authFailed", "principalRejected");
+      req.resume();
+      return reject(res, valid.error, { "www-authenticate": "Bearer", ...CLOSE });
+    }
+    if (principal.role !== "child") {
+      req.resume();
+      return reject(
+        res,
+        failure(
+          "forbidden",
+          "フックの受け口は、子のノードのトークンだけが使える",
+          "子のノードのトークンで呼び出す",
+        ),
+        CLOSE,
+      );
+    }
+    const key = principalKey(principal);
+    const releaseSlot = acquire(key);
+    if (releaseSlot === undefined) {
+      counters.count("rateLimited", "inflight");
+      req.resume();
+      return tooMany(res, 1, true);
+    }
+    try {
+      const used = principalLimiter.tryConsume(key, 1);
+      if (!used.ok) {
+        counters.count("rateLimited", "principal");
+        req.resume();
+        return tooMany(res, used.retryAfterSec, true);
+      }
+      if (!/^application\/json(\s*;|$)/i.test(String(req.headers["content-type"] ?? ""))) {
+        req.resume();
+        return reject(
+          res,
+          failure("unsupportedMediaType", "Content-Type が application/json でない", "JSON で送る"),
+          CLOSE,
+        );
+      }
+      const raw = await readBody(req, maxBody);
+      if (raw === undefined) {
+        return reject(
+          res,
+          failure(
+            "payloadTooLarge",
+            `本文が大きすぎる（上限 ${maxBody} バイト）。フックは拒否として扱う`,
+            "書き込む内容を分けて、小さくする",
+          ),
+        );
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(raw.toString("utf8"));
+      } catch {
+        return reject(res, failure("invalidRequest", "本文が JSON でない", "JSON で送る"));
+      }
+      const parsed = parseHookRequest(body);
+      if (!parsed.ok) return reject(res, parsed.error);
+      const h = parsed.value;
+      if (!sessions.check(principal.nodeId, h.sessionId)) {
+        log({ event: "hookSessionMismatch", at: now() });
+        return reject(
+          res,
+          failure(
+            "forbidden",
+            "このトークンは、別のセッションに結ばれている",
+            "このノードのセッションから呼び出す",
+            "daemon を再起動すると、結び直しになる",
+          ),
+        );
+      }
+      if (h.event !== "PreToolUse" || h.toolName === undefined) {
+        return send(res, 200, { ok: true, value: { decision: "allow" } });
+      }
+      let d: Awaited<ReturnType<HookDecider>>;
+      try {
+        d = await decide(principal.nodeId, h.toolName, h.toolInput);
+      } catch {
+        d = { allow: false, reason: "フックの判定に失敗したため拒否した。" };
+      }
+      return send(res, 200, {
+        ok: true,
+        value: d.allow ? { decision: "allow" } : { decision: "deny", reason: d.reason },
+      });
+    } finally {
+      releaseSlot();
+    }
   }
 
   /** 画面の資産（HTML・JS・CSS）。状態を含まないので、認証はない（Host・Origin の検査は、入口で済んでいる）。 */

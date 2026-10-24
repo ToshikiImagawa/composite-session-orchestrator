@@ -1068,3 +1068,33 @@ describe("停止の宣言の release（Desktop だけ）", () => {
     expect(adapter.capabilities("a").stopDelegated).not.toBe(true);
   });
 });
+
+describe("ファイルで設定するフックの判定（decideHook。T22-h）", () => {
+  it("SDK のコールバックと同じ判定・同じ記録をする（範囲外の書き込みは拒否して scope.violation と受信箱。未知のツールは node.toolDenied）", async () => {
+    const r = rig();
+    await startNode(r);
+    expect(await r.adapter.decideHook("a", "Write", { file_path: "src/a.ts" })).toEqual({
+      allow: true,
+    });
+    const d = await r.adapter.decideHook("a", "Write", { file_path: "a.txt" });
+    expect(d.allow).toBe(false);
+    expect(r.sink.types).toEqual(["scope.violation", "inbox.added"]);
+    // 同じ違反は、SDK のコールバックから来ても、受信箱に 2 度は出さない（数え上げを共有する）
+    await sessionOf(r).options.hooks.preToolUse({
+      toolName: "Write",
+      toolInput: { file_path: "a.txt" },
+      cwd: WT,
+    });
+    expect(r.sink.types).toEqual(["scope.violation", "inbox.added", "scope.violation"]);
+    const u = await r.adapter.decideHook("a", "WebFetch", { url: "https://x" });
+    expect(u.allow).toBe(false);
+    expect(r.sink.types.at(-1)).toBe("node.toolDenied");
+  });
+
+  it("daemon が作業ツリーを知らないノードは、拒否する（フェイルクローズ。記録しない）", async () => {
+    const r = rig();
+    const d = await r.adapter.decideHook("zzz", "Read", { file_path: "a" });
+    expect(d.allow).toBe(false);
+    expect(r.sink.records).toHaveLength(0);
+  });
+});

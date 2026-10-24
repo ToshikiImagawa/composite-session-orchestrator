@@ -1,0 +1,22 @@
+{
+  "description": "CSO のフック（T22-h）。daemon の受け口（パス v1/hook）に送る。URL とトークンは環境変数 CSO_DAEMON_URL・CSO_NODE_TOKEN",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cso-hook.mjs\"", "timeout": 10 }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cso-hook.mjs\"", "timeout": 10 }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cso-hook.mjs\"", "timeout": 10 }]
+      }
+    ]
+  }
+}

@@ -637,6 +637,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   const server = createApiServer({
     identity: () => currentIdentity,
     credentials,
+    // ファイルで設定するフック（plugin の hooks.json。T22-h）。SDK のコールバックと同じ判定・同じ記録。
+    hook: (nodeId, toolName, toolInput) => adapter.decideHook(nodeId, toolName, toolInput),
     getState: () => log.state(),
     handlers: {
       ...handlers,

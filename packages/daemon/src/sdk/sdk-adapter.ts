@@ -558,6 +558,25 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     return promise;
   }
 
+  /**
+   * ファイルで設定するフック（`POST /v1/hook`。T22-h）の判定。SDK のコールバックと同じ判定・同じ記録（範囲違反の数え上げも共有）。
+   * daemon が作業ツリーを知らないノード（この adapter が起動していない）は、拒否する。
+   */
+  async decideHook(nodeId: string, toolName: unknown, toolInput: unknown): Promise<HookOutcome> {
+    const entry = this.nodes.get(nodeId);
+    if (entry === undefined || typeof toolName !== "string") {
+      return {
+        allow: false,
+        reason: "このノードの作業範囲を daemon が持っていないため拒否した。",
+      };
+    }
+    return this.onPreToolUse(nodeId, entry.state, entry.cwd, {
+      toolName,
+      toolInput,
+      cwd: entry.cwd,
+    });
+  }
+
   private async onPreToolUse(
     nodeId: string,
     state: HookState,
