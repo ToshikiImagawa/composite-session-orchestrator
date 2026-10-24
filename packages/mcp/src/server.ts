@@ -5,7 +5,7 @@
 import { type Failure, failure, ok, type Result } from "@cso/core";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { renderInbox } from "./inbox-response.js";
+import { type InboxProblem, inboxProblems, renderInbox } from "./inbox-response.js";
 import type { Relay } from "./relay.js";
 import { inputSchemaFor, parseToolInput } from "./schemas.js";
 import {
@@ -20,6 +20,63 @@ import {
 export interface ToolServerDeps {
   readonly role: McpRole;
   readonly relay: Relay;
+  /** 受信箱で除外した項目の不備を知らせる（T24-m2。ログに出す）。省略すると知らせない。 */
+  readonly onInboxProblems?: (problems: readonly InboxProblem[]) => void;
+}
+
+/** 受信箱の不備のログ（T24-m2）。固定の記号と、識別子の形式の項目 ID だけ（項目の内容は出さない）。 */
+export interface InboxExcludedLog {
+  readonly event: "inboxExcluded";
+  /** この行に出した不備の数（新しい不備だけ）。 */
+  readonly count: number;
+  readonly problems: readonly InboxProblem[];
+  /** 1 行の上限を超えて、出さなかった不備があった。 */
+  readonly truncated?: true;
+  readonly at: string;
+}
+
+/**
+ * 受信箱の不備を、プロセスの間に 1 回だけログに出す（T24-m2）。受信箱は LLM のターンごとに読まれるので、同じ不備（項目 ID と理由）は
+ * 2 回目から出さない。覚える数には上限があり（既定 1000）、超えたら古いものから忘れる（忘れた不備は、また 1 回出る）。
+ * プロセスを再起動すると、覚えたものは消える（また 1 回出る）。1 行に出すのは 20 件まで（超えたら `truncated`）。
+ */
+export function createInboxProblemReporter(opts: {
+  readonly log: (e: InboxExcludedLog) => void;
+  readonly maxRemembered?: number;
+  readonly perLine?: number;
+  readonly clock?: () => string;
+}): (problems: readonly InboxProblem[]) => void {
+  const max = opts.maxRemembered ?? 1000;
+  const perLine = opts.perLine ?? 20;
+  const clock = opts.clock ?? (() => new Date().toISOString());
+  const seen = new Set<string>();
+  return (problems) => {
+    const fresh: InboxProblem[] = [];
+    for (const p of problems) {
+      // 項目 ID がない不備（オブジェクトでない・ID が不正）は、理由だけで 1 つと数える
+      const key = `${p.itemId ?? ""}\0${p.reason}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (seen.size > max) {
+        const oldest = seen.values().next().value;
+        if (oldest !== undefined) seen.delete(oldest);
+      }
+      fresh.push(p);
+    }
+    if (fresh.length === 0) return;
+    const shown = fresh.slice(0, perLine);
+    try {
+      opts.log({
+        event: "inboxExcluded",
+        count: shown.length,
+        problems: shown,
+        ...(fresh.length > perLine ? { truncated: true as const } : {}),
+        at: clock(),
+      });
+    } catch {
+      // ログの失敗で、ツールの応答を変えない
+    }
+  };
 }
 
 const asError = (f: Failure) => ({
@@ -96,6 +153,8 @@ export function createToolServer(deps: ToolServerDeps): Server {
       if (operation === "inbox.fetch") {
         const items = (r.value as { items?: unknown } | null)?.items;
         const page = renderInbox(items as never, view);
+        // 除外した項目があれば、不備の理由をログに出す（応答には出さない。T24-m2）
+        if (page.ok && page.value.excluded > 0) deps.onInboxProblems?.(inboxProblems(items));
         return page.ok ? asValue(page.value) : asError(page.error);
       }
       return asValue(r.value);
@@ -117,7 +176,10 @@ export function createToolServer(deps: ToolServerDeps): Server {
  * 接続のトークンのロールを daemon に尋ね（接続ごとに 1 回）、そのロールのツールサーバーを作る。
  * MCP で公開しないロール（人間・不明）には、何も公開せず失敗にする。daemon の 401・403 は、そのまま失敗にする。
  */
-export async function openSession(relay: Relay): Promise<Result<Server>> {
+export async function openSession(
+  relay: Relay,
+  onInboxProblems?: (problems: readonly InboxProblem[]) => void,
+): Promise<Result<Server>> {
   try {
     const who = await relay.whoami();
     if (!who.ok) return who;
@@ -133,7 +195,13 @@ export async function openSession(relay: Relay): Promise<Result<Server>> {
     }
     const role = who.value.role;
     // ロールは接続の間だけ持つ（キャッシュはこの接続の間のみ）。
-    return ok(createToolServer({ role, relay }));
+    return ok(
+      createToolServer({
+        role,
+        relay,
+        ...(onInboxProblems === undefined ? {} : { onInboxProblems }),
+      }),
+    );
   } catch {
     return {
       ok: false,
