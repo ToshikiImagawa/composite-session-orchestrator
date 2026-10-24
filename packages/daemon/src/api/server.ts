@@ -895,6 +895,22 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       const parsed = parseHookRequest(body);
       if (!parsed.ok) return reject(res, parsed.error);
       const h = parsed.value;
+      // 本文を読んでいるあいだに、トークンが発行し直された・失効したなら、この要求では結ばない（T22-hu）。認証からここまでは
+      // 非同期（本文の読み込み）なので、もう一度確かめる。ここから結ぶまでは同期の処理なので、間に発行し直されることはない。
+      const again = deps.credentials.authenticate(token);
+      if (again === undefined || again.role !== "child" || again.nodeId !== principal.nodeId) {
+        counters.count("authFailed", "principalRejected");
+        return reject(
+          res,
+          failure(
+            "unauthenticated",
+            "資格情報がないか、正しくない",
+            "正しい資格情報で呼び出す",
+            "資格情報を再発行する",
+          ),
+          { "www-authenticate": "Bearer" },
+        );
+      }
       if (!sessions.check(principal.nodeId, h.sessionId)) {
         log({ event: "hookSessionMismatch", at: now() });
         return reject(

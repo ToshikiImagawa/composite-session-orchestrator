@@ -273,8 +273,8 @@ const isHeld = (v: unknown): v is { held: true; until?: string } =>
 const NOTE_FORBIDDEN = /[\p{Cc}\p{Cf}]/u;
 const isConfirmedStopped = (v: unknown): v is { state: string } =>
   isRecord(v) && typeof v.state === "string";
-const isUnbound = (v: unknown): v is { unbound: boolean } =>
-  isRecord(v) && typeof v.unbound === "boolean";
+const isUnbound = (v: unknown): v is { unbound: boolean; duplicate: boolean } =>
+  isRecord(v) && typeof v.unbound === "boolean" && typeof v.duplicate === "boolean";
 const isReleased = (v: unknown): v is { released: true } => isRecord(v) && v.released === true;
 const isPurged = (v: unknown): v is { purged: readonly string[] } =>
   isRecord(v) && isStringArray(v.purged);
@@ -601,7 +601,9 @@ export async function runCommand(
     if (res.kind !== "ok") return fail(res);
     return {
       exitCode: 0,
-      stdout: `${res.value.unbound ? "フックの結び付けを外した" : "フックの結び付けはなかった（記録だけ残した）"}: ${nodeId}\n次に来たセッションに結び直す\nrequestId: ${id}\n`,
+      stdout: res.value.duplicate
+        ? `すでに記録済み（再送。もう一度は外さない）: ${nodeId}\nrequestId: ${id}\n`
+        : `${res.value.unbound ? "フックの結び付けを外した" : "フックの結び付けはなかった（記録だけ残した）"}: ${nodeId}\n次に来たセッションに結び直す\nrequestId: ${id}\n`,
       stderr: "",
     };
   }

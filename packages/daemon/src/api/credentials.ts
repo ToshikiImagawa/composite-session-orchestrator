@@ -51,7 +51,9 @@ export function createCredentialStore(options: {
   readonly clock?: () => string;
   /**
    * ノードのトークンを発行し直した・失効させた直後に呼ぶ（T22-hu。フックの受け口の session_id の結び付けを外す）。
-   * 古いトークンを無効にしたあと、同じ同期の処理の中で呼ぶので、古いトークンのセッションが、その間に結び直すことはない。
+   * 古いトークンを無効にしたあと、同じ同期の処理の中で呼ぶ。これだけでは、認証を済ませて本文を読んでいる途中の古い要求が、
+   * 外したあとに結んでしまいうるので、受け口は、結ぶ直前に、もう一度認証する（`server.ts` の `handleHook`）。
+   * 両方で、古いトークンの要求は、発行し直したあとに結び付けを作れない。
    */
   readonly onNodeTokenChanged?: (nodeId: string) => void;
 }): CredentialStore {

@@ -893,15 +893,20 @@ describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h�
   });
 
   it("hook-unbind は、node.hookUnbind を送り、外したか・なかったかを表示する（T22-hu）", async () => {
-    const a = fakeClient({ "node.hookUnbind": ok({ unbound: true }) });
+    const a = fakeClient({ "node.hookUnbind": ok({ unbound: true, duplicate: false }) });
     const r = await runCommand(["hook-unbind", "a"], deps(a.client));
     expect(ops(a.sent)).toEqual(["node.hookUnbind"]);
     expect(a.sent[0]?.params).toEqual({ nodeId: "a" });
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("外した");
-    const b = fakeClient({ "node.hookUnbind": ok({ unbound: false }) });
+    const b = fakeClient({ "node.hookUnbind": ok({ unbound: false, duplicate: false }) });
     expect((await runCommand(["hook-unbind", "a"], deps(b.client))).stdout).toContain("なかった");
     expect((await runCommand(["hook-unbind", "a", "--yes"], deps(b.client))).exitCode).toBe(2);
+    const c = fakeClient({ "node.hookUnbind": ok({ unbound: false, duplicate: true }) });
+    const again = await runCommand(["hook-unbind", "a", "--request-id", "r-1"], deps(c.client));
+    expect(again.exitCode).toBe(0);
+    expect(again.stdout).toContain("すでに記録済み（再送");
+    expect(again.stdout).not.toContain("なかった");
   });
 
   it("purge-release は、node.purgeRelease を送る", async () => {

@@ -123,7 +123,11 @@ export interface OperationMap {
    * 次に来た session_id に結び直す。人間と祖先の統合ノードだけ（本人の子は使えない: 盗まれたトークンで結び直させない）。
    * 結び付けがなくても成功する（`unbound: false`）。外した者を記録に残す（`node.hookUnbound`）。
    */
-  "node.hookUnbind": { params: { nodeId: string }; result: { unbound: boolean } };
+  "node.hookUnbind": {
+    params: { nodeId: string };
+    /** `duplicate`: 同じ requestId の再送で、すでに記録済み（もう一度は外さない。`unbound` は false）。 */
+    result: { unbound: boolean; duplicate: boolean };
+  };
   "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly InboxItem[] } };
   "tree.list": { params: Record<string, never>; result: { table: string } };
   "decision.present": {

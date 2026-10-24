@@ -60,7 +60,7 @@ describe("node.hookUnbind（フックの結び付けを外す。T22-hu）", () =
     const r = rig();
     expect(r.sessions.check("a", "s-old")).toBe(true);
     expect(r.sessions.check("a", "s-new")).toBe(false);
-    expect(r.call("human", "a")).toEqual({ ok: true, value: { unbound: true } });
+    expect(r.call("human", "a")).toEqual({ ok: true, value: { unbound: true, duplicate: false } });
     expect(r.sessions.check("a", "s-new")).toBe(true);
     expect(r.sessions.check("a", "s-old")).toBe(false);
     expect(r.unboundEvents()).toEqual([
@@ -71,7 +71,7 @@ describe("node.hookUnbind（フックの結び付けを外す。T22-hu）", () =
   it("祖先の統合ノードは外せる（記録の actor はその統合ノード）。部分木の外・自分自身は 403", () => {
     const r = rig();
     r.sessions.check("a", "s-1");
-    expect(r.call("root", "a")).toEqual({ ok: true, value: { unbound: true } });
+    expect(r.call("root", "a")).toEqual({ ok: true, value: { unbound: true, duplicate: false } });
     expect(r.unboundEvents()[0]?.actor).toEqual({ nodeId: "root" });
     r.sessions.check("a", "s-2");
     const outside = r.call("m2", "a");
@@ -84,7 +84,7 @@ describe("node.hookUnbind（フックの結び付けを外す。T22-hu）", () =
 
   it("結び付けがなくても成功し（unbound: false）、記録は残す。未知のノードは notFound", () => {
     const r = rig();
-    expect(r.call("human", "a")).toEqual({ ok: true, value: { unbound: false } });
+    expect(r.call("human", "a")).toEqual({ ok: true, value: { unbound: false, duplicate: false } });
     expect(r.unboundEvents()).toEqual([
       { actor: { human: true }, payload: { nodeId: "a", hadBinding: false } },
     ]);
@@ -95,9 +95,15 @@ describe("node.hookUnbind（フックの結び付けを外す。T22-hu）", () =
   it("同じ requestId の再送は、もう一度は外さない（その間に結んだ新しいセッションを外さない）", () => {
     const r = rig();
     r.sessions.check("a", "s-1");
-    expect(r.call("human", "a", "same")).toEqual({ ok: true, value: { unbound: true } });
+    expect(r.call("human", "a", "same")).toEqual({
+      ok: true,
+      value: { unbound: true, duplicate: false },
+    });
     r.sessions.check("a", "s-2");
-    expect(r.call("human", "a", "same")).toEqual({ ok: true, value: { unbound: false } });
+    expect(r.call("human", "a", "same")).toEqual({
+      ok: true,
+      value: { unbound: false, duplicate: true },
+    });
     expect(r.sessions.check("a", "s-2")).toBe(true);
     expect(r.unboundEvents()).toHaveLength(1);
   });

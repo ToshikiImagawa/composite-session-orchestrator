@@ -6,7 +6,7 @@
  *   本人が外せると、盗まれたトークンで外して、別のセッションで結び直せてしまう。
  * - 記録（`node.hookUnbound`。外した者は actor）に成功してから外す（記録できなければ、外さない）。記録と外す処理は同期の処理の
  *   中で続けて行うので、その間に別のセッションが結ぶことはない。session_id は記録に書かない。
- * - 同じ requestId の再送は、もう一度は外さない（再送のあいだに結んだ、新しいセッションを外さないため）。結果は `unbound: false`。
+ * - 同じ requestId の再送は、もう一度は外さない（再送のあいだに結んだ、新しいセッションを外さないため）。結果は `{ unbound: false, duplicate: true }`。
  */
 
 import { type Failure, isStrictDescendant, type OperationMap, type Result } from "@cso/core";
@@ -41,7 +41,7 @@ export function createHookHandlers(deps: HookHandlerDeps) {
       }
       const actor = human ? ({ human: true } as const) : { nodeId: caller };
       if (alreadyApplied(state, actor, req.requestId))
-        return { ok: true, value: { unbound: false } };
+        return { ok: true, value: { unbound: false, duplicate: true } };
       const hadBinding = sessions.has(nodeId);
       const r = log.append({
         requestId: derivedRequestId(actor, req.requestId, 0),
@@ -49,7 +49,7 @@ export function createHookHandlers(deps: HookHandlerDeps) {
         body: { type: "node.hookUnbound", payload: { nodeId, hadBinding } },
       });
       if (!r.ok) return fail(r.error.code, r.error.cause, ...r.error.nextActions);
-      return { ok: true, value: { unbound: sessions.unbind(nodeId) } };
+      return { ok: true, value: { unbound: sessions.unbind(nodeId), duplicate: false } };
     },
   };
 }
