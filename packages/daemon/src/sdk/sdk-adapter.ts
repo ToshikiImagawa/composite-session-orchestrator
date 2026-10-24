@@ -42,6 +42,7 @@ import type {
   McpServerConfig,
 } from "./agent.js";
 import { childEnv } from "./child-env.js";
+import { qualifiedSkill, skillFor } from "./child-plugin.js";
 import { decideToolUse, type ResolvePath, resolveScope } from "./hook-policy.js";
 import type { ProcessProbe } from "./lsof-probe.js";
 import type {
@@ -78,6 +79,8 @@ export interface SdkAdapterDeps {
    * 最初のイベントの要求 ID を、この鍵から決める（判断への回答の側が、人間が止めた子と区別し、回答で再開する）。
    */
   readonly waitKeyOf?: (nodeId: string) => string | undefined;
+  /** 子に渡す skill だけの plugin のパス（T22-c。`buildChildPlugin` で作ったもの）。省略すると、plugin を渡さない。 */
+  readonly childPluginPath?: string;
   /** 応答に出さない原因（記録の失敗など）の記録先。 */
   readonly onFailure?: (nodeId: string, cause: string) => void;
   /** 穏当な停止の猶予の既定値（ミリ秒）。既定 60000。 */
@@ -257,6 +260,8 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
           }
         : undefined;
 
+      const skill =
+        d.childPluginPath === undefined ? undefined : skillFor(request.role ?? "implement");
       let session: AgentSession;
       try {
         session = d.launcher.launch({
@@ -265,7 +270,13 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
           settingSources: [],
           ...(mcpServers ? { mcpServers } : {}),
           hooks: { preToolUse: (input) => this.onPreToolUse(nodeId, state, cwd, input) },
-          initialPrompt: request.instruction,
+          ...(skill === undefined
+            ? { initialPrompt: request.instruction }
+            : {
+                // 手順は skill に任せる（指示には手順の本文を書かない。食い違いを避ける）。
+                initialPrompt: `${request.instruction}\n作業の手順（報告・判断の求め方など）は、skill「${skill}」に従う。`,
+                plugin: { path: d.childPluginPath as string, skill: qualifiedSkill(skill) },
+              }),
         });
       } catch (e) {
         return fail(

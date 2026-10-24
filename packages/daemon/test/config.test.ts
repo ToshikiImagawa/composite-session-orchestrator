@@ -441,6 +441,15 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     }
   });
 
+  it("childPluginDir は、絶対パス（任意。.. を含まない）", () => {
+    const none = parseConfig(JSON.stringify(base));
+    expect(none.ok && none.value.childPluginDir).toBeUndefined();
+    const okp = parseConfig(JSON.stringify({ ...base, childPluginDir: "/opt/cso/plugin" }));
+    expect(okp.ok && okp.value.childPluginDir).toBe("/opt/cso/plugin");
+    for (const v of ["plugin", "/a/../b", "/", 1, null])
+      bad({ childPluginDir: v }, "childPluginDir");
+  });
+
   it("childHome は、isolated（既定）か inherit", () => {
     const none = parseConfig(JSON.stringify(base));
     expect(none.ok && none.value.childHome).toBeUndefined();

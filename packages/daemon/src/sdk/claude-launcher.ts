@@ -148,6 +148,15 @@ export function launcherWith(
               ),
             }),
         hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
+        // skill だけの plugin（hooks・commands を含まない。daemon が作る）。使える skill は、その 1 つに絞る。
+        ...(options.plugin === undefined
+          ? {}
+          : {
+              plugins: [
+                { type: "local" as const, path: options.plugin.path, skipMcpDiscovery: true },
+              ],
+              skills: [options.plugin.skill],
+            }),
       };
       const q = queryFn({ prompt: input(), options: sdkOptions });
 

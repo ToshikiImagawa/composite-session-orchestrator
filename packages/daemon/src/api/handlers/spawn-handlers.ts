@@ -268,6 +268,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
     try {
       const started = await adapter.start({
         nodeId,
+        role,
         worktreePath,
         scope: brief.scope,
         instruction: instructionOf(brief, intro.value),

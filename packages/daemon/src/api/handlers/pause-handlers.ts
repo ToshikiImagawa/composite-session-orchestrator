@@ -230,6 +230,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
     try {
       const started = await adapter.start({
         nodeId: target,
+        role: node.role,
         worktreePath: cwd,
         scope,
         instruction: instructionAfterAnswer(node.id, before, scope, answer, intro.value),
