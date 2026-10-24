@@ -10,5 +10,6 @@ step "build";           pnpm build
 step "resolve core";    node scripts/check-core-resolution.mjs
 step "typecheck";       pnpm typecheck
 step "test";            pnpm test
+step "plugin check test"; node --test scripts/*.test.mjs
 step "validate plugin"; pnpm validate:plugin
 printf '\nAll checks passed.\n'
