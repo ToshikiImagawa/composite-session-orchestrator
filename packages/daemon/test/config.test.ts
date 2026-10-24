@@ -410,6 +410,15 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     for (const v of ["yes", 1, null]) bad({ purgeTombstone: v }, "purgeTombstone");
   });
 
+  it("desktopRequireVerifiedHooks は真偽値（任意。省略時はゲート有効）", () => {
+    const d = parseConfig(JSON.stringify(base));
+    expect(d.ok && d.value.desktopRequireVerifiedHooks).toBeUndefined();
+    const off = parseConfig(JSON.stringify({ ...base, desktopRequireVerifiedHooks: false }));
+    expect(off.ok && off.value.desktopRequireVerifiedHooks).toBe(false);
+    for (const v of ["no", 0, null])
+      bad({ desktopRequireVerifiedHooks: v }, "desktopRequireVerifiedHooks");
+  });
+
   it("childEnvAllow は、環境変数の名前の配列（任意）", () => {
     const ok1 = parseConfig(JSON.stringify({ ...base, childEnvAllow: ["AWS_PROFILE", "MY_VAR"] }));
     expect(ok1.ok && ok1.value.childEnvAllow).toEqual(["AWS_PROFILE", "MY_VAR"]);

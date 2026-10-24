@@ -9,6 +9,8 @@ export interface Capabilities {
   readonly send: "ok" | "delayed" | "unreliable" | "unsupported";
   readonly stopGraceful: boolean;
   readonly stopImmediate: boolean;
+  /** 直接は止められないが、受信箱を通じて親に停止の代行を依頼できる（Desktop。FR_036）。省略すると false。 */
+  readonly stopDelegated?: boolean;
   readonly hooks: "ok" | "unverified" | "unsupported";
   readonly sessionId: boolean;
 }
@@ -48,12 +50,14 @@ export interface StopRequest {
 export interface StopValue {
   /** `stopped`: 作業ツリー配下にプロセスがないことを確認できた。`stopIncomplete`: 所定の時間を超えても残っている。 */
   readonly state: "stopped" | "stopIncomplete";
-  /** 猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか。 */
-  readonly outcome: StopOutcome;
+  /** 猶予内に止まったか、`interrupt()` に落ちたか、`abort()` したか。代行（`delegation`）のときは省略する。 */
+  readonly outcome?: StopOutcome;
   /** 残っているプロセスの pid（`stopIncomplete` のときの手がかり）。 */
   readonly blockers: readonly number[];
   /** 続行した問題（手段の例外、観測の記録の失敗など）。なければ省略する。 */
   readonly warnings?: readonly string[];
+  /** 停止を親に代行してもらうときの依頼の文面（親・手順・対象のノード）。受信箱の stopIncomplete の項目に出す。 */
+  readonly delegation?: string;
 }
 
 export interface RuntimeAdapter {

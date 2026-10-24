@@ -93,7 +93,7 @@ const ruleHolds = (
 /**
  * ノードについて、呼び出した統合ノード（`caller`）が取れる操作を導く（FR_034）。次の 3 つで絞る:
  * (1) ノードの状態（core の遷移表）、(2) アダプタの能力表（アダプタがなければ、指示・停止・切り出し・子の生成は出さない。
- * 停止は、穏当か即時のどちらかが可能なときだけ。指示は `send` が unsupported でないときだけ）、
+ * 停止は、穏当か即時のどちらかが可能か、代行（`stopDelegated`）できるときだけ。指示は `send` が unsupported でないときだけ）、
  * (3) 呼び出し元との関係（`SUBTREE_RULES`。例: 完了の判定は直接の親だけ、自分自身には何もない）。
  * `node.reclaimPreview`・`node.reclaim` は、回収の入口に立てる状態（verified・stopped）で出す。実際に回収できるかは、
  * `node.reclaimPreview` の判定（回収可能判定。条件 1〜6）で決まる。停止未完了（stopIncomplete）からの `node.stop` は、
@@ -110,7 +110,7 @@ export function operationsFor(
   const candidates: DaemonOperation[] = ["node.capabilities"];
   if (caps !== undefined) {
     if (SENDABLE.has(s) && caps.send !== "unsupported") candidates.push("node.send");
-    const canStop = caps.stopGraceful || caps.stopImmediate;
+    const canStop = caps.stopGraceful || caps.stopImmediate || caps.stopDelegated === true;
     if (
       canStop &&
       (s === "stopIncomplete" ||
@@ -157,6 +157,7 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
    * 停止の結果を、イベントログへ反映する（アダプタが記録しない分）。停止の試行（`stopSeq`）ごとに 1 回（冪等）。
    * - 停止を確認した（stopped）: 受信箱に info。
    * - 停止未完了（stopIncomplete。残っているプロセスの pid つき）: 受信箱に stopIncomplete。
+   * - 代行（`delegation` つき。Desktop）: 受信箱に stopIncomplete（代行の文面）。
    * - アダプタの失敗: まだ stopping なら、`stopTimeout` を記録して stopIncomplete にし、受信箱に stopIncomplete。
    */
   const settle = (nodeId: string, stopSeq: number, result: Result<StopValue, Failure>): void => {
@@ -171,7 +172,9 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       },
     });
     if (result.ok && result.value.state === "stopped") {
-      bodies.push(inbox("info", `停止を確認した（${result.value.outcome}）`));
+      bodies.push(inbox("info", `停止を確認した（${result.value.outcome ?? "不明"}）`));
+    } else if (result.ok && result.value.delegation !== undefined) {
+      bodies.push(inbox("stopIncomplete", result.value.delegation));
     } else if (result.ok) {
       bodies.push(
         inbox(

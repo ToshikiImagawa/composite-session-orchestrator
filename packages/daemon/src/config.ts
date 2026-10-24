@@ -57,6 +57,11 @@ export interface DaemonConfig {
   /** `node.purge` の `tombstone` を省略したときに、墓標を残すか。省略すると `DEFAULT_PURGE_TOMBSTONE`（残す）。 */
   readonly purgeTombstone?: boolean;
   /**
+   * Desktop の子で、フックが確認済みでない間は起動を拒否するか（T20 のゲート）。省略すると true。設定ファイルでのみ false にでき、
+   * false のときは起動のたびに警告を記録する（作業範囲外の拒否 FR_014 による安全を保証できない）。
+   */
+  readonly desktopRequireVerifiedHooks?: boolean;
+  /**
    * 窓口の回数の制限（T10l）の調整。**制限そのものは、常に有効**（無効にはできない）。省略した項目は既定: 主体ごと（人間は 1 つ、
    * ノードは nodeId ごと）に容量 60・毎秒 20（重い操作は 5 トークン）、認証の失敗は接続元ごとに容量 20・毎分 30、キーの数の上限 10,000。
    * 下限がある（極端に低くして、自分を締め出さないため）: `perPrincipal.burst` 10〜10000、`perSecond` 1〜10000、
@@ -168,6 +173,7 @@ const KEYS = [
   "startLimits",
   "retentionDays",
   "purgeTombstone",
+  "desktopRequireVerifiedHooks",
   "autoPurge",
   "digest",
   "wake",
@@ -275,6 +281,12 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
   }
   if (raw.purgeTombstone !== undefined && typeof raw.purgeTombstone !== "boolean") {
     return bad("purgeTombstone は真偽値");
+  }
+  if (
+    raw.desktopRequireVerifiedHooks !== undefined &&
+    typeof raw.desktopRequireVerifiedHooks !== "boolean"
+  ) {
+    return bad("desktopRequireVerifiedHooks は真偽値");
   }
   let rateLimit: DaemonConfig["rateLimit"];
   if (raw.rateLimit !== undefined) {
@@ -641,6 +653,9 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(raw.purgeTombstone === undefined
         ? {}
         : { purgeTombstone: raw.purgeTombstone as boolean }),
+      ...(raw.desktopRequireVerifiedHooks === undefined
+        ? {}
+        : { desktopRequireVerifiedHooks: raw.desktopRequireVerifiedHooks as boolean }),
     },
   };
 }

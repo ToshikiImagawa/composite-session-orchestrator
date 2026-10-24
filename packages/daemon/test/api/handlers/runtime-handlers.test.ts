@@ -457,6 +457,23 @@ describe("バックグラウンドの停止の堅牢化（onStopSettled・アダ
     expect(inbox(r2).at(-1)).toMatchObject({ kind: "info", nodeId: "a" });
   });
 
+  it("アダプタが代行（delegation）を返したら、受信箱の stopIncomplete の項目に、代行の文面をそのまま出す", async () => {
+    const r = rig();
+    if (r.adapter) {
+      r.adapter.stopResult = ok({
+        state: "stopIncomplete",
+        blockers: [],
+        delegation: "親に停止の代行を依頼: Desktop でノード a のタスクを止める",
+      });
+    }
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" });
+    await flush();
+    await flush();
+    const item = inbox(r).at(-1);
+    expect(item).toMatchObject({ kind: "stopIncomplete", nodeId: "a" });
+    expect(item?.summary).toBe("親に停止の代行を依頼: Desktop でノード a のタスクを止める");
+  });
+
   it("受信箱の項目は、停止の試行ごとに 1 件（同じ結果を二重に出さない）", async () => {
     const r = rig();
     await r.call("node.stop", { nodeId: "a", mode: "immediate" }, "same");
@@ -502,6 +519,18 @@ describe("node.capabilities の絞り込み（呼び出し元との関係・ア�
     const o2 = await ops(r2, "a");
     expect(o2).not.toContain("node.send");
     expect(o2).toContain("node.stop");
+  });
+
+  it("停止の手段がなくても、代行（stopDelegated）があれば stop を出す", async () => {
+    const r = rig();
+    if (r.adapter)
+      r.adapter.caps = {
+        ...r.adapter.caps,
+        stopGraceful: false,
+        stopImmediate: false,
+        stopDelegated: true,
+      };
+    expect(await ops(r, "a")).toContain("node.stop");
   });
 
   it("停止未完了からは、停止（再試行＝即時）が出る", async () => {
