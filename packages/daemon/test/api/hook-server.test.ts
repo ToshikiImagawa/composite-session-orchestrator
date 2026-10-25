@@ -247,3 +247,115 @@ describe("POST /v1/hook（ファイルで設定するフック。T22-h）", () =
     expect(sessions.has("a")).toBe(false);
   });
 });
+
+describe("受け口の要求数（apiSummary の hook。T24-hc）", () => {
+  it("received（認証の前）・allowed・denied を数え、まとめに件数だけ出す（nodeId・session_id・ツール名・内容は出さない）", async () => {
+    const r = await start(policy);
+    await post(r.url, r.child, pre("Read", { file_path: "a" }, "sess-secret-1"));
+    await post(r.url, r.child, pre("Write", { file_path: "secret-path" }, "sess-secret-1"));
+    await post(r.url, r.child, { hook_event_name: "Stop", session_id: "sess-secret-1", cwd: "/x" });
+    await post(r.url, "wrong-token-wrong-token-wrong-token-1", pre("Read", {}));
+    await server?.close(); // 停止のときに、溜まった件数を 1 行にまとめる
+    server = undefined;
+    const summary = r.logs.find((e) => e.event === "apiSummary") as
+      | { hook?: Record<string, number>; authFailed: Record<string, number> }
+      | undefined;
+    expect(summary?.hook).toEqual({ received: 4, allowed: 2, denied: 1 });
+    expect(summary?.authFailed).toEqual({ invalid: 1 });
+    // 窓の最初の 1 件の記録は、hook では出さない
+    expect(r.logs.filter((e) => e.event !== "apiSummary" && e.event !== "apiAuthFailed")).toEqual(
+      [],
+    );
+    const text = JSON.stringify(r.logs);
+    for (const secret of ["sess-secret-1", "secret-path", "Write", "Read", '"a"']) {
+      expect(text.includes(secret), secret).toBe(false);
+    }
+  });
+
+  it("メソッドの検査（405）は数えない。認証に失敗した要求は received に入る", async () => {
+    const r = await start(policy);
+    await post(r.url, "wrong-token-wrong-token-wrong-token-1", {});
+    const s2 = await fetch(`${r.url}/v1/hook`, { method: "GET" });
+    expect(s2.status).toBe(405);
+    await server?.close();
+    server = undefined;
+    // 405（メソッドの検査）は数えない。数えるのは、認証に失敗した 1 件だけ
+    const summary = r.logs.find((e) => e.event === "apiSummary") as {
+      hook?: Record<string, number>;
+    };
+    expect(summary.hook).toEqual({ received: 1 });
+  });
+});
+
+describe("拒否の経路ごとの要求数（T24-hc）: received が 1 増え、allowed・denied は増えない", () => {
+  const raw = (url: string, token: string, body: string, type = "application/json") =>
+    fetch(`${url}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": type, authorization: `Bearer ${token}` },
+      body,
+    }).then((x) => x.status);
+  type Rig = Awaited<ReturnType<typeof start>>;
+  const cases: {
+    name: string;
+    over?: Parameters<typeof start>[1];
+    /** 前置きの要求（すべて許可される。received・allowed に入る）と、その数。 */
+    setup?: (r: Rig) => Promise<void>;
+    setupCount?: number;
+    act: (r: Rig) => Promise<number>;
+    status: number;
+  }[] = [
+    {
+      name: "人間のトークン",
+      act: (r) => post(r.url, HUMAN, pre("Read", {})).then((x) => x.status),
+      status: 403,
+    },
+    {
+      name: "session_id の不一致",
+      setup: async (r) => void (await post(r.url, r.child, pre("Read", {}, "s-1"))),
+      setupCount: 1,
+      act: (r) => post(r.url, r.child, pre("Read", {}, "s-2")).then((x) => x.status),
+      status: 403,
+    },
+    {
+      name: "本文が 1 MiB を超える",
+      act: (r) =>
+        post(r.url, r.child, pre("Write", { content: "x".repeat(1024 * 1024 + 1) })).then(
+          (x) => x.status,
+          () => 413, // 本文を読まずに閉じると、送り手には接続のエラーに見えることがある（どちらでも受け口は拒否）
+        ),
+      status: 413,
+    },
+    {
+      name: "text/plain",
+      act: (r) => raw(r.url, r.child, JSON.stringify(pre("Read", {})), "text/plain"),
+      status: 415,
+    },
+    { name: "壊れた JSON", act: (r) => raw(r.url, r.child, "{"), status: 400 },
+    {
+      name: "回数の制限（429）",
+      over: { rateLimit: { perPrincipal: { burst: 1, perSecond: 0.001 }, monotonicMs: () => 0 } },
+      setup: async (r) => {
+        // 重み 0.5 なので、容量 1 で 2 回通る
+        await post(r.url, r.child, pre("Read", {}));
+        await post(r.url, r.child, pre("Read", {}));
+      },
+      setupCount: 2,
+      act: (r) => post(r.url, r.child, pre("Read", {})).then((x) => x.status),
+      status: 429,
+    },
+  ];
+  it.each(cases)("$name", async (c) => {
+    const r = await start(policy, c.over ?? {});
+    await c.setup?.(r);
+    const n = c.setupCount ?? 0;
+    expect(await c.act(r)).toBe(c.status);
+    await server?.close();
+    server = undefined;
+    const summary = r.logs.find((e) => e.event === "apiSummary") as {
+      hook?: Record<string, number>;
+    };
+    expect(summary.hook?.received ?? 0).toBe(n + 1);
+    expect(summary.hook?.allowed ?? 0).toBe(n);
+    expect(summary.hook?.denied ?? 0).toBe(0);
+  });
+});

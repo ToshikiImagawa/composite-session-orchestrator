@@ -163,7 +163,12 @@ export const IN_PROGRESS_DEFAULTS = {
  * すぐに `first` として出し、窓が終わるときに、種類別の件数を 1 行にまとめる（次の記録が来たとき、または `flush`）。
  * 理由・キーの種類・操作の名前だけを出す。トークン・nodeId・内容は出さない。
  */
-export type CounterKind = "authFailed" | "rateLimited" | "deduped";
+export type CounterKind = "authFailed" | "rateLimited" | "deduped" | "hook";
+/**
+ * 窓の最初の 1 件の記録（`first`）を出さない種類。`hook`（`POST /v1/hook` の要求数。T24-hc）は、成功した要求も数えるので、
+ * 毎分の記録にしない（件数のまとめにだけ出す）。
+ */
+const NO_FIRST: ReadonlySet<CounterKind> = new Set(["hook"]);
 export interface ApiCounters {
   count(kind: CounterKind, name: string): void;
   /** 溜まっている件数を、今すぐ 1 行にまとめて出す（停止のとき）。 */
@@ -210,6 +215,7 @@ export function createApiCounters(options: {
     authFailed: {},
     rateLimited: {},
     deduped: {},
+    hook: {},
   });
   let counts = empty();
   const total = (): number =>
@@ -250,7 +256,7 @@ export function createApiCounters(options: {
       const bucket = counts[kind];
       const isFirst = bucket[name] === undefined;
       bucket[name] = (bucket[name] ?? 0) + 1;
-      if (isFirst) options.sink.first(kind, name);
+      if (isFirst && !NO_FIRST.has(kind)) options.sink.first(kind, name);
     },
     flush() {
       emit();
