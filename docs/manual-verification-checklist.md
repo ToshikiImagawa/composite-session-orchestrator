@@ -18,7 +18,7 @@
 | 6 | Desktop（Spike 01） | [B4. 項目 1・2: 送信・停止の操作](#b4-項目-12-送信停止の操作) | B1 と同じ | 権限モードの組み合わせで時間がかかる |
 | 7 | Desktop（Spike 01） | [B5. 項目 3: 完了と結果の取得](#b5-項目-3-完了と結果の取得) | B1 と同じ | B4 の子を完了させて確かめる |
 | 8 | Desktop（Spike 01） | [B6. 項目 7: 親を閉じたときの子](#b6-項目-7-親を閉じたときの子) | B1 と同じ | 親を閉じる・アプリを再起動するので、最後に行う |
-| 9 | Desktop（配線） | [C1. Desktop の子の紐付けと報告（T21）](#c1-desktop-の子の紐付けと報告t21) | B1 が「可」か「条件付き」 | B1 の結果を前提にする |
+| 9 | Desktop（配線） | [C1. Desktop の子の紐付けと報告（T21）](#c1-desktop-の子の紐付けと報告t21) | B1 のうち 2 点（子が `curl` を実行できる〔`-H @-`・`-d @-`〕・prompt が人間のメッセージとして扱われる）が可 | B1 の結果を前提にする |
 | 10 | Desktop（配線） | [C2. 停止の宣言を cli・画面から（T22d）](#c2-停止の宣言を-cli画面からt22d) | C1 の子 | C1 で作った子を止めて確かめる |
 
 B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desktop-spawn-task.md`](spikes/01-desktop-spawn-task.md) の「確認項目と結果」）。
@@ -34,6 +34,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 | Agent SDK の版 | |
 | Claude Desktop の版（B・C） | |
 | 権限モード（親・子。B・C） | |
+| 権限モード（A） | `dontAsk`（daemon が SDK で起動する子の固定値。記録だけ） |
 
 ---
 
@@ -41,7 +42,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 ### A1. 子が skill を使える（T22-c）
 
-- **前提**: daemon の設定に `childPluginDir`（この plugin のディレクトリ）を指定する（[`docs/plugin.md`](plugin.md) の「daemon が起動する子に渡す skill」）。daemon と `cso-mcp` の起動は [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「準備」「MCP サーバーの起動」。
+- **前提**: T22-c の `Skill` ツールの許可を含む版の daemon で行う。daemon の設定に `childPluginDir`（この plugin のディレクトリ）を指定する（[`docs/plugin.md`](plugin.md) の「daemon が起動する子に渡す skill」）。daemon と `cso-mcp` の起動は [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「準備」「MCP サーバーの起動」。
 - **手順**: 子を 1 つ作り（`node_spawn`）、子に作業させる。子の記録（トランスクリプト）と daemon の記録を見る。
 - **期待する結果**:
   - 子が `Skill` ツールで `cso-child`（中間の統合ノードは `cso-integrator`）を読み、その手順に従って報告する（`report_progress`・`report_done` など）。
@@ -60,7 +61,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 |:--|:--|:--|:--|
 | H1 | フックが発火する | PreToolUse・PostToolUse・Stop で動く。範囲内の書き込みは許可 | |
 | H2 | 範囲外の書き込みの拒否と記録 | 拒否され、理由がモデルに伝わる。`scope.violation` と受信箱の violation 1 件。未知のツールは `node.toolDenied` | |
-| H3 | `settingSources` の混入がない | SDK で起動する子からは、受け口に要求が来ない（api のカウンタ `apiSummary` でも確かめる） | |
+| H3 | `settingSources` の混入がない | SDK で起動する子からは、受け口に要求が来ない。**直接は確かめられない**: `apiSummary` は、成功した `/v1/hook` の要求数を数えないため。確かめられるのは間接的なこと（`hookSessionMismatch` が出ない、`apiSummary` の `authFailed`・`rateLimited` が増えない）だけ。要求数を足すのは後続のタスク T24-hc | |
 | H4 | daemon 停止のときのフェイルクローズ | PreToolUse はすべて拒否。Stop は止めない | |
 | H5 | 環境変数 | 両方なし: 素通し（標準エラーに一言）。片方だけ: 拒否 | |
 | H6 | `session_id` の結び付け | 別のセッションは 403。`/clear`・`--resume` で変わると拒否され、`cso hook-unbind <nodeId>`（または画面のボタン・親の `node_hookUnbind`）のあと通る。記録に `node.hookUnbound` | |
@@ -101,6 +102,8 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 ### B4. 項目 1・2: 送信・停止の操作
 
+結果は、spike の文書の「確認項目と結果」の表の **項目 1 の行**（送信・停止以外の操作があるか）と **項目 2 の行**（送信できるか・停止できるか）の判定の欄に、それぞれ書く。
+
 - **期待する結果**: 使えた操作名とエラー文。停止は「使えた／使えなかった／保留された」、メッセージは「合間に読んだ／作業の後に読んだ／届かなかった」で判定。権限モードの組み合わせと、5 分以上の放置も。配信経路（Desktop 内蔵 / SendMessage）をメッセージごとに書く。
 - **結果**:
 - **結果によって変わるタスク**: 停止・送信が使えるなら、能力表の `send`・停止の代行（`stopDelegated`）を見直す（T20）。使えないなら、停止は親への代行依頼と、停止の宣言（C2）のまま。
@@ -121,7 +124,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 ## C. Desktop の配線（T21・T22d。B1 のあと）
 
-- **前提（C 全体）**: daemon の設定 `childRuntime: "desktop"`。フックのゲートは既定で有効なので、B1 の結果で能力表を見直すまでは、確認のためだけに `desktopRequireVerifiedHooks: false` にする（確認のあとで戻す）。仕組みは [`docs/desktop-runtime.md`](desktop-runtime.md) の「配線と紐付け（T21。仮置き）」。
+- **前提（C 全体）**: B1 のうち 2 点（子が `curl` を実行できる〔`-H @-`・`-d @-` が使える〕こと、spawn_task の prompt が人間のメッセージとして扱われること）が可。daemon の設定 `childRuntime: "desktop"`。フックのゲートは既定で有効なので、B1 の結果で能力表を見直すまでは、確認のためだけに `desktopRequireVerifiedHooks: false` にする（確認のあとで戻す）。仕組みは [`docs/desktop-runtime.md`](desktop-runtime.md) の「配線と紐付け（T21。仮置き）」。
 
 ### C1. Desktop の子の紐付けと報告（T21）
 
@@ -142,7 +145,8 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
   2. Desktop の画面で、その子のタスクを止める（またはアーカイブする）。
   3. `cso confirm-stopped <nodeId> --note <根拠>` で宣言する。別の子で、HTML 画面の「止めたと宣言…」（ノード ID の打ち込み）でも宣言する（画面の確かめ方は [`docs/manual-verification-ui.md`](manual-verification-ui.md) の「停止の宣言（T22d）」）。
   4. daemon を再起動したあとも、同じことができるか（[`docs/desktop-runtime.md`](desktop-runtime.md) の「再起動のあと」）。
-- **期待する結果**: 停止済み（stopped）になり、宣言した者と根拠が記録に残り、代行依頼が解決済みになる。打ち込みが違えば送れない。
+  5. 動いている Desktop の子がある状態で、daemon を再起動する。根の受信箱を見る。もう一度再起動して、また見る。そのあと、その子を止めたと宣言する。
+- **期待する結果**: 停止済み（stopped）になり、宣言した者と根拠が記録に残り、代行依頼が解決済みになる。打ち込みが違えば送れない。再起動のあと、根の受信箱に（停止未完了の帯で）1 件出る。もう一度再起動しても増えない。止めたと宣言すると、その項目は解決済みになる。
 - **結果**:
 - **結果によって変わるタスク**: 不可なら T22d（cli・画面）か T20（`node.confirmStopped`）を差し戻す。合格なら tasks.md の T22d・T21 の手動確認を「済」にする。
 
