@@ -129,6 +129,11 @@ export type ApiLogEvent =
       readonly rateLimited: Readonly<Record<string, number>>;
       /** 同じ要求の重複（`coalesced`: 最初の結果を待って返した、`inProgress`: 待ちきれず 409、`conflict`: 本文が違う）。 */
       readonly deduped: Readonly<Record<string, number>>;
+      /**
+       * フックの受け口（`POST /v1/hook`。T24-hc）の要求数。`received`: 届いた（メソッドの検査の後、認証・回数の制限の前）、
+       * `allowed`・`denied`: 200 で返した判定。件数だけ（nodeId・session_id・ツール名・内容は出さない）。要求がなかった窓では出さない。
+       */
+      readonly hook?: Readonly<Record<string, number>>;
       readonly at: string;
     }
   /** 同じ要求の重複の処理（窓の最初の 1 件）。`kind`: coalesced・inProgress・conflict。 */
@@ -396,6 +401,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
           authFailed: c.authFailed,
           rateLimited: c.rateLimited,
           deduped: c.deduped,
+          ...(Object.keys(c.hook).length === 0 ? {} : { hook: c.hook }),
           at: now(),
         }),
     },
@@ -829,6 +835,8 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         allow: "POST",
       });
     }
+    // 届いた要求の数（T24-hc。認証・回数の制限の前なので、断った要求も含む）。
+    counters.count("hook", "received");
     const token = parseBearer(req.headers.authorization);
     const principal = deps.credentials.authenticate(token);
     if (principal === undefined) {
@@ -924,6 +932,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
         );
       }
       if (h.event !== "PreToolUse" || h.toolName === undefined) {
+        counters.count("hook", "allowed");
         return send(res, 200, { ok: true, value: { decision: "allow" } });
       }
       let d: Awaited<ReturnType<HookDecider>>;
@@ -932,6 +941,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       } catch {
         d = { allow: false, reason: "フックの判定に失敗したため拒否した。" };
       }
+      counters.count("hook", d.allow ? "allowed" : "denied");
       return send(res, 200, {
         ok: true,
         value: d.allow ? { decision: "allow" } : { decision: "deny", reason: d.reason },

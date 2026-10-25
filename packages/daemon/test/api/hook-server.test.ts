@@ -247,3 +247,42 @@ describe("POST /v1/hook（ファイルで設定するフック。T22-h）", () =
     expect(sessions.has("a")).toBe(false);
   });
 });
+
+describe("受け口の要求数（apiSummary の hook。T24-hc）", () => {
+  it("received（認証の前）・allowed・denied を数え、まとめに件数だけ出す（nodeId・session_id・ツール名・内容は出さない）", async () => {
+    const r = await start(policy);
+    await post(r.url, r.child, pre("Read", { file_path: "a" }, "sess-secret-1"));
+    await post(r.url, r.child, pre("Write", { file_path: "secret-path" }, "sess-secret-1"));
+    await post(r.url, r.child, { hook_event_name: "Stop", session_id: "sess-secret-1", cwd: "/x" });
+    await post(r.url, "wrong-token-wrong-token-wrong-token-1", pre("Read", {}));
+    await server?.close(); // 停止のときに、溜まった件数を 1 行にまとめる
+    server = undefined;
+    const summary = r.logs.find((e) => e.event === "apiSummary") as
+      | { hook?: Record<string, number>; authFailed: Record<string, number> }
+      | undefined;
+    expect(summary?.hook).toEqual({ received: 4, allowed: 2, denied: 1 });
+    expect(summary?.authFailed).toEqual({ invalid: 1 });
+    // 窓の最初の 1 件の記録は、hook では出さない
+    expect(r.logs.filter((e) => e.event !== "apiSummary" && e.event !== "apiAuthFailed")).toEqual(
+      [],
+    );
+    const text = JSON.stringify(r.logs);
+    for (const secret of ["sess-secret-1", "secret-path", "Write", "Read", '"a"']) {
+      expect(text.includes(secret), secret).toBe(false);
+    }
+  });
+
+  it("メソッドの検査（405）は数えない。認証に失敗した要求は received に入る", async () => {
+    const r = await start(policy);
+    await post(r.url, "wrong-token-wrong-token-wrong-token-1", {});
+    const s2 = await fetch(`${r.url}/v1/hook`, { method: "GET" });
+    expect(s2.status).toBe(405);
+    await server?.close();
+    server = undefined;
+    // 405（メソッドの検査）は数えない。数えるのは、認証に失敗した 1 件だけ
+    const summary = r.logs.find((e) => e.event === "apiSummary") as {
+      hook?: Record<string, number>;
+    };
+    expect(summary.hook).toEqual({ received: 1 });
+  });
+});

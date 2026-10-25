@@ -67,6 +67,15 @@ const rig = (over: { threshold?: number; minIntervalMs?: number } = {}) => {
 };
 
 describe("createApiAlert（窓口の 429・401 の件数の見える化。T10l-f PR-B）", () => {
+  it("フックの受け口の要求数（hook。T24-hc）は、閾値を超えても警告に入らない（数え方は変わらない）", () => {
+    const r = rig({ threshold: 5 });
+    r.alert({ ...summary({}), hook: { received: 1000, allowed: 990, denied: 10 } } as ApiLogEvent);
+    expect(r.added()).toEqual([]);
+    r.alert({ ...summary({ invalid: 5 }), hook: { received: 1000 } } as ApiLogEvent);
+    expect(r.added()).toHaveLength(1);
+    expect(JSON.stringify(r.added())).not.toContain("1000");
+  });
+
   it("閾値以上なら、根の受信箱に info を 1 件出す。文面は件数と固定の語だけ", () => {
     const r = rig();
     r.alert(summary({ invalid: 25, missing: 10, bindFailed: 2 }));

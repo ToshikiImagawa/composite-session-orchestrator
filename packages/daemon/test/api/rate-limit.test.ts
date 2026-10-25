@@ -164,6 +164,31 @@ describe("認証の失敗・制限の発動の集計（T10a）", () => {
     return { c, counters, firsts, summaries };
   };
 
+  it("hook（T24-hc）は、件数のまとめにだけ入り、窓の最初の 1 件の記録（first）は出さない。ほかの種類と独立", () => {
+    const r = rig();
+    r.counters.count("hook", "received");
+    r.counters.count("hook", "received");
+    r.counters.count("hook", "allowed");
+    r.counters.count("authFailed", "invalid");
+    expect(r.firsts).toEqual(["authFailed:invalid"]);
+    r.counters.flush();
+    expect(r.summaries).toEqual([
+      {
+        windowSec: 60,
+        counts: {
+          authFailed: { invalid: 1 },
+          rateLimited: {},
+          deduped: {},
+          hook: { received: 2, allowed: 1 },
+        },
+      },
+    ]);
+    // hook だけの窓でも、まとめを出す（H3 を直接確かめるため）
+    r.counters.count("hook", "received");
+    r.counters.flush();
+    expect(r.summaries).toHaveLength(2);
+  });
+
   it("窓の中で、種類ごとの最初の 1 件だけをすぐに出し、窓が終わった次の記録で、件数を 1 行にまとめる", () => {
     const r = rig();
     for (let i = 0; i < 5; i++) r.counters.count("authFailed", "invalid");
@@ -180,6 +205,7 @@ describe("認証の失敗・制限の発動の集計（T10a）", () => {
           authFailed: { invalid: 5, missing: 1 },
           rateLimited: { principal: 1 },
           deduped: {},
+          hook: {},
         },
       },
     ]);
@@ -225,7 +251,7 @@ describe("認証の失敗・制限の発動の集計（T10a）", () => {
       expect(r.summaries).toEqual([
         {
           windowSec: 60,
-          counts: { authFailed: { invalid: 2 }, rateLimited: {}, deduped: {} },
+          counts: { authFailed: { invalid: 2 }, rateLimited: {}, deduped: {}, hook: {} },
           window: { startMs: 1_000_000, endMs: 1_060_000 },
         },
       ]);
