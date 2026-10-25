@@ -61,7 +61,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 |:--|:--|:--|:--|
 | H1 | フックが発火する | PreToolUse・PostToolUse・Stop で動く。範囲内の書き込みは許可 | |
 | H2 | 範囲外の書き込みの拒否と記録 | 拒否され、理由がモデルに伝わる。`scope.violation` と受信箱の violation 1 件。未知のツールは `node.toolDenied` | |
-| H3 | `settingSources` の混入がない | SDK で起動する子からは、受け口に要求が来ない。**対比で直接確かめる**（T24-hc）: SDK の子だけを動かした窓の `apiSummary` に `hook.received` が出ない（項目がない＝0）。H1 の CLI セッションを動かした窓では `hook.received` が出る | |
+| H3 | `settingSources` の混入がない | SDK で起動する子からは、受け口に要求が来ない。**対比で直接確かめる**（T24-hc）: SDK の子だけを動かし、同じ 1 分のうちに無効なトークンで `GET /v1/whoami` を 1 回呼ぶ（窓を必ず作る）。その窓の `apiSummary` に `authFailed` があって `hook` がなければ、受け口の要求は 0（行がなければ、やり直す）。H1 の CLI セッションを動かした窓では `hook.received` が出る | |
 | H4 | daemon 停止のときのフェイルクローズ | PreToolUse はすべて拒否。Stop は止めない | |
 | H5 | 環境変数 | 両方なし: 素通し（標準エラーに一言）。片方だけ: 拒否 | |
 | H6 | `session_id` の結び付け | 別のセッションは 403。`/clear`・`--resume` で変わると拒否され、`cso hook-unbind <nodeId>`（または画面のボタン・親の `node_hookUnbind`）のあと通る。記録に `node.hookUnbound` | |

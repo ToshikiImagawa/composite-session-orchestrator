@@ -113,8 +113,8 @@ daemon の窓口（`POST /v1/request`・`GET /v1/whoami`・`POST /v1/hook`〔フ
 - `apiAuthFailed`（窓の最初の 1 件）: `reason` は `missing`（トークンがない・形式が違う）・`invalid`（形式は正しいが未知）・`principalRejected`（失効・止まったノード）。紐付け（`/v1/bind`）の失敗は `bindFailed` として、まとめに数える。
 - `apiRateLimited`（窓の最初の 1 件）: `key` は `principal`（主体ごとの制限）・`inflight`（同時数の制限）・`origin`（認証の失敗の制限。応答は 401 + `Retry-After`）。
 - `apiSummary`: `windowSec`・`authFailed`・`rateLimited`（種類別の件数）。フックの受け口（`POST /v1/hook`）に要求があった窓では、`hook`（T24-hc）も出る:
-  - `received`: 受け口に届いた要求の数。**メソッドの検査の後、認証と回数の制限の前に数える**ので、認証に失敗した要求・回数の制限で断った要求（401・429）も含む。断った理由は、今までどおり `authFailed`・`rateLimited` に出る。
-  - `allowed`・`denied`: 200 で返した判定の数（PreToolUse 以外の素通しは `allowed`）。`received` − `allowed` − `denied` が、断った要求の数。
+  - `received`: 受け口に届いた要求の数。**窓口の入口の検査（Host・Origin）とメソッドの検査の後、認証と回数の制限の前に数える**ので、認証に失敗した要求・回数の制限で断った要求（401・429）も含む。断った理由は、今までどおり `authFailed`・`rateLimited` に出る。
+  - `allowed`・`denied`: 200 で返した判定の数（PreToolUse 以外の素通しは `allowed`。判定に失敗して拒否にした場合も `denied`）。`received` − `allowed` − `denied` が、断った要求の数。
   - 件数だけを出す（nodeId・session_id・ツール名・内容は出さない）。窓の最初の 1 件の記録（`apiAuthFailed` のようなもの）は、`hook` では出さない（成功の要求で、記録が毎分増えないように）。
   - 上の警告（閾値）には入らない（警告は `authFailed`・`rateLimited` だけを数える）。
 

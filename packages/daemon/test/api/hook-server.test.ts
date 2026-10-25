@@ -286,3 +286,76 @@ describe("受け口の要求数（apiSummary の hook。T24-hc）", () => {
     expect(summary.hook).toEqual({ received: 1 });
   });
 });
+
+describe("拒否の経路ごとの要求数（T24-hc）: received が 1 増え、allowed・denied は増えない", () => {
+  const raw = (url: string, token: string, body: string, type = "application/json") =>
+    fetch(`${url}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": type, authorization: `Bearer ${token}` },
+      body,
+    }).then((x) => x.status);
+  type Rig = Awaited<ReturnType<typeof start>>;
+  const cases: {
+    name: string;
+    over?: Parameters<typeof start>[1];
+    /** 前置きの要求（すべて許可される。received・allowed に入る）と、その数。 */
+    setup?: (r: Rig) => Promise<void>;
+    setupCount?: number;
+    act: (r: Rig) => Promise<number>;
+    status: number;
+  }[] = [
+    {
+      name: "人間のトークン",
+      act: (r) => post(r.url, HUMAN, pre("Read", {})).then((x) => x.status),
+      status: 403,
+    },
+    {
+      name: "session_id の不一致",
+      setup: async (r) => void (await post(r.url, r.child, pre("Read", {}, "s-1"))),
+      setupCount: 1,
+      act: (r) => post(r.url, r.child, pre("Read", {}, "s-2")).then((x) => x.status),
+      status: 403,
+    },
+    {
+      name: "本文が 1 MiB を超える",
+      act: (r) =>
+        post(r.url, r.child, pre("Write", { content: "x".repeat(1024 * 1024 + 1) })).then(
+          (x) => x.status,
+          () => 413, // 本文を読まずに閉じると、送り手には接続のエラーに見えることがある（どちらでも受け口は拒否）
+        ),
+      status: 413,
+    },
+    {
+      name: "text/plain",
+      act: (r) => raw(r.url, r.child, JSON.stringify(pre("Read", {})), "text/plain"),
+      status: 415,
+    },
+    { name: "壊れた JSON", act: (r) => raw(r.url, r.child, "{"), status: 400 },
+    {
+      name: "回数の制限（429）",
+      over: { rateLimit: { perPrincipal: { burst: 1, perSecond: 0.001 }, monotonicMs: () => 0 } },
+      setup: async (r) => {
+        // 重み 0.5 なので、容量 1 で 2 回通る
+        await post(r.url, r.child, pre("Read", {}));
+        await post(r.url, r.child, pre("Read", {}));
+      },
+      setupCount: 2,
+      act: (r) => post(r.url, r.child, pre("Read", {})).then((x) => x.status),
+      status: 429,
+    },
+  ];
+  it.each(cases)("$name", async (c) => {
+    const r = await start(policy, c.over ?? {});
+    await c.setup?.(r);
+    const n = c.setupCount ?? 0;
+    expect(await c.act(r)).toBe(c.status);
+    await server?.close();
+    server = undefined;
+    const summary = r.logs.find((e) => e.event === "apiSummary") as {
+      hook?: Record<string, number>;
+    };
+    expect(summary.hook?.received ?? 0).toBe(n + 1);
+    expect(summary.hook?.allowed ?? 0).toBe(n);
+    expect(summary.hook?.denied ?? 0).toBe(0);
+  });
+});
