@@ -62,7 +62,7 @@ daemon が SDK で起動する子（CLI の子）には、plugin の skill を�
 - `childPluginDir` を省略すると、子に skill を渡さない（起動時に `childPluginSkipped` を記録する）。
 - パス（NFR_012）: plugin のパスは、コード・skill に書かない。写す元は設定、写す先は状態の置き場から決める。
 
-手動確認（未。実 SDK）: 子が skill を読めた（`Skill` ツールが許可され、内容に従って動く）こと、フックが二重にならないこと（hooks.json の判定が動かないこと）。
+手動確認（実 SDK。2026-10-26。Claude Code 2.1.308・Agent SDK 0.3.292・macOS 26.5）: 子が `Skill` ツールで `cso-child` を読めた（子の報告による自己申告。`node.toolDenied` は 0 件・`childPluginSkipped` なし）。**フックが二重にならないことは、未確認**: 認証（CLI のログイン）を引き継ぐため `childHome: "inherit"` で行い（既定の `isolated` では、子が認証できず止まった）、子が `~/.claude` の設定を読めた。`isolated` で認証できる環境（`ANTHROPIC_API_KEY`）で、受け口 `POST /v1/hook` に子の要求が来ないことを確かめる。
 
 ## Desktop
 

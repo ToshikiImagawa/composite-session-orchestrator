@@ -27,11 +27,11 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 | 欄 | 値 |
 |:--|:--|
-| 実施日 | |
+| 実施日 | 2026-10-26（A1） |
 | 実施者 | |
-| OS | |
-| Claude Code の版 | |
-| Agent SDK の版 | |
+| OS | macOS 26.5（A1） |
+| Claude Code の版 | 2.1.308（A1） |
+| Agent SDK の版 | 0.3.292（A1） |
 | Claude Desktop の版（B・C） | |
 | 権限モード（親・子。B・C） | |
 | 権限モード（A） | `dontAsk`（daemon が SDK で起動する子の固定値。記録だけ） |
@@ -49,7 +49,10 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
   - `Skill` ツールの呼び出しが、フックで拒否されない（`node.toolDenied` に出ない）。
   - フックが二重にならない: 子の起動で plugin の `hooks/hooks.json` が読まれない（daemon の受け口 `POST /v1/hook` に、その子からの要求が来ない）。
   - 起動時に `childPluginSkipped` が記録されない（設定したとき）。
-- **結果**: （可・不可・条件付き。観察したこと）
+- **結果**: **条件付き**（2026-10-26。Claude Code 2.1.308・Agent SDK 0.3.292・macOS 26.5）。
+  - 可: 子が `Skill` ツールで `cso-child` を読めたと報告した（自己申告。子の記録〔トランスクリプト〕は残らないので、ツール呼び出しは見えない）。`node.toolDenied` は 0 件。`childPluginSkipped` なし。子は `report_done` で完了を報告した。
+  - 未確認: フックが二重にならないこと。認証のため `childHome: "inherit"` で行い、子が `~/.claude` の設定を読めた。既定の `isolated` では、`ANTHROPIC_API_KEY` なしでは、子が認証できず止まった（`claude` CLI のログインは引き継げない）。
+  - 補足: `<repoRoot>/.claude/cso-worktree-files.json` で、作業ツリーに `.envrc` などが写り、子が読めた（[`worktree-seed-files.md`](worktree-seed-files.md)）。
 - **結果によって変わるタスク**: 不可なら T22-c を差し戻す（`options.plugins` の渡し方・`skills` の名前）。合格なら [`docs/plugin.md`](plugin.md) の「手動確認（未。実 SDK）」を「済」に、tasks.md の T22-c の状態を更新する。
 
 ### A2. ファイルで設定するフック（H1〜H6。T22-h・T22-hu）
@@ -156,7 +159,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 | 項目 | 判定 | 変わるタスク | 備考 |
 |:--|:--|:--|:--|
-| A1（T22-c） | | | |
+| A1（T22-c） | 条件付き | T22-c は、二重フックの確認が残る | skill を読めた（自己申告）。`inherit` で実施。`isolated` は認証で止まった |
 | A2（H1〜H6） | | | |
 | B1（項目 4） | | | |
 | B2（項目 6） | | | |
