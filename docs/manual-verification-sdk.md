@@ -120,7 +120,7 @@
 | # | 確認 | 期待 | 確認の方法 |
 |:--|:--|:--|:--|
 | H1 | フックが発火する | PreToolUse・PostToolUse・Stop で `cso-hook.mjs` が動く | `claude --debug` の出力に、フックの実行が出る。範囲内の `Write`（`src/a.txt`）は許可される |
-| H2 | 範囲外の書き込みの拒否と記録 | `Write`（`b.txt`）が拒否され、理由がモデルに伝わる。`scope.violation` が記録され、親の受信箱に violation が 1 件載る | 子に `b.txt` を書くよう頼み、`cso inbox` と記録を見る。未知のツール（例: `WebFetch`）は `node.toolDenied` |
+| H2 | 範囲外の書き込みの拒否と記録 | `Write`（`b.txt`）が拒否され、理由がモデルに伝わる。`scope.violation` が記録され、親の受信箱に violation が 1 件載る | 子に `b.txt` を書くよう頼み、親の受信箱（親の `inbox_fetch`、または画面の受信箱）と記録を見る。未知のツール（例: `WebFetch`）は `node.toolDenied` |
 | H3 | `settingSources` の混入がない | daemon が SDK で起動する子（`settingSources: []`）には、利用者が入れた plugin のフックが混ざらない（受け口に、その子からの要求が来ない） | **対比で直接確かめる**（T24-hc。窓口の件数のまとめ `apiSummary` の `hook`。窓は 1 分）。(1) H1 の CLI セッションを止め、ほかに受け口を呼ぶものがない状態で、SDK で起動した子にツールを使わせる（`Read` など）。**同じ 1 分のうちに、窓を必ず作るため、無効なトークンで `GET /v1/whoami` を 1 回呼ぶ**（例: `curl -sS -H 'authorization: Bearer invalid-token-invalid-token-0000' "$CSO_DAEMON_URL/v1/whoami"`）。1 分待ち、その窓の `apiSummary` を見る。**`authFailed` のある行があって、`hook` がなければ、窓は観測できていて、受け口の要求は 0**（`apiSummary` の行そのものがなければ、窓が観測できていないので、やり直す）。(2) 比べるため、H1 の CLI セッションでツールを使わせ、その窓の `apiSummary` に `hook.received`（と `allowed`）が**出る**ことを見る。(1) で `hook.received` が出たら、混入がある（`hookSessionMismatch` が出ないことも、あわせて見る）。`received` は認証・回数の制限の前に数えるので、断った要求も含む |
 | H4 | daemon 停止のときのフェイルクローズ | daemon を止めると、PreToolUse はすべて拒否される（「届かない」）。Stop は止めない（セッションを終えられる） | daemon を止めて、`Read` と `Write` を頼む。ツールが実行されないこと |
 | H5 | 環境変数 | 両方なし: 素通しし、標準エラーに一言出る（CSO のフックは働かない）。片方だけ: 拒否 | `CSO_NODE_TOKEN` だけを外して起動し、ツールが拒否されること |
