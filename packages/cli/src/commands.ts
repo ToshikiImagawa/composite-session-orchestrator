@@ -29,6 +29,8 @@ export interface CommandDeps {
   readonly client: DaemonClient;
   /** 要求の識別子（冪等性）。時刻・乱数を持たないよう、呼び出し側が渡す。 */
   readonly newRequestId: () => string;
+  /** 端末に繋がっているか（bin が `process.stdin.isTTY`・`process.stdout.isTTY` を渡す。T22-cli）。省略すると、どちらも false として扱う。 */
+  readonly isTTY?: { readonly stdin: boolean; readonly stdout: boolean };
 }
 
 export interface CommandResult {
