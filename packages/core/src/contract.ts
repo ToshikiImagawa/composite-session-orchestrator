@@ -234,7 +234,11 @@ export interface OperationMap {
   // 人間（画面・コマンド）
   "decision.answer": {
     params: { decisionId: string } & ({ choice: string } | { text: string });
-    result: { accepted: true };
+    /**
+     * `notResumed`（T24-rs）: 判断で止めた子のうち、回答で再開しなかった子と理由。再開しなかった子がいるときだけ入る
+     * （いなければ、今までどおり `{ accepted: true }`）。
+     */
+    result: { accepted: true; notResumed?: readonly NotResumed[] };
   };
   /**
    * 破棄の判断（人間。停止したノードの成果を捨ててよいという判断）。**`expectTips`（必須。空でもよい）**: プレビュー（`node.reclaimPreview` の `tips`）で
@@ -330,6 +334,22 @@ export interface OperationMap {
 }
 
 export type DaemonOperation = keyof OperationMap;
+
+/**
+ * 判断の回答で、子を再開しなかった理由（T24-rs）。1 つの子に複数が当てはまるときは、この順で最初のもの:
+ * `discarded`（破棄の判断を経た）> `stoppedAfterStopIncomplete`（判断の要求のあと、停止未完了を経て止め直された〔retryStop〕）>
+ * `stoppedByOther`（この判断のほかに止められた）。
+ */
+export type NotResumedReason = "discarded" | "stoppedAfterStopIncomplete" | "stoppedByOther";
+export const NOT_RESUMED_REASONS: readonly NotResumedReason[] = [
+  "discarded",
+  "stoppedAfterStopIncomplete",
+  "stoppedByOther",
+];
+export interface NotResumed {
+  readonly nodeId: string;
+  readonly reason: NotResumedReason;
+}
 
 /** ロールごとに公開する操作（NFR_004）。`node.purge`・`node.purgePreview` は人間のコマンドだけ（DC_003）。 */
 export const ROLE_OPERATIONS = {

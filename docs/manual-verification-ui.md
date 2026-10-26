@@ -94,3 +94,10 @@ daemon の窓口の実物に、記録するだけの仮のハンドラ（`decisi
 | 出し分け | compose と同じ `stopDelegatedOf(DesktopRuntimeAdapter)` で、停止未完了の子（c2）に「止めたと宣言…」が出る。実行中のノードには出ない。アダプタが何も管理していない（再起動のあと）状態でも出る | そのとおり |
 | 送る値 | ノード ID を打ち込んで送ると、params は `{ nodeId: "c2" }` | そのとおり |
 
+## 回答の結果の、再開しなかった子（T24-rs。2026-10-26 に確認）
+
+`scripts/ui-browser-check.mjs`（実ブラウザ。Chromium）。d1 の回答の結果に、`notResumed`（`a`・`stoppedAfterStopIncomplete` と、XSS の文字列の ID・`discarded`）を返す。
+
+| 項目 | 期待 | 結果 |
+| --- | --- | --- |
+| 通知の文 | 「回答を送りました。再開しなかった子: a（停止未完了のあと止め直したため。新しい子でやり直す）」。形の違う ID（XSS）は出ない。通知の中に img・script の要素がない | そのとおり（`ops.notResumedText`・`ops.notResumedShown`） |

@@ -30,6 +30,7 @@ export * from "./ids.js";
 export * from "./inbox.js";
 export * from "./inbox-kinds.js";
 export * from "./limits.js";
+export * from "./process-name.js";
 export * from "./purge.js";
 export * from "./reclaim.js";
 export * from "./scope.js";

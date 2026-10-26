@@ -97,6 +97,13 @@ describe("reconcileOnStartup（再起動の後、記録と実際のプロセス�
     expect(items.map((i) => i.summary).join(" ")).toContain("222");
   });
 
+  it("残っているプロセスの名前を、整えて要約に添える（T24-sp）", async () => {
+    const r = rig({ processes: { a: [{ ...proc(111), command: "vim\u0007" }, proc(112)] } });
+    await r.run();
+    const item = r.s().inbox.find((i) => i.kind === "stopIncomplete" && i.nodeId === "a");
+    expect(item?.summary).toContain("残っているプロセス pid 111（vim）、112");
+  });
+
   it("プロセスを調べられない・作業ツリーが分からないときも、安全側（停止未完了）にする。stopIncomplete のまま残っていれば、そのまま", async () => {
     const r = rig({ processes: { a: null }, noCwd: ["w"] });
     await r.run();
