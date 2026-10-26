@@ -7,7 +7,7 @@
 ## 前提
 
 - Node 22 以上、`git`、`lsof`。`pnpm install && pnpm build` 済み。
-- Claude の認証が、実行する環境にあること（`ANTHROPIC_API_KEY` または、`claude` CLI のログイン）。認証情報は、設定ファイルにも、このリポジトリにも書かない。
+- Claude の認証が、daemon を起動する環境の**環境変数**にあること（`ANTHROPIC_API_KEY`、または `claude setup-token` で作った `CLAUDE_CODE_OAUTH_TOKEN`）。`claude` CLI のログインだけでは、既定の `childHome: "isolated"` で子が起動できない（`childAuthMissing`。下の「HOME の分離」）。認証情報は、設定ファイルにも、このリポジトリにも書かない。
 - 依存: `@anthropic-ai/claude-agent-sdk` **0.3.292**（2026-10-06 公開。固定。ライセンスは `SEE LICENSE IN README.md`。ユーザーが確認・承認）。推移的な依存の公開日は `docs/dependency-release-ages.md`。
 - MCP サーバー（`cso-mcp`）は、`packages/mcp` の bin（`pnpm build` で `packages/mcp/dist/bin.js` ができる）。手順 6〜7 は、これを起動して行う（下の「MCP サーバーの起動」）。
 
@@ -117,7 +117,7 @@
 
 前提: daemon（`childRuntime: "cli"`）が起動していて、範囲を持つ子（例: `writableLocations: ["src"]`）が daemon の管理下で動いている（受け口は、daemon が作業ツリーを知っているノードだけを判定する。ほかは拒否）。人間が、その子の**フック専用のトークン**を発行して、環境変数に入れる: `eval "$(cso hook-env <nodeId>)"`（T22-ht。`CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が設定される。トークンは画面・引数・履歴に出ない。標準出力が端末なら、`cso hook-env` は失敗する）。ノードのトークン（SDK の子が使っているもの）は変わらない。次に、**その子の作業ツリーで**、同じシェルから plugin つきの CLI のセッションを起動する: `claude --plugin-dir <plugin のディレクトリ>`。トークンは、チャット・設定ファイルに書かない。`cso` の実行ファイル（T22-cli）は、窓口の URL を `CSO_DAEMON_URL`、人間のトークンを `CSO_HUMAN_TOKEN` で受ける（使い方は `cso --help`）。
 
-**フック専用のトークンが無効になるとき**: ノードのトークンが発行し直される（判断の回答のあとの再開・子の再起動・失効）と、フック専用のトークンも一緒に無効になる。手動のセッションのフックは拒否されるようになるので、`eval "$(cso hook-env <nodeId>)"` から起動し直す。daemon の再起動でも無効になる。**`cso hook-env` の出力を、パイプやファイルに出さない**（`eval` 以外に渡すと、トークンがそこに残る）。**互換**: 記録のイベント `node.hookTokenIssued` を書いたあとは、古い版の daemon に戻せない（ダウングレード不可）。
+**フック専用のトークンが無効になるとき**: ノードのトークンが発行し直される・失効すると、フック専用のトークンも一緒に無効になる。発行し直されるのは、**子が止められて再開したとき**（判断要求の `pauseNodeIds` で止め、回答で再開）・子の作り直し・bind のとき（CLI の子（`childRuntime: "cli"`）で実際に起こるのは、このうち**再開だけ**（作り直しは新しいノードになり、bind は Desktop の子だけ）。）。**子を止めない判断（`pauseNodeIds` なし、子が自分で出した判断など）に回答しても、子は動いたまま（回答は指示として届く）で、トークンは変わらない。手動のセッションは、そのまま使える**。手動のセッションのフックは拒否されるようになるので、`eval "$(cso hook-env <nodeId>)"` から起動し直す。daemon の再起動でも無効になる。**`cso hook-env` の出力を、パイプやファイルに出さない**（`eval` 以外に渡すと、トークンがそこに残る）。**互換**: 記録のイベント `node.hookTokenIssued` を書いたあとは、古い版の daemon に戻せない（ダウングレード不可）。
 
 | # | 確認 | 期待 | 確認の方法 |
 |:--|:--|:--|:--|
@@ -126,7 +126,7 @@
 | H3 | `settingSources` の混入がない | daemon が SDK で起動する子（`settingSources: []`）には、利用者が入れた plugin のフックが混ざらない | **受け口の要求数では見分けられない**: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らないので、plugin の hooks.json が混ざっても、フックのスクリプトは素通しして、受け口を呼ばない（`apiSummary` の `hook` は 0 のまま）。代わりに次の 2 つで確かめる。(1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない（`skills/` と `.claude-plugin/plugin.json` だけ）。(2) SDK の子の標準エラーに、フックのスクリプトの一言 `[cso-hook]` が出ない（**見方**: daemon は、SDK の子の標準エラーを記録しない〔daemon の記録＝daemon の標準エラーの JSON の行には出ない〕。フックの一言は、子のセッションの記録〔子の HOME の下の `.claude/projects/<作業ツリーを表す名前>/<セッション ID>.jsonl`。`childHome: inherit` なら利用者の HOME、`isolated` なら daemon が子に用意した HOME〕に残るので、そのファイルを、フックの一言そのもの（`[cso-hook] CSO_DAEMON_URL と CSO_NODE_TOKEN がない…`）で調べる: `grep -c 'cso-hook\] CSO_DAEMON_URL と CSO_NODE_TOKEN がない'`〔0 なら出ていない。`cso-hook` だけで探すと、plugin の名前・パスに当たって誤検知する〕。記録に残らない版の Claude Code では、(1) だけで判定し、結果の欄にそう書く）（混ざっていれば、環境変数がないことを知らせる一言が、ツールの呼び出しのたびに出る） |
 | H4 | daemon 停止のときのフェイルクローズ | daemon を止めると、PreToolUse はすべて拒否される（「届かない」）。Stop は止めない（セッションを終えられる） | daemon を止めて、`Read` と `Write` を頼む。ツールが実行されないこと |
 | H5 | 環境変数 | 両方なし: 素通しし、標準エラーに一言出る（CSO のフックは働かない）。片方だけ: 拒否 | `CSO_NODE_TOKEN` だけを外して起動し、ツールが拒否されること（`eval` のあと、`unset CSO_NODE_TOKEN` して起動する） |
-| H6 | `session_id` の結び付け | 同じトークンで別のセッションを起動すると、403 で拒否される（`hookSessionMismatch`）。daemon を再起動すると、最初に来たセッションに結び直す | 2 つ目の CLI セッションを、同じ環境変数で起動する。同じセッションで `/clear`・`--resume` をして `session_id` が変わると拒否され、`cso hook-unbind <nodeId>`（または親の `node_hookUnbind`）のあと、新しいセッションが通ることも確かめる（記録に `node.hookUnbound` が残る）。`cso hook-env` で発行し直したときも、古いフック用トークンは 401 になり、結び付けが外れることを確かめる。**判断の回答のあと**（`decision.present` で子を止め、回答で再開すると、子のノードのトークンが発行し直される）、手動のセッションのフックが拒否されるようになり（401）、`eval "$(cso hook-env <nodeId>)"` から起動し直すと通ることも確かめる |
+| H6 | `session_id` の結び付け | 同じトークンで別のセッションを起動すると、403 で拒否される（`hookSessionMismatch`）。daemon を再起動すると、最初に来たセッションに結び直す | 2 つ目の CLI セッションを、同じ環境変数で起動する。同じセッションで `/clear`・`--resume` をして `session_id` が変わると拒否され、`cso hook-unbind <nodeId>`（または親の `node_hookUnbind`）のあと、新しいセッションが通ることも確かめる（記録に `node.hookUnbound` が残る）。`cso hook-env` で発行し直したときも、古いフック用トークンは 401 になり、結び付けが外れることを確かめる。**子が止められて再開したあと**（親が `decision.present` に `pauseNodeIds: [<子>]` を付けて子を止め、回答で再開すると、子のノードのトークンが発行し直される。見えるもので確かめる: (a) HTML の画面の木で、子が `stopped` になり、回答のあとに `running` に戻る。(b) 親の受信箱に、回答（answer）の項目が出る。記録で確かめるときは、状態の置き場の `state.db`（SQLite）を読む: `sqlite3 <状態の置き場>/state.db "SELECT seq, type, payload FROM events WHERE type IN ('decision.requested','node.stateChanged') ORDER BY seq DESC LIMIT 10"`。`decision.requested` の payload に `pauseNodeIds`、子の `node.stateChanged` に `restart` がある）、手動のセッションのフックが拒否されるようになり（401）、`eval "$(cso hook-env <nodeId>)"` から起動し直すと通ることも確かめる。**子を止めない判断**（`pauseNodeIds` なし）に回答したあとは、画面の木で子が動作中（`running`）のままで、停止の表示が出ず、手動のセッションがそのまま通ることも確かめる |
 
 注: 本文の上限（1 MiB）を超えた要求の 413 は、daemon が本文を読まずに接続を閉じるため、スクリプトからは「届かない」扱いになることがある（どちらでも PreToolUse は拒否）。
 
@@ -171,6 +171,9 @@ Desktop の子への継承は、項目 4 の結果のあと（T22 の Desktop �
 ### HOME の分離（#45 のレビュー対応）
 
 子の `HOME` は、既定で `<stateDir>/homes/<nodeId>`（0700）に分ける（設定 `childHome: "inherit"` で、daemon の `HOME` を渡す）。
+
+子の認証（T22-auth）: 既定の `isolated` では、`claude` CLI のログインだけの環境は、子の起動が `childAuthMissing` で拒否される。認証の環境変数と、判定の規則は [`docs/plugin.md`](plugin.md) の「子の認証」。
+
 `childEnvAllow` に、`LD_*`・`NODE_OPTIONS`・`BASH_ENV`・`GIT_SSH_COMMAND` など、子の実行を乗っ取れる名前は指定できない。
 実 SDK（0.3.292）で、子の `HOME` を空の 0700 のディレクトリに分けて、項目 16 をやり直した（2026-10-21）: 認証は通り（`ready`、約 7 秒で結果）、
 `src/a.txt` への Write は許可されて書けた。範囲の外（`outside.txt`）への Write は、フックが拒否して書かれなかった。分けた HOME には、SDK が

@@ -165,6 +165,37 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
     return promise;
   }
 
+  /**
+   * 利用者が直せる起動の失敗（子の認証がない。T22-auth）を、親の受信箱に failure で出す。同じ子の同じ失敗が、未解決のまま
+   * 残っていれば出さない（再試行のたびに増やさない）。値は出さない（失敗の文面は、変数の名前だけ）。
+   */
+  function reportStartFailure(target: string, parentId: string | null, f: Failure): void {
+    if (parentId === null) return;
+    const summary = summarize(
+      `子 ${target} を再開できなかった（${f.code}）: ${f.cause}。対処: ${f.nextActions[0]}`,
+    );
+    const state = log.state();
+    if (
+      state.inbox.some(
+        (i) => i.nodeId === target && i.resolved === undefined && i.summary === summary,
+      )
+    )
+      return;
+    const key = `start-failure-${target}-${f.code}-${state.lastSeq}`;
+    const r = appendAtomically(log, deps.clock, key, { system: true }, [
+      {
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", key, "failure"),
+          kind: "failure",
+          nodeId: target,
+          summary,
+        },
+      },
+    ]);
+    if (!r.ok) note(target, `起動の失敗を受信箱に記録できない: ${r.error.code}`);
+  }
+
   async function resumeExclusive(
     decision: { decisionId: string; nodeId: string },
     target: string,
@@ -191,8 +222,9 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
     const intro = selfIntroLines(node.id, node.role, node.parentId);
     if (!intro.ok) return { kind: "failed", message: `${target}（指示を組み立てられない）` };
     const warnings: string[] = [];
-    const abort = (cause: string): ResumeOutcome => {
+    const abort = (cause: string, userFixable?: Failure): ResumeOutcome => {
       note(target, cause);
+      if (userFixable !== undefined) reportStartFailure(target, node.parentId, userFixable);
       try {
         credentials.revokeNode(target);
       } catch (e) {
@@ -218,7 +250,9 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
         );
         if (!back.ok) note(target, `停止を記録できない: ${back.error.code}: ${back.error.cause}`);
       }
-      return { kind: "failed", message: [`${target}（起動できなかった）`, ...warnings].join("。") };
+      const why =
+        userFixable === undefined ? "起動できなかった" : `起動できなかった: ${userFixable.cause}`;
+      return { kind: "failed", message: [`${target}（${why}）`, ...warnings].join("。") };
     };
     // 起動してから、再開を記録する（起動の失敗で、動作中なのにプロセスがない状態を作らない）。
     let token: string;
@@ -236,7 +270,11 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
         instruction: instructionAfterAnswer(node.id, before, scope, answer, intro.value),
         mcp: { url: ports.mcpUrl, token },
       });
-      if (!started.ok) return abort(`起動に失敗: ${started.error.code}: ${started.error.cause}`);
+      if (!started.ok)
+        return abort(
+          `起動に失敗: ${started.error.code}: ${started.error.cause}`,
+          started.error.code === "childAuthMissing" ? started.error : undefined,
+        );
     } catch (e) {
       return abort(`起動が例外: ${String(e)}`);
     }

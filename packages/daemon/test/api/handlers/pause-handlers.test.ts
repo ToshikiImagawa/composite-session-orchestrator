@@ -9,9 +9,11 @@ import {
   stateOf,
 } from "@cso/core";
 import { describe, expect, it } from "vitest";
+import { type CredentialStore, createCredentialStore } from "../../../src/api/credentials.js";
 import { createPauseHandlers } from "../../../src/api/handlers/pause-handlers.js";
 import { createRuntimeHandlers } from "../../../src/api/handlers/runtime-handlers.js";
 import { createStateHandlers } from "../../../src/api/handlers/state-handlers.js";
+import { createHookTokens } from "../../../src/api/hook.js";
 import type { HandlerRequest } from "../../../src/api/server.js";
 import { EventLog } from "../../../src/eventlog.js";
 import { createMemoryStore } from "../../../src/memory-store.js";
@@ -27,7 +29,9 @@ const SCOPE: Scope = {
 };
 
 /** root ─ m1(統合) ─ a(running)・b(running)・p(pending)・d(done)。呼び出し元は m1 */
-const rig = () => {
+const rig = (
+  opts: { credentials?: Pick<CredentialStore, "issueNodeToken" | "revokeNode"> } = {},
+) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
   const log = opened.value;
@@ -73,7 +77,7 @@ const rig = () => {
     revoked: [] as string[],
     failures: [] as string[],
   };
-  const flags = { startFails: false, revokeThrows: false };
+  const flags = { startFails: false, revokeThrows: false, authMissing: false };
   const adapter = {
     kind: "cli" as const,
     capabilities: () => ({
@@ -86,6 +90,16 @@ const rig = () => {
     async start(req: StartRequest): Promise<Result<StartValue, Failure>> {
       calls.started.push(req);
       if (flags.startFails) return { ok: false, error: failure("startFailed", "x", "y") };
+      if (flags.authMissing)
+        return {
+          ok: false,
+          error: failure(
+            "childAuthMissing",
+            "子に渡す環境変数に認証がない",
+            "claude setup-token",
+            "inherit",
+          ),
+        };
       return ok({ sessionId: "s", cwd: req.worktreePath, removedEnv: [] });
     },
     async send() {
@@ -107,7 +121,7 @@ const rig = () => {
     stop: runtime["node.stop"],
     adapterFor: () => adapter,
     ports: { cwdOf: async (id) => `/wt/${id}`, mcpUrl: "http://127.0.0.1:1/mcp" },
-    credentials: {
+    credentials: opts.credentials ?? {
       issueNodeToken: (id) => {
         calls.issued.push(id);
         return `tok-${id}`;
@@ -233,6 +247,28 @@ describe("decision.answer（回答で、止めた子を必ず再開する）", (
     expect(r.calls.started).toHaveLength(2);
   });
 
+  it("子の認証がない（childAuthMissing）なら、原因を返し、親の受信箱に failure を 1 件だけ出す（再試行で増えない）", async () => {
+    const r = rig();
+    const id = await paused(r);
+    r.flags.authMissing = true;
+    const res = await r.answer(id, "A", "ans-1");
+    expect(res.error?.code).toBe("resumePending");
+    expect(res.error?.cause).toContain("認証がない");
+    expect(stateOf(r.s(), "a")).toBe("stopped");
+    const items = () =>
+      r
+        .s()
+        .inbox.filter(
+          (i) =>
+            i.kind === "failure" && i.nodeId === "a" && i.summary?.includes("childAuthMissing"),
+        );
+    expect(items()).toHaveLength(1);
+    expect(items()[0]?.summary).toContain("claude setup-token");
+    await r.answer(id, "A", "ans-2");
+    await r.answer(id, "A", "ans-3");
+    expect(items()).toHaveLength(1);
+  });
+
   it("人間などが止めた子は、回答が来ても再開しない（受信箱に載せる）。判断による停止だけの子は再開する", async () => {
     const r = rig();
     const res = await r.present({ ...Q, pauseNodeIds: ["a", "b"] });
@@ -310,5 +346,41 @@ describe("decision.answer（回答で、止めた子を必ず再開する）", (
     const pid = plain.value?.decisionId as string;
     expect((await r.answer(pid, "A")).ok).toBe(true);
     expect(r.calls.started).toHaveLength(1);
+  });
+});
+
+describe("判断の回答と、フック専用のトークン（T22-ht・H6）", () => {
+  // compose と同じ配線: ノードのトークンが変わったら、フック専用のトークンも無効にする
+  const wired = () => {
+    const hookTokens = createHookTokens();
+    const credentials = createCredentialStore({
+      humanToken: "h".repeat(40),
+      onNodeTokenChanged: (id) => hookTokens.revoke(id),
+    });
+    credentials.issueNodeToken("a", "child");
+    return { hookTokens, credentials };
+  };
+
+  it("判断要求で子を止め（pauseNodeIds）、回答で再開すると、回答の前のフック専用のトークンは無効になる", async () => {
+    const w = wired();
+    const r = rig({ credentials: w.credentials });
+    const hook = w.hookTokens.issue("a");
+    const p = await r.present({ ...Q, pauseNodeIds: ["a"] });
+    await r.flush();
+    r.ev("a", { type: "confirmStopped" });
+    // 止めただけでは無効にならない（無効になる原因を、回答による再開に固定する）
+    expect(w.hookTokens.authenticate(hook)).toBe("a");
+    expect((await r.answer(p.value?.decisionId as string, "B")).ok).toBe(true);
+    expect(stateOf(r.s(), "a")).toBe("running");
+    expect(w.hookTokens.authenticate(hook)).toBeUndefined();
+  });
+
+  it("子を止めない判断に回答しても、子のトークンは変わらず、フック専用のトークンは使えるまま", async () => {
+    const w = wired();
+    const r = rig({ credentials: w.credentials });
+    const hook = w.hookTokens.issue("a");
+    const p = await r.present({ ...Q });
+    expect((await r.answer(p.value?.decisionId as string, "B")).ok).toBe(true);
+    expect(w.hookTokens.authenticate(hook)).toBe("a");
   });
 });

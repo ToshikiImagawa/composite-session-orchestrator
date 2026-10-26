@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ok } from "@cso/core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Daemon } from "../src/compose.js";
 import { loadLauncher, loadWorktreePorts } from "../src/loaders.js";
 import { main } from "../src/main.js";
@@ -19,6 +19,7 @@ import { FakeLauncher } from "./sdk/fakes.js";
 
 const running: Daemon[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const d of running.splice(0)) await d.stop();
 });
 
@@ -65,6 +66,8 @@ const setup = () => {
 describe("起動を、実物の git の口（loadWorktreePorts）を通して確かめる", () => {
   it("cso-daemon の読み込みで git の口を得て、根が spawn した子の作業ツリーが、実際の git に作られる", async () => {
     const s = setup();
+    // 既定の childHome（isolated）では、子に認証の環境変数が要る（T22-auth）
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
     const launcher = new FakeLauncher();
     const out: string[] = [];
     const err: string[] = [];
