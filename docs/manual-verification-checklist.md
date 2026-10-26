@@ -72,7 +72,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 | H3 | `settingSources` の混入がない | SDK で起動する子に、plugin のフックが混ざらない。**受け口の要求数では見分けられない**: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らないので、plugin の hooks.json が混ざっても、フックのスクリプトは素通しして、受け口を呼ばない（`apiSummary` の `hook` は 0 のまま）。代わりに次の 2 つで確かめる。(1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない（`skills/` と `.claude-plugin/plugin.json` だけ）。(2) SDK の子の標準エラーに、フックのスクリプトの一言 `[cso-hook]` が出ない（**見方**: daemon は、SDK の子の標準エラーを記録しない〔daemon の記録＝daemon の標準エラーの JSON の行には出ない〕。フックの一言は、子のセッションの記録〔子の HOME の下の `.claude/projects/<作業ツリーを表す名前>/<セッション ID>.jsonl`。`childHome: inherit` なら利用者の HOME、`isolated` なら daemon が子に用意した HOME〕に残るので、そのファイルを、フックの一言そのもの（`[cso-hook] CSO_DAEMON_URL と CSO_NODE_TOKEN がない…`）で調べる: `grep -c 'cso-hook\] CSO_DAEMON_URL と CSO_NODE_TOKEN がない'`〔0 なら出ていない。`cso-hook` だけで探すと、plugin の名前・パスに当たって誤検知する〕。記録に残らない版の Claude Code では、(1) だけで判定し、結果の欄にそう書く）（混ざっていれば、環境変数がないことを知らせる一言が、ツールの呼び出しのたびに出る） | 条件付き。子に渡す plugin に `hooks/` なし（A1）。子の標準エラーの確認は未（取得せず） |
 | H4 | daemon 停止のときのフェイルクローズ | PreToolUse はすべて拒否。Stop は止めない | 可。daemon 停止後、`Read`・`Write` とも拒否（「受け口に届かない」）。セッションは正常に終了（Stop は止めない） |
 | H5 | 環境変数 | 両方なし: 素通し（標準エラーに一言）。片方だけ: 拒否 | 可。片方だけ: 拒否。両方なし: 素通し。フックの標準エラーに一言（`[cso-hook] … フックは働いていない`）が出る（`claude -p` の出力には出ない） |
-| H6 | `session_id` の結び付け | 別のセッションは 403。`/clear`・`--resume` で変わると拒否され、`cso hook-unbind <nodeId>`（または画面のボタン・親の `node_hookUnbind`）のあと通る。記録に `node.hookUnbound`。判断の回答のあと（子のノードのトークンが発行し直される）、手動のセッションは拒否され、`cso hook-env` から起動し直すと通る | 条件付き。可: 2 つ目のセッションは 403・`cso hook-unbind` のあと通る・`hook-env` の再発行で古いトークンは 401・記録に `node.hookUnbound`。**不可**: 判断への回答で子が再開したあとも、結び付く前のフック専用トークンが通った（文書は 401 になるはず）。`/clear`・`--resume` は未 |
+| H6 | `session_id` の結び付け | 別のセッションは 403。`/clear`・`--resume` で変わると拒否され、`cso hook-unbind <nodeId>`（または画面のボタン・親の `node_hookUnbind`）のあと通る。記録に `node.hookUnbound`。判断の回答のあと（子のノードのトークンが発行し直される）、手動のセッションは拒否され、`cso hook-env` から起動し直すと通る | 条件付き。可: 2 つ目のセッションは 403・`cso hook-unbind` のあと通る・`hook-env` の再発行で古いトークンは 401・記録に `node.hookUnbound`。未確認（確かめ方の誤り）: 判断に回答して再開したあとも、フック専用トークンが通った。この判断は `pauseNodeIds` がなく、子を止めていなかった（記録で確認。`stopped`・`restart` もなし）ため、仕様どおり（無効になるのは、子を止める判断への回答で再開したときだけ。#102）。**子を止める判断での確認は、やり直しが要る**。`/clear`・`--resume` も未 |
 
 - **結果**（2026-10-26。Claude Code 2.1.308・Agent SDK 0.3.292・macOS 26.5。daemon は `childRuntime: "cli"`・`childHome: "inherit"`。`eval "$(cso hook-env <nodeId>)"` で実施）: 上の表のとおり。
 - **結果によって変わるタスク**: H1〜H3 が不可なら T22-h を差し戻す（hooks.json の形・受け口）。H6 が不可なら T22-hu・T22-hub。合格なら tasks.md の T22-h の「手動確認は未」を更新する。
@@ -166,7 +166,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 | 項目 | 判定 | 変わるタスク | 備考 |
 |:--|:--|:--|:--|
 | A1（T22-c） | 条件付き | T22-c は、skill の使用の裏付け（記録）が残る | 二重フックなし（plugin の中身で確認）。skill を読めた（自己申告。記録なし）。`inherit` で実施。`isolated` は認証で止まった |
-| A2（H1〜H6） | 条件付き | T22-hu（H6 の回答後の無効化が再現せず。要調査）。T22-h は H1・H2 が可 | H1・H2・H4・H5 可。H3 は標準エラー未確認。H6 は `/clear`・`--resume` 未 |
+| A2（H1〜H6） | 条件付き | T22-hu は、H6 の「子を止める判断への回答後」のやり直し待ち。T22-h は H1・H2 が可 | H1・H2・H4・H5 可。H3 は標準エラー未確認。H6 は `/clear`・`--resume` 未 |
 | B1（項目 4） | | | |
 | B2（項目 6） | | | |
 | B3（項目 5） | | | |
