@@ -428,6 +428,69 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
     expect(r.sink.types).toEqual(["node.stopObserved:aborted", "node.stateChanged:stopTimeout"]);
   });
 
+  it("最後の確認が取れなかった（null・時間切れ）ときも、それまでに見つけた pid を失わない（「pid 不明」にしない。T24-sp）", async () => {
+    const r = rig({}, [[{ ...proc(7), command: "zsh" }], null]);
+    await startNode(r);
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    await settle();
+    await r.timers.advance(30_000);
+    const res = await p;
+    expect(res.ok && res.value).toMatchObject({
+      state: "stopIncomplete",
+      blockers: [7],
+      processes: [{ pid: 7, command: "zsh" }],
+    });
+  });
+
+  it("期限ぎわの確認にも最低限の持ち時間（2 秒）を与え、期限ちょうどに探査が成功してプロセスがなければ stopped にする", async () => {
+    let r: Rig | undefined;
+    let deadline = Number.POSITIVE_INFINITY;
+    const probe = async () => {
+      const t = r?.timers;
+      if (t === undefined || t.now() < deadline) return [proc(7)];
+      await t.sleep(1_500); // 期限を過ぎた最後の 1 回は、時間がかかる
+      return [];
+    };
+    r = rig({ probe });
+    await startNode(r);
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    deadline = r.timers.now() + 30_000;
+    await settle();
+    await r.timers.advance(30_000);
+    await r.timers.advance(1_500);
+    const res = await p;
+    expect(res.ok && res.value.state).toBe("stopped");
+    expect(r.sink.types.at(-1)).toBe("node.stateChanged:confirmStopped");
+  });
+
+  it("停止未完了の結果に、整えたコマンドの名前つきの processes を添える（blockers は pid のまま。T24-sp）", async () => {
+    const r = rig({}, [[{ ...proc(7), command: "z\u001b[2Jsh" }, proc(9)]]);
+    await startNode(r);
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    await settle();
+    await r.timers.advance(30_000);
+    const res = await p;
+    expect(res.ok && res.value).toMatchObject({
+      state: "stopIncomplete",
+      blockers: [7, 9],
+      processes: [{ pid: 7, command: "z[2Jsh" }, { pid: 9 }],
+    });
+  });
+
+  it("予期しない終了の受信箱の要約（イベントログに残る）に、整えた名前を「pid 7（zsh）」の形で出す（T24-sp）", async () => {
+    const r = rig({}, [[{ ...proc(7), command: "zsh\u001b]0;\u0007\u202e" }]]);
+    await startNode(r);
+    r.launcher.sessions[0]?.finish(new Error("crashed"));
+    await settle();
+    const summaries = r.sink.records
+      .map((x) => x.body)
+      .filter((b) => b.type === "inbox.added")
+      .map((b) => (b.payload as { summary: string }).summary);
+    const left = summaries.find((t) => t.includes("残っている"));
+    expect(left).toContain("（pid 7（zsh]0;））");
+    expect(JSON.stringify(r.sink.records)).not.toMatch(/\\u001b|\\u0007|\u202e/);
+  });
+
   it("プロセス一覧が取得できない（null）間は停止と確認できない。時間切れで停止未完了になる", async () => {
     const r = rig({}, [null]);
     await startNode(r);

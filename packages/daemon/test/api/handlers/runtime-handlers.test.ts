@@ -471,6 +471,30 @@ describe("バックグラウンドの停止の堅牢化（onStopSettled・アダ
     expect(inbox(r2).at(-1)).toMatchObject({ kind: "info", nodeId: "a" });
   });
 
+  it("processes があれば、受信箱の要約を「pid 101（zsh）、102」の形にし、名前を整える。無ければ従来の pid の並び（T24-sp）", async () => {
+    const r = rig();
+    if (r.adapter) {
+      r.adapter.stopResult = ok({
+        state: "stopIncomplete",
+        outcome: "aborted",
+        blockers: [101, 102],
+        processes: [{ pid: 101, command: "z\u001bsh\n" }, { pid: 102 }],
+      });
+    }
+    await r.call("node.stop", { nodeId: "a", mode: "immediate" });
+    await flush();
+    await flush();
+    expect(inbox(r).at(-1)?.summary).toBe("停止未完了: 残っているプロセス pid 101（zsh）、102");
+    const r2 = rig();
+    if (r2.adapter) {
+      r2.adapter.stopResult = ok({ state: "stopIncomplete", outcome: "aborted", blockers: [5, 6] });
+    }
+    await r2.call("node.stop", { nodeId: "a", mode: "immediate" });
+    await flush();
+    await flush();
+    expect(inbox(r2).at(-1)?.summary).toBe("停止未完了: 残っているプロセス pid 5, 6");
+  });
+
   it("アダプタが代行（delegation）を返したら、受信箱の stopIncomplete の項目に、代行の文面をそのまま出す", async () => {
     const r = rig();
     if (r.adapter) {

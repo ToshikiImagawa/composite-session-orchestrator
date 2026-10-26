@@ -20,6 +20,7 @@ import {
   discardedNodeIds,
   type Failure,
   failure,
+  formatProcesses,
   isCommitSha,
   isStrictDescendant,
   LIMITS,
@@ -105,7 +106,7 @@ const REASON_TEXT: Record<UnmetReason, string> = {
 };
 
 const blockerText = (b: Blocker): string =>
-  b.kind === "process" ? `pid ${b.pid}` : `ノード ${b.nodeId}`;
+  b.kind === "process" ? formatProcesses([b]) : `ノード ${b.nodeId}`;
 
 interface Unmet {
   readonly nodeId: string;

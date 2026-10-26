@@ -493,7 +493,8 @@ export const UI_JS = `'use strict';
     v.unmet.slice(0, 10).forEach(function (u) { lines.push(['満たしていない条件', name(UNMET_NAMES, String(u))]); });
     if (v.unmet.length > 10) lines.push(['満たしていない条件', 'ほか ' + (v.unmet.length - 10) + ' 件']);
     v.blockers.slice(0, 10).forEach(function (b) {
-      var who = b && b.kind === 'process' ? 'プロセス ' + Number(b.pid) : 'ノード ' + cleanText(String(b && b.nodeId), 128);
+      var cmd = b && b.kind === 'process' && typeof b.command === 'string' ? cleanText(b.command, 33) : '';
+      var who = b && b.kind === 'process' ? 'プロセス ' + Number(b.pid) + (cmd ? '（' + cmd + '）' : '') : 'ノード ' + cleanText(String(b && b.nodeId), 128);
       lines.push(['原因', who + '（' + name(UNMET_NAMES, String(b && b.reason)) + '）']);
     });
     if (v.blockers.length > 10) lines.push(['原因', 'ほか ' + (v.blockers.length - 10) + ' 件']);

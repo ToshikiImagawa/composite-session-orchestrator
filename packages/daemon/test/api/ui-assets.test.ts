@@ -115,6 +115,7 @@ describe("画面の資産（走査）", () => {
       "options",
       "question",
       "nodeId",
+      "command",
       "reason",
       "priority",
       "kind",
@@ -706,6 +707,28 @@ describe("画面の資産（走査）", () => {
         }),
       );
       expect(exact.some((l) => l[1].startsWith("ほか"))).toBe(false);
+    });
+
+    it("reclaimLines: プロセスの名前を整えて添える。文字列でない・空の名前は出さない（T24-sp）", () => {
+      const blockers = [
+        {
+          kind: "process",
+          reason: "processesRunning",
+          pid: 1,
+          command: "<img src=x onerror=alert(1)>\u001b",
+        },
+        { kind: "process", reason: "processesRunning", pid: 2, command: 42 },
+        { kind: "process", reason: "processesRunning", pid: 3 },
+      ];
+      const causes = api
+        .reclaimLines("s1", preview({ unmet: ["processesRunning"], blockers }))
+        .filter((l) => l[0] === "原因")
+        .map((l) => l[1]);
+      expect(causes[0]).toMatch(/^プロセス 1（<img src=x onerror=alert\(1\)>）（/);
+      expect(causes[0]).not.toContain("\u001b");
+      expect(causes[1]).toMatch(/^プロセス 2（/);
+      expect(causes[1]).not.toContain("42");
+      expect(causes[2]).toMatch(/^プロセス 3（/);
     });
 
     it("reclaimLines: 満たしていない条件・原因を 10 件で切ったときも、「ほか N 件」を出す", () => {
