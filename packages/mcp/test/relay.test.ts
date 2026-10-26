@@ -105,6 +105,17 @@ describe("request（/v1/request への中継）", () => {
     expect(body.requestId).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
   });
 
+  it("requestId を渡すと、それを使う（cli の再実行。T22-cli）。識別子の形でなければ、送らずに失敗する", async () => {
+    const f = vi.fn(async () => json(200, { ok: true, value: { accepted: true } }));
+    const relay = relayWith(f as never);
+    await relay.request("report.progress", { text: "t" }, { requestId: "again-1" });
+    const [, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body)).requestId).toBe("again-1");
+    const bad = await relay.request("report.progress", { text: "t" }, { requestId: "a b" });
+    expect(bad.ok ? null : bad.error.code).toBe("invalid_request_id");
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
   it("daemon の失敗（4xx・5xx）は、code・cause・nextActions をそのまま返す", async () => {
     for (const status of [400, 401, 403, 404, 422, 500]) {
       const error = { code: "c", cause: "原因", nextActions: ["次"] };

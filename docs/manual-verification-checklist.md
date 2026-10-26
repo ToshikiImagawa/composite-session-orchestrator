@@ -62,7 +62,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 ### A2. ファイルで設定するフック（H1〜H6。T22-h・T22-hu）
 
-- **前提**: [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「ファイルで設定するフック（T22-h。CLI のセッション）」の前提（daemon が範囲を持つ子を管理している。人間が `eval "$(cso hook-env <nodeId>)"` でその子のフック専用のトークン〔T22-ht〕を環境変数に入れ、その子の作業ツリーで、同じシェルから plugin つきの CLI のセッションを起動する）。仕組みは [`docs/plugin.md`](plugin.md) の「フック」。**`cso` の実行ファイル（T22-cli）がマージされるまでは、A2 は実行できない**。
+- **前提**: [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「ファイルで設定するフック（T22-h。CLI のセッション）」の前提（daemon が範囲を持つ子を管理している。人間が `eval "$(cso hook-env <nodeId>)"` でその子のフック専用のトークン〔T22-ht〕を環境変数に入れ、その子の作業ツリーで、同じシェルから plugin つきの CLI のセッションを起動する）。仕組みは [`docs/plugin.md`](plugin.md) の「フック」。`cso` の実行ファイル（T22-cli）は、`CSO_DAEMON_URL`・`CSO_HUMAN_TOKEN` を設定して使う。
 - **手順**: 同じ節の表の H1〜H6。
 
 | # | 確認 | 期待する結果（要約。詳細はリンク先） | 結果 |

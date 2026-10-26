@@ -7,7 +7,7 @@
 
 ```
 cso reclaim <nodeId>          # 失われるものを表示して止まる（終了コード 2）
-cso reclaim <nodeId> --yes    # 表示したうえで、破棄を指示する（node.reclaimInstruct）
+cso reclaim <nodeId> --yes --expect <digest>    # 表示した照合の値を付けて、破棄を指示する（node.reclaimInstruct）
 ```
 
 `--yes` は**必須**（以前は、確認なしで、すぐに指示していた。破壊的な変更）。失われるものがない場合も、破棄の判断なので、`--yes` を要求する。

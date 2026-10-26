@@ -25,8 +25,15 @@ export interface Relay {
   /** トークンのロール（接続ごとに 1 回引く）。 */
   /** 呼び出し元のロールと、ノードのトークンなら自分の nodeId（古い daemon・人間のトークンでは、なし。T10m-wh）。 */
   whoami(): Promise<Result<{ role: string; nodeId?: string }>>;
-  /** 操作を daemon へ中継する。成功の値・daemon の失敗は、そのまま返す。 */
-  request(operation: string, params: unknown): Promise<Result<unknown>>;
+  /**
+   * 操作を daemon へ中継する。成功の値・daemon の失敗は、そのまま返す。`requestId` を渡すと、それを使う（cli の `--request-id`
+   * の再実行。T22-cli）。省略すると、新しく作る。再送は、どちらでも同じ requestId で行う。
+   */
+  request(
+    operation: string,
+    params: unknown,
+    options?: { readonly requestId?: string },
+  ): Promise<Result<unknown>>;
 }
 
 export interface RelayOptions {
@@ -286,8 +293,12 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
       const nodeId = isSafeId(r.value.nodeId) ? r.value.nodeId : undefined;
       return ok({ role: r.value.role, ...(nodeId === undefined ? {} : { nodeId }) });
     },
-    async request(operation, params) {
-      const body = JSON.stringify({ requestId: newRequestId(), operation, params });
+    async request(operation, params, options) {
+      const requestId = options?.requestId ?? newRequestId();
+      if (!isSafeId(requestId)) {
+        return fail("invalid_request_id", "requestId が識別子の形でない", "requestId を確かめる");
+      }
+      const body = JSON.stringify({ requestId, operation, params });
       if (Buffer.byteLength(body) > maxBytes) {
         return fail(
           "request_too_large",

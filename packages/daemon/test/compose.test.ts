@@ -1478,3 +1478,68 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(nodes.find((x) => x.id === nodeId)?.stopDelegated).toBe(true);
   });
 });
+
+describe("cso（cli の実行ファイル）で、実際の daemon を呼ぶ（T22-cli）", () => {
+  const BIN = fileURLToPath(new URL("../../cli/dist/bin.js", import.meta.url));
+  const brief = {
+    objective: "x",
+    acceptanceCriteria: ["x"],
+    scope: {
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: ["pnpm test"],
+    },
+  };
+
+  it("窓口・トークン・設定を環境変数で渡し、身元を確かめてから操作する。引数にトークンを置かない", async () => {
+    const r = rig();
+    const d = await boot(r);
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    const nodeId = spawned.json.value.nodeId as string;
+    const configPath = join(r.config.stateDir, "..", "config.json");
+    writeFileSync(configPath, JSON.stringify({ stateDir: r.config.stateDir }));
+    const env = { ...process.env };
+    for (const k of [
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "http_proxy",
+      "https_proxy",
+      "ALL_PROXY",
+      "all_proxy",
+      "CSO_CLI_ALLOW_UNVERIFIED",
+    ])
+      delete env[k];
+    Object.assign(env, {
+      CSO_DAEMON_URL: d.url,
+      CSO_HUMAN_TOKEN: d.humanToken,
+      CSO_DAEMON_CONFIG: configPath,
+    });
+    const args = [BIN, "hook-unbind", nodeId, "--request-id", "cli-e2e-1"];
+    expect(args.join(" ")).not.toContain(d.humanToken); // トークンは、プロセスの引数に出ない（環境変数だけ）
+    const { stdout, stderr } = await promisify(execFile)(process.execPath, args, {
+      encoding: "utf8",
+      env,
+      timeout: 20_000,
+    });
+    expect(stdout).toContain("cli-e2e-1");
+    expect(stdout + stderr).not.toContain(d.humanToken);
+    // 記録に残る（外した者は人間）
+    expect(r.logs.join("\n")).not.toContain(d.humanToken);
+    // 身元の秘密が違えば（偽の daemon）、トークンを送らずに失敗する
+    writeFileSync(configPath, JSON.stringify({ stateDir: join(r.config.stateDir, "..") }));
+    const bad = await promisify(execFile)(process.execPath, [BIN, "hook-unbind", nodeId], {
+      encoding: "utf8",
+      env,
+      timeout: 20_000,
+    }).then(
+      () => ({ code: 0, stderr: "" }),
+      (e: { code: number; stderr: string }) => ({ code: e.code, stderr: e.stderr }),
+    );
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain("daemon_identity_failed");
+  });
+});

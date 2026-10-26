@@ -115,14 +115,14 @@
 
 ## ファイルで設定するフック（T22-h。CLI のセッション）
 
-前提: daemon（`childRuntime: "cli"`）が起動していて、範囲を持つ子（例: `writableLocations: ["src"]`）が daemon の管理下で動いている（受け口は、daemon が作業ツリーを知っているノードだけを判定する。ほかは拒否）。人間が、その子の**フック専用のトークン**を発行して、環境変数に入れる: `eval "$(cso hook-env <nodeId>)"`（T22-ht。`CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が設定される。トークンは画面・引数・履歴に出ない。標準出力が端末なら、`cso hook-env` は失敗する）。ノードのトークン（SDK の子が使っているもの）は変わらない。次に、**その子の作業ツリーで**、同じシェルから plugin つきの CLI のセッションを起動する: `claude --plugin-dir <plugin のディレクトリ>`。トークンは、チャット・設定ファイルに書かない。**`cso` の実行ファイル（T22-cli）のマージまでは、この手順は実行できない**。
+前提: daemon（`childRuntime: "cli"`）が起動していて、範囲を持つ子（例: `writableLocations: ["src"]`）が daemon の管理下で動いている（受け口は、daemon が作業ツリーを知っているノードだけを判定する。ほかは拒否）。人間が、その子の**フック専用のトークン**を発行して、環境変数に入れる: `eval "$(cso hook-env <nodeId>)"`（T22-ht。`CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が設定される。トークンは画面・引数・履歴に出ない。標準出力が端末なら、`cso hook-env` は失敗する）。ノードのトークン（SDK の子が使っているもの）は変わらない。次に、**その子の作業ツリーで**、同じシェルから plugin つきの CLI のセッションを起動する: `claude --plugin-dir <plugin のディレクトリ>`。トークンは、チャット・設定ファイルに書かない。`cso` の実行ファイル（T22-cli）は、窓口の URL を `CSO_DAEMON_URL`、人間のトークンを `CSO_HUMAN_TOKEN` で受ける（使い方は `cso --help`）。
 
 **フック専用のトークンが無効になるとき**: ノードのトークンが発行し直される（判断の回答のあとの再開・子の再起動・失効）と、フック専用のトークンも一緒に無効になる。手動のセッションのフックは拒否されるようになるので、`eval "$(cso hook-env <nodeId>)"` から起動し直す。daemon の再起動でも無効になる。**`cso hook-env` の出力を、パイプやファイルに出さない**（`eval` 以外に渡すと、トークンがそこに残る）。**互換**: 記録のイベント `node.hookTokenIssued` を書いたあとは、古い版の daemon に戻せない（ダウングレード不可）。
 
 | # | 確認 | 期待 | 確認の方法 |
 |:--|:--|:--|:--|
 | H1 | フックが発火する | PreToolUse・PostToolUse・Stop で `cso-hook.mjs` が動く | `claude --debug` の出力に、フックの実行が出る。範囲内の `Write`（`src/a.txt`）は許可される |
-| H2 | 範囲外の書き込みの拒否と記録 | `Write`（`b.txt`）が拒否され、理由がモデルに伝わる。`scope.violation` が記録され、親の受信箱に violation が 1 件載る | 子に `b.txt` を書くよう頼み、`cso inbox` と記録を見る。未知のツール（例: `WebFetch`）は `node.toolDenied` |
+| H2 | 範囲外の書き込みの拒否と記録 | `Write`（`b.txt`）が拒否され、理由がモデルに伝わる。`scope.violation` が記録され、親の受信箱に violation が 1 件載る | 子に `b.txt` を書くよう頼み、親の受信箱（親の `inbox_fetch`、または画面の受信箱）と記録を見る。未知のツール（例: `WebFetch`）は `node.toolDenied` |
 | H3 | `settingSources` の混入がない | daemon が SDK で起動する子（`settingSources: []`）には、利用者が入れた plugin のフックが混ざらない | **受け口の要求数では見分けられない**: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らないので、plugin の hooks.json が混ざっても、フックのスクリプトは素通しして、受け口を呼ばない（`apiSummary` の `hook` は 0 のまま）。代わりに次の 2 つで確かめる。(1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない（`skills/` と `.claude-plugin/plugin.json` だけ）。(2) SDK の子の標準エラーに、フックのスクリプトの一言 `[cso-hook]` が出ない（**見方**: daemon は、SDK の子の標準エラーを記録しない〔daemon の記録＝daemon の標準エラーの JSON の行には出ない〕。フックの一言は、子のセッションの記録〔子の HOME の下の `.claude/projects/<作業ツリーを表す名前>/<セッション ID>.jsonl`。`childHome: inherit` なら利用者の HOME、`isolated` なら daemon が子に用意した HOME〕に残るので、そのファイルを、フックの一言そのもの（`[cso-hook] CSO_DAEMON_URL と CSO_NODE_TOKEN がない…`）で調べる: `grep -c 'cso-hook\] CSO_DAEMON_URL と CSO_NODE_TOKEN がない'`〔0 なら出ていない。`cso-hook` だけで探すと、plugin の名前・パスに当たって誤検知する〕。記録に残らない版の Claude Code では、(1) だけで判定し、結果の欄にそう書く）（混ざっていれば、環境変数がないことを知らせる一言が、ツールの呼び出しのたびに出る） |
 | H4 | daemon 停止のときのフェイルクローズ | daemon を止めると、PreToolUse はすべて拒否される（「届かない」）。Stop は止めない（セッションを終えられる） | daemon を止めて、`Read` と `Write` を頼む。ツールが実行されないこと |
 | H5 | 環境変数 | 両方なし: 素通しし、標準エラーに一言出る（CSO のフックは働かない）。片方だけ: 拒否 | `CSO_NODE_TOKEN` だけを外して起動し、ツールが拒否されること（`eval` のあと、`unset CSO_NODE_TOKEN` して起動する） |

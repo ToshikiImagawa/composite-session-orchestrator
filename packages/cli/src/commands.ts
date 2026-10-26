@@ -31,8 +31,8 @@ export interface CommandDeps {
   /** 要求の識別子（冪等性）。時刻・乱数を持たないよう、呼び出し側が渡す。 */
   readonly newRequestId: () => string;
   /**
-   * 端末に繋がっているか（実行ファイル〔T22-cli〕が `process.stdin.isTTY`・`process.stdout.isTTY` を渡す）。既存のコマンドは使わない。
-   * `hook-env`（T22-ht）は、**省略されたときもトークンを出さない**（画面に出す経路を作らない。渡されて、標準出力が端末でないときだけ出す）。
+   * 端末に繋がっているか（bin が `process.stdin.isTTY`・`process.stdout.isTTY` を必ず渡す。T22-cli）。省略すると、どちらも false として
+   * 扱う（`hook-env`〔T22-ht〕だけは、省略時もトークンを出さない）。
    */
   readonly isTTY?: { readonly stdin: boolean; readonly stdout: boolean };
 }
