@@ -11,3 +11,5 @@ coverage/
 .orch-wt/
 # sdd-workflow のキャッシュ
 .sdd/.cache/
+# direnv
+/.envrc
