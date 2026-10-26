@@ -1166,6 +1166,25 @@ describe("子の認証の確認（T22-auth）", () => {
     expect(JSON.stringify(res.error)).not.toContain("ghp-secret-value");
   });
 
+  it("認証を、HOME のディレクトリを作る前に確かめる（失敗したときに、空の HOME を残さない）", async () => {
+    const made: string[] = [];
+    const r = rig({
+      homeFor: (id) => {
+        made.push(id);
+        return `/state/homes/${id}`;
+      },
+      parentEnv: { PATH: "/bin" },
+    });
+    const res = await r.adapter.start({
+      nodeId: "a",
+      worktreePath: "/link/a",
+      scope: SCOPE,
+      instruction: "x",
+    });
+    expect(res.ok).toBe(false);
+    expect(made).toEqual([]);
+  });
+
   it("HOME を共有する（inherit。homeFor なし）ときは、確かめない", async () => {
     const r = rig({ parentEnv: { PATH: "/bin" } });
     const res = await r.adapter.start({

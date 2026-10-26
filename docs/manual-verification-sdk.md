@@ -172,7 +172,7 @@ Desktop の子への継承は、項目 4 の結果のあと（T22 の Desktop �
 
 子の `HOME` は、既定で `<stateDir>/homes/<nodeId>`（0700）に分ける（設定 `childHome: "inherit"` で、daemon の `HOME` を渡す）。
 
-子の認証（T22-auth）: 既定の `childHome: "isolated"` では、子の HOME が空のディレクトリなので、`claude` CLI のログインは使えない。daemon を起動する環境に、認証の環境変数（`ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN`・`CLAUDE_CODE_OAUTH_TOKEN` のどれか。`claude setup-token` で作った値を `CLAUDE_CODE_OAUTH_TOKEN` に入れる）が要る。**CLI のログインだけの環境は、子の起動が `childAuthMissing` で拒否される**（理由と対処が、親に返る。spawn・判断の回答による再開・スケジューラのどれでも同じ。受信箱の項目は、同じ子の同じ失敗では増えない）。Bedrock・Vertex・Foundry の経路は、切り替えの変数（`CLAUDE_CODE_USE_BEDROCK`・`_VERTEX`・`_FOUNDRY`）が**あることだけで通す**（その資格情報は `childEnvAllow` で渡す前提で、中身までは確かめない）。`childHome: "inherit"` では確かめない（親の HOME と CLI のログインを共有する。分離は弱まる）。値は、記録・失敗の文面に出さない。
+子の認証（T22-auth）: 既定の `isolated` では、`claude` CLI のログインだけの環境は、子の起動が `childAuthMissing` で拒否される。認証の環境変数と、判定の規則は [`docs/plugin.md`](plugin.md) の「子の認証」。
 
 `childEnvAllow` に、`LD_*`・`NODE_OPTIONS`・`BASH_ENV`・`GIT_SSH_COMMAND` など、子の実行を乗っ取れる名前は指定できない。
 実 SDK（0.3.292）で、子の `HOME` を空の 0700 のディレクトリに分けて、項目 16 をやり直した（2026-10-21）: 認証は通り（`ready`、約 7 秒で結果）、

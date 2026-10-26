@@ -16,7 +16,8 @@ describe("childAuthProblem（子の認証の有無。T22-auth）", () => {
     ]) {
       const f = childAuthProblem(env);
       expect(f?.code).toBe("childAuthMissing");
-      expect(f?.nextActions).toHaveLength(3);
+      expect(f?.nextActions).toHaveLength(4);
+      expect(f?.nextActions.at(-1)).toContain("解決済み");
       expect(f?.nextActions.join()).toContain("claude setup-token");
       expect(f?.nextActions.join()).toContain("inherit");
     }
@@ -26,6 +27,15 @@ describe("childAuthProblem（子の認証の有無。T22-auth）", () => {
     for (const n of [...CHILD_AUTH_VARIABLES, ...CHILD_CLOUD_VARIABLES]) {
       expect(childAuthProblem({ [n]: "1" }), n).toBeUndefined();
     }
+  });
+
+  it("クラウドの経路の切り替えが 0・false・no・off（大文字小文字を問わない）なら、なしとみなす", () => {
+    for (const v of ["0", "false", "FALSE", "no", "Off", " off "]) {
+      expect(childAuthProblem({ CLAUDE_CODE_USE_BEDROCK: v })?.code, v).toBe("childAuthMissing");
+    }
+    expect(childAuthProblem({ CLAUDE_CODE_USE_VERTEX: "true" })).toBeUndefined();
+    // API キー・トークンは、空かどうかだけで見る（"0" でも、あるとみなす）
+    expect(childAuthProblem({ ANTHROPIC_API_KEY: "0" })).toBeUndefined();
   });
 
   it("失敗の文面に、値を出さない（名前だけ）", () => {
