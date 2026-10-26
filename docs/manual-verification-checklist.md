@@ -93,7 +93,10 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 - **あわせて見る点**:
   - spawn_task の `prompt` が「人間のメッセージ」として扱われるか。
   - 子が `curl` を実行できるか。**トークンが `ps` に出ない形（`printf` から標準入力で `-H @-`・`-d @-`）で送れるか**（[`docs/desktop-runtime.md`](desktop-runtime.md) の「仮置きの一覧」の項目 4）。
-- **結果**: （判定。ワークツリー／ローカルそれぞれ。最初のメッセージの前と後）
+- **結果**: 条件付き（2026-10。Desktop 3.6556.2・macOS 26.5。親・子とも権限モード auto。**plugin ではなく、プロジェクトの `.claude/settings.json` のフック**〔PreToolUse / PostToolUse、matcher `*`〕で確認。Desktop の Code タブに `/plugin` がなく、plugin を導入できなかったため）。
+  - **フック（プロジェクトの設定）**: 継承される。子の `Write` も、親と同じ文言で拒否された（`PreToolUse:Write hook error: Spike 01: Write は deny`）。フックのログの `session_id` は親と異なる ID で、子の `Write` の deny も記録された。
+  - **MCP ツール**: 親では `spike_ping_desktop`・`spike_ping_project`・claude.ai のコネクタが deferred。子にも見えるが、deferred かは不明。子の報告は主要なサーバーだけで、完全な一覧ではない。`rustrover` は親子とも接続失敗（ECONNREFUSED）。
+  - **未確認**: plugin のフックが子に継承されるか。「ワークツリーで開始」「ローカルで開始」の別、最初の人間のメッセージの前後の別。「あわせて見る点」（prompt の扱い・`curl`）は、この記録では未確認。
 - **結果によって変わるタスク**:
   - 可・条件付き（MCP・フックが継承される）: 能力表の `hooks` を見直す（[`docs/desktop-runtime.md`](desktop-runtime.md) の「能力表」。`DESKTOP_CAPABILITIES` の 1 か所）。T22 の Desktop の分（子へのフックの継承）に進む。受け口が Desktop の子に許可を返さない仮置きを見直す。
   - `curl` が使える: T21 の案 A（子が `curl` で bind・報告する）を確定する。使えない: T21 の紐付けの手順を作り直す（MCP をあとから足すなど）。
@@ -169,7 +172,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 |:--|:--|:--|:--|
 | A1（T22-c） | 条件付き | T22-c は、skill の使用の裏付け（記録）が残る | 二重フックなし（plugin の中身で確認）。skill を読めた（自己申告。記録なし）。`inherit` で実施。`isolated` は認証で止まった |
 | A2（H1〜H6） | 条件付き（H3 は (1) のみ） | T22-h・T22-hu・T22-ht は、H1〜H6 が可（H3 は (1) のみ） | H1〜H6 可。H3 は (1) のみ（子のセッション記録が残らない環境）。H7（T24-sp・T24-rs の表示）も可 |
-| B1（項目 4） | | | |
+| B1（項目 4） | 条件付き | 能力表の `hooks` の見直しは、plugin のフックの確認のあと。T22 の Desktop の分は、プロジェクトのフックの継承までが根拠 | プロジェクトの `.claude/settings.json` のフックは子に継承され、`Write` は子でも拒否された。plugin のフックは未確認（`/plugin` がなく導入できなかった）。MCP は子にも見えるが、deferred かは不明 |
 | B2（項目 6） | | | |
 | B3（項目 5） | | | |
 | B4（項目 1・2） | | | |
