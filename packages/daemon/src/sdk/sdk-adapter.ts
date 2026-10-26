@@ -860,7 +860,8 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     let remaining: ProcessLabel[] = [];
     for (;;) {
       const pids = await this.probeWithin(entry.cwd, deadline - d.timers.now());
-      remaining = pids ?? [];
+      // 取れなかった確認（null・時間切れ）で、それまでに見つけたプロセスを消さない（「pid 不明」にしない）。
+      if (pids !== null) remaining = pids;
       if (pids !== null && pids.length === 0) {
         const err = this.record({
           type: "node.stateChanged",

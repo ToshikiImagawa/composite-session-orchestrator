@@ -428,6 +428,20 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
     expect(r.sink.types).toEqual(["node.stopObserved:aborted", "node.stateChanged:stopTimeout"]);
   });
 
+  it("最後の確認が取れなかった（null・時間切れ）ときも、それまでに見つけた pid を失わない（「pid 不明」にしない。T24-sp）", async () => {
+    const r = rig({}, [[{ ...proc(7), command: "zsh" }], null]);
+    await startNode(r);
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    await settle();
+    await r.timers.advance(30_000);
+    const res = await p;
+    expect(res.ok && res.value).toMatchObject({
+      state: "stopIncomplete",
+      blockers: [7],
+      processes: [{ pid: 7, command: "zsh" }],
+    });
+  });
+
   it("停止未完了の結果に、整えたコマンドの名前つきの processes を添える（blockers は pid のまま。T24-sp）", async () => {
     const r = rig({}, [[{ ...proc(7), command: "z\u001b[2Jsh" }, proc(9)]]);
     await startNode(r);
