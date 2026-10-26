@@ -17,6 +17,7 @@ import {
   type EventBody,
   type Failure,
   failure,
+  formatProcesses,
   isDirectChild,
   isInSubtree,
   isStrictDescendant,
@@ -185,7 +186,11 @@ export function createRuntimeHandlers(deps: RuntimeHandlerDeps) {
       bodies.push(
         inbox(
           "stopIncomplete",
-          `停止未完了: 残っているプロセス pid ${result.value.blockers.join(", ") || "不明"}`,
+          `停止未完了: 残っているプロセス ${
+            result.value.processes !== undefined
+              ? formatProcesses(result.value.processes)
+              : `pid ${result.value.blockers.join(", ") || "不明"}`
+          }`,
         ),
       );
     } else {
