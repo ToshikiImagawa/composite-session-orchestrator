@@ -128,6 +128,7 @@ export function purgeEventSeqs(
       case "node.purgeHeld":
       case "node.purgeHoldReleased":
       case "node.hookUnbound":
+      case "node.hookTokenIssued":
         subject = e.payload.nodeId;
         break;
       case "inbox.added":

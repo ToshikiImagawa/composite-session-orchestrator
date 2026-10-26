@@ -2,7 +2,7 @@ import { request as httpRequest } from "node:http";
 import { type EventBody, foldEvents, type OrchEvent, type OrchState } from "@cso/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCredentialStore } from "../../src/api/credentials.js";
-import { createSessionBinder, type HookDecider } from "../../src/api/hook.js";
+import { createHookTokens, createSessionBinder, type HookDecider } from "../../src/api/hook.js";
 import { type ApiLogEvent, type ApiServer, createApiServer } from "../../src/api/server.js";
 
 let n = 0;
@@ -357,5 +357,47 @@ describe("拒否の経路ごとの要求数（T24-hc）: received が 1 増え�
     expect(summary.hook?.received ?? 0).toBe(n + 1);
     expect(summary.hook?.allowed ?? 0).toBe(n);
     expect(summary.hook?.denied ?? 0).toBe(0);
+  });
+
+  it("フック専用のトークン（T22-ht）は /v1/hook だけで通り、/v1/request・/v1/whoami では 401。ノードのトークン（SDK の子）は無効にならない", async () => {
+    const credentials = createCredentialStore({ humanToken: HUMAN });
+    const hookTokens = createHookTokens();
+    const st = state();
+    const calls2: unknown[][] = [];
+    server = createApiServer({
+      credentials,
+      getState: () => st,
+      handlers: { "tree.list": () => ({ ok: true, value: { table: "t" } }) } as never,
+      hook: async (nodeId, toolName) => {
+        calls2.push([nodeId, toolName]);
+        return { allow: true };
+      },
+      hookTokens,
+    });
+    const { url } = await server.listen(0);
+    const nodeToken = credentials.issueNodeToken("a", "child");
+    const hookToken = hookTokens.issue("a");
+    const ok = await post(url, hookToken, pre("Read", {}, "s-manual"));
+    expect(ok.status).toBe(200);
+    expect(calls2).toEqual([["a", "Read"]]); // ノードはトークンから決まる
+    const req = await fetch(`${url}/v1/request`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${hookToken}` },
+      body: JSON.stringify({ requestId: "q", operation: "tree.list", params: {} }),
+    });
+    expect(req.status).toBe(401);
+    const who = await fetch(`${url}/v1/whoami`, {
+      headers: { authorization: `Bearer ${hookToken}` },
+    });
+    expect(who.status).toBe(401);
+    // ノードのトークンは、そのまま使える
+    const who2 = await fetch(`${url}/v1/whoami`, {
+      headers: { authorization: `Bearer ${nodeToken}` },
+    });
+    expect(who2.status).toBe(200);
+    expect(credentials.authenticate(nodeToken)).toEqual({ role: "child", nodeId: "a" });
+    // 発行し直すと、古いフック用トークンは 401
+    hookTokens.issue("a");
+    expect((await post(url, hookToken, pre("Read", {}, "s-manual"))).status).toBe(401);
   });
 });
