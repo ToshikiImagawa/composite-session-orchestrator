@@ -43,3 +43,10 @@ cso reclaim <nodeId>
 ## 終了コード
 
 0 成功 / 1 失敗・結果が確認できない / 2 引数・環境の誤り
+
+## 子の認証（daemon の起動の環境）
+
+`cso` が使うのは人間のトークンだけだが、daemon が起動する子には、別に Claude の認証が要る。既定の `childHome: "isolated"` では、
+`claude` CLI のログインだけの環境は、子の起動が `childAuthMissing` で拒否される。daemon を起動する環境に `ANTHROPIC_API_KEY`、または
+`claude setup-token` で作った `CLAUDE_CODE_OAUTH_TOKEN` を入れる（または `childHome: "inherit"`）。詳しくは `docs/plugin.md` の「子の認証」。
+

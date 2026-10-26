@@ -7,7 +7,7 @@
 ## 前提
 
 - Node 22 以上、`git`、`lsof`。`pnpm install && pnpm build` 済み。
-- Claude の認証が、実行する環境にあること（`ANTHROPIC_API_KEY` または、`claude` CLI のログイン）。認証情報は、設定ファイルにも、このリポジトリにも書かない。
+- Claude の認証が、daemon を起動する環境の**環境変数**にあること（`ANTHROPIC_API_KEY`、または `claude setup-token` で作った `CLAUDE_CODE_OAUTH_TOKEN`）。`claude` CLI のログインだけでは、既定の `childHome: "isolated"` で子が起動できない（`childAuthMissing`。下の「HOME の分離」）。認証情報は、設定ファイルにも、このリポジトリにも書かない。
 - 依存: `@anthropic-ai/claude-agent-sdk` **0.3.292**（2026-10-06 公開。固定。ライセンスは `SEE LICENSE IN README.md`。ユーザーが確認・承認）。推移的な依存の公開日は `docs/dependency-release-ages.md`。
 - MCP サーバー（`cso-mcp`）は、`packages/mcp` の bin（`pnpm build` で `packages/mcp/dist/bin.js` ができる）。手順 6〜7 は、これを起動して行う（下の「MCP サーバーの起動」）。
 
@@ -171,6 +171,9 @@ Desktop の子への継承は、項目 4 の結果のあと（T22 の Desktop �
 ### HOME の分離（#45 のレビュー対応）
 
 子の `HOME` は、既定で `<stateDir>/homes/<nodeId>`（0700）に分ける（設定 `childHome: "inherit"` で、daemon の `HOME` を渡す）。
+
+子の認証（T22-auth）: 既定の `isolated` では、`claude` CLI のログインだけの環境は、子の起動が `childAuthMissing` で拒否される。認証の環境変数と、判定の規則は [`docs/plugin.md`](plugin.md) の「子の認証」。
+
 `childEnvAllow` に、`LD_*`・`NODE_OPTIONS`・`BASH_ENV`・`GIT_SSH_COMMAND` など、子の実行を乗っ取れる名前は指定できない。
 実 SDK（0.3.292）で、子の `HOME` を空の 0700 のディレクトリに分けて、項目 16 をやり直した（2026-10-21）: 認証は通り（`ready`、約 7 秒で結果）、
 `src/a.txt` への Write は許可されて書けた。範囲の外（`outside.txt`）への Write は、フックが拒否して書かれなかった。分けた HOME には、SDK が

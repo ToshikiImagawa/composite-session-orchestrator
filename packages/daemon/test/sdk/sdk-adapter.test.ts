@@ -915,7 +915,7 @@ describe("予期しない終了（finished の監視）", () => {
   it("子の HOME を、ノードごとのディレクトリに分ける（homeFor を渡したとき）。作れなければ、起動しない（フェイルクローズ）", async () => {
     const made: string[] = [];
     const r = rig({
-      parentEnv: { PATH: "/bin", HOME: "/root" },
+      parentEnv: { PATH: "/bin", HOME: "/root", ANTHROPIC_API_KEY: "k" },
       homeFor: (id) => {
         made.push(id);
         return `/state/homes/${id}`;
@@ -926,6 +926,7 @@ describe("予期しない終了（finished の監視）", () => {
     expect(sessionOf(r).options.env).toEqual({
       PATH: "/bin",
       HOME: "/state/homes/a",
+      ANTHROPIC_API_KEY: "k",
       ...LOOPBACK_NO_PROXY,
     });
     const bad = rig({
@@ -1142,5 +1143,57 @@ describe("子に渡す skill（T22-c）", () => {
     const r2 = rig({ childPluginPath: "/p" });
     await startNode(r2);
     expect(sessionOf(r2).options.plugin?.skill).toBe("cso-child-skills:cso-child");
+  });
+});
+
+describe("子の認証の確認（T22-auth）", () => {
+  it("HOME を分ける（homeFor）とき、認証の環境変数がなければ、SDK を起動せずに childAuthMissing。値は出さない", async () => {
+    const r = rig({
+      homeFor: (id) => `/state/homes/${id}`,
+      parentEnv: { PATH: "/bin", GH_TOKEN: "ghp-secret-value" },
+    });
+    const res = await r.adapter.start({
+      nodeId: "a",
+      worktreePath: "/link/a",
+      scope: SCOPE,
+      instruction: "x",
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error.code).toBe("childAuthMissing");
+    expect(r.launcher.sessions).toHaveLength(0);
+    expect(r.adapter.has("a")).toBe(false);
+    expect(JSON.stringify(res.error)).not.toContain("ghp-secret-value");
+  });
+
+  it("認証を、HOME のディレクトリを作る前に確かめる（失敗したときに、空の HOME を残さない）", async () => {
+    const made: string[] = [];
+    const r = rig({
+      homeFor: (id) => {
+        made.push(id);
+        return `/state/homes/${id}`;
+      },
+      parentEnv: { PATH: "/bin" },
+    });
+    const res = await r.adapter.start({
+      nodeId: "a",
+      worktreePath: "/link/a",
+      scope: SCOPE,
+      instruction: "x",
+    });
+    expect(res.ok).toBe(false);
+    expect(made).toEqual([]);
+  });
+
+  it("HOME を共有する（inherit。homeFor なし）ときは、確かめない", async () => {
+    const r = rig({ parentEnv: { PATH: "/bin" } });
+    const res = await r.adapter.start({
+      nodeId: "a",
+      worktreePath: "/link/a",
+      scope: SCOPE,
+      instruction: "x",
+    });
+    expect(res.ok).toBe(true);
+    expect(r.launcher.sessions).toHaveLength(1);
   });
 });

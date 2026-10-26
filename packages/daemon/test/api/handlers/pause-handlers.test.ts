@@ -73,7 +73,7 @@ const rig = () => {
     revoked: [] as string[],
     failures: [] as string[],
   };
-  const flags = { startFails: false, revokeThrows: false };
+  const flags = { startFails: false, revokeThrows: false, authMissing: false };
   const adapter = {
     kind: "cli" as const,
     capabilities: () => ({
@@ -86,6 +86,16 @@ const rig = () => {
     async start(req: StartRequest): Promise<Result<StartValue, Failure>> {
       calls.started.push(req);
       if (flags.startFails) return { ok: false, error: failure("startFailed", "x", "y") };
+      if (flags.authMissing)
+        return {
+          ok: false,
+          error: failure(
+            "childAuthMissing",
+            "子に渡す環境変数に認証がない",
+            "claude setup-token",
+            "inherit",
+          ),
+        };
       return ok({ sessionId: "s", cwd: req.worktreePath, removedEnv: [] });
     },
     async send() {
@@ -231,6 +241,28 @@ describe("decision.answer（回答で、止めた子を必ず再開する）", (
     expect(retry.ok).toBe(true);
     expect(stateOf(r.s(), "a")).toBe("running");
     expect(r.calls.started).toHaveLength(2);
+  });
+
+  it("子の認証がない（childAuthMissing）なら、原因を返し、親の受信箱に failure を 1 件だけ出す（再試行で増えない）", async () => {
+    const r = rig();
+    const id = await paused(r);
+    r.flags.authMissing = true;
+    const res = await r.answer(id, "A", "ans-1");
+    expect(res.error?.code).toBe("resumePending");
+    expect(res.error?.cause).toContain("認証がない");
+    expect(stateOf(r.s(), "a")).toBe("stopped");
+    const items = () =>
+      r
+        .s()
+        .inbox.filter(
+          (i) =>
+            i.kind === "failure" && i.nodeId === "a" && i.summary?.includes("childAuthMissing"),
+        );
+    expect(items()).toHaveLength(1);
+    expect(items()[0]?.summary).toContain("claude setup-token");
+    await r.answer(id, "A", "ans-2");
+    await r.answer(id, "A", "ans-3");
+    expect(items()).toHaveLength(1);
   });
 
   it("人間などが止めた子は、回答が来ても再開しない（受信箱に載せる）。判断による停止だけの子は再開する", async () => {

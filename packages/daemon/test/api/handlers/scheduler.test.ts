@@ -71,6 +71,7 @@ const rig = (opts: { startLimits?: { perParent?: number; total?: number } } = {}
   };
   const flags = {
     startFails: false,
+    authMissing: false,
     startGate: undefined as Promise<void> | undefined,
     noAdapter: false,
   };
@@ -80,6 +81,15 @@ const rig = (opts: { startLimits?: { perParent?: number; total?: number } } = {}
       calls.started.push(req);
       if (flags.startGate !== undefined) await flags.startGate;
       if (flags.startFails) return { ok: false, error: failure("startFailed", "内部X", "内部Y") };
+      if (flags.authMissing)
+        return {
+          ok: false,
+          error: failure(
+            "childAuthMissing",
+            "子に渡す環境変数に認証がない",
+            "claude setup-token で作る",
+          ),
+        };
       return ok({ sessionId: "sess", cwd: req.worktreePath, removedEnv: [] });
     },
     async stop() {
@@ -148,6 +158,19 @@ const rig = (opts: { startLimits?: { perParent?: number; total?: number } } = {}
 };
 
 describe("スケジューラ（依存が揃った pending の子を起動する）", () => {
+  it("子の認証がない（childAuthMissing）なら、原因と対処を、親の受信箱に failure で 1 件だけ出す（T22-auth）", async () => {
+    const r = rig();
+    r.verify("a");
+    r.flags.authMissing = true;
+    await r.spawner.tick();
+    await r.spawner.tick();
+    const items = r.failures("b");
+    expect(items).toHaveLength(1);
+    expect(items[0]?.summary).toContain("childAuthMissing");
+    expect(items[0]?.summary).toContain("認証がない");
+    expect(items[0]?.summary).toContain("claude setup-token");
+  });
+
   it("依存先が未完了のあいだは、起動しない", async () => {
     const r = rig();
     await r.spawner.tick();
