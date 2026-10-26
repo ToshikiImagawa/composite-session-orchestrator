@@ -22,6 +22,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { type Failure, failure, isCommitSha, isPathUnder, LIMITS, type Result } from "@cso/core";
 import { collisionKey, ownedBy } from "./discarded-keys.js";
+import { copySeed, planSeed, readSeedList } from "./worktree-seed.js";
 
 export interface GitResult {
   readonly code: number | null;
@@ -81,6 +82,13 @@ export interface GitPortsOptions {
   readonly regenerableIgnored?: readonly string[];
   /** 保管する、破棄した成果（`refs/cso/discarded/*`）の数の上限。上限に達したら、強制の回収は失敗する。省略すると 200。 */
   readonly discardedRefsMax?: number;
+  /** 作業ツリーに設定ファイルを写した結果の通知（`worktree-seed.ts`）。省略すると、標準エラーに 1 行（JSON）出す。 */
+  readonly onSeed?: (e: {
+    nodeId: string;
+    copied: readonly string[];
+    skipped: readonly string[];
+    missing: readonly string[];
+  }) => void;
 }
 
 export const DEFAULT_DISCARDED_REFS_MAX = 200;
@@ -201,6 +209,17 @@ export function createGitPorts(
     );
   }
   const regenerable = new Set(options.regenerableIgnored ?? DEFAULT_REGENERABLE_IGNORED);
+  const onSeed =
+    options.onSeed ??
+    ((e) =>
+      process.stderr.write(
+        `${JSON.stringify({ at: new Date().toISOString(), event: "worktreeSeeded", ...e })}\n`,
+      ));
+  /** 作業ツリーに写したファイル（一覧の内容）。回収の判定で、失われるものに数えない。一覧を読めなければ空。 */
+  const seededPaths = (): ReadonlySet<string> => {
+    const list = readSeedList(repoRoot);
+    return new Set(list.ok ? list.value : []);
+  };
 
   // git の操作は直列に行う（作業ツリーの追加・削除は、リポジトリの内部で競合しうる）。
   let tail: Promise<unknown> = Promise.resolve();
@@ -265,6 +284,7 @@ export function createGitPorts(
 
   /** きれいか: 未保存の変更・未追跡のファイルがなく、gitignore の対象は、再生成できるもの（許可リスト）だけ。調べられなければ false。 */
   const isClean = async (path: string): Promise<boolean> => {
+    const seeded = seededPaths();
     // fsmonitor・フックは使わない（作業ツリーの設定に、コマンドを走らせない）。
     const status = await git(
       [
@@ -284,7 +304,11 @@ export function createGitPorts(
       status.stdout
         .split("\n")
         .filter((l) => l !== "")
-        .every((l) => l.startsWith("!! ") && regenerable.has(l.slice(3).split("/")[0] ?? ""))
+        .every(
+          (l) =>
+            ((l.startsWith("!! ") || l.startsWith("?? ")) && seeded.has(l.slice(3))) ||
+            (l.startsWith("!! ") && regenerable.has(l.slice(3).split("/")[0] ?? "")),
+        )
     );
   };
 
@@ -347,8 +371,11 @@ export function createGitPorts(
     );
     if (status.code !== 0) out.workingTreeUnknown = true;
     else {
+      const seeded = seededPaths();
       for (const line of status.stdout.split("\n")) {
         if (line === "") continue;
+        if ((line.startsWith("!! ") || line.startsWith("?? ")) && seeded.has(line.slice(3)))
+          continue;
         if (line.startsWith("?? ")) out.untracked += 1;
         else if (line.startsWith("!! ")) {
           // 再生成できる gitignore の対象（許可リスト）は、失われるものに数えない。
@@ -552,6 +579,11 @@ export function createGitPorts(
             );
           }
         }
+        // 写すファイルは、作業ツリーを作る前に確かめる（不正なら、何も作らずに失敗する）。
+        const seedList = readSeedList(repoRoot);
+        if (!seedList.ok) return seedList;
+        const seedPlan = planSeed(repoRoot, seedList.value);
+        if (!seedPlan.ok) return seedPlan;
         const exists = await branchExists(branch);
         if (exists) {
           // 残っていたブランチを使うときは、上流が親のブランチのままか確かめる（違えば、統合の判定が狂う）。
@@ -574,6 +606,14 @@ export function createGitPorts(
             `作業ツリーを作れなかった: ${r.stderr.trim()}`,
             "git の状態を確認する",
           );
+        }
+        if (seedPlan.value.copy.length > 0 || seedPlan.value.missing.length > 0) {
+          const { copied, skipped } = copySeed(repoRoot, path, seedPlan.value);
+          try {
+            onSeed({ nodeId, copied, skipped, missing: seedPlan.value.missing });
+          } catch {
+            // 通知の失敗は、処理を止めない
+          }
         }
         return { ok: true as const, value: { worktreePath: realOrUndefined(path) ?? path } };
       }),
