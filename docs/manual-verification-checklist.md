@@ -75,6 +75,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 | H6 | `session_id` の結び付け | 別のセッションは 403。`/clear`・`--resume` で変わると拒否され、`cso hook-unbind <nodeId>`（または画面のボタン・親の `node_hookUnbind`）のあと通る。記録に `node.hookUnbound`。子が止められて再開したあと（判断要求の `pauseNodeIds` で止め、回答で再開。画面の木で `stopped` → `running`、親の受信箱に回答）、手動のセッションは拒否され、`cso hook-env` から起動し直すと通る。子を止めない判断（`pauseNodeIds` なし）に回答したあとは、子は動作中のまま（停止の表示なし）で、手動のセッションがそのまま通る | 条件付き。可: 2 つ目のセッションは 403・`cso hook-unbind` のあと通る・`hook-env` の再発行で古いトークンは 401・記録に `node.hookUnbound`。未確認（確かめ方の誤り）: 判断に回答して再開したあとも、フック専用トークンが通った。この判断は `pauseNodeIds` がなく、子を止めていなかった（記録で確認。`stopped`・`restart` もなし）ため、仕様どおり（無効になるのは、子を止める判断への回答で再開したときだけ。#102）。**子を止める判断での確認は、やり直しが要る**。`/clear`・`--resume` も未 |
 
 - **結果**（2026-10-26。Claude Code 2.1.308・Agent SDK 0.3.292・macOS 26.5。daemon は `childRuntime: "cli"`・`childHome: "inherit"`。`eval "$(cso hook-env <nodeId>)"` で実施）: 上の表のとおり。
+- **H6 の注意**: 手動のセッションは、作業ツリーの外のディレクトリで起動しておく（作業ツリーを開いたシェル・エディタも、止める前に出す。停止の確認は、作業ツリーの下の cwd・開いているファイルで判定するので、残ると `stopIncomplete` になる）。回答は、子が `stopped` になってから送る（目安: 止める操作から最大で、猶予〔既定 60 秒〕＋30 秒）。**`stopIncomplete` になったら、その子では再開の確認を続けられない**（止め直すと `stopped` にはなるが、人の停止として数えられ、回答しても再開しない）。原因を直し（作業ツリーから出る）、新しい子と新しい判断（`pauseNodeIds`）で最初からやり直す（詳しくは [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「H6 で子を止めるときの注意」）。
 - **結果によって変わるタスク**: H1〜H3 が不可なら T22-h を差し戻す（hooks.json の形・受け口）。H6 が不可なら T22-hu・T22-hub（フック専用のトークンの無効化は T22-ht）。合格なら tasks.md の T22-h の「手動確認は未」を更新する。
 
 ---
