@@ -14,6 +14,12 @@ describe("processCommandName（T24-sp）", () => {
     expect(processCommandName("ev‮il​")).toBe("evil");
     expect(processCommandName("x\u0000y\u007f")).toBe("xy");
   });
+  it("表示の区切り・引用符は _ に置き換え、行・段落の区切りは除く（別のプロセスに見せかけない）", () => {
+    expect(processCommandName("a）、999（root")).toBe("a__999_root");
+    expect(formatProcesses([{ pid: 1, command: "a）、999（root" }])).toBe("pid 1（a__999_root）");
+    expect(processCommandName(`x"y'z`)).toBe("x_y_z");
+    expect(processCommandName("ab\u2028cd\u2029")).toBe("abcd");
+  });
   it("空・文字列でないものは undefined", () => {
     expect(processCommandName("")).toBeUndefined();
     expect(processCommandName(" \t​ ")).toBeUndefined();

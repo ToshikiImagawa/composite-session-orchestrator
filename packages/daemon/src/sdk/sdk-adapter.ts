@@ -163,6 +163,9 @@ const fail = (
   error: failure(code, cause, ...next),
 });
 
+/** 停止の確認の 1 回の探査に、最低限与える持ち時間（ミリ秒）。 */
+const MIN_PROBE_MS = 2_000;
+
 export class SdkRuntimeAdapter implements RuntimeAdapter {
   readonly kind = "cli" as const;
   private readonly nodes = new Map<string, NodeEntry>();
@@ -859,7 +862,11 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     const deadline = d.timers.now() + timeoutMs;
     let remaining: ProcessLabel[] = [];
     for (;;) {
-      const pids = await this.probeWithin(entry.cwd, deadline - d.timers.now());
+      // 期限ぎわの確認にも、最低限の持ち時間を与える（期限ちょうどの 1 回が必ず時間切れになり、一覧が古くならないように）。
+      const pids = await this.probeWithin(
+        entry.cwd,
+        Math.max(MIN_PROBE_MS, deadline - d.timers.now()),
+      );
       // 取れなかった確認（null・時間切れ）で、それまでに見つけたプロセスを消さない（「pid 不明」にしない）。
       if (pids !== null) remaining = pids;
       if (pids !== null && pids.length === 0) {

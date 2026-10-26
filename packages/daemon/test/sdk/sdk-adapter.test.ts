@@ -442,6 +442,27 @@ describe("stop: 停止の確認（作業ツリー配下のプロセス）", () =
     });
   });
 
+  it("期限ぎわの確認にも最低限の持ち時間（2 秒）を与え、期限ちょうどに探査が成功してプロセスがなければ stopped にする", async () => {
+    let r: Rig | undefined;
+    let deadline = Number.POSITIVE_INFINITY;
+    const probe = async () => {
+      const t = r?.timers;
+      if (t === undefined || t.now() < deadline) return [proc(7)];
+      await t.sleep(1_500); // 期限を過ぎた最後の 1 回は、時間がかかる
+      return [];
+    };
+    r = rig({ probe });
+    await startNode(r);
+    const p = r.adapter.stop("a", { mode: "immediate", stopSeq: STOP_SEQ });
+    deadline = r.timers.now() + 30_000;
+    await settle();
+    await r.timers.advance(30_000);
+    await r.timers.advance(1_500);
+    const res = await p;
+    expect(res.ok && res.value.state).toBe("stopped");
+    expect(r.sink.types.at(-1)).toBe("node.stateChanged:confirmStopped");
+  });
+
   it("停止未完了の結果に、整えたコマンドの名前つきの processes を添える（blockers は pid のまま。T24-sp）", async () => {
     const r = rig({}, [[{ ...proc(7), command: "z\u001b[2Jsh" }, proc(9)]]);
     await startNode(r);
