@@ -8,6 +8,7 @@
  *   cso purge-release <nodeId> [--request-id <id>]
  *   cso confirm-stopped <nodeId> [--note <根拠>] [--request-id <id>]
  *   cso hook-unbind <nodeId> [--request-id <id>]
+ *   eval "$(cso hook-env <nodeId>)"
  *   cso discarded list
  *   cso discarded restore <nodeId|key> [--branch <名前>] [--request-id <id>]
  *   cso discarded drop <nodeId|key> [--yes] [--request-id <id>]
@@ -29,6 +30,11 @@ export interface CommandDeps {
   readonly client: DaemonClient;
   /** 要求の識別子（冪等性）。時刻・乱数を持たないよう、呼び出し側が渡す。 */
   readonly newRequestId: () => string;
+  /**
+   * 標準出力が端末（TTY）か（T22-ht の `hook-env`）。真か省略なら、`hook-env` はトークンを出さずに失敗する（画面に出す経路を作らない）。
+   * 実行ファイル（T22-cli）が `process.stdout.isTTY` から渡す。
+   */
+  readonly stdoutIsTTY?: boolean;
 }
 
 export interface CommandResult {
@@ -66,6 +72,10 @@ const USAGE = `使い方:
       子のフック（plugin のファイルで設定するフック）の session_id の結び付けを外す。/clear・--resume で session_id が変わって、
       フックが拒否され続けるときに使う。次に来たセッションに結び直す。外した者（人間）が記録に残る。
       トークンが漏れた疑いがあるときは、外さずに、子を止めてトークンを失効させる
+  eval "$(cso hook-env <nodeId>)"
+      手動の CLI セッション用に、その子のフック専用のトークンを発行し、環境変数 CSO_DAEMON_URL・CSO_NODE_TOKEN を設定する
+      （eval で使うときだけ。標準出力が端末なら、トークンを出さずに失敗する）。そのあと、子の作業ツリーで plugin つきの claude を起動する。
+      発行し直すと、古いフック用トークンは無効になり、フックの結び付けも外れる。CLI の子（childRuntime: cli）の、動作中の子だけ
   cso discarded list
       強制の回収で破棄した成果の保管（refs/cso/discarded/*）の一覧: 名前・ノード・先端の SHA・日時・件名（コミットメッセージ由来の、信頼できない入力）。孤立（ノードがもうない）も出る。
       保管は、最終削除（cso purge）のときに、その木のノードの分が消える。数の上限（daemon の設定 discardedRefsMax）に達すると、強制の回収は失敗する
@@ -84,6 +94,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "purge-release": [],
   "confirm-stopped": ["--note"],
   "hook-unbind": [],
+  "hook-env": [],
   "discarded-list": [],
   "discarded-restore": ["--branch"],
   "discarded-drop": ["--yes"],
@@ -273,6 +284,15 @@ const isHeld = (v: unknown): v is { held: true; until?: string } =>
 const NOTE_FORBIDDEN = /[\p{Cc}\p{Cf}]/u;
 const isConfirmedStopped = (v: unknown): v is { state: string } =>
   isRecord(v) && typeof v.state === "string";
+const HOOK_ENV_TOKEN = /^[A-Za-z0-9_-]{16,512}$/;
+const HOOK_ENV_URL = /^http:\/\/(127\.0\.0\.1|localhost):[0-9]{1,5}$/;
+const isHookToken = (v: unknown): v is { token: string; nodeId: string; daemonUrl: string } =>
+  isRecord(v) &&
+  typeof v.token === "string" &&
+  HOOK_ENV_TOKEN.test(v.token) &&
+  typeof v.daemonUrl === "string" &&
+  HOOK_ENV_URL.test(v.daemonUrl) &&
+  typeof v.nodeId === "string";
 const isUnbound = (v: unknown): v is { unbound: boolean; duplicate: boolean } =>
   isRecord(v) && typeof v.unbound === "boolean" && typeof v.duplicate === "boolean";
 const isReleased = (v: unknown): v is { released: true } => isRecord(v) && v.released === true;
@@ -592,6 +612,25 @@ export async function runCommand(
     return {
       exitCode: 0,
       stdout: `保留を解除した: ${nodeId}（保持期間を過ぎていれば、予告から出し直し、noticeDays 日後に消える）\nrequestId: ${id}\n`,
+      stderr: "",
+    };
+  }
+
+  if (command === "hook-env") {
+    // 画面に出す経路を作らない: 標準出力が端末なら（分からないときも）、daemon を呼ばずに失敗する（トークンを発行しない）
+    if (deps.stdoutIsTTY !== false) {
+      return {
+        exitCode: 2,
+        stdout: "",
+        stderr: `hook-env は eval で使う: eval "$(cso hook-env ${nodeId})"（標準出力が端末のときは、トークンを出さない）\n`,
+      };
+    }
+    const res = await invoke(deps.client, id, "node.hookToken", { nodeId }, isHookToken);
+    if (res.kind !== "ok") return fail(res);
+    // 値は、形を確かめた文字（英数字・_・-、ループバックの URL）だけなので、単一引用符の中にそのまま置ける
+    return {
+      exitCode: 0,
+      stdout: `export CSO_DAEMON_URL='${res.value.daemonUrl}'\nexport CSO_NODE_TOKEN='${res.value.token}'\n`,
       stderr: "",
     };
   }

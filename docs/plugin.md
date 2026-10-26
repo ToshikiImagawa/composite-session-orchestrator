@@ -26,6 +26,8 @@ daemon が SDK で起動する子は、MCP の設定を daemon が組み立て�
 
 `plugin/hooks/hooks.json` は、PreToolUse・PostToolUse・Stop で、`node "${CLAUDE_PLUGIN_ROOT}/hooks/cso-hook.mjs"` を呼ぶ（依存なしのスクリプト）。スクリプトは、フック入力（標準入力の JSON）を、daemon の受け口 `POST /v1/hook` にそのまま送り、判定を返す。
 
+手動の CLI セッション（daemon が SDK で起動する子とは別に、人が起動する `claude`）では、人間が `eval "$(cso hook-env <nodeId>)"` で、その子の**フック専用のトークン**（T22-ht）を発行して環境変数に入れる。このトークンは `POST /v1/hook` だけで使え（ほかの入口は 401）、ノードのトークン（SDK の子の MCP の接続）は変わらない。発行し直すと、古いものは無効になり、フックの結び付けも外れる。daemon を再起動すると無効（発行し直す）。`cso hook-env` は、標準出力が端末なら、トークンを出さずに失敗する（`eval` で使うときだけ）。
+
 **CSO の子は、必ず `CSO_DAEMON_URL`（窓口の URL）と `CSO_NODE_TOKEN`（その子のノードのトークン）の両方を設定して起動する。どちらもない場合、フックは働かない**（CSO の子ではないセッションを壊さないため、素通しして、標準エラーに一言出す）。片方だけのときは、設定の誤りとして、拒否する。
 
 | 場面 | PreToolUse | PostToolUse・Stop |

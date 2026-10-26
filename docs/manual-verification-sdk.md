@@ -115,16 +115,16 @@
 
 ## ファイルで設定するフック（T22-h。CLI のセッション）
 
-前提: daemon が起動していて、範囲を持つ子（例: `writableLocations: ["src"]`）が daemon の管理下にある（受け口は、daemon が作業ツリーを知っているノードだけを判定する。ほかは拒否）。その子のトークン（bind で取得したもの）を使い、**その子の作業ツリーで**、plugin つきの CLI のセッションを起動する: `CSO_DAEMON_URL=<窓口の URL> CSO_NODE_TOKEN=<子のトークン> claude --plugin-dir <plugin のパス>`。トークンは、チャット・設定ファイルに書かない。
+前提: daemon（`childRuntime: "cli"`）が起動していて、範囲を持つ子（例: `writableLocations: ["src"]`）が daemon の管理下で動いている（受け口は、daemon が作業ツリーを知っているノードだけを判定する。ほかは拒否）。人間が、その子の**フック専用のトークン**を発行して、環境変数に入れる: `eval "$(cso hook-env <nodeId>)"`（T22-ht。`CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が設定される。トークンは画面・引数・履歴に出ない。標準出力が端末なら、`cso hook-env` は失敗する）。ノードのトークン（SDK の子が使っているもの）は変わらない。次に、**その子の作業ツリーで**、同じシェルから plugin つきの CLI のセッションを起動する: `claude --plugin-dir <plugin のディレクトリ>`。トークンは、チャット・設定ファイルに書かない。**`cso` の実行ファイル（T22-cli）のマージまでは、この手順は実行できない**。
 
 | # | 確認 | 期待 | 確認の方法 |
 |:--|:--|:--|:--|
 | H1 | フックが発火する | PreToolUse・PostToolUse・Stop で `cso-hook.mjs` が動く | `claude --debug` の出力に、フックの実行が出る。範囲内の `Write`（`src/a.txt`）は許可される |
 | H2 | 範囲外の書き込みの拒否と記録 | `Write`（`b.txt`）が拒否され、理由がモデルに伝わる。`scope.violation` が記録され、親の受信箱に violation が 1 件載る | 子に `b.txt` を書くよう頼み、`cso inbox` と記録を見る。未知のツール（例: `WebFetch`）は `node.toolDenied` |
-| H3 | `settingSources` の混入がない | daemon が SDK で起動する子（`settingSources: []`）には、利用者が入れた plugin のフックが混ざらない（受け口に、その子からの要求が来ない） | **対比で直接確かめる**（T24-hc。窓口の件数のまとめ `apiSummary` の `hook`。窓は 1 分）。(1) H1 の CLI セッションを止め、ほかに受け口を呼ぶものがない状態で、SDK で起動した子にツールを使わせる（`Read` など）。**同じ 1 分のうちに、窓を必ず作るため、無効なトークンで `GET /v1/whoami` を 1 回呼ぶ**（例: `curl -sS -H 'authorization: Bearer invalid-token-invalid-token-0000' "$CSO_DAEMON_URL/v1/whoami"`）。1 分待ち、その窓の `apiSummary` を見る。**`authFailed` のある行があって、`hook` がなければ、窓は観測できていて、受け口の要求は 0**（`apiSummary` の行そのものがなければ、窓が観測できていないので、やり直す）。(2) 比べるため、H1 の CLI セッションでツールを使わせ、その窓の `apiSummary` に `hook.received`（と `allowed`）が**出る**ことを見る。(1) で `hook.received` が出たら、混入がある（`hookSessionMismatch` が出ないことも、あわせて見る）。`received` は認証・回数の制限の前に数えるので、断った要求も含む |
+| H3 | `settingSources` の混入がない | daemon が SDK で起動する子（`settingSources: []`）には、利用者が入れた plugin のフックが混ざらない | **受け口の要求数では見分けられない**: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らないので、plugin の hooks.json が混ざっても、フックのスクリプトは素通しして、受け口を呼ばない（`apiSummary` の `hook` は 0 のまま）。代わりに次の 2 つで確かめる。(1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない（`skills/` と `.claude-plugin/plugin.json` だけ）。(2) SDK の子の標準エラー（daemon の記録の、子の出力）に、フックのスクリプトの一言 `[cso-hook]` が出ない（混ざっていれば、環境変数がないことを知らせる一言が、ツールの呼び出しのたびに出る） |
 | H4 | daemon 停止のときのフェイルクローズ | daemon を止めると、PreToolUse はすべて拒否される（「届かない」）。Stop は止めない（セッションを終えられる） | daemon を止めて、`Read` と `Write` を頼む。ツールが実行されないこと |
-| H5 | 環境変数 | 両方なし: 素通しし、標準エラーに一言出る（CSO のフックは働かない）。片方だけ: 拒否 | `CSO_NODE_TOKEN` だけを外して起動し、ツールが拒否されること |
-| H6 | `session_id` の結び付け | 同じトークンで別のセッションを起動すると、403 で拒否される（`hookSessionMismatch`）。daemon を再起動すると、最初に来たセッションに結び直す | 2 つ目の CLI セッションを、同じ環境変数で起動する。同じセッションで `/clear`・`--resume` をして `session_id` が変わると拒否され、`cso hook-unbind <nodeId>`（または親の `node_hookUnbind`）のあと、新しいセッションが通ることも確かめる（記録に `node.hookUnbound` が残る） |
+| H5 | 環境変数 | 両方なし: 素通しし、標準エラーに一言出る（CSO のフックは働かない）。片方だけ: 拒否 | `CSO_NODE_TOKEN` だけを外して起動し、ツールが拒否されること（`eval` のあと、`unset CSO_NODE_TOKEN` して起動する） |
+| H6 | `session_id` の結び付け | 同じトークンで別のセッションを起動すると、403 で拒否される（`hookSessionMismatch`）。daemon を再起動すると、最初に来たセッションに結び直す | 2 つ目の CLI セッションを、同じ環境変数で起動する。同じセッションで `/clear`・`--resume` をして `session_id` が変わると拒否され、`cso hook-unbind <nodeId>`（または親の `node_hookUnbind`）のあと、新しいセッションが通ることも確かめる（記録に `node.hookUnbound` が残る）。`cso hook-env` で発行し直したときも、古いフック用トークンは 401 になり、結び付けが外れることを確かめる |
 
 注: 本文の上限（1 MiB）を超えた要求の 413 は、daemon が本文を読まずに接続を閉じるため、スクリプトからは「届かない」扱いになることがある（どちらでも PreToolUse は拒否）。
 

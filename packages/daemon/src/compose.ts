@@ -38,7 +38,7 @@ import { waitRequestKey } from "./api/handlers/context.js";
 import { createHookHandlers } from "./api/handlers/hook-handlers.js";
 import { createInstructionDelivery } from "./api/handlers/instruction-delivery.js";
 import { createPurger, type PurgeHandlerDeps } from "./api/handlers/purge-handlers.js";
-import { createSessionBinder } from "./api/hook.js";
+import { createHookTokens, createSessionBinder } from "./api/hook.js";
 import {
   createIdentity,
   IDENTITY_FILE,
@@ -376,6 +376,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
 
   // フックの受け口の session_id の結び付け（T22-hu）。トークンを発行し直した・失効させたら外す。
   const hookSessions = createSessionBinder();
+  // 手動の CLI セッション用の、フック専用のトークン（T22-ht）。CLI の子のときだけ。ノードのトークンが変わったら、一緒に無効にする。
+  const hookTokens = config.childRuntime === "desktop" ? undefined : createHookTokens();
   // 認証。
   let humanToken: string;
   let credentials: ReturnType<typeof createCredentialStore>;
@@ -388,6 +390,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       repository: new FileTokenRepository(join(config.stateDir, "node-tokens.json")),
       clock,
       onNodeTokenChanged: (nodeId) => {
+        hookTokens?.revoke(nodeId);
         if (hookSessions.unbind(nodeId)) note("hookUnbound", { reason: "tokenReissued" });
       },
     });
@@ -688,6 +691,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
             reason: "Desktop の子のフックの受け口は、実機確認までは使わない（仮置き）",
           }),
     hookSessions,
+    ...(hookTokens === undefined ? {} : { hookTokens }),
     getState: () => log.state(),
     // 画面の停止の宣言（T22d）。ハンドラ（node.confirmStopped）と同じく、能力表の stopDelegated だけで決める（管理しているか
     // は見ない。再起動の後も出す）。childRuntime が desktop のとき、Desktop のアダプタの能力表から真になる（T21）。
@@ -695,7 +699,13 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     handlers: {
       ...handlers,
       // フックの結び付けを外す（人間・祖先の統合ノード。T22-hu）。
-      ...createHookHandlers({ log, sessions: hookSessions }),
+      ...createHookHandlers({
+        log,
+        sessions: hookSessions,
+        ...(hookTokens === undefined ? {} : { hookTokens }),
+        managed: (id) => adapter.has(id),
+        baseUrl: () => running?.url,
+      }),
       // Desktop の子の紐付けの文面（T21・仮置き）。コードは記録しない（応答だけ）。
       ...createBindHandlers({
         log,

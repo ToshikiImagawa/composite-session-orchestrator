@@ -8,6 +8,7 @@
  *   トークンの発行し直し・失効で外れる（T22-hu）。
  */
 
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { type Failure, failure, type Result } from "@cso/core";
 
 export type HookEventName = "PreToolUse" | "PostToolUse" | "Stop";
@@ -84,6 +85,45 @@ export function createSessionBinder(): SessionBinder {
     },
     has(nodeId) {
       return bound.has(nodeId);
+    },
+  };
+}
+
+/**
+ * 手動の CLI セッション用の、フック専用のトークンの表（T22-ht）。ノードのトークン（`CredentialStore`）とは別に持ち、`POST /v1/hook` だけで使う。
+ * ノードごとに 1 つ（発行し直すと、古いものは無効）。ハッシュだけを持ち、メモリだけ（daemon の再起動で無効）。
+ */
+export interface HookTokens {
+  /** 発行する（そのノードの古いフック用トークンは無効になる）。 */
+  issue(nodeId: string): string;
+  /** トークンのノード。未知・不正なら undefined。 */
+  authenticate(token: unknown): string | undefined;
+  revoke(nodeId: string): void;
+}
+
+const sha256 = (s: string): Buffer => createHash("sha256").update(s).digest();
+
+export function createHookTokens(
+  options: { readonly randomBytes?: (n: number) => Buffer } = {},
+): HookTokens {
+  const random = options.randomBytes ?? randomBytes;
+  const byNode = new Map<string, Buffer>();
+  return {
+    issue(nodeId) {
+      const token = random(32).toString("base64url");
+      byNode.set(nodeId, sha256(token));
+      return token;
+    },
+    authenticate(token) {
+      if (typeof token !== "string" || token === "") return undefined;
+      const h = sha256(token);
+      for (const [nodeId, stored] of byNode) {
+        if (timingSafeEqual(stored, h)) return nodeId;
+      }
+      return undefined;
+    },
+    revoke(nodeId) {
+      byNode.delete(nodeId);
     },
   };
 }

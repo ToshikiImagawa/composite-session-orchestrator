@@ -44,6 +44,7 @@ import { fingerprintOf } from "./dedupe.js";
 import {
   createSessionBinder,
   type HookDecider,
+  type HookTokens,
   parseHookRequest,
   type SessionBinder,
 } from "./hook.js";
@@ -174,6 +175,8 @@ export interface ApiDeps {
   readonly hook?: HookDecider;
   /** フックの受け口の session_id の結び付け（T22-hu で外から外せるように渡す）。省略すると、このサーバーの中だけのもの。 */
   readonly hookSessions?: SessionBinder;
+  /** 手動の CLI セッション用の、フック専用のトークン（T22-ht）。`POST /v1/hook` だけで認証に使う。 */
+  readonly hookTokens?: HookTokens;
   /** bind の入口の、全体のスロットル（1 秒あたりの失敗）。省略すると 1 秒に 10 回。 */
   readonly bindThrottle?: Throttle;
   /** 記録の時刻（ISO 8601 UTC）。既定は現在時刻。 */
@@ -825,6 +828,14 @@ export function createApiServer(deps: ApiDeps): ApiServer {
    * 認証・主体の検査・同時数・回数の制限は、`/v1/request` と同じ（重みは 0.5）。重複の扱い（requestId）はない（判定は冪等）。
    * 応答は `{ decision: "allow" | "deny", reason? }`。判定するのは PreToolUse だけで、PostToolUse・Stop は受けて allow を返す。
    */
+  /** 受け口の主体: ノードのトークンか、フック専用のトークン（T22-ht。子のノードとして扱う。ほかの入口では使えない）。 */
+  const hookPrincipal = (token: string | undefined): Principal | undefined => {
+    const p = deps.credentials.authenticate(token);
+    if (p !== undefined) return p;
+    const nodeId = deps.hookTokens?.authenticate(token);
+    return nodeId === undefined ? undefined : { role: "child", nodeId };
+  };
+
   async function handleHook(
     req: IncomingMessage,
     res: ServerResponse,
@@ -838,7 +849,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     // 届いた要求の数（T24-hc。認証・回数の制限の前なので、断った要求も含む）。
     counters.count("hook", "received");
     const token = parseBearer(req.headers.authorization);
-    const principal = deps.credentials.authenticate(token);
+    const principal = hookPrincipal(token);
     if (principal === undefined) {
       return authFailed(req, res, token === undefined ? "missing" : "invalid");
     }
@@ -905,7 +916,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       const h = parsed.value;
       // 本文を読んでいるあいだに、トークンが発行し直された・失効したなら、この要求では結ばない（T22-hu）。認証からここまでは
       // 非同期（本文の読み込み）なので、もう一度確かめる。ここから結ぶまでは同期の処理なので、間に発行し直されることはない。
-      const again = deps.credentials.authenticate(token);
+      const again = hookPrincipal(token);
       if (again === undefined || again.role !== "child" || again.nodeId !== principal.nodeId) {
         counters.count("authFailed", "principalRejected");
         return reject(

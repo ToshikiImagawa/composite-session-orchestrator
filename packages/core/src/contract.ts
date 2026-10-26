@@ -136,6 +136,15 @@ export interface OperationMap {
     params: { nodeId: string };
     result: { instruction: string; expiresAt: string };
   };
+  /**
+   * 手動の CLI セッション用の、フック専用のトークンを発行する（T22-ht）。人間だけ。`childRuntime: "cli"` の、daemon が管理している
+   * 動作中の子だけ。トークンは `POST /v1/hook` だけで使える（ほかの入口では 401）。ノードのトークン（SDK の子）は変えない。
+   * 発行し直すと、古いフック用トークンは無効になり、フックの結び付けも外れる。トークンは記録しない（`node.hookTokenIssued` に残すのは nodeId だけ）。
+   */
+  "node.hookToken": {
+    params: { nodeId: string };
+    result: { token: string; nodeId: string; daemonUrl: string };
+  };
   "inbox.fetch": { params: { sinceSeq?: number }; result: { items: readonly InboxItem[] } };
   "tree.list": { params: Record<string, never>; result: { table: string } };
   "decision.present": {
@@ -349,6 +358,7 @@ export const ROLE_OPERATIONS = {
     "node.confirmStopped",
     "node.bindCode",
     "node.hookUnbind",
+    "node.hookToken",
     "scope.decide",
     "node.reclaimInstruct",
     "node.reclaimPreview",
