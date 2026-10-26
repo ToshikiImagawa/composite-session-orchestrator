@@ -1,7 +1,7 @@
 import type { EventBody, NodeEvent } from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { createHookHandlers } from "../../../src/api/handlers/hook-handlers.js";
-import { createSessionBinder } from "../../../src/api/hook.js";
+import { createHookTokens, createSessionBinder } from "../../../src/api/hook.js";
 import type { HandlerRequest } from "../../../src/api/server.js";
 import { EventLog } from "../../../src/eventlog.js";
 import { createMemoryStore } from "../../../src/memory-store.js";
@@ -115,5 +115,98 @@ describe("node.hookUnbind（フックの結び付けを外す。T22-hu）", () =
     if (!again.ok) throw new Error(again.error.code);
     expect(again.value.state().nodes).toEqual(r.log.state().nodes);
     expect(again.value.state().lastSeq).toBe(r.log.state().lastSeq);
+  });
+});
+
+describe("node.hookToken（手動の CLI セッション用の、フック専用のトークン。T22-ht）", () => {
+  const setup = (opts: { cli?: boolean; managed?: boolean } = {}) => {
+    const store = createMemoryStore().open();
+    const opened = EventLog.open(store, { clock });
+    if (!opened.ok) throw new Error(opened.error.code);
+    const log = opened.value;
+    const add = (body: EventBody): void => {
+      const r = log.append({ requestId: `seed-${++n}`, actor: SYS, body });
+      if (!r.ok) throw new Error(`${r.error.code} ${r.error.cause}`);
+    };
+    add({
+      type: "node.created",
+      payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+    });
+    add({ type: "node.stateChanged", payload: { nodeId: "root", event: { type: "start" } } });
+    add({
+      type: "node.created",
+      payload: { nodeId: "m1", role: "integrator", parentId: "root", dependsOn: [] },
+    });
+    add({ type: "node.stateChanged", payload: { nodeId: "m1", event: { type: "start" } } });
+    add({
+      type: "node.created",
+      payload: { nodeId: "a", role: "implement", parentId: "m1", dependsOn: [] },
+    });
+    add({ type: "node.stateChanged", payload: { nodeId: "a", event: { type: "start" } } });
+    add({
+      type: "node.created",
+      payload: { nodeId: "p", role: "implement", parentId: "m1", dependsOn: [] },
+    });
+    const sessions = createSessionBinder();
+    const tokens = createHookTokens();
+    const h = createHookHandlers({
+      log,
+      sessions,
+      ...(opts.cli === false ? {} : { hookTokens: tokens }),
+      managed: () => opts.managed !== false,
+      baseUrl: () => "http://127.0.0.1:7777",
+    });
+    const call = (nodeId: string, role = "human", requestId = `q-${++n}`) =>
+      h["node.hookToken"]({
+        requestId,
+        operation: "node.hookToken",
+        role,
+        ...(role === "human" ? {} : { caller: { nodeId: "m1" } }),
+        params: { nodeId },
+      } as unknown as HandlerRequest<"node.hookToken">);
+    return { store, log, sessions, tokens, call };
+  };
+
+  it("人間だけが、動作中の CLI の子に発行できる。トークンはフック用の表で通り、記録にはトークンが入らない", () => {
+    const r = setup();
+    const res = r.call("a");
+    if (!res.ok) throw new Error(res.error.code);
+    expect(res.value.nodeId).toBe("a");
+    expect(res.value.daemonUrl).toBe("http://127.0.0.1:7777");
+    expect(r.tokens.authenticate(res.value.token)).toBe("a");
+    const rows = r.store.readAll();
+    expect(
+      rows.filter((e) => e.type === "node.hookTokenIssued").map((e) => JSON.parse(e.payload)),
+    ).toEqual([{ nodeId: "a" }]);
+    expect(JSON.stringify(rows)).not.toContain(res.value.token);
+  });
+
+  it("統合ノードのトークン・統合ノード・依存待ち・desktop・管理していないノードは、発行しない", () => {
+    const r = setup();
+    const code = (x: ReturnType<typeof r.call>) => (x.ok ? null : x.error.code);
+    expect(code(r.call("a", "integrator"))).toBe("forbidden");
+    expect(code(r.call("m1"))).toBe("integratorNotSupported");
+    expect(code(r.call("p"))).toBe("notActive");
+    expect(code(r.call("zzz"))).toBe("notFound");
+    expect(code(setup({ cli: false }).call("a"))).toBe("notCli");
+    expect(code(setup({ managed: false }).call("a"))).toBe("notManaged");
+  });
+
+  it("発行し直すと、古いトークンは無効になり、フックの結び付けも外れる。同じ requestId の再送は記録 1 回", () => {
+    const r = setup();
+    const first = r.call("a", "human", "same");
+    if (!first.ok) throw new Error("x");
+    r.sessions.check("a", "s-1");
+    const again = r.call("a", "human", "same");
+    if (!again.ok) throw new Error("x");
+    expect(again.value.token).not.toBe(first.value.token);
+    expect(r.tokens.authenticate(first.value.token)).toBeUndefined();
+    expect(r.tokens.authenticate(again.value.token)).toBe("a");
+    expect(r.sessions.has("a")).toBe(false);
+    expect(r.store.readAll().filter((e) => e.type === "node.hookTokenIssued")).toHaveLength(1);
+    // ログを開き直しても、同じ状態
+    const reopened = EventLog.open(r.store, { clock });
+    if (!reopened.ok) throw new Error(reopened.error.code);
+    expect(reopened.value.state().nodes).toEqual(r.log.state().nodes);
   });
 });

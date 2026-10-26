@@ -26,6 +26,8 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 ## 共通の記録欄
 
+版の書き方: 項目ごとに区切って追記する（例: `2.1.308（A1）／2.1.310（B）／…（C）`）。前の値は消さない。
+
 | 欄 | 値 |
 |:--|:--|
 | 実施日 | 2026-10-26（A1） |
@@ -48,7 +50,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 - **期待する結果**（二重フックは、受け口に要求が来ないことでは確かめられない。下の注）:
   - 子が `Skill` ツールで `cso-child`（中間の統合ノードは `cso-integrator`）を読み、その手順に従って報告する（`report_progress`・`report_done` など）。
   - `Skill` ツールの呼び出しが、フックで拒否されない（`node.toolDenied` に出ない）。
-  - フックが二重にならない: 子に渡す plugin（`<stateDir>/child-plugin/`）に `hooks/`・`commands/`・`.mcp.json` がない。子の標準エラーに `[cso-hook] …フックは働いていない` が出ない。（受け口に要求が来ないことは、環境変数が渡らないので、二重でもそうなる。根拠にしない）
+  - フックが二重にならない: (1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない。(2) 子の標準エラーに、フックのスクリプトの一言 `[cso-hook]` が出ない（**見方**: daemon は、SDK の子の標準エラーを記録しない〔daemon の記録＝daemon の標準エラーの JSON の行には出ない〕。フックの一言は、子のセッションの記録〔子の HOME の下の `.claude/projects/<作業ツリーを表す名前>/<セッション ID>.jsonl`。`childHome: inherit` なら利用者の HOME、`isolated` なら daemon が子に用意した HOME〕に残るので、そのファイルを、フックの一言そのもの（`[cso-hook] CSO_DAEMON_URL と CSO_NODE_TOKEN がない…`）で調べる: `grep -c 'cso-hook\] CSO_DAEMON_URL と CSO_NODE_TOKEN がない'`〔0 なら出ていない。`cso-hook` だけで探すと、plugin の名前・パスに当たって誤検知する〕。記録に残らない版の Claude Code では、(1) だけで判定し、結果の欄にそう書く）（受け口の要求数では見分けられない: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らず、混ざってもスクリプトは素通しして受け口を呼ばないため）。
   - 起動時に `childPluginSkipped` が記録されない（設定したとき）。
 - **結果**: **条件付き**（2026-10-26。Claude Code 2.1.308・Agent SDK 0.3.292・macOS 26.5）。
   - 可: 子が `Skill` ツールで `cso-child` を読めたと報告した（自己申告。子の記録〔トランスクリプト〕は残らないので、ツール呼び出しは見えない）。`node.toolDenied` は 0 件。`childPluginSkipped` なし。子は `report_done` で完了を報告した。
@@ -60,17 +62,17 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 ### A2. ファイルで設定するフック（H1〜H6。T22-h・T22-hu）
 
-- **前提**: [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「ファイルで設定するフック（T22-h。CLI のセッション）」の前提（daemon が範囲を持つ子を管理している。その子の作業ツリーで、`CSO_DAEMON_URL` と `CSO_NODE_TOKEN` を両方設定して、plugin つきの CLI のセッションを起動する）。仕組みは [`docs/plugin.md`](plugin.md) の「フック」。
+- **前提**: [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「ファイルで設定するフック（T22-h。CLI のセッション）」の前提（daemon が範囲を持つ子を管理している。人間が `eval "$(cso hook-env <nodeId>)"` でその子のフック専用のトークン〔T22-ht〕を環境変数に入れ、その子の作業ツリーで、同じシェルから plugin つきの CLI のセッションを起動する）。仕組みは [`docs/plugin.md`](plugin.md) の「フック」。`cso` の実行ファイル（T22-cli）は、`CSO_DAEMON_URL`・`CSO_HUMAN_TOKEN` を設定して使う。
 - **手順**: 同じ節の表の H1〜H6。
 
 | # | 確認 | 期待する結果（要約。詳細はリンク先） | 結果 |
 |:--|:--|:--|:--|
 | H1 | フックが発火する | PreToolUse・PostToolUse・Stop で動く。範囲内の書き込みは許可 | |
 | H2 | 範囲外の書き込みの拒否と記録 | 拒否され、理由がモデルに伝わる。`scope.violation` と受信箱の violation 1 件。未知のツールは `node.toolDenied` | |
-| H3 | `settingSources` の混入がない | SDK で起動する子からは、受け口に要求が来ない。**対比で直接確かめる**（T24-hc）: SDK の子だけを動かし、同じ 1 分のうちに無効なトークンで `GET /v1/whoami` を 1 回呼ぶ（窓を必ず作る）。その窓の `apiSummary` に `authFailed` があって `hook` がなければ、受け口の要求は 0（行がなければ、やり直す）。H1 の CLI セッションを動かした窓では `hook.received` が出る | |
+| H3 | `settingSources` の混入がない | SDK で起動する子に、plugin のフックが混ざらない。**受け口の要求数では見分けられない**: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らないので、plugin の hooks.json が混ざっても、フックのスクリプトは素通しして、受け口を呼ばない（`apiSummary` の `hook` は 0 のまま）。代わりに次の 2 つで確かめる。(1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない（`skills/` と `.claude-plugin/plugin.json` だけ）。(2) SDK の子の標準エラーに、フックのスクリプトの一言 `[cso-hook]` が出ない（**見方**: daemon は、SDK の子の標準エラーを記録しない〔daemon の記録＝daemon の標準エラーの JSON の行には出ない〕。フックの一言は、子のセッションの記録〔子の HOME の下の `.claude/projects/<作業ツリーを表す名前>/<セッション ID>.jsonl`。`childHome: inherit` なら利用者の HOME、`isolated` なら daemon が子に用意した HOME〕に残るので、そのファイルを、フックの一言そのもの（`[cso-hook] CSO_DAEMON_URL と CSO_NODE_TOKEN がない…`）で調べる: `grep -c 'cso-hook\] CSO_DAEMON_URL と CSO_NODE_TOKEN がない'`〔0 なら出ていない。`cso-hook` だけで探すと、plugin の名前・パスに当たって誤検知する〕。記録に残らない版の Claude Code では、(1) だけで判定し、結果の欄にそう書く）（混ざっていれば、環境変数がないことを知らせる一言が、ツールの呼び出しのたびに出る） | |
 | H4 | daemon 停止のときのフェイルクローズ | PreToolUse はすべて拒否。Stop は止めない | |
 | H5 | 環境変数 | 両方なし: 素通し（標準エラーに一言）。片方だけ: 拒否 | |
-| H6 | `session_id` の結び付け | 別のセッションは 403。`/clear`・`--resume` で変わると拒否され、`cso hook-unbind <nodeId>`（または画面のボタン・親の `node_hookUnbind`）のあと通る。記録に `node.hookUnbound` | |
+| H6 | `session_id` の結び付け | 別のセッションは 403。`/clear`・`--resume` で変わると拒否され、`cso hook-unbind <nodeId>`（または画面のボタン・親の `node_hookUnbind`）のあと通る。記録に `node.hookUnbound`。判断の回答のあと（子のノードのトークンが発行し直される）、手動のセッションは拒否され、`cso hook-env` から起動し直すと通る | |
 
 - **結果によって変わるタスク**: H1〜H3 が不可なら T22-h を差し戻す（hooks.json の形・受け口）。H6 が不可なら T22-hu・T22-hub。合格なら tasks.md の T22-h の「手動確認は未」を更新する。
 

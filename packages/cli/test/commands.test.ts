@@ -909,6 +909,57 @@ describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h�
     expect(again.stdout).not.toContain("なかった");
   });
 
+  it("hook-env は、標準出力が端末でないときだけ、node.hookToken を呼んで eval 用の 2 行を出す（T22-ht）", async () => {
+    const TOKEN = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
+    const a = fakeClient({
+      "node.hookToken": ok({ token: TOKEN, nodeId: "a", daemonUrl: "http://127.0.0.1:7777" }),
+    });
+    const r = await runCommand(["hook-env", "a"], {
+      ...deps(a.client),
+      isTTY: { stdin: true, stdout: false },
+    });
+    expect(ops(a.sent)).toEqual(["node.hookToken"]);
+    expect(a.sent[0]?.params).toEqual({ nodeId: "a" });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(
+      `export CSO_DAEMON_URL='http://127.0.0.1:7777'\nexport CSO_NODE_TOKEN='${TOKEN}'\n`,
+    );
+    expect(r.stderr).not.toContain(TOKEN);
+  });
+
+  it("hook-env は、標準出力が端末か、分からないときは、daemon を呼ばずに失敗する（トークンを発行しない・出さない）", async () => {
+    for (const tty of [true, undefined]) {
+      const a = fakeClient({});
+      const r = await runCommand(["hook-env", "a"], {
+        ...deps(a.client),
+        ...(tty === undefined ? {} : { isTTY: { stdin: true, stdout: tty } }),
+      });
+      expect(r.exitCode).toBe(2);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toContain('eval "$(cso hook-env a)"');
+      expect(a.sent).toEqual([]);
+    }
+  });
+
+  it("hook-env は、形の違う応答（引用符を含むトークン・ループバックでない URL）を出さない", async () => {
+    for (const value of [
+      { token: "x'; rm -rf ~; '", nodeId: "a", daemonUrl: "http://127.0.0.1:7777" },
+      {
+        token: "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+        nodeId: "a",
+        daemonUrl: "http://evil.example:80",
+      },
+    ]) {
+      const a = fakeClient({ "node.hookToken": ok(value) });
+      const r = await runCommand(["hook-env", "a"], {
+        ...deps(a.client),
+        isTTY: { stdin: true, stdout: false },
+      });
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toBe("");
+    }
+  });
+
   it("purge-release は、node.purgeRelease を送る", async () => {
     const { client, sent } = heldClient();
     const r = await runCommand(["purge-release", "t"], deps(client));

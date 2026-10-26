@@ -17,6 +17,7 @@ export const RESULT_KEYS: ResultKeys = {
   "node.confirmStopped": ["state"],
   "node.bindCode": ["instruction", "expiresAt"],
   "node.hookUnbind": ["unbound", "duplicate"],
+  "node.hookToken": ["token", "nodeId", "daemonUrl"],
   "inbox.fetch": ["items"],
   "tree.list": ["table"],
   "decision.present": ["decisionId"],

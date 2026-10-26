@@ -58,3 +58,24 @@ describe("node.hookUnbound（フックの結び付けを外した記録。T22-hu
     expect(purgeEventSeqs(events, new Set(["a"]))).toEqual([3, 4]);
   });
 });
+
+describe("node.hookTokenIssued（フック専用のトークンを発行した記録。T22-ht）", () => {
+  const issued = (nodeId: string) =>
+    ev({ type: "node.hookTokenIssued", payload: { nodeId } } as unknown as EventBody, {
+      human: true,
+    });
+  it("記録のみで、状態は変えない。未知のノード・形の誤りは拒否。最終削除の対象", () => {
+    const events = base();
+    const before = foldEvents(events);
+    events.push(issued("a"));
+    const after = foldEvents(events);
+    if (!before.ok || !after.ok) throw new Error("fold failed");
+    expect(after.value.nodes).toEqual(before.value.nodes);
+    expect(after.value.lastSeq).toBe(4);
+    const unknown = foldEvents([...base(), issued("zzz")]);
+    expect(unknown.ok ? null : unknown.error.code).toBe("unknownNode");
+    const bad = foldEvents([...base(), issued("")]);
+    expect(bad.ok).toBe(false);
+    expect(purgeEventSeqs([...base(), issued("a")], new Set(["a"]))).toEqual([3, 4]);
+  });
+});

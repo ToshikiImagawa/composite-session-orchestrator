@@ -224,6 +224,11 @@ export type EventBody =
       };
     }
   | {
+      /** 手動の CLI セッション用の、フック専用のトークンを発行した記録（T22-ht）。発行した者は封筒の `actor`（人間）。トークンは書かない。記録のみ。 */
+      readonly type: "node.hookTokenIssued";
+      readonly payload: { readonly nodeId: string };
+    }
+  | {
       /** 自動の最終削除の保留の解除（T13f-h）。保留がなければ拒否する。 */
       readonly type: "node.purgeHoldReleased";
       readonly payload: { readonly nodeId: string };
@@ -1870,6 +1875,13 @@ function step(d: Draft, raw: unknown): Result<boolean, FoldFailure> {
           ...(reason === undefined ? {} : { reason }),
         }),
       });
+      return commit();
+    }
+
+    case "node.hookTokenIssued": {
+      const { nodeId } = p;
+      if (!isId(nodeId)) return invalid(seq, "node.hookTokenIssued の payload");
+      if (nodeAt(d, nodeId) === undefined) return unknownNode(seq, nodeId);
       return commit();
     }
 
