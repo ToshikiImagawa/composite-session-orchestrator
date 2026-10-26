@@ -425,6 +425,19 @@ describe("画面の資産（走査）", () => {
       expect(api.answerDoneText(null)).toBe("回答を送りました");
     });
 
+    it("T24-rs: 再開しなかった子は 10 件で切り、残りを「ほか N 件」と出す（形の違う ID は数えない）", () => {
+      const many = Array.from({ length: 12 }, (_, i) => ({ nodeId: `n${i}`, reason: "discarded" }));
+      const text = api.answerDoneText({
+        accepted: true,
+        notResumed: [...many, { nodeId: "<x>", reason: "discarded" }],
+      });
+      expect(text).toContain("n9（破棄の判断を経たため）、ほか 2 件");
+      expect(text).not.toContain("n10");
+      const ten = api.answerDoneText({ accepted: true, notResumed: many.slice(0, 10) });
+      expect(ten).toContain("n9（破棄の判断を経たため）");
+      expect(ten).not.toContain("ほか");
+    });
+
     it("T22-hub: フックの結び付けを外す確認の行と、結果の 3 通りの文", () => {
       const lines = api.hookUnbindLines("a");
       expect(lines[0]).toEqual(["ノード", "a"]);

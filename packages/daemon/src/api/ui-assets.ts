@@ -582,7 +582,7 @@ export const UI_JS = `'use strict';
     box.appendChild(problem);
     return box;
   }
-  // 回答の結果（T24-rs）。再開しなかった子（notResumed）があれば、ID と理由を添える。理由は固定の文に写し、知らない記号・形の違う ID は出さない
+  // 回答の結果（T24-rs）。再開しなかった子（notResumed）があれば、ID と理由を添える。理由は固定の文に写し、知らない記号・形の違う ID は出さない。10 件で切り「ほか N 件」
   var NOT_RESUMED_TEXT = {
     discarded: '破棄の判断を経たため',
     stoppedAfterStopIncomplete: '停止未完了のあと止め直したため。新しい子でやり直す',
@@ -597,7 +597,9 @@ export const UI_JS = `'use strict';
       if (x.reason === 'discarded' || x.reason === 'stoppedAfterStopIncomplete' || x.reason === 'stoppedByOther') why = NOT_RESUMED_TEXT[x.reason];
       parts.push(x.nodeId + '（' + why + '）');
     });
-    return parts.length === 0 ? '回答を送りました' : '回答を送りました。再開しなかった子: ' + parts.join('、');
+    if (parts.length === 0) return '回答を送りました';
+    var more = parts.length > 10 ? '、ほか ' + (parts.length - 10) + ' 件' : '';
+    return '回答を送りました。再開しなかった子: ' + parts.slice(0, 10).join('、') + more;
   }
   // フックの結び付けを外す（T22-hub）。取り消せる操作（次に来たセッションに結び直すだけ）なので、打ち込みはない
   function hookUnbindLines(nodeId) {

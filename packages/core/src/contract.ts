@@ -337,7 +337,7 @@ export type DaemonOperation = keyof OperationMap;
 
 /**
  * 判断の回答で、子を再開しなかった理由（T24-rs）。1 つの子に複数が当てはまるときは、この順で最初のもの:
- * `discarded`（破棄の判断を経た）> `stoppedAfterStopIncomplete`（この判断の一時停止のあと、停止未完了を経て止め直された〔retryStop〕）>
+ * `discarded`（破棄の判断を経た）> `stoppedAfterStopIncomplete`（判断の要求のあと、停止未完了を経て止め直された〔retryStop〕）>
  * `stoppedByOther`（この判断のほかに止められた）。
  */
 export type NotResumedReason = "discarded" | "stoppedAfterStopIncomplete" | "stoppedByOther";
