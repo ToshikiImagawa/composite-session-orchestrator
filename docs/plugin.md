@@ -64,6 +64,10 @@ daemon が SDK で起動する子（CLI の子）には、plugin の skill を�
 
 手動確認（実 SDK。2026-10-26。Claude Code 2.1.308・Agent SDK 0.3.292・macOS 26.5）: 子が `Skill` ツールで `cso-child` を読めた（子の報告による自己申告。`node.toolDenied` は 0 件・`childPluginSkipped` なし）。フックが二重にならないことは、子に渡す plugin の中身（`plugin.json` と `skills/` だけ。`hooks/` なし）で確認した（「受け口に要求が来ない」は、環境変数が渡らないので根拠にならない）。認証（CLI のログイン）を引き継ぐため `childHome: "inherit"` で行い（既定の `isolated` では、子が認証できず止まった）、`Skill` の呼び出しの記録による裏付けは得られていない。
 
+## 子の認証（T22-auth）
+
+子の認証（T22-auth）: 既定の `childHome: "isolated"` では、子の HOME が空のディレクトリなので、`claude` CLI のログインは使えない。daemon を起動する環境に、認証の環境変数（`ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN`・`CLAUDE_CODE_OAUTH_TOKEN` のどれか。`claude setup-token` で作った値を `CLAUDE_CODE_OAUTH_TOKEN` に入れる）が要る。**CLI のログインだけの環境は、子の起動が `childAuthMissing` で拒否される**（理由と対処が、親に返る。spawn・判断の回答による再開・スケジューラのどれでも同じ。受信箱の項目は、同じ子の同じ失敗では増えない）。Bedrock・Vertex・Foundry の経路は、切り替えの変数（`CLAUDE_CODE_USE_BEDROCK`・`_VERTEX`・`_FOUNDRY`）が**あることだけで通す**（その資格情報は `childEnvAllow` で渡す前提で、中身までは確かめない）。`childHome: "inherit"` では確かめない（親の HOME と CLI のログインを共有する。分離は弱まる）。値は、記録・失敗の文面に出さない。
+
 ## Desktop
 
 Desktop の子へのフックの継承と、接続設定の引き継ぎは、**実機での確認（`.sdd/` の要求の項目 4）のあと**に扱う。この版は、CLI の分だけ。

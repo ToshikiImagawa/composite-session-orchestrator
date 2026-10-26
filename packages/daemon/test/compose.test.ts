@@ -84,6 +84,8 @@ const rig = (over: Partial<DaemonConfig> = {}, stateDir?: string) => {
     worktree,
     probe: async () => [],
     logLine: (l) => logs.push(l),
+    // 既定の childHome（isolated）では、子に認証の環境変数が要る（T22-auth）
+    parentEnv: { PATH: process.env.PATH, ANTHROPIC_API_KEY: "test-key" },
   };
   return { config, deps, launcher, calls, logs };
 };
@@ -1541,5 +1543,48 @@ describe("cso（cli の実行ファイル）で、実際の daemon を呼ぶ（T
     );
     expect(bad.code).toBe(1);
     expect(bad.stderr).toContain("daemon_identity_failed");
+  });
+});
+
+describe("子の認証がない（T22-auth）", () => {
+  const brief = {
+    objective: "x",
+    acceptanceCriteria: ["x"],
+    scope: {
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: ["pnpm test"],
+    },
+  };
+
+  it("既定（isolated）で認証の環境変数がなければ、spawn は childAuthMissing（原因と対処）を返し、作業ツリーを後始末する", async () => {
+    const r = rig();
+    r.deps = { ...r.deps, parentEnv: { PATH: process.env.PATH, GH_TOKEN: "ghp-secret-value" } };
+    const d = await boot(r);
+    const res = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(res.json.ok).toBe(false);
+    expect(res.json.error?.code).toBe("childAuthMissing");
+    expect(res.json.error?.nextActions.join()).toContain("claude setup-token");
+    expect(r.launcher.sessions).toHaveLength(0);
+    expect(r.calls.removed).toEqual(r.calls.provisioned); // 作った作業ツリーは消した
+    expect(r.calls.provisioned).toHaveLength(1);
+    expect(JSON.stringify(res.json) + r.logs.join("\n")).not.toContain("ghp-secret-value");
+  });
+
+  it("childHome: inherit なら、確かめずに起動する", async () => {
+    const r = rig({ childHome: "inherit" });
+    r.deps = { ...r.deps, parentEnv: { PATH: process.env.PATH } };
+    const d = await boot(r);
+    const res = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(res.json.ok, JSON.stringify(res.json)).toBe(true);
+    expect(r.launcher.sessions).toHaveLength(1);
   });
 });

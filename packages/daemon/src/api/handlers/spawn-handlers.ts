@@ -114,6 +114,9 @@ const LIVE = new Set(["running", "waiting"]);
 /** 後始末済み・終わった子。同じ requestId の再試行で、成功として返してはならない。 */
 const DEAD = new Set(["stopping", "stopIncomplete", "stopped", "reclaimable", "archived"]);
 
+/** 起動の失敗のうち、利用者が直せるもの（原因と対処を、そのまま親に返す）。 */
+const USER_FIXABLE: ReadonlySet<string> = new Set(["childAuthMissing"]);
+
 const instructionOf = (b: BriefParams, self: string[]): string =>
   [
     ...self,
@@ -275,11 +278,13 @@ export function createSpawner(deps: SpawnHandlerDeps) {
         mcp: { url: ports.mcpUrl, token },
       });
       if (!started.ok) {
-        return abort(
+        const aborted = await abort(
           "startFailed",
           "子を起動できなかった",
           `起動に失敗: ${started.error.code}: ${started.error.cause}`,
         );
+        // 利用者が直せる失敗（子の認証がない。T22-auth）は、原因と対処をそのまま親に返す（後始末は済んでいる）。
+        return USER_FIXABLE.has(started.error.code) ? { ok: false, error: started.error } : aborted;
       }
     } catch (e) {
       // 例外は、起動したかどうかが分からない。停止を確認できたときだけ、作業ツリーを消す。
@@ -631,7 +636,7 @@ export function createSpawner(deps: SpawnHandlerDeps) {
           reportOnce(
             nodeId,
             `sched-${nodeId}/failed`,
-            `依存が揃ったので起動しようとしたが、失敗した（${started.error.code}）: ${started.error.cause}`,
+            `依存が揃ったので起動しようとしたが、失敗した（${started.error.code}）: ${started.error.cause}。対処: ${started.error.nextActions[0]}`,
           );
         }
       } catch (e) {

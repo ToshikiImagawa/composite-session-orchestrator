@@ -41,6 +41,7 @@ import type {
   HookOutcome,
   McpServerConfig,
 } from "./agent.js";
+import { childAuthProblem } from "./child-auth.js";
 import { childEnv } from "./child-env.js";
 import { qualifiedSkill, skillFor } from "./child-plugin.js";
 import { decideToolUse, type ResolvePath, resolveScope } from "./hook-policy.js";
@@ -234,6 +235,11 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
             "もう一度起動する",
           );
         }
+      }
+      // HOME を分けた子は、claude CLI のログインを使えない。認証の環境変数がなければ、起動しない（T22-auth。値は出さない）。
+      if (d.homeFor !== undefined) {
+        const missing = childAuthProblem(env);
+        if (missing !== undefined) return { ok: false, error: missing };
       }
       const removed =
         removedAll.length <= REMOVED_ENV_MAX
