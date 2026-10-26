@@ -80,12 +80,23 @@ export async function runBin(argv: readonly string[], deps: BinDeps): Promise<Co
     ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
     ...(verifier === undefined ? {} : { verifier }),
   });
-  if (!relay.ok) return usage(`${relay.error.code}: ${relay.error.cause}`);
-  return runCommand(argv, {
+  if (!relay.ok) return redact(usage(`${relay.error.code}: ${relay.error.cause}`), token);
+  const result = await runCommand(argv, {
     client: createHttpClient(relay.value),
     newRequestId: deps.newRequestId ?? (() => `cso-${randomUUID()}`),
     isTTY: deps.isTTY,
   });
+  return redact(result, token);
+}
+
+/**
+ * 出力・エラーの中の、人間のトークンの値を `***` に置き換える（出す直前。daemon・偽の窓口が、応答にトークンを入れても出さない）。
+ * トークンが空のときは、置き換えない。
+ */
+export function redact(result: CommandResult, token: string): CommandResult {
+  if (token === "") return result;
+  const hide = (s: string): string => s.split(token).join("***");
+  return { ...result, stdout: hide(result.stdout), stderr: hide(result.stderr) };
 }
 
 // 直接実行されたときだけ動く（試験では runBin を呼ぶ）。

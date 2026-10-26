@@ -49,6 +49,21 @@ describe("cso（bin。T22-cli）", () => {
     expect(r.stdout + r.stderr).not.toContain(TOKEN);
   });
 
+  it("daemon（偽の窓口）が、応答にトークンを入れても、出力・エラーには出さない（*** に置き換える）", async () => {
+    const f = (async () =>
+      new Response(
+        JSON.stringify({
+          ok: false,
+          error: { code: "boom", cause: `echo ${TOKEN} back`, nextActions: [`use ${TOKEN}`] },
+        }),
+        { status: 422, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    const r = await runBin(["hook-unbind", "a"], { env: ENV, isTTY: TTY, fetch: f });
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).not.toContain(TOKEN);
+    expect(r.stderr).toContain("echo *** back");
+  });
+
   it("CSO_DAEMON_URL・CSO_HUMAN_TOKEN がなければ、終了コード 2（何も送らない）。--token の引数は受けない", async () => {
     const { f, seen } = fakeFetch({});
     for (const env of [
