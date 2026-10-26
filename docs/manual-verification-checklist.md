@@ -5,6 +5,7 @@
 - 手順の詳細は、各項目の「手順」のリンク先にある（この文書では書き写さない。食い違ったら、リンク先を正とする）。
 - 秘密（トークン・紐付けコード）とパスは書かない（NFR_012）。結果の欄にも書かない。パスは `<作業ツリー>`・`<plugin のディレクトリ>` のように置き換える。
 - 結果を書いたら、リンク先の文書の「結果の記録」にも、同じ内容を追記する（日付・版・環境）。
+- 判定は「可」「不可」「条件付き」のいずれか。**条件付き**は、期待の一部だけを確かめられた、または確かめ方に制約があったときに使う。何が確かめられ、何が残ったかを、結果に分けて書く。条件付きの項目は、結果のまとめの表で、残りを「備考」に書く。
 
 ## 実施の順序（おすすめ）
 
@@ -28,7 +29,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 | 欄 | 値 |
 |:--|:--|
 | 実施日 | 2026-10-26（A1） |
-| 実施者 | |
+| 実施者 | Claude Code（人の依頼で実行。A1） |
 | OS | macOS 26.5（A1） |
 | Claude Code の版 | 2.1.308（A1） |
 | Agent SDK の版 | 0.3.292（A1） |
@@ -44,15 +45,17 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 - **前提**: T22-c の `Skill` ツールの許可を含む版の daemon で行う。daemon の設定に `childPluginDir`（この plugin のディレクトリ）を指定する（[`docs/plugin.md`](plugin.md) の「daemon が起動する子に渡す skill」）。daemon と `cso-mcp` の起動は [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「準備」「MCP サーバーの起動」。
 - **手順**: 子を 1 つ作り（`node_spawn`）、子に作業させる。子の記録（トランスクリプト）と daemon の記録を見る。
-- **期待する結果**:
+- **期待する結果**（二重フックは、受け口に要求が来ないことでは確かめられない。下の注）:
   - 子が `Skill` ツールで `cso-child`（中間の統合ノードは `cso-integrator`）を読み、その手順に従って報告する（`report_progress`・`report_done` など）。
   - `Skill` ツールの呼び出しが、フックで拒否されない（`node.toolDenied` に出ない）。
-  - フックが二重にならない: 子の起動で plugin の `hooks/hooks.json` が読まれない（daemon の受け口 `POST /v1/hook` に、その子からの要求が来ない）。
+  - フックが二重にならない: 子に渡す plugin（`<stateDir>/child-plugin/`）に `hooks/`・`commands/`・`.mcp.json` がない。子の標準エラーに `[cso-hook] …フックは働いていない` が出ない。（受け口に要求が来ないことは、環境変数が渡らないので、二重でもそうなる。根拠にしない）
   - 起動時に `childPluginSkipped` が記録されない（設定したとき）。
 - **結果**: **条件付き**（2026-10-26。Claude Code 2.1.308・Agent SDK 0.3.292・macOS 26.5）。
   - 可: 子が `Skill` ツールで `cso-child` を読めたと報告した（自己申告。子の記録〔トランスクリプト〕は残らないので、ツール呼び出しは見えない）。`node.toolDenied` は 0 件。`childPluginSkipped` なし。子は `report_done` で完了を報告した。
-  - 未確認: フックが二重にならないこと。認証のため `childHome: "inherit"` で行い、子が `~/.claude` の設定を読めた。既定の `isolated` では、`ANTHROPIC_API_KEY` なしでは、子が認証できず止まった（`claude` CLI のログインは引き継げない）。
-  - 補足: `<repoRoot>/.claude/cso-worktree-files.json` で、作業ツリーに `.envrc` などが写り、子が読めた（[`worktree-seed-files.md`](worktree-seed-files.md)）。
+  - 可（フックが二重にならない）: daemon が子に渡す plugin（`<stateDir>/child-plugin/`）の中身は、`.claude-plugin/plugin.json` と `skills/`（`cso-child`・`cso-integrator` の `SKILL.md`）だけで、`hooks/`・`commands/`・`.mcp.json` がない。コードでも、子の環境に `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` は渡らない。**「受け口 `POST /v1/hook` に子の要求が来ない」ことは、二重フックの有無を見分けられない**（環境変数がなければ、フックのスクリプトは何もせずに通すため）。中身を見る方法で確かめる。
+  - 未確認: `Skill` ツールの呼び出しの記録による裏付け。子のセッションの記録（トランスクリプト）は、`~/.claude/projects` にも `~/Library/Caches/claude-cli-nodejs` にも残っておらず（MCP の接続ログだけ）、自己申告のまま。
+  - 制約: 認証のため `childHome: "inherit"` で行った。既定の `isolated` では、`ANTHROPIC_API_KEY` なしでは、子が認証できず止まった（`claude` CLI のログインは引き継げない）。
+  - その他の観察: `<repoRoot>/.claude/cso-worktree-files.json` で、作業ツリーに `.envrc` などが写り、子が読めた（[`worktree-seed-files.md`](worktree-seed-files.md)。A1 の期待とは別の確認）。
 - **結果によって変わるタスク**: 不可なら T22-c を差し戻す（`options.plugins` の渡し方・`skills` の名前）。合格なら [`docs/plugin.md`](plugin.md) の「手動確認（未。実 SDK）」を「済」に、tasks.md の T22-c の状態を更新する。
 
 ### A2. ファイルで設定するフック（H1〜H6。T22-h・T22-hu）
@@ -159,7 +162,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 | 項目 | 判定 | 変わるタスク | 備考 |
 |:--|:--|:--|:--|
-| A1（T22-c） | 条件付き | T22-c は、二重フックの確認が残る | skill を読めた（自己申告）。`inherit` で実施。`isolated` は認証で止まった |
+| A1（T22-c） | 条件付き | T22-c は、skill の使用の裏付け（記録）が残る | 二重フックなし（plugin の中身で確認）。skill を読めた（自己申告。記録なし）。`inherit` で実施。`isolated` は認証で止まった |
 | A2（H1〜H6） | | | |
 | B1（項目 4） | | | |
 | B2（項目 6） | | | |
