@@ -5,6 +5,7 @@
 - 手順の詳細は、各項目の「手順」のリンク先にある（この文書では書き写さない。食い違ったら、リンク先を正とする）。
 - 秘密（トークン・紐付けコード）とパスは書かない（NFR_012）。結果の欄にも書かない。パスは `<作業ツリー>`・`<plugin のディレクトリ>` のように置き換える。
 - 結果を書いたら、リンク先の文書の「結果の記録」にも、同じ内容を追記する（日付・版・環境）。
+- 判定は「可」「不可」「条件付き」のいずれか。**条件付き**は、期待の一部だけを確かめられた、または確かめ方に制約があったときに使う。何が確かめられ、何が残ったかを、結果に分けて書く。条件付きの項目は、結果のまとめの表で、残りを「備考」に書く。
 
 ## 実施の順序（おすすめ）
 
@@ -25,13 +26,15 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 ## 共通の記録欄
 
+版の書き方: 項目ごとに区切って追記する（例: `2.1.308（A1）／2.1.310（B）／…（C）`）。前の値は消さない。
+
 | 欄 | 値 |
 |:--|:--|
-| 実施日 | |
-| 実施者 | |
-| OS | |
-| Claude Code の版 | |
-| Agent SDK の版 | |
+| 実施日 | 2026-10-26（A1） |
+| 実施者 | Claude Code（人の依頼で実行。A1） |
+| OS | macOS 26.5（A1） |
+| Claude Code の版 | 2.1.308（A1） |
+| Agent SDK の版 | 0.3.292（A1） |
 | Claude Desktop の版（B・C） | |
 | 権限モード（親・子。B・C） | |
 | 権限モード（A） | `dontAsk`（daemon が SDK で起動する子の固定値。記録だけ） |
@@ -44,12 +47,17 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 - **前提**: T22-c の `Skill` ツールの許可を含む版の daemon で行う。daemon の設定に `childPluginDir`（この plugin のディレクトリ）を指定する（[`docs/plugin.md`](plugin.md) の「daemon が起動する子に渡す skill」）。daemon と `cso-mcp` の起動は [`docs/manual-verification-sdk.md`](manual-verification-sdk.md) の「準備」「MCP サーバーの起動」。
 - **手順**: 子を 1 つ作り（`node_spawn`）、子に作業させる。子の記録（トランスクリプト）と daemon の記録を見る。
-- **期待する結果**:
+- **期待する結果**（二重フックは、受け口に要求が来ないことでは確かめられない。下の注）:
   - 子が `Skill` ツールで `cso-child`（中間の統合ノードは `cso-integrator`）を読み、その手順に従って報告する（`report_progress`・`report_done` など）。
   - `Skill` ツールの呼び出しが、フックで拒否されない（`node.toolDenied` に出ない）。
-  - フックが二重にならない: (1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない。(2) 子の標準エラーに、フックのスクリプトの一言 `[cso-hook]` が出ない（受け口の要求数では見分けられない: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らず、混ざってもスクリプトは素通しして受け口を呼ばないため）。
+  - フックが二重にならない: (1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない。(2) 子の標準エラーに、フックのスクリプトの一言 `[cso-hook]` が出ない（**見方**: daemon は、SDK の子の標準エラーを記録しない〔daemon の記録＝daemon の標準エラーの JSON の行には出ない〕。フックの一言は、子のセッションの記録〔子の HOME の下の `.claude/projects/<作業ツリーを表す名前>/<セッション ID>.jsonl`。`childHome: inherit` なら利用者の HOME、`isolated` なら daemon が子に用意した HOME〕に残るので、そのファイルを `grep -c 'cso-hook'` で調べる〔0 なら出ていない〕。記録に残らない版の Claude Code では、(1) だけで判定し、結果の欄にそう書く）（受け口の要求数では見分けられない: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らず、混ざってもスクリプトは素通しして受け口を呼ばないため）。
   - 起動時に `childPluginSkipped` が記録されない（設定したとき）。
-- **結果**: （可・不可・条件付き。観察したこと）
+- **結果**: **条件付き**（2026-10-26。Claude Code 2.1.308・Agent SDK 0.3.292・macOS 26.5）。
+  - 可: 子が `Skill` ツールで `cso-child` を読めたと報告した（自己申告。子の記録〔トランスクリプト〕は残らないので、ツール呼び出しは見えない）。`node.toolDenied` は 0 件。`childPluginSkipped` なし。子は `report_done` で完了を報告した。
+  - 可（フックが二重にならない）: daemon が子に渡す plugin（`<stateDir>/child-plugin/`）の中身は、`.claude-plugin/plugin.json` と `skills/`（`cso-child`・`cso-integrator` の `SKILL.md`）だけで、`hooks/`・`commands/`・`.mcp.json` がない。コードでも、子の環境に `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` は渡らない。**「受け口 `POST /v1/hook` に子の要求が来ない」ことは、二重フックの有無を見分けられない**（環境変数がなければ、フックのスクリプトは何もせずに通すため）。中身を見る方法で確かめる。
+  - 未確認: `Skill` ツールの呼び出しの記録による裏付け。子のセッションの記録（トランスクリプト）は、`~/.claude/projects` にも `~/Library/Caches/claude-cli-nodejs` にも残っておらず（MCP の接続ログだけ）、自己申告のまま。
+  - 制約: 認証のため `childHome: "inherit"` で行った。既定の `isolated` では、`ANTHROPIC_API_KEY` なしでは、子が認証できず止まった（`claude` CLI のログインは引き継げない）。
+  - その他の観察: `<repoRoot>/.claude/cso-worktree-files.json` で、作業ツリーに `.envrc` などが写り、子が読めた（[`worktree-seed-files.md`](worktree-seed-files.md)。A1 の期待とは別の確認）。
 - **結果によって変わるタスク**: 不可なら T22-c を差し戻す（`options.plugins` の渡し方・`skills` の名前）。合格なら [`docs/plugin.md`](plugin.md) の「手動確認（未。実 SDK）」を「済」に、tasks.md の T22-c の状態を更新する。
 
 ### A2. ファイルで設定するフック（H1〜H6。T22-h・T22-hu）
@@ -61,7 +69,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 |:--|:--|:--|:--|
 | H1 | フックが発火する | PreToolUse・PostToolUse・Stop で動く。範囲内の書き込みは許可 | |
 | H2 | 範囲外の書き込みの拒否と記録 | 拒否され、理由がモデルに伝わる。`scope.violation` と受信箱の violation 1 件。未知のツールは `node.toolDenied` | |
-| H3 | `settingSources` の混入がない | SDK で起動する子に、plugin のフックが混ざらない。**受け口の要求数では見分けられない**: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らないので、plugin の hooks.json が混ざっても、フックのスクリプトは素通しして、受け口を呼ばない（`apiSummary` の `hook` は 0 のまま）。代わりに次の 2 つで確かめる。(1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない（`skills/` と `.claude-plugin/plugin.json` だけ）。(2) SDK の子の標準エラー（daemon の記録の、子の出力）に、フックのスクリプトの一言 `[cso-hook]` が出ない（混ざっていれば、環境変数がないことを知らせる一言が、ツールの呼び出しのたびに出る） | |
+| H3 | `settingSources` の混入がない | SDK で起動する子に、plugin のフックが混ざらない。**受け口の要求数では見分けられない**: SDK の子には `CSO_DAEMON_URL`・`CSO_NODE_TOKEN` が渡らないので、plugin の hooks.json が混ざっても、フックのスクリプトは素通しして、受け口を呼ばない（`apiSummary` の `hook` は 0 のまま）。代わりに次の 2 つで確かめる。(1) `<状態の置き場>/child-plugin/` に `hooks/`・`commands/`・`.mcp.json` がない（`skills/` と `.claude-plugin/plugin.json` だけ）。(2) SDK の子の標準エラーに、フックのスクリプトの一言 `[cso-hook]` が出ない（**見方**: daemon は、SDK の子の標準エラーを記録しない〔daemon の記録＝daemon の標準エラーの JSON の行には出ない〕。フックの一言は、子のセッションの記録〔子の HOME の下の `.claude/projects/<作業ツリーを表す名前>/<セッション ID>.jsonl`。`childHome: inherit` なら利用者の HOME、`isolated` なら daemon が子に用意した HOME〕に残るので、そのファイルを `grep -c 'cso-hook'` で調べる〔0 なら出ていない〕。記録に残らない版の Claude Code では、(1) だけで判定し、結果の欄にそう書く）（混ざっていれば、環境変数がないことを知らせる一言が、ツールの呼び出しのたびに出る） | |
 | H4 | daemon 停止のときのフェイルクローズ | PreToolUse はすべて拒否。Stop は止めない | |
 | H5 | 環境変数 | 両方なし: 素通し（標準エラーに一言）。片方だけ: 拒否 | |
 | H6 | `session_id` の結び付け | 別のセッションは 403。`/clear`・`--resume` で変わると拒否され、`cso hook-unbind <nodeId>`（または画面のボタン・親の `node_hookUnbind`）のあと通る。記録に `node.hookUnbound` | |
@@ -156,7 +164,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 | 項目 | 判定 | 変わるタスク | 備考 |
 |:--|:--|:--|:--|
-| A1（T22-c） | | | |
+| A1（T22-c） | 条件付き | T22-c は、skill の使用の裏付け（記録）が残る | 二重フックなし（plugin の中身で確認）。skill を読めた（自己申告。記録なし）。`inherit` で実施。`isolated` は認証で止まった |
 | A2（H1〜H6） | | | |
 | B1（項目 4） | | | |
 | B2（項目 6） | | | |

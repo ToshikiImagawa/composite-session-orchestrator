@@ -914,7 +914,10 @@ describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h�
     const a = fakeClient({
       "node.hookToken": ok({ token: TOKEN, nodeId: "a", daemonUrl: "http://127.0.0.1:7777" }),
     });
-    const r = await runCommand(["hook-env", "a"], { ...deps(a.client), stdoutIsTTY: false });
+    const r = await runCommand(["hook-env", "a"], {
+      ...deps(a.client),
+      isTTY: { stdin: true, stdout: false },
+    });
     expect(ops(a.sent)).toEqual(["node.hookToken"]);
     expect(a.sent[0]?.params).toEqual({ nodeId: "a" });
     expect(r.exitCode).toBe(0);
@@ -929,7 +932,7 @@ describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h�
       const a = fakeClient({});
       const r = await runCommand(["hook-env", "a"], {
         ...deps(a.client),
-        ...(tty === undefined ? {} : { stdoutIsTTY: tty }),
+        ...(tty === undefined ? {} : { isTTY: { stdin: true, stdout: tty } }),
       });
       expect(r.exitCode).toBe(2);
       expect(r.stdout).toBe("");
@@ -948,7 +951,10 @@ describe("purge-hold・purge-release（自動の最終削除の保留。T13f-h�
       },
     ]) {
       const a = fakeClient({ "node.hookToken": ok(value) });
-      const r = await runCommand(["hook-env", "a"], { ...deps(a.client), stdoutIsTTY: false });
+      const r = await runCommand(["hook-env", "a"], {
+        ...deps(a.client),
+        isTTY: { stdin: true, stdout: false },
+      });
       expect(r.exitCode).toBe(1);
       expect(r.stdout).toBe("");
     }
