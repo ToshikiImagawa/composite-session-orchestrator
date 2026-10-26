@@ -52,6 +52,8 @@ export interface StopRequest {
 interface StopValueBase {
   /** 残っているプロセスの pid（`stopIncomplete` のときの手がかり）。 */
   readonly blockers: readonly number[];
+  /** 残っているプロセスの pid と、整えたコマンドの名前（任意。表示用）。古い実装・代行では省略する。 */
+  readonly processes?: readonly { readonly pid: number; readonly command?: string }[];
   /** 続行した問題（手段の例外、観測の記録の失敗など）。なければ省略する。 */
   readonly warnings?: readonly string[];
 }

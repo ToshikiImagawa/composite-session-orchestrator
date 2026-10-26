@@ -320,6 +320,17 @@ describe("node.reclaimPreview（回収の事前確認。何も変えない）", 
     const p = await running.call("node.reclaimPreview", { nodeId: "a" });
     expect(p.value.unmet).toEqual(["processesRunning"]);
     expect(p.value.blockers).toEqual([{ kind: "process", reason: "processesRunning", pid: 4242 }]);
+    // 名前（任意）は整えて原因に添える。失敗の理由の文面にも出す（T24-sp）
+    const named = rig({
+      processes: [{ pid: 4242, cwd: `${WT}/a`, hasOpenFiles: false, command: "node\u001b[0m" }],
+    });
+    const np = await named.call("node.reclaimPreview", { nodeId: "a" });
+    expect(np.value.blockers).toEqual([
+      { kind: "process", reason: "processesRunning", pid: 4242, command: "node[0m" },
+    ]);
+    const nr = await named.call("node.reclaim", { nodeId: "a" });
+    expect(nr.ok).toBe(false);
+    expect(nr.error?.cause).toContain("pid 4242（node[0m）");
     const missing = rig({ facts: { a: undefined } });
     expect((await missing.call("node.reclaimPreview", { nodeId: "a" })).value.unmet).toContain(
       "factsMissing",

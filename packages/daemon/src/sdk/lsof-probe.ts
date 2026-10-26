@@ -13,7 +13,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { isPathUnder, normalizePath, type ProcessInfo } from "@cso/core";
+import { isPathUnder, normalizePath, type ProcessInfo, processCommandName } from "@cso/core";
 
 export interface ExecResult {
   /** 終了コード。起動できなかった・時間切れなどは `null`。 */
@@ -107,13 +107,21 @@ export function createLsofProbe(
     if (!okExit(cwdRes) || !okExit(openRes)) return null;
 
     const cwds = new Map<number, string>();
+    // `c` の欄はコマンドの名前だけ（引数・パス・環境変数を含まない）。信頼しない入力として core で整えてから持つ。
+    const names = new Map<number, string>();
+    const nameOf = (p: LsofProcess): void => {
+      const name = processCommandName(p.command);
+      if (name !== undefined && !names.has(p.pid)) names.set(p.pid, name);
+    };
     for (const p of parseLsofFields(cwdRes.stdout)) {
+      nameOf(p);
       const cwd = cwdOf(p);
       if (cwd !== undefined) cwds.set(p.pid, cwd);
     }
 
     const openPids = new Set<number>();
     for (const p of parseLsofFields(openRes.stdout)) {
+      nameOf(p);
       // cwd の行は cwd の一覧で扱うので、開いているファイルには数えない。
       if (p.files.some((f) => f.fd !== "cwd" && under(f.name, worktreePath))) openPids.add(p.pid);
     }
@@ -122,13 +130,15 @@ export function createLsofProbe(
     for (const [pid, cwd] of cwds) if (under(cwd, worktreePath)) pids.add(pid);
     return [...pids]
       .sort((a, b) => a - b)
-      .map(
-        (pid): ProcessInfo => ({
+      .map((pid): ProcessInfo => {
+        const command = names.get(pid);
+        return {
           pid,
           cwd: cwds.get(pid) ?? "",
           hasOpenFiles: openPids.has(pid),
-        }),
-      );
+          ...(command === undefined ? {} : { command }),
+        };
+      });
   };
 }
 

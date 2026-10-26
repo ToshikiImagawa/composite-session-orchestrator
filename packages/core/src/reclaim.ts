@@ -30,6 +30,7 @@
 
 import { type Failure, failure, ok, type Result } from "./contract.js";
 import type { NodeState } from "./index.js";
+import { type ProcessLabel, processCommandName } from "./process-name.js";
 import { isPathUnder, normalizePath } from "./scope.js";
 import { COMPLETED_STATES } from "./transition.js";
 import { descendantsOf, type TreeNode } from "./tree.js";
@@ -39,6 +40,8 @@ export interface ProcessInfo {
   readonly cwd: string;
   /** 作業ツリー配下のファイルを開いているか。`"unknown"`（調べられなかった）は動作中として扱う。 */
   readonly hasOpenFiles: boolean | "unknown";
+  /** コマンドの名前（lsof の `c`）。表示だけに使う。古い記録・取れないときは無い。 */
+  readonly command?: string;
 }
 
 export interface ReclaimNodeFacts {
@@ -86,7 +89,13 @@ export type UnmetReason = (typeof UNMET_REASONS)[number];
 /** 満たしていない条件の原因。`kind` でノードとプロセスを判別する。 */
 export type Blocker =
   | { readonly kind: "node"; readonly reason: UnmetReason; readonly nodeId: string }
-  | { readonly kind: "process"; readonly reason: UnmetReason; readonly pid: number };
+  | {
+      readonly kind: "process";
+      readonly reason: UnmetReason;
+      readonly pid: number;
+      /** 整えたコマンドの名前（任意）。 */
+      readonly command?: string;
+    };
 
 export interface ReclaimAssessment {
   readonly nodeId: string;
@@ -155,7 +164,13 @@ function runningProcesses(worktree: string, processes: readonly unknown[]): Bloc
       p.hasOpenFiles === false && // 開いていないと確認できたときだけ
       validAbs(p.cwd) && // cwd が不明なら動作中として扱う
       !isPathUnder(normalizePath("/", p.cwd), wt);
-    if (!notRunning) out.push({ kind: "process", reason: "processesRunning", pid });
+    if (notRunning) continue;
+    const command = isRec(p) ? processCommandName(p.command) : undefined;
+    out.push(
+      command === undefined
+        ? { kind: "process", reason: "processesRunning", pid }
+        : { kind: "process", reason: "processesRunning", pid, command },
+    );
   }
   return out.sort(sortPid);
 }
@@ -169,6 +184,18 @@ export function findRunningProcesses(
   processes: readonly ProcessInfo[],
 ): number[] {
   return runningProcesses(worktreePath, processes).map((b) => (b.kind === "process" ? b.pid : -1));
+}
+
+/** {@link findRunningProcesses} と同じ規則で、pid と整えたコマンドの名前（任意）を返す。表示に使う。 */
+export function findRunningProcessLabels(
+  worktreePath: string,
+  processes: readonly ProcessInfo[],
+): ProcessLabel[] {
+  return runningProcesses(worktreePath, processes).map((b) =>
+    b.kind === "process" && b.command !== undefined
+      ? { pid: b.pid, command: b.command }
+      : { pid: b.kind === "process" ? b.pid : -1 },
+  );
 }
 
 /** ノードが回収可能かを、満たしていない条件と原因つきで判定する。回収の実行直前の再判定にも使う。 */

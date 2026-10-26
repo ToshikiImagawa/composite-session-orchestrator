@@ -20,6 +20,7 @@
 import {
   type EventBody,
   findRunningProcesses,
+  formatProcesses,
   type OrchState,
   type ProcessInfo,
   stateOf,
@@ -158,7 +159,7 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
       type: "node.stateChanged",
       payload: { nodeId: n.id, event: { type: "stop", mode: "immediate" } },
     };
-    const pids = procs === null ? "不明（調べられない）" : procs.map((p) => p.pid).join(", ");
+    const pids = procs === null ? "pid 不明（調べられない）" : formatProcesses(procs);
     const openDecision =
       n.state === "waiting"
         ? start.decisions.find((d) => d.nodeId === n.id && d.status === "open")
@@ -223,7 +224,7 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
             },
           },
           inbox("failure", "daemon の再起動で、子のセッションが失われた", reportId),
-          inbox("stopIncomplete", `再起動後、停止を確認できない。残っているプロセス pid ${pids}`),
+          inbox("stopIncomplete", `再起動後、停止を確認できない。残っているプロセス ${pids}`),
         );
       }
     } else if (n.state === "stopping") {
@@ -231,7 +232,7 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
         gone ? ev("confirmStopped") : ev("stopTimeout"),
         gone
           ? inbox("info", "再起動後、停止を確認した")
-          : inbox("stopIncomplete", `再起動後、停止を確認できない。残っているプロセス pid ${pids}`),
+          : inbox("stopIncomplete", `再起動後、停止を確認できない。残っているプロセス ${pids}`),
       );
     } else if (gone) {
       // stopIncomplete: 人間が残っていたプロセスを止めたあとの再起動で、停止を確認する。

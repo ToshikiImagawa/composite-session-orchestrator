@@ -22,11 +22,13 @@ import {
   type EventBody,
   type Failure,
   failure,
-  findRunningProcesses,
+  findRunningProcessLabels,
+  formatProcesses,
   ID_MAX_LENGTH,
   LIMITS,
   MAX_GRACE_MS,
   ok,
+  type ProcessLabel,
   type Result,
   type Scope,
   type ScopeViolationReason,
@@ -160,6 +162,9 @@ const fail = (
   ok: false,
   error: failure(code, cause, ...next),
 });
+
+/** 停止の確認の 1 回の探査に、最低限与える持ち時間（ミリ秒）。 */
+const MIN_PROBE_MS = 2_000;
 
 export class SdkRuntimeAdapter implements RuntimeAdapter {
   readonly kind = "cli" as const;
@@ -406,7 +411,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     } catch {
       waitKey = undefined;
     }
-    let pids: number[] | null = null;
+    let pids: ProcessLabel[] | null = null;
     try {
       pids = await this.probeWithin(cwd, 5_000);
     } catch {
@@ -447,7 +452,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
           summary: sanitizeText(
             pids === null
               ? "子が予期せず終了した。作業ツリー配下のプロセスを調べられず、停止を確認できない"
-              : `子が予期せず終了した。作業ツリー配下にプロセスが残っている（pid ${pids.join(", ")}）`,
+              : `子が予期せず終了した。作業ツリー配下にプロセスが残っている（${formatProcesses(pids)}）`,
             LIMITS.summary,
           ),
         },
@@ -758,7 +763,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
   }
 
   /** 作業ツリー配下のプロセスの一覧。例外・時間切れ（`maxMs`）は `null`（取得できない）。 */
-  private async probeWithin(cwd: string, maxMs: number): Promise<number[] | null> {
+  private async probeWithin(cwd: string, maxMs: number): Promise<ProcessLabel[] | null> {
     const d = this.deps;
     const timer = d.timers.after(Math.max(1, maxMs));
     try {
@@ -767,7 +772,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
         timer.promise.then(() => undefined),
       ]);
       if (list === undefined || list.l === null) return null;
-      return findRunningProcesses(cwd, list.l);
+      return findRunningProcessLabels(cwd, list.l);
     } catch {
       return null;
     } finally {
@@ -855,10 +860,15 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     const timeoutMs = d.verifyTimeoutMs ?? 30_000;
     const intervalMs = d.verifyIntervalMs ?? 1000;
     const deadline = d.timers.now() + timeoutMs;
-    let remaining: number[] = [];
+    let remaining: ProcessLabel[] = [];
     for (;;) {
-      const pids = await this.probeWithin(entry.cwd, deadline - d.timers.now());
-      remaining = pids ?? [];
+      // 期限ぎわの確認にも、最低限の持ち時間を与える（期限ちょうどの 1 回が必ず時間切れになり、一覧が古くならないように）。
+      const pids = await this.probeWithin(
+        entry.cwd,
+        Math.max(MIN_PROBE_MS, deadline - d.timers.now()),
+      );
+      // 取れなかった確認（null・時間切れ）で、それまでに見つけたプロセスを消さない（「pid 不明」にしない）。
+      if (pids !== null) remaining = pids;
       if (pids !== null && pids.length === 0) {
         const err = this.record({
           type: "node.stateChanged",
@@ -895,7 +905,8 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     return ok({
       state: "stopIncomplete" as const,
       outcome: finalOutcome(),
-      blockers: remaining,
+      blockers: remaining.map((p) => p.pid),
+      processes: remaining,
       ...warnings(),
     });
   }

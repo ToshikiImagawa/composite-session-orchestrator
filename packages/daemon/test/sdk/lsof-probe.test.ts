@@ -93,11 +93,31 @@ describe("createLsofProbe（作業ツリー配下で動作中のプロセスの�
     const list = await probe(WT);
     expect(list).not.toBeNull();
     expect(list).toEqual([
-      { pid: 100, cwd: "/wt/a", hasOpenFiles: false }, // cwd は配下。+D の cwd の行は「開いているファイル」に数えない
-      { pid: 101, cwd: "/wt/a/src/deep", hasOpenFiles: false },
-      { pid: 103, cwd: "/other", hasOpenFiles: true }, // cwd は外でも、配下のファイルを開いている
-      { pid: 104, cwd: "/WT/A", hasOpenFiles: false }, // 大文字小文字を畳み込んで同一視
-      { pid: 105, cwd: "", hasOpenFiles: true }, // cwd を取れなかったが、配下のファイルを開いている
+      { pid: 100, cwd: "/wt/a", hasOpenFiles: false, command: "claude" }, // cwd は配下。+D の cwd の行は「開いているファイル」に数えない
+      { pid: 101, cwd: "/wt/a/src/deep", hasOpenFiles: false, command: "bash" },
+      { pid: 103, cwd: "/other", hasOpenFiles: true, command: "node" }, // cwd は外でも、配下のファイルを開いている
+      { pid: 104, cwd: "/WT/A", hasOpenFiles: false, command: "daemon" }, // 大文字小文字を畳み込んで同一視
+      { pid: 105, cwd: "", hasOpenFiles: true, command: "writer" }, // cwd を取れなかったが、配下のファイルを開いている
+    ]);
+  });
+
+  it("コマンドの名前（c の欄）は core で整えてから持つ。空なら持たない（T24-sp）", async () => {
+    const cwd = [
+      "p200",
+      "cvi\u001b]0;x\u0007m",
+      "fcwd",
+      "n/wt/a",
+      "p201",
+      "c\u200b",
+      "fcwd",
+      "n/wt/a",
+      "",
+    ].join("\n");
+    const list =
+      (await createLsofProbe(fakeExec({ stdout: cwd }, { code: 1, stdout: "" }))(WT)) ?? [];
+    expect(list).toEqual([
+      { pid: 200, cwd: "/wt/a", hasOpenFiles: false, command: "vi]0;xm" },
+      { pid: 201, cwd: "/wt/a", hasOpenFiles: false },
     ]);
   });
 
