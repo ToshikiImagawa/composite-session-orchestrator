@@ -368,6 +368,8 @@ describe("判断の回答と、フック専用のトークン（T22-ht・H6）",
     const p = await r.present({ ...Q, pauseNodeIds: ["a"] });
     await r.flush();
     r.ev("a", { type: "confirmStopped" });
+    // 止めただけでは無効にならない（無効になる原因を、回答による再開に固定する）
+    expect(w.hookTokens.authenticate(hook)).toBe("a");
     expect((await r.answer(p.value?.decisionId as string, "B")).ok).toBe(true);
     expect(stateOf(r.s(), "a")).toBe("running");
     expect(w.hookTokens.authenticate(hook)).toBeUndefined();
