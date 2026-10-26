@@ -384,3 +384,88 @@ describe("判断の回答と、フック専用のトークン（T22-ht・H6）",
     expect(w.hookTokens.authenticate(hook)).toBe("a");
   });
 });
+
+describe("回答で再開しなかった子と理由（notResumed。T24-rs）", () => {
+  it("再開した子だけのときは、結果は今までどおり { accepted: true }（キーが増えない）", async () => {
+    const r = rig();
+    const p = await r.present({ ...Q, pauseNodeIds: ["a"] });
+    await r.flush();
+    r.ev("a", { type: "confirmStopped" });
+    const id = p.value?.decisionId as string;
+    const res = await r.answer(id, "B");
+    expect(res).toEqual({ ok: true, value: { accepted: true } });
+  });
+
+  it("一時停止のない判断の回答も { accepted: true } のまま", async () => {
+    const r = rig();
+    const p = await r.present({ ...Q });
+    const res = await r.answer(p.value?.decisionId as string, "B");
+    expect(res).toEqual({ ok: true, value: { accepted: true } });
+  });
+
+  it("停止未完了のあと止め直した子は stoppedAfterStopIncomplete。判断の停止だけの子は再開する（判定は変えない）", async () => {
+    const r = rig();
+    const res = await r.present({ ...Q, pauseNodeIds: ["a", "b"] });
+    const id = res.value?.decisionId as string;
+    await r.flush();
+    r.ev("a", { type: "confirmStopped" });
+    r.ev("b", { type: "stopTimeout" });
+    r.ev("b", { type: "retryStop" });
+    r.ev("b", { type: "confirmStopped" });
+    const ans = await r.answer(id, "A");
+    expect(ans).toEqual({
+      ok: true,
+      value: {
+        accepted: true,
+        notResumed: [{ nodeId: "b", reason: "stoppedAfterStopIncomplete" }],
+      },
+    });
+    expect(r.calls.started.map((x) => x.nodeId)).toEqual(["a"]);
+    const info = r.s().inbox.at(-1)?.summary ?? "";
+    expect(info).toContain("b（停止未完了のあと止め直したため。新しい子でやり直す）");
+    // 同じ回答の再送で、受信箱の項目は増えない
+    const before = r.s().inbox.length;
+    await r.answer(id, "A");
+    expect(r.s().inbox.length).toBe(before);
+  });
+
+  it("判断のほかに止められた子は stoppedByOther", async () => {
+    const r = rig();
+    const res = await r.present({ ...Q, pauseNodeIds: ["a"] });
+    const id = res.value?.decisionId as string;
+    await r.flush();
+    // 判断の一時停止で止まったあと、人が再開して、また止めた（判断のほかの停止）
+    r.ev("a", { type: "confirmStopped" });
+    r.ev("a", { type: "restart", dependenciesDone: true });
+    r.ev("a", { type: "stop", mode: "graceful" });
+    r.ev("a", { type: "confirmStopped" });
+    const ans = await r.answer(id, "A");
+    expect(ans).toEqual({
+      ok: true,
+      value: { accepted: true, notResumed: [{ nodeId: "a", reason: "stoppedByOther" }] },
+    });
+    expect(r.calls.started).toEqual([]);
+    expect(r.s().inbox.at(-1)?.summary).toContain("a（判断のほかに止められたため）");
+  });
+
+  it("破棄の判断は、止め直しより優先する（discarded > stoppedAfterStopIncomplete > stoppedByOther）", async () => {
+    const r = rig();
+    const res = await r.present({ ...Q, pauseNodeIds: ["a"] });
+    const id = res.value?.decisionId as string;
+    await r.flush();
+    r.ev("a", { type: "stopTimeout" });
+    r.ev("a", { type: "retryStop" });
+    r.ev("a", { type: "confirmStopped" });
+    r.log.append({
+      requestId: "disc-rs",
+      actor: { human: true },
+      body: { type: "node.discardDecided", payload: { nodeId: "a" } },
+    });
+    const ans = await r.answer(id, "A");
+    expect(ans).toEqual({
+      ok: true,
+      value: { accepted: true, notResumed: [{ nodeId: "a", reason: "discarded" }] },
+    });
+    expect(r.s().inbox.at(-1)?.summary).toContain("a（破棄の判断を経たため）");
+  });
+});

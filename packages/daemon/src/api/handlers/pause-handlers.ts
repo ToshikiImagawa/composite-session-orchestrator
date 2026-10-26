@@ -18,6 +18,8 @@ import {
   COMPLETED_STATES,
   effectiveScope,
   type Failure,
+  type NotResumed,
+  type NotResumedReason,
   type OperationMap,
   type OrchState,
   type Result,
@@ -40,6 +42,13 @@ import {
   waitRequestKey,
 } from "./context.js";
 import type { InstructionDelivery } from "./instruction-delivery.js";
+
+/** 受信箱の文面（再開しなかった理由。T24-rs）。 */
+const NOT_RESUMED_TEXT: Readonly<Record<NotResumedReason, string>> = {
+  discarded: "破棄の判断を経たため",
+  stoppedAfterStopIncomplete: "停止未完了のあと止め直したため。新しい子でやり直す",
+  stoppedByOther: "判断のほかに止められたため",
+};
 
 type R<Op extends keyof OperationMap> = Result<OperationMap[Op]["result"], Failure>;
 type Async<Op extends keyof OperationMap> = R<Op> | Promise<R<Op>>;
@@ -147,6 +156,8 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
 
   interface ResumeOutcome {
     readonly kind: "resumed" | "skipped" | "notStopped" | "failed";
+    /** 再開しなかった理由（`skipped` のとき。T24-rs）。 */
+    readonly reason?: NotResumedReason;
     /** 失敗の短い説明、または警告。 */
     readonly message?: string;
   }
@@ -209,8 +220,17 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       return { kind: "failed", message: `${target}（停止の途中）` };
     }
     if (node === undefined || now !== "stopped") return { kind: "notStopped" }; // 動作中・終了済みなど
-    if (node.discarded !== undefined) return { kind: "skipped" }; // 破棄の判断（人間）を経た子は、再開しない
-    if (!pausedOnlyByDecision(before, decision, target)) return { kind: "skipped" }; // 人間などが止めた子
+    // 理由の優先は、discarded > stoppedAfterStopIncomplete > stoppedByOther（NotResumedReason の説明）。再開するかの判定は変えない
+    if (node.discarded !== undefined) return { kind: "skipped", reason: "discarded" }; // 破棄の判断（人間）を経た子は、再開しない
+    if (!pausedOnlyByDecision(before, decision, target)) {
+      // 人間などが止めた子。止め直し（retryStop）は停止未完了からしか起きないので、あれば「停止未完了を経て止め直された」
+      const since =
+        before.inbox.find((i) => i.kind === "decision" && i.ref === decision.decisionId)?.seq ?? 0;
+      const retried = before.stopRequests.some(
+        (q) => q.nodeId === target && q.seq > since && q.kind === "retryStop",
+      );
+      return { kind: "skipped", reason: retried ? "stoppedAfterStopIncomplete" : "stoppedByOther" };
+    }
     const episode = before.stopRequests.filter((q) => q.nodeId === target).length;
     const cwd = await ports.cwdOf(target).catch(() => undefined);
     const scope = effectiveScope(before, target);
@@ -352,7 +372,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
       if (d === undefined || targets.length === 0) return r;
       const answer = d.answer ?? params.choice ?? params.text ?? "";
       const failed: string[] = [];
-      const skipped: string[] = [];
+      const skipped: NotResumed[] = [];
       for (const t of targets) {
         const o = await resumeOne(d, t, answer);
         if (o.kind === "failed") {
@@ -363,7 +383,8 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
               d,
             );
           }
-        } else if (o.kind === "skipped") skipped.push(t);
+        } else if (o.kind === "skipped")
+          skipped.push({ nodeId: t, reason: o.reason ?? "stoppedByOther" });
         else if (o.kind === "notStopped" && t === d.nodeId && deps.deliver !== undefined) {
           // 動作中・待機中のまま（セッションが生きている）の判断者には、回答を追加指示として届ける。
           const sent = await deliverAnswer(
@@ -395,7 +416,7 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
                 kind: "info",
                 nodeId: d.nodeId,
                 summary: summarize(
-                  `判断 ${d.decisionId} の回答で、再開しなかった子（人間などが止めたため）: ${skipped.join("、")}`,
+                  `判断 ${d.decisionId} の回答で、再開しなかった子: ${skipped.map((x) => `${x.nodeId}（${NOT_RESUMED_TEXT[x.reason]}）`).join("、")}`,
                 ),
               },
             },
@@ -403,7 +424,11 @@ export function createPauseHandlers(deps: PauseHandlerDeps) {
         );
         if (!listed.ok) note(d.nodeId, `再開しなかった子を記録できない: ${listed.error.code}`);
       }
-      if (failed.length === 0) return r;
+      if (failed.length === 0) {
+        return skipped.length === 0
+          ? r
+          : { ok: true, value: { accepted: true, notResumed: skipped } };
+      }
       return fail(
         "resumePending",
         `回答は記録した。再開できなかった子: ${failed.join("、")}`,

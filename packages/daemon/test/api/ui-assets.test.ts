@@ -99,6 +99,8 @@ describe("画面の資産（走査）", () => {
       "until",
       // フックの結び付けを外した結果（T22-hub。node.hookUnbind の { unbound, duplicate }）
       "unbound",
+      // 回答の結果の、再開しなかった子（T24-rs）
+      "notResumed",
       "duplicate",
       "label",
       "days",
@@ -326,9 +328,16 @@ describe("画面の資産（走査）", () => {
         fn("checkNote"),
         fn("confirmStoppedParams"),
         fn("confirmStoppedLines"),
+        line("var ID_RE ="),
+        "var NOT_RESUMED_TEXT = " +
+          UI_JS.slice(
+            UI_JS.indexOf("{", UI_JS.indexOf("var NOT_RESUMED_TEXT =")),
+            UI_JS.indexOf("};", UI_JS.indexOf("var NOT_RESUMED_TEXT =")) + 2,
+          ),
+        fn("answerDoneText"),
         fn("hookUnbindLines"),
         fn("hookUnbindDoneText"),
-        "({ hookUnbindLines: hookUnbindLines, hookUnbindDoneText: hookUnbindDoneText, checkNote: checkNote, confirmStoppedParams: confirmStoppedParams, confirmStoppedLines: confirmStoppedLines, isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
+        "({ answerDoneText: answerDoneText, hookUnbindLines: hookUnbindLines, hookUnbindDoneText: hookUnbindDoneText, checkNote: checkNote, confirmStoppedParams: confirmStoppedParams, confirmStoppedLines: confirmStoppedLines, isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
@@ -346,6 +355,7 @@ describe("画面の資産（走査）", () => {
       checkNote(text: string): string;
       confirmStoppedParams(nodeId: string, note: string): Record<string, unknown>;
       confirmStoppedLines(nodeId: string, note: string): [string, string][];
+      answerDoneText(value: unknown): string;
       hookUnbindLines(nodeId: string): [string, string][];
       hookUnbindDoneText(nodeId: string, value: unknown): string;
       isReclaimPreview(v: unknown): boolean;
@@ -395,6 +405,38 @@ describe("画面の資産（走査）", () => {
       expect(lines.at(-1)).toEqual(["根拠", api.confirmStoppedParams("a", raw).note]);
       expect(api.checkNote("x\ny")).toContain("使えない文字"); // 1 行だけ
       expect(api.confirmStoppedLines("a", "").at(-1)).toEqual(["根拠", "（なし）"]);
+    });
+
+    it("T24-rs: 回答の結果の文。再開しなかった子があれば ID と理由を添える。知らない理由・形の違う ID は出さない", () => {
+      expect(api.answerDoneText({ accepted: true })).toBe("回答を送りました");
+      expect(
+        api.answerDoneText({
+          accepted: true,
+          notResumed: [
+            { nodeId: "a", reason: "discarded" },
+            { nodeId: "b", reason: "stoppedAfterStopIncomplete" },
+            { nodeId: "c", reason: "stoppedByOther" },
+            { nodeId: "d", reason: "toString" },
+            { nodeId: "<img src=x>", reason: "discarded" },
+          ],
+        }),
+      ).toBe(
+        "回答を送りました。再開しなかった子: a（破棄の判断を経たため）、b（停止未完了のあと止め直したため。新しい子でやり直す）、c（判断のほかに止められたため）、d（理由は不明）",
+      );
+      expect(api.answerDoneText(null)).toBe("回答を送りました");
+    });
+
+    it("T24-rs: 再開しなかった子は 10 件で切り、残りを「ほか N 件」と出す（形の違う ID は数えない）", () => {
+      const many = Array.from({ length: 12 }, (_, i) => ({ nodeId: `n${i}`, reason: "discarded" }));
+      const text = api.answerDoneText({
+        accepted: true,
+        notResumed: [...many, { nodeId: "<x>", reason: "discarded" }],
+      });
+      expect(text).toContain("n9（破棄の判断を経たため）、ほか 2 件");
+      expect(text).not.toContain("n10");
+      const ten = api.answerDoneText({ accepted: true, notResumed: many.slice(0, 10) });
+      expect(ten).toContain("n9（破棄の判断を経たため）");
+      expect(ten).not.toContain("ほか");
     });
 
     it("T22-hub: フックの結び付けを外す確認の行と、結果の 3 通りの文", () => {

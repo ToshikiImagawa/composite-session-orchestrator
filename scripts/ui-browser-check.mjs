@@ -180,6 +180,19 @@ const handlers = {
       };
     }
     bump({ decisions: state.decisions.filter((d) => d.decisionId !== req.params.decisionId) });
+    // d1 の回答では、再開しなかった子（T24-rs）を返す。形の違う ID（XSS）は、画面に出ないこと
+    if (req.params.decisionId === "d1") {
+      return {
+        ok: true,
+        value: {
+          accepted: true,
+          notResumed: [
+            { nodeId: "a", reason: "stoppedAfterStopIncomplete" },
+            { nodeId: XSS, reason: "discarded" },
+          ],
+        },
+      };
+    }
     return { ok: true, value: { accepted: true } };
   },
 };
@@ -440,6 +453,14 @@ await pageO.waitForFunction(
   { timeout: 5000 },
 );
 ops.callsAfterDoubleClick = calls.length; // 1
+// 再開しなかった子（T24-rs）: ID と理由が文字として出る。形の違う ID は出さない
+ops.notResumedText = await pageO.locator("#notice").innerText();
+ops.notResumedShown =
+  ops.notResumedText.includes(
+    "再開しなかった子: a（停止未完了のあと止め直したため。新しい子でやり直す）",
+  ) &&
+  !ops.notResumedText.includes("img") &&
+  (await pageO.locator("#notice img, #notice script").count()) === 0;
 ops.answeredParams = calls[0]?.params;
 await pageO
   .waitForFunction(
