@@ -1,4 +1,10 @@
-import { type EventBody, type NodeEvent, type ProcessInfo, stateOf } from "@cso/core";
+import {
+  type EventBody,
+  INBOX_SUMMARY_MAX,
+  type NodeEvent,
+  type ProcessInfo,
+  stateOf,
+} from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { EventLog } from "../src/eventlog.js";
 import { createMemoryStore } from "../src/memory-store.js";
@@ -152,5 +158,120 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
     for (const id of ["a", "w", "s", "i", "g"]) expect(ask?.summary).toContain(id);
     await r.run();
     expect(asks()).toHaveLength(1);
+  });
+
+  it("文面: 仮置きを外し、決めつけない・画面で子ごとに確かめる・アーカイブで止めて確かめてから宣言する、を書く。docs を指す。長さの上限に収まる", async () => {
+    expect(EXTERNAL_CHECK_SUMMARY).not.toContain("仮置き");
+    for (const word of [
+      "daemon 再起動後",
+      "決めつけず",
+      "子ごとに確かめ",
+      "アーカイブし",
+      "止まりを確かめて",
+      "宣言",
+      "desktop-runtime.md",
+    ]) {
+      expect(EXTERNAL_CHECK_SUMMARY, word).toContain(word);
+    }
+    const r = rig({ external: true });
+    await r.run();
+    const [ask] = r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+    expect(ask?.summary?.length ?? 0).toBeLessThanOrEqual(INBOX_SUMMARY_MAX);
+    expect(ask?.summary).toContain("5 件");
+  });
+
+  it("前の版の文面の未解決の依頼があれば、新しい文面でも出さない（判定は変えない）", async () => {
+    const r = rig({ external: true });
+    const seeded = r.log.append({
+      requestId: "legacy-ask",
+      actor: SYS,
+      body: {
+        type: "inbox.added",
+        payload: {
+          id: "inbox-legacy",
+          kind: "stopIncomplete",
+          nodeId: "root",
+          summary:
+            "daemon の再起動のあと、Desktop の子の状態は daemon から確かめられない。Desktop で確かめ、止まっていれば停止して止めたと宣言する（仮置き）（5 件: a、w、s、i、g）",
+        },
+      },
+    });
+    expect(seeded.ok).toBe(true);
+    const seq = r.s().lastSeq;
+    await r.run();
+    expect(r.s().lastSeq).toBe(seq);
+    expect(
+      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true),
+    ).toHaveLength(0);
+  });
+
+  it("前の版の文面の依頼が解決済みなら、新しい文面で 1 件出す", async () => {
+    const r = rig({ external: true });
+    const add = (requestId: string, body: EventBody) => {
+      const x = r.log.append({ requestId, actor: SYS, body });
+      expect(x.ok).toBe(true);
+    };
+    add("legacy-ask-2", {
+      type: "inbox.added",
+      payload: {
+        id: "inbox-legacy-2",
+        kind: "stopIncomplete",
+        nodeId: "root",
+        summary:
+          "daemon の再起動のあと、Desktop の子の状態は daemon から確かめられない。Desktop で確かめ、止まっていれば停止して止めたと宣言する（仮置き）（5 件: a、w、s、i、g）",
+      },
+    });
+    add("legacy-resolve", { type: "inbox.resolved", payload: { itemId: "inbox-legacy-2" } });
+    await r.run();
+    expect(
+      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true),
+    ).toHaveLength(1);
+  });
+
+  it("本物の長さの ID（node- ＋ 32 桁の 16 進）が 5 件でも、固定文は切られず、ID が少なくとも 3 件、完全な形で載る", async () => {
+    const opened = EventLog.open(createMemoryStore().open(), { clock });
+    if (!opened.ok) throw new Error(opened.error.code);
+    const log = opened.value;
+    let k = 0;
+    const add = (body: EventBody): void => {
+      const x = log.append({ requestId: `long-${++k}`, actor: SYS, body });
+      if (!x.ok) throw new Error(`${x.error.code} ${x.error.cause}`);
+    };
+    const ids = Array.from(
+      { length: 5 },
+      (_, i) => `node-${"0123456789abcdef"[i + 1]?.repeat(32)}`,
+    );
+    const nodes: [string, string | null][] = [
+      ["root", null],
+      ...ids.map((x): [string, string] => [x, "root"]),
+    ];
+    for (const [id, parentId] of nodes) {
+      add({
+        type: "node.created",
+        payload: {
+          nodeId: id,
+          role: parentId === null ? "integrator" : "implement",
+          parentId,
+          dependsOn: [],
+        },
+      });
+      add({ type: "node.stateChanged", payload: { nodeId: id, event: { type: "start" } } });
+    }
+    await reconcileOnStartup({
+      log,
+      clock,
+      cwdOf: async () => undefined,
+      probe: async () => [],
+      has: () => false,
+      external: () => true,
+    });
+    const [ask] = log
+      .state()
+      .inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+    const summary = ask?.summary ?? "";
+    expect(summary.length).toBeLessThanOrEqual(INBOX_SUMMARY_MAX);
+    expect(summary.startsWith(EXTERNAL_CHECK_SUMMARY)).toBe(true);
+    const full = ids.filter((id) => new RegExp(`(?:: |、)${id}(?:、|）|…)`).test(summary));
+    expect(full.length, summary).toBeGreaterThanOrEqual(3);
   });
 });
