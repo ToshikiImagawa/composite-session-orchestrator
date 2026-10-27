@@ -166,9 +166,9 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
       "決めつけない",
       "子ごとに確かめ",
       "アーカイブで止め",
-      "止まったのを確かめてから",
-      "止めたと宣言",
-      "docs/desktop-runtime.md",
+      "止まったと確かめて",
+      "宣言",
+      "desktop-runtime.md",
     ]) {
       expect(EXTERNAL_CHECK_SUMMARY, word).toContain(word);
     }
@@ -202,5 +202,75 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
     expect(
       r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true),
     ).toHaveLength(0);
+  });
+
+  it("前の版の文面の依頼が解決済みなら、新しい文面で 1 件出す", async () => {
+    const r = rig({ external: true });
+    const add = (requestId: string, body: EventBody) => {
+      const x = r.log.append({ requestId, actor: SYS, body });
+      expect(x.ok).toBe(true);
+    };
+    add("legacy-ask-2", {
+      type: "inbox.added",
+      payload: {
+        id: "inbox-legacy-2",
+        kind: "stopIncomplete",
+        nodeId: "root",
+        summary:
+          "daemon の再起動のあと、Desktop の子の状態は daemon から確かめられない。Desktop で確かめ、止まっていれば停止して止めたと宣言する（仮置き）（5 件: a、w、s、i、g）",
+      },
+    });
+    add("legacy-resolve", { type: "inbox.resolved", payload: { itemId: "inbox-legacy-2" } });
+    await r.run();
+    expect(
+      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true),
+    ).toHaveLength(1);
+  });
+
+  it("本物の長さの ID（node- ＋ 32 桁の 16 進）が 5 件でも、固定文は切られず、ID が少なくとも 3 件、完全な形で載る", async () => {
+    const opened = EventLog.open(createMemoryStore().open(), { clock });
+    if (!opened.ok) throw new Error(opened.error.code);
+    const log = opened.value;
+    let k = 0;
+    const add = (body: EventBody): void => {
+      const x = log.append({ requestId: `long-${++k}`, actor: SYS, body });
+      if (!x.ok) throw new Error(`${x.error.code} ${x.error.cause}`);
+    };
+    const ids = Array.from(
+      { length: 5 },
+      (_, i) => `node-${"0123456789abcdef"[i + 1]?.repeat(32)}`,
+    );
+    const nodes: [string, string | null][] = [
+      ["root", null],
+      ...ids.map((x): [string, string] => [x, "root"]),
+    ];
+    for (const [id, parentId] of nodes) {
+      add({
+        type: "node.created",
+        payload: {
+          nodeId: id,
+          role: parentId === null ? "integrator" : "implement",
+          parentId,
+          dependsOn: [],
+        },
+      });
+      add({ type: "node.stateChanged", payload: { nodeId: id, event: { type: "start" } } });
+    }
+    await reconcileOnStartup({
+      log,
+      clock,
+      cwdOf: async () => undefined,
+      probe: async () => [],
+      has: () => false,
+      external: () => true,
+    });
+    const [ask] = log
+      .state()
+      .inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+    const summary = ask?.summary ?? "";
+    expect(summary.length).toBeLessThanOrEqual(INBOX_SUMMARY_MAX);
+    expect(summary.startsWith(EXTERNAL_CHECK_SUMMARY)).toBe(true);
+    const full = ids.filter((id) => new RegExp(`(?:: |、)${id}(?:、|）|…)`).test(summary));
+    expect(full.length, summary).toBeGreaterThanOrEqual(3);
   });
 });
