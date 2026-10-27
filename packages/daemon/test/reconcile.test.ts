@@ -1,4 +1,10 @@
-import { type EventBody, type NodeEvent, type ProcessInfo, stateOf } from "@cso/core";
+import {
+  type EventBody,
+  INBOX_SUMMARY_MAX,
+  type NodeEvent,
+  type ProcessInfo,
+  stateOf,
+} from "@cso/core";
 import { describe, expect, it } from "vitest";
 import { EventLog } from "../src/eventlog.js";
 import { createMemoryStore } from "../src/memory-store.js";
@@ -152,5 +158,49 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
     for (const id of ["a", "w", "s", "i", "g"]) expect(ask?.summary).toContain(id);
     await r.run();
     expect(asks()).toHaveLength(1);
+  });
+
+  it("文面: 仮置きを外し、決めつけない・画面で子ごとに確かめる・アーカイブで止めて確かめてから宣言する、を書く。docs を指す。長さの上限に収まる", async () => {
+    expect(EXTERNAL_CHECK_SUMMARY).not.toContain("仮置き");
+    for (const word of [
+      "決めつけない",
+      "子ごとに確かめ",
+      "アーカイブで止め",
+      "止まったのを確かめてから",
+      "止めたと宣言",
+      "docs/desktop-runtime.md",
+    ]) {
+      expect(EXTERNAL_CHECK_SUMMARY, word).toContain(word);
+    }
+    const r = rig({ external: true });
+    await r.run();
+    const [ask] = r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+    expect(ask?.summary?.length ?? 0).toBeLessThanOrEqual(INBOX_SUMMARY_MAX);
+    expect(ask?.summary).toContain("5 件");
+  });
+
+  it("前の版の文面の未解決の依頼があれば、新しい文面でも出さない（判定は変えない）", async () => {
+    const r = rig({ external: true });
+    const seeded = r.log.append({
+      requestId: "legacy-ask",
+      actor: SYS,
+      body: {
+        type: "inbox.added",
+        payload: {
+          id: "inbox-legacy",
+          kind: "stopIncomplete",
+          nodeId: "root",
+          summary:
+            "daemon の再起動のあと、Desktop の子の状態は daemon から確かめられない。Desktop で確かめ、止まっていれば停止して止めたと宣言する（仮置き）（5 件: a、w、s、i、g）",
+        },
+      },
+    });
+    expect(seeded.ok).toBe(true);
+    const seq = r.s().lastSeq;
+    await r.run();
+    expect(r.s().lastSeq).toBe(seq);
+    expect(
+      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true),
+    ).toHaveLength(0);
   });
 });

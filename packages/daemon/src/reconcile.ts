@@ -63,9 +63,20 @@ export interface ReconcileOutcome {
 
 const TARGETS = new Set(["running", "waiting", "stopping", "stopIncomplete"]);
 
-/** daemon の外で動く子（Desktop）を、再起動のあとに人に確かめてもらう依頼の文面（固定。重複の判定にも使う）。 */
+/**
+ * daemon の外で動く子（Desktop）を、再起動のあとに人に確かめてもらう依頼の文面（固定。重複の判定にも使う）。
+ * 詳しい手順は `docs/desktop-runtime.md` の「根の受信箱の 1 件で、人に確かめてもらうこと」。
+ */
 export const EXTERNAL_CHECK_SUMMARY =
-  "daemon の再起動のあと、Desktop の子の状態は daemon から確かめられない。Desktop で確かめ、止まっていれば停止して止めたと宣言する（仮置き）";
+  "daemon の再起動のあと: Desktop の子は止まっていると決めつけない（動き続けるか、自動で再開する）。Desktop の画面で子ごとに確かめ、止めるならアーカイブで止め、止まったのを確かめてから止めたと宣言する（手順は docs/desktop-runtime.md）";
+
+/** 前の版の文面（記録に残っている未解決の依頼も、同じ依頼として数える。重複して出さない）。 */
+const LEGACY_EXTERNAL_CHECK_SUMMARIES: readonly string[] = [
+  "daemon の再起動のあと、Desktop の子の状態は daemon から確かめられない。Desktop で確かめ、止まっていれば停止して止めたと宣言する（仮置き）",
+];
+const isExternalCheck = (summary: string | undefined): boolean =>
+  summary !== undefined &&
+  [EXTERNAL_CHECK_SUMMARY, ...LEGACY_EXTERNAL_CHECK_SUMMARIES].some((s) => summary.startsWith(s));
 
 export async function reconcileOnStartup(deps: ReconcileDeps): Promise<ReconcileOutcome[]> {
   const { log } = deps;
@@ -80,9 +91,7 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
   // 未解決の同じ依頼があれば、出さない（再起動を繰り返しても、増えない）。
   const external = candidates.filter((n) => deps.external?.(n.id) === true);
   const root = start.nodes.find((n) => n.parentId === null);
-  const pending = start.inbox.some(
-    (i) => i.resolved === undefined && i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true,
-  );
+  const pending = start.inbox.some((i) => i.resolved === undefined && isExternalCheck(i.summary));
   if (external.length > 0 && root !== undefined && !pending) {
     const key = `reconcile-external-${run}`;
     const shown = external.slice(0, 5).map((n) => n.id);
