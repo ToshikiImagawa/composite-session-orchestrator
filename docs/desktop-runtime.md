@@ -61,6 +61,8 @@ Desktop の実機確認（Spike 01 の項目 1〜7）は、一部済んだ（親
 4. 子は、最初のメッセージを受けたら、`instruction` にある `curl` で `POST /v1/bind` を呼び、ノードのトークンをシェルの変数 `CSO_TOKEN` に受け取る。以後の報告は、`curl` で `POST /v1/request`（`role: "child"`）。
    - トークンとコードは、`curl` の引数に置かない（`ps` のプロセス一覧に出さない）。本文とヘッダーは、シェルの組み込みの `printf` から標準入力で渡す（`-d @-`・`-H @-`）。トークンは、応答から直接変数に入れ、画面に出さない。
    - **仮置き**: Desktop の子が `curl` を実行できるか、MCP をあとから足せるかは、実機確認（項目 4）で確かめる。
+   - **手動確認 C1 の結果（2026-10-27。条件付き）**: 標準入力の形の `curl`（`-H @-`・`-d @-`）は動いた。1 回の Bash 呼び出しの中で bind → `report.progress` → `report.done` を続けると、すべて ok で、`ps`・stateDir・daemon のログに、トークンとコードの漏れはなかった。**ただし、Desktop の子では、シェルの変数が次の Bash 呼び出しに残らない**。今の `instruction` は、`CSO_TOKEN` に受けるコマンドと、それを使う報告のコマンドを別々に示すので、別の呼び出しで報告すると、空のトークンで送られて 401 になる。直し方は未決定（計画。T21）。
+     - 計画（未実装）の、直し方の候補（採否は決めていない）: (a) bind と報告を 1 つのコマンドで行う小さなスクリプトを、`instruction` で渡す。(b) トークンを権限 0600 のファイル（umask 077）に置き、完了のときに消す（「書き出さない」原則との両立が要る）。(c) 報告を cso-mcp（MCP）に切り替える（子の MCP は自己申告だけで、未確認）。詳しくは [`docs/manual-verification-checklist.md`](manual-verification-checklist.md) の C1。
    - Desktop の中間の統合ノード（role が integrator）は、紐付けできない（`node.bindCode` は `integratorNotSupported`。紐付けで渡すのは子のトークンだけ。**仮置き**）。
 
 ### 紐付けコードの扱い
