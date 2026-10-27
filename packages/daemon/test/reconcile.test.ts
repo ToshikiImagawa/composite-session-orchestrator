@@ -163,10 +163,11 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
   it("文面: 仮置きを外し、決めつけない・画面で子ごとに確かめる・アーカイブで止めて確かめてから宣言する、を書く。docs を指す。長さの上限に収まる", async () => {
     expect(EXTERNAL_CHECK_SUMMARY).not.toContain("仮置き");
     for (const word of [
-      "決めつけない",
+      "daemon 再起動後",
+      "決めつけず",
       "子ごとに確かめ",
-      "アーカイブで止め",
-      "止まったと確かめて",
+      "アーカイブし",
+      "止まりを確かめて",
       "宣言",
       "desktop-runtime.md",
     ]) {

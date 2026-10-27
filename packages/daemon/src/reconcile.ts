@@ -68,7 +68,7 @@ const TARGETS = new Set(["running", "waiting", "stopping", "stopIncomplete"]);
  * 詳しい手順は `docs/desktop-runtime.md` の「根の受信箱の 1 件で、人に確かめてもらうこと」。
  */
 export const EXTERNAL_CHECK_SUMMARY =
-  "再起動後: Desktop の子は止まったと決めつけない。画面で子ごとに確かめ、アーカイブで止め、止まったと確かめて宣言（desktop-runtime.md）";
+  "daemon 再起動後: 子は止まったと決めつけず、Desktop で子ごとに確かめ、アーカイブし、止まりを確かめて宣言（desktop-runtime.md）";
 
 /**
  * 前の版の文面（記録に残っている未解決の依頼も、同じ依頼として数える。重複して出さない）。
