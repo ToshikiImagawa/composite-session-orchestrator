@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -428,6 +429,19 @@ describe("起動の安全（レビュー反映）", () => {
     const made = createDaemon({ ...r.config, worktreeRoot: join(link, "not-yet", "wt") }, r.deps);
     expect(made.ok).toBe(false);
     if (!made.ok) expect(made.error.code).toBe("invalidConfig");
+  });
+
+  it("起動時に子の引き出しの置き場（0700）を作り、動いている子の鍵でない引き出しを消す（T21-d・M9）", async () => {
+    const r = rig();
+    r.deps = { ...r.deps, excludeFromBackup: async () => undefined };
+    mkdirSync(r.config.stateDir, { recursive: true, mode: 0o700 });
+    const root = join(r.config.stateDir, "children.noindex");
+    mkdirSync(join(root, "0".repeat(32)), { recursive: true, mode: 0o700 });
+    chmodSync(root, 0o700);
+    await boot(r);
+    expect(lstatSync(root).mode & 0o777).toBe(0o700);
+    expect(existsSync(join(root, "0".repeat(32)))).toBe(false);
+    expect(r.logs.join("\n")).toContain("childrenDirSwept");
   });
 
   it("trackTimers: 止めるときに、残っているタイマーをまとめて取り消す", () => {
