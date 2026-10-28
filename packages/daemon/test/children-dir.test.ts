@@ -20,8 +20,11 @@ import {
   CHILDREN_DIR,
   CHILDREN_KEY_FILE,
   ChildrenDirError,
+  createTmutilExclude,
   drawerActionFor,
   prepareChildrenDirs,
+  safeCause as safeCauseOf,
+  tmutilFailureKind,
 } from "../src/children-dir.js";
 
 const made: string[] = [];
@@ -246,5 +249,74 @@ describe("引き出しの中身と、状態の移り変わり（T21-cc N3・N4�
     expect(drawerActionFor("running", "done", false)).toBeUndefined();
     expect(drawerActionFor("stopped", "running", false)).toBeUndefined();
     expect(drawerActionFor("running", "running", false)).toBeUndefined();
+  });
+});
+
+describe("Time Machine から外す（tmutil。C1' の childrenDirWarning）", () => {
+  const calls: string[][] = [];
+  const run =
+    (behave: { isexcluded?: "excluded" | "included" | "fail"; add?: unknown }) =>
+    async (file: string, args: readonly string[]) => {
+      calls.push([file, ...args]);
+      if (args[0] === "isexcluded") {
+        if (behave.isexcluded === "fail") throw Object.assign(new Error("x"), { code: 1 });
+        return {
+          stdout: behave.isexcluded === "excluded" ? "[Excluded]    /p\n" : "[Included]    /p\n",
+          stderr: "",
+        };
+      }
+      if (behave.add !== undefined) throw behave.add;
+      return { stdout: "", stderr: "" };
+    };
+
+  it("すでに外されていれば、addexclusion を呼ばず、警告も出さない", async () => {
+    calls.length = 0;
+    await createTmutilExclude(run({ isexcluded: "excluded" }), "darwin")("/p");
+    expect(calls.map((c) => c[1])).toEqual(["isexcluded"]);
+  });
+
+  it("外されていなければ addexclusion を呼ぶ。確かめられなくても、外す処理に進む", async () => {
+    calls.length = 0;
+    await createTmutilExclude(run({ isexcluded: "included" }), "darwin")("/p");
+    await createTmutilExclude(run({ isexcluded: "fail" }), "darwin")("/p");
+    expect(calls.map((c) => c[1])).toEqual([
+      "isexcluded",
+      "addexclusion",
+      "isexcluded",
+      "addexclusion",
+    ]);
+    calls.length = 0;
+    await createTmutilExclude(run({}), "linux")("/p");
+    expect(calls).toEqual([]);
+  });
+
+  it("失敗の理由の種類: 終了コード（数）・時間切れ・権限・起動の失敗。実パス・出力そのものは入れない", async () => {
+    expect(
+      tmutilFailureKind(
+        Object.assign(new Error("x"), { code: 80, stderr: "/Users/secret/x failed" }),
+      ),
+    ).toBe("exit 80");
+    expect(
+      tmutilFailureKind(
+        Object.assign(new Error("x"), { killed: true, signal: "SIGTERM", code: null }),
+      ),
+    ).toBe("timeout");
+    expect(
+      tmutilFailureKind(
+        Object.assign(new Error("x"), { code: 1, stderr: "Operation not permitted" }),
+      ),
+    ).toBe("permission, exit 1");
+    expect(tmutilFailureKind(Object.assign(new Error("x"), { code: "ENOENT" }))).toBe("ENOENT");
+    expect(tmutilFailureKind(undefined)).toBe("unknown");
+    const err = await createTmutilExclude(
+      run({
+        isexcluded: "included",
+        add: Object.assign(new Error("/Users/secret"), { code: 80, stderr: "/Users/secret" }),
+      }),
+      "darwin",
+    )("/Users/secret/children.noindex").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ChildrenDirError);
+    expect((err as Error).message).toBe("tmutil addexclusion: exit 80");
+    expect(safeCauseOf(err)).not.toContain("/Users");
   });
 });

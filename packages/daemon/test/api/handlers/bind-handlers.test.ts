@@ -162,4 +162,24 @@ describe("node.bindCode（Desktop の子の紐付けの文面。T21・仮置き�
     expect(res.ok).toBe(true);
     expect(r.log.state().lastSeq).toBe(before);
   });
+
+  it("文面の done・decision・scope-extend の本文の例は、そのまま daemon の検査を通る形（C1' で done の形が分からず送り直した）", async () => {
+    const { validateParams } = await import("../../../src/api/validate.js");
+    const r = rig();
+    const res = r.call("m1", "a");
+    if (!res.ok) throw new Error(res.error.code);
+    const lines = res.value.instruction.split("\n").map((l) => l.trim());
+    const example = (kind: string) => {
+      const line = lines.find((l) => l.startsWith(`${kind}: {`)) as string;
+      return JSON.parse(line.slice(kind.length + 2).replace(/（.*$/, ""));
+    };
+    for (const [kind, op] of [
+      ["done", "report.done"],
+      ["decision", "report.decision"],
+      ["scope-extend", "scope.extend"],
+    ] as const) {
+      const v = validateParams(op, example(kind));
+      expect(v.ok, `${kind}: ${JSON.stringify(v)}`).toBe(true);
+    }
+  });
 });

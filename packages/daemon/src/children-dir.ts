@@ -354,14 +354,68 @@ export function prepareChildrenDirs(
   };
 }
 
-const defaultExclude = (path: string): Promise<void> =>
-  process.platform !== "darwin"
-    ? Promise.resolve()
-    : new Promise((resolve, reject) => {
-        execFile(TMUTIL, ["addexclusion", path], { timeout: TMUTIL_TIMEOUT_MS }, (e) =>
-          e ? reject(e) : resolve(),
-        );
-      });
+/** 外部コマンドを動かす口（試験で差し替える）。終了コードが 0 以外・時間切れ・起動の失敗は、`execFile` と同じ形の例外。 */
+export type RunCommand = (
+  file: string,
+  args: readonly string[],
+  timeoutMs: number,
+) => Promise<{ stdout: string; stderr: string }>;
+
+const runExecFile: RunCommand = (file, args, timeoutMs) =>
+  new Promise((resolve, reject) => {
+    execFile(file, [...args], { timeout: timeoutMs, encoding: "utf8" }, (e, stdout, stderr) => {
+      if (e) reject(Object.assign(e, { stdout, stderr }));
+      else resolve({ stdout, stderr });
+    });
+  });
+
+/**
+ * `tmutil` の失敗の理由の種類（実パス・出力そのものは入れない）。`execFile` は、終了コードが 0 以外のとき `code` に**数**を入れる
+ * （文字列の code だけを見ると unknown になる）。時間切れは `killed`。権限（フルディスクアクセスなど）は、出力の決まった語で見分ける。
+ */
+export function tmutilFailureKind(e: unknown): string {
+  const x = e as {
+    code?: unknown;
+    killed?: unknown;
+    signal?: unknown;
+    stderr?: unknown;
+    stdout?: unknown;
+  };
+  if (x?.killed === true || (x?.signal !== undefined && x?.signal !== null)) return "timeout";
+  if (typeof x?.code === "string") return x.code; // ENOENT・EACCES など（起動できない）
+  if (typeof x?.code === "number") {
+    const out = `${typeof x.stderr === "string" ? x.stderr : ""}\n${typeof x.stdout === "string" ? x.stdout : ""}`;
+    const permission = /not permitted|permission|full disk access|privilege/i.test(out);
+    return permission ? `permission, exit ${x.code}` : `exit ${x.code}`;
+  }
+  return "unknown";
+}
+
+/**
+ * Time Machine から外す（macOS だけ。ほかの OS では何もしない）。先に `tmutil isexcluded` で確かめ、すでに外されていれば何もしない
+ * （前に人が外した置き場で、警告を出さない）。外せなければ、理由の種類だけを持つ例外（`ChildrenDirError`）。
+ */
+export function createTmutilExclude(
+  run: RunCommand = runExecFile,
+  platform: NodeJS.Platform = process.platform,
+): (path: string) => Promise<void> {
+  return async (path) => {
+    if (platform !== "darwin") return;
+    try {
+      const checked = await run(TMUTIL, ["isexcluded", path], TMUTIL_TIMEOUT_MS);
+      if (/\[Excluded\]/.test(checked.stdout)) return;
+    } catch {
+      // 確かめられなければ、外す処理に進む（外す処理の失敗で、理由を出す）
+    }
+    try {
+      await run(TMUTIL, ["addexclusion", path], TMUTIL_TIMEOUT_MS);
+    } catch (e) {
+      throw new ChildrenDirError(`tmutil addexclusion: ${tmutilFailureKind(e)}`);
+    }
+  };
+}
+
+const defaultExclude = createTmutilExclude();
 
 /**
  * 状態の移り変わりで、子の引き出しにすること（T21-cc N4。Desktop の子）。`prev` は前に見た状態（初めて見るノードは undefined）。
