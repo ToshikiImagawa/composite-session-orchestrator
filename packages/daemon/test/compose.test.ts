@@ -119,14 +119,19 @@ const call = async (
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ requestId, operation, params }),
     });
-  // 同じポートで起動し直すと（保存したポート）、前の daemon への使い回しの接続が閉じていることがある。1 回だけ送り直す
-  // （同じ requestId なので、重複して実行されない）。
-  const res = await send().catch((e: unknown) => {
-    if (
+  // 同じポートで起動し直すと（保存したポート）、fetch が前の daemon への使い回しの接続（keep-alive。前の daemon の stop で
+  // 閉じられている）で送ることがある。閉じられ方は OS で違い、Linux では FIN で「other side closed」（UND_ERR_SOCKET）、
+  // macOS では RST で「read ECONNRESET」になる。どちらも、要求が新しい daemon に届く前の失敗なので、1 回だけ送り直す
+  // （同じ requestId なので、届いていても重複して実行されない）。
+  const stale = (e: unknown): boolean => {
+    const cause = (e as { cause?: { code?: unknown } }).cause;
+    return (
       e instanceof TypeError &&
-      /other side closed|socket/i.test(String((e as { cause?: unknown }).cause))
-    )
-      return send();
+      (cause?.code === "UND_ERR_SOCKET" || cause?.code === "ECONNRESET" || cause?.code === "EPIPE")
+    );
+  };
+  const res = await send().catch((e: unknown) => {
+    if (stale(e)) return send();
     throw e;
   });
   return {
