@@ -6,6 +6,18 @@
  * - 記録で動作中・判断待ち・停止中・停止未完了の子が 1 つもなくなったら、未解決の依頼を、system が解決済みにする
  *   （停止の宣言・完了などで状態が変わったとき。対象の ID は持たず、今の木全体で判断する）。
  * - 記録の形は変えない（`inbox.added`・`inbox.resolved` だけ）。
+ *
+ * 包む経路（追記が成功したあとに、解決を判断する。`withExternalCheckResolution`）:
+ * - 操作のハンドラ（停止の宣言・完了の報告・受理・停止など、ノードの状態を変える操作は、すべてここを通る）。
+ * - Desktop のアダプタの記録口（停止の代行依頼の `stopTimeout` など）。
+ * 包まない経路: 配下の要約（digest）・窓口の警告（api-alert）・自動の最終削除（auto-purge）・起こす指示（wake）・回答の配送の
+ * やり直し。これらは受信箱の項目と指示を書くだけで、子の状態を「動いているかもしれない」から外さないので、解決の判断が要らない
+ * （起動時の照合でも、同じ判断をする）。
+ *
+ * 停止の追記のあとは、子は停止中（stopping）のままなので、解決は起きない（記録が増えない）。`pause-handlers.ts`・
+ * `spawn-handlers.ts` は、停止の要求を追記したあとの `log.state().lastSeq` を、停止の要求の seq として使っているので、
+ * この前提が崩れたら（停止の追記のあとに、解決の追記が起きうるようになったら）、追記の結果の seq を使う形に直すこと
+ * （tasks.md の T21-ec2）。
  */
 
 import type { Actor, EventBody, OrchState } from "@cso/core";
@@ -45,9 +57,14 @@ export const openExternalChecks = (state: OrchState): string[] =>
     .filter((i) => i.resolved === undefined && isExternalCheck(i.summary))
     .map((i) => i.id);
 
-/** 記録で、まだ動いているかもしれない子（根を除く）がいるか。 */
-export const hasLiveChild = (state: OrchState): boolean =>
-  state.nodes.some((n) => n.parentId !== null && EXTERNAL_LIVE_STATES.has(n.state));
+/** 記録で、まだ動いているかもしれない Desktop の子（根を除く。`isExternal` が真のもの）がいるか。 */
+export const hasLiveChild = (
+  state: OrchState,
+  isExternal: (nodeId: string) => boolean = () => true,
+): boolean =>
+  state.nodes.some(
+    (n) => n.parentId !== null && EXTERNAL_LIVE_STATES.has(n.state) && isExternal(n.id),
+  );
 
 /** 依頼を解決済みにする記録（system）。 */
 export const resolveExternalCheckBodies = (ids: readonly string[]): EventBody[] =>
@@ -59,11 +76,13 @@ export const resolveExternalCheckBodies = (ids: readonly string[]): EventBody[] 
  */
 export function resolveStaleExternalChecks(
   log: Pick<LogPort, "state" | "append">,
+  isExternal: (nodeId: string) => boolean = () => true,
   onFailure?: (cause: string) => void,
 ): void {
   const state = log.state();
-  if (hasLiveChild(state)) return;
-  for (const itemId of openExternalChecks(state)) {
+  const open = openExternalChecks(state);
+  if (open.length === 0 || hasLiveChild(state, isExternal)) return;
+  for (const itemId of open) {
     const r = log.append({
       requestId: `external-check-resolved-${itemId}`,
       actor: SYSTEM,
@@ -94,11 +113,12 @@ function optional(log: LogPort): Partial<LogPort> {
  */
 export function withExternalCheckResolution(
   log: LogPort,
+  isExternal: (nodeId: string) => boolean,
   onFailure?: (cause: string) => void,
 ): LogPort {
   const after = (): void => {
     try {
-      resolveStaleExternalChecks(log, onFailure);
+      resolveStaleExternalChecks(log, isExternal, onFailure);
     } catch (e) {
       onFailure?.(`依頼を解決済みにできない: ${String(e)}`);
     }

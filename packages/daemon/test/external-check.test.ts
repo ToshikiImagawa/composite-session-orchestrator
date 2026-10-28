@@ -75,7 +75,7 @@ describe("根の「daemon 再起動後」の依頼の自動の解決（C2-4・�
 
   it("包んだログ: 追記が成功したあとに判断する（完了の報告で、動いている子がいなくなっても解決する）", () => {
     const r = rig();
-    const wrapped = withExternalCheckResolution(r.log);
+    const wrapped = withExternalCheckResolution(r.log, () => true);
     const done = wrapped.append({
       requestId: "done-a",
       actor: SYS,
@@ -87,7 +87,7 @@ describe("根の「daemon 再起動後」の依頼の自動の解決（C2-4・�
 
   it("包んだログ: 追記が失敗したら、何もしない。任意の口は、元のログに結び付けて渡す", () => {
     const r = rig();
-    const wrapped = withExternalCheckResolution(r.log);
+    const wrapped = withExternalCheckResolution(r.log, () => true);
     const bad = wrapped.appendAll([
       {
         requestId: "bad",
@@ -98,5 +98,11 @@ describe("根の「daemon 再起動後」の依頼の自動の解決（C2-4・�
     expect(bad.ok).toBe(false);
     expect(r.open()).toBe(true);
     expect(wrapped.firstEventOf?.("t-1")?.seq).toBe(1);
+  });
+
+  it("Desktop の子でないノード（isExternal が偽）は、動いていても数えない（照合と同じ判定）", () => {
+    const r = rig();
+    resolveStaleExternalChecks(r.log, (id) => id !== "a");
+    expect(r.open()).toBe(false);
   });
 });

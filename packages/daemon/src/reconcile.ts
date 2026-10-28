@@ -84,7 +84,8 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
   const external = candidates.filter((n) => deps.external?.(n.id) === true);
   const root = start.nodes.find((n) => n.parentId === null);
   // 未解決の古い依頼（前の版の文面を含む）は、置き換える: 解決済みにして、今の対象の子で新しい依頼を出す（未解決は常に 1 件まで）。
-  // 対象の子がいなければ、古い依頼を解決済みにするだけ。
+  // 対象の子がいなければ、古い依頼を解決済みにするだけ。同じプロセスで照合を走らせ直すと、置き換えがもう一度起きる（害はない:
+  // 未解決は 1 件のまま）。
   const stale = openExternalChecks(start);
   if ((external.length > 0 && root !== undefined) || stale.length > 0) {
     const key = `reconcile-external-${run}`;
@@ -105,7 +106,11 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
       });
     }
     const r = appendAtomically(log, deps.clock, key, { system: true }, bodies);
-    if (!r.ok) deps.onFailure?.(root?.id ?? "", `確かめる依頼を記録できない: ${r.error.cause}`);
+    if (!r.ok)
+      deps.onFailure?.(
+        root?.id ?? "（根なし）",
+        `確かめる依頼を記録できない${root === undefined ? "（根のノードが記録にない）" : ""}: ${r.error.cause}`,
+      );
   }
   // 置き場全体を 1 回だけ調べて共有する（調べられなければ null。全ノードを安全側にする）。
   let shared: readonly ProcessInfo[] | null | undefined;
