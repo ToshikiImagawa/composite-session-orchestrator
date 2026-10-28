@@ -38,7 +38,7 @@ export interface CommandDeps {
 }
 
 export interface CommandResult {
-  readonly exitCode: 0 | 1 | 2;
+  readonly exitCode: 0 | 1 | 2 | 3;
   readonly stdout: string;
   readonly stderr: string;
 }

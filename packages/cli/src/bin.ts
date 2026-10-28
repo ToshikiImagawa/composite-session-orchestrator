@@ -8,12 +8,16 @@
  *   確かめる（cso-mcp と同じ）。ないと動かない。環境変数 `CSO_CLI_ALLOW_UNVERIFIED` が**ちょうど `1`** のときだけ、検証なしで動く。
  *
  * 終了コードは `runCommand` と同じ（0 成功・1 失敗／結果が確認できない・2 引数・環境の誤り）。
+ *
+ * `cso child bind`・`cso child report`（Desktop の子が使う。T21-cc）は、人間のトークン・環境変数を使わない（子の引き出しの
+ * ファイルと、引数の窓口の URL だけ。`child.ts`）。終了コード 3 は、子のトークンの期限切れ。
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createIdentityVerifier, createRelay, IDENTITY_FILE } from "@cso/mcp/relay";
+import { runChild } from "./child.js";
 import { type CommandResult, runCommand } from "./commands.js";
 import { createHttpClient } from "./http-client.js";
 
@@ -23,6 +27,8 @@ export interface BinDeps {
   readonly fetch?: typeof fetch;
   readonly readFile?: (path: string) => string;
   readonly newRequestId?: () => string;
+  /** 標準入力の全部（`cso child report` の本文）。 */
+  readonly readStdin?: () => Promise<string>;
 }
 
 const usage = (cause: string): CommandResult => ({
@@ -46,6 +52,13 @@ function stateDirOf(path: string, readFile: (p: string) => string): string | und
 }
 
 export async function runBin(argv: readonly string[], deps: BinDeps): Promise<CommandResult> {
+  if (argv[0] === "child") {
+    return runChild(argv.slice(1), {
+      readStdin: deps.readStdin ?? (async () => ""),
+      newRequestId: deps.newRequestId ?? (() => `cso-child-${randomUUID()}`),
+      ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+    });
+  }
   if (argv.includes("--help") || argv.includes("-h")) {
     return runCommand(argv, {
       client: { call: async () => Promise.reject(new Error("unused")) },
@@ -105,6 +118,18 @@ if (entry !== undefined && realpathSync(entry) === fileURLToPath(import.meta.url
   const result = await runBin(process.argv.slice(2), {
     env: process.env,
     isTTY: { stdin: process.stdin.isTTY === true, stdout: process.stdout.isTTY === true },
+    readStdin: async () => {
+      if (process.stdin.isTTY === true) return "";
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const c of process.stdin) {
+        const b = c as Buffer;
+        size += b.length;
+        if (size > 1024 * 1024) break; // 上限は child.ts で見る（読みすぎない）
+        chunks.push(b);
+      }
+      return Buffer.concat(chunks).toString("utf8");
+    },
   });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);

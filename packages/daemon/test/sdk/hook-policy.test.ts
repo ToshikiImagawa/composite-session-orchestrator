@@ -374,3 +374,133 @@ describe("読み取りも禁じる場所（FR_014 の例外。T21-pr）", () => 
     ).toBe(true);
   });
 });
+
+describe("自分の引き出しの例外（T21-cc）", () => {
+  const S = "/home/u/state";
+  const D = `${S}/children.noindex`;
+  const mine = `${D}/aaaa`;
+  const other = `${D}/bbbb`;
+  const CSO = "node /opt/cso/bin.js";
+  const childScope: Scope = {
+    writableLocations: ["src"],
+    forbiddenLocations: [],
+    allowedCommands: [`${CSO} child`, "cat", "ls", "grep"],
+  };
+  const prot = {
+    roots: [{ path: S, kind: "stateDir" as const }],
+    allow: [],
+    home: `${S}/homes/a`,
+    drawer: mine,
+    csoCommand: ["node", "/opt/cso/bin.js"],
+  };
+  const resolve = async (p: string) => {
+    const { posix } = await import("node:path");
+    const n = posix.resolve(p);
+    if (n === "/link" || n.startsWith("/link/")) return other + n.slice("/link".length); // 他人の引き出しへのリンク
+    return n;
+  };
+  const reasonOf = async (tool: string, input: unknown) => {
+    const r = await decideToolUse(childScope, "/home/u/wt/a", tool, input, resolve, prot);
+    return r.allow ? null : (r.violation?.subject ?? r.violation?.reason ?? "unknownTool");
+  };
+  const bash = (command: string) => reasonOf("Bash", { command });
+
+  it("Bash: cso child bind|report の --dir の値が自分の引き出しなら許す", async () => {
+    expect(await bash(`${CSO} child bind --dir ${mine} --url http://127.0.0.1:7777`)).toBeNull();
+    expect(
+      await bash(`${CSO} child report --dir ${mine}/ --url http://127.0.0.1:7777 progress`),
+    ).toBeNull();
+  });
+
+  it("Bash: cso child の命令の --dir が自分の引き出しそのものでなければ拒否（他人の引き出し・リンク経由・中のファイル・--dir=値。R1）", async () => {
+    for (const dir of [other, "/link", `${mine}/token`, `${mine}/*`, "/home/u/wt/a", "rel"]) {
+      expect(
+        await bash(`${CSO} child bind --dir ${dir} --url http://127.0.0.1:7777`),
+        dir,
+      ).not.toBeNull();
+    }
+    expect(
+      await bash(`${CSO} child bind --dir=${mine} --url http://127.0.0.1:7777`),
+    ).not.toBeNull();
+  });
+
+  it("Bash: 例外は、先頭が csoCommand・2 語目が child・3 語目が bind|report の命令だけ（M1）", async () => {
+    const no = "protected:stateDir";
+    expect(await bash(`tar --dir ${mine} -cf - token child bind`)).toBe(no);
+    expect(await bash(`pnpm --dir ${mine} exec cat token child bind`)).toBe(no);
+    expect(await bash(`${CSO} --dir ${mine} child bind`)).toBe(no);
+    expect(await bash(`node /other/bin.js child bind --dir ${mine} --url u`)).toBe(no);
+    expect(await bash(`${CSO} child purge --dir ${mine}`)).toBe(no);
+    expect(await bash(`${CSO} child bind --url u; cat --dir ${mine}`)).toBe(no);
+    // csoCommand がなければ、先頭が cso か、末尾が /cso の語
+    const r = await decideToolUse(
+      { ...childScope, allowedCommands: ["cso child", "/usr/local/bin/cso child"] },
+      "/home/u/wt/a",
+      "Bash",
+      { command: `/usr/local/bin/cso child bind --dir ${mine} --url u` },
+      resolve,
+      { ...prot, csoCommand: undefined },
+    );
+    expect(r.allow).toBe(true);
+  });
+
+  it("Bash: cso child の命令でも、--dir の値のほかの語（token の 1 語・.）は、ふつうに判定する", async () => {
+    // 作業ツリーを基準にした相対の語は、禁じる場所ではない（引き出しの中の token ではない）
+    expect(await bash(`${CSO} child report --dir ${mine} --url u progress token`)).toBeNull();
+    expect(await bash(`${CSO} child report --dir ${mine} --url u .`)).toBeNull();
+    expect(await bash(`${CSO} child report --dir ${mine} --url ${mine}/token progress`)).toBe(
+      "protected:stateDir",
+    );
+  });
+
+  it("Bash: 他人の引き出し・リンク経由・--dir 以外の位置・cso child でない命令は、禁じる場所のまま", async () => {
+    const no = "protected:stateDir";
+    expect(await bash(`ls --dir ${mine}`)).toBe(no);
+    expect(await bash(`cat ${mine}`)).toBe(no);
+    expect(await bash(`${CSO} child bind ${mine} --dir x`)).not.toBeNull();
+    expect(await bash(`${CSO} child bind --dir ${mine}/* --url u`)).not.toBeNull();
+    expect(await bash(`cd ${mine}`)).toBe(no);
+  });
+
+  it("Bash: 自分の引き出しの token とその一時ファイル、ほかの中のファイルの名前を含む語は拒否する", async () => {
+    const no = "protected:stateDir";
+    for (const f of ["token", "token.tmp-0123", "url", "code", "node"]) {
+      expect(await bash(`cat ${mine}/${f}`), f).toBe(no);
+      expect(await bash(`${CSO} child report --dir ${mine} --url ${mine}/${f} progress`), f).toBe(
+        no,
+      );
+    }
+    expect(await bash(`grep -r x ${mine}`)).toBe(no);
+    // リダイレクトは、範囲の判定（コマンドの許可）でも拒否される。どちらの理由でも通らない
+    expect(
+      await bash(`${CSO} child report --dir ${mine} --url u progress < ${mine}/token`),
+    ).not.toBeNull();
+  });
+
+  it("Write: 自分の引き出しの code だけ書ける。Edit・ほかのファイル・他人の引き出しは拒否", async () => {
+    expect(await reasonOf("Write", { file_path: `${mine}/code`, content: "X" })).toBeNull();
+    expect(await reasonOf("Edit", { file_path: `${mine}/code` })).not.toBeNull();
+    expect(await reasonOf("Write", { file_path: `${mine}/token` })).not.toBeNull();
+    expect(await reasonOf("Write", { file_path: `${other}/code` })).not.toBeNull();
+    expect(await reasonOf("Write", { file_path: "/link/code" })).not.toBeNull();
+  });
+
+  it("読み取りの道具は、自分の引き出しも拒否する（token をモデルに読ませない）", async () => {
+    expect(await reasonOf("Read", { file_path: `${mine}/token` })).toBe("protected:stateDir");
+    expect(await reasonOf("Read", { file_path: `${mine}/code` })).toBe("protected:stateDir");
+    expect(await reasonOf("Glob", { pattern: `${mine}/*` })).toBe("protected:stateDir");
+    expect(await reasonOf("Grep", { pattern: "x", path: mine })).toBe("protected:stateDir");
+  });
+
+  it("引き出しがない（drawer なし）なら、--dir の値も禁じる場所のまま", async () => {
+    const r = await decideToolUse(
+      childScope,
+      "/home/u/wt/a",
+      "Bash",
+      { command: `${CSO} child bind --dir ${mine} --url u` },
+      resolve,
+      { ...prot, drawer: undefined },
+    );
+    expect(r.allow).toBe(false);
+  });
+});

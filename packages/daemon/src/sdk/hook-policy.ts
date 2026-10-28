@@ -50,7 +50,36 @@ export interface ProtectedPaths {
   readonly allow: readonly string[];
   /** 子のシェルが `~` を展開する先（子の HOME）。なければ `~` で始まる語は禁じる場所の判定から外れない（拒否する）。 */
   readonly home?: string | undefined;
+  /**
+   * そのノード自身の引き出し（`<D>/<鍵>`。実パス。T21-cc）。禁じる場所の中のまま、次の 2 つだけを許す:
+   * Bash の `cso child bind|report` の `--dir` の値（引き出しそのもの。中のファイルの語は許さない〔token とその一時ファイルを含む〕）と、
+   * Write の道具で `<引き出し>/code` を書くこと。読み取りの道具（Read・Glob・Grep など）は許さない（token をモデルに読ませない）。
+   * ほかのノードの引き出しは、禁じる場所のまま。
+   */
+  readonly drawer?: string | undefined;
+  /**
+   * `cso` を起動する語（設定 `csoCommand` を語に分けたもの。例: `["node", "/opt/cso/bin.js"]`）。`drawer` の例外は、区切りの先頭の
+   * 語がこれと一致し、続く 2 語が `child` と `bind`・`report` のときだけ効く。なければ、先頭の語が `cso`（または末尾が `/cso`）のとき。
+   */
+  readonly csoCommand?: readonly string[] | undefined;
 }
+
+/** 区切りの語が `cso child bind|report …` か（`csoCommand` と一致する先頭・`child`・`bind|report`）。 */
+function isCsoChildCommand(words: readonly string[], p: ProtectedPaths): boolean {
+  const head =
+    p.csoCommand !== undefined && p.csoCommand.length > 0
+      ? p.csoCommand
+      : words[0] === "cso" || (words[0]?.endsWith("/cso") ?? false)
+        ? [words[0] as string]
+        : undefined;
+  if (head === undefined || words.length < head.length + 2) return false;
+  if (head.some((w, i) => words[i] !== w)) return false;
+  const sub = words[head.length + 1];
+  return words[head.length] === "child" && (sub === "bind" || sub === "report");
+}
+
+/** 引き出しの中で、子が Write で書いてよいファイル（紐付けのコード）。 */
+export const DRAWER_CODE_FILE = "code";
 /** 禁じる場所の種類（拒否の文面と記録には、種類だけを出す。実パスは出さない）。 */
 export type ProtectedKind = "stateDir" | "daemonConfig" | "processEnv";
 const KIND_TEXT: Readonly<Record<ProtectedKind, string>> = {
@@ -206,6 +235,16 @@ async function checkProtectedPath(
   return undefined;
 }
 
+/** 語が、そのノード自身の引き出しそのもの（中のファイルではない）か。グロブ・波括弧・`~` は認めない。 */
+async function isDrawer(w: string, p: ProtectedPaths, resolve: ResolvePath): Promise<boolean> {
+  if (p.drawer === undefined || !w.startsWith("/") || GLOB.test(w) || w.includes("{")) return false;
+  try {
+    return fold(await resolve(w)) === fold(p.drawer);
+  } catch {
+    return false;
+  }
+}
+
 /** 語がパスに見えるか（/ を含む・~ で始まる・. と ..）。 */
 const pathLike = (x: string): boolean =>
   x === "." || x === ".." || x.includes("/") || x.startsWith("~");
@@ -229,7 +268,17 @@ async function checkBash(
   for (const words of segs) {
     const name = words[0];
     if (name === "popd") return "unresolvable";
-    for (const w of words) {
+    // `cso child bind|report --dir <自分の引き出し>` の値だけは、禁じる場所の判定から外す（T21-cc）。この命令の --dir は、
+    // 自分の引き出しそのものでなければ拒否する。`--dir=値` の形も拒否する（値を別の語にする）
+    const childCommand = isCsoChildCommand(words, p);
+    for (const [i, w] of words.entries()) {
+      if (childCommand) {
+        if (w.startsWith("--dir=")) return "unresolvable";
+        if (words[i - 1] === "--dir") {
+          if (await isDrawer(w, p, resolve)) continue;
+          return "unresolvable";
+        }
+      }
       if (pathLike(w)) {
         const k = await checkProtectedPath(w, cwds, p, resolve, true);
         if (k !== undefined) return k;
@@ -414,6 +463,14 @@ export async function decideToolUse(
       target = await resolve(path.startsWith("/") ? path : `${cwd}/${path}`);
     } catch {
       return deny("invalidPath", `${path}（実パスを解決できない）`);
+    }
+    // 自分の引き出しの code（紐付けのコード）だけは、Write の道具で書いてよい（T21-cc。Edit などは許さない）
+    if (
+      toolName === "Write" &&
+      protectedPaths?.drawer !== undefined &&
+      fold(target) === fold(`${protectedPaths.drawer}/${DRAWER_CODE_FILE}`)
+    ) {
+      return ALLOW;
     }
     const d = evaluateScope(scope, cwd, { kind: "write", path: target });
     if (d.allowed) return ALLOW;
