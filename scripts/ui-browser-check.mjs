@@ -1154,9 +1154,12 @@ out.throttleWindowMs = Date.now() - tt;
   const cf = {};
   const terminal = [];
   let purged = 0;
+  let shift = 0;
+  let failPurge = false;
   const gate = createConfirmationGate({
     log: { state: () => state, appendAll: () => ({ ok: true, value: [] }) },
     clock: () => "2026-10-28T00:00:00Z",
+    nowMs: () => Date.now() + shift,
     writeTerminal: (l) => terminal.push(l),
   });
   const csrv = createApiServer({
@@ -1165,6 +1168,11 @@ out.throttleWindowMs = Date.now() - tt;
     handlers: gate.wrap({
       ...handlers,
       "node.purge": () => {
+        if (failPurge)
+          return {
+            ok: false,
+            error: { code: "purgeStale", cause: "木が変わった", nextActions: ["確かめ直す"] },
+          };
         purged += 1;
         return { ok: true, value: { purged: ["t"] } };
       },
@@ -1220,6 +1228,87 @@ out.throttleWindowMs = Date.now() - tt;
   });
   cf.purgedOnce = purged === 1;
   cf.doneNotice = (await pageCf.locator("#notice").innerText()).includes("確認して実行しました");
+  const ask = (requestId) =>
+    fetch(`${cUrl}/v1/request`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${HUMAN}`, "content-type": "application/json" },
+      body: JSON.stringify({ requestId, operation: "node.purge", params: { nodeId: "t" } }),
+    }).then((x) => x.json());
+  const codeAt = (k) => {
+    const mm = terminal[k]?.match(/確認コード ([0-9A-Z]{4})-([0-9A-Z]{4})/);
+    return `${mm?.[1] ?? ""}${mm?.[2] ?? ""}`;
+  };
+  const noticeText = () => pageCf.locator("#notice").innerText();
+  const noticeBad = () =>
+    pageCf.evaluate(() => document.getElementById("notice").className.includes("bad"));
+  // 5 回目の誤り: 確認待ちは消えるが、理由はページ全体の赤い通知に残る
+  await ask("cf-purge-2");
+  await pageCf.locator("#approvals").waitFor({ timeout: 8000 });
+  for (let k = 0; k < 5; k++) {
+    await pageCf.locator("#approvals textarea").fill("00000000");
+    await pageCf.getByRole("button", { name: "確認して実行する" }).click();
+    await pageCf.waitForFunction(
+      (n) =>
+        document.getElementById("approvals").hidden ||
+        document.querySelectorAll("#approvals .error").length > 0,
+      k,
+      { timeout: 8000 },
+    );
+    if (k < 4) await pageCf.locator("#approvals .error").waitFor({ timeout: 8000 });
+  }
+  await pageCf.waitForFunction(() => document.getElementById("approvals").hidden === true, null, {
+    timeout: 8000,
+  });
+  cf.fifthWrongNotice = (await noticeText()).includes("試行の上限") && (await noticeBad());
+  // 期限切れ: 欄が消えても、理由が赤い通知に出る
+  await ask("cf-purge-3");
+  await pageCf.locator("#approvals").waitFor({ timeout: 8000 });
+  shift = 6 * 60_000;
+  await pageCf.locator("#approvals textarea").fill(codeAt(terminal.length - 1));
+  await pageCf.getByRole("button", { name: "確認して実行する" }).click();
+  await pageCf.waitForFunction(
+    () => document.getElementById("notice").innerText.includes("確認できませんでした"),
+    null,
+    { timeout: 8000 },
+  );
+  const expiredText = await noticeText();
+  cf.expiredNotice =
+    (expiredText.includes("confirmationExpired") || expiredText.includes("confirmationInvalid")) &&
+    (await noticeBad());
+  shift = 0;
+  // 実行のあとの失敗（purgeStale）: 赤い通知に理由が出る。実行は数えない
+  failPurge = true;
+  await ask("cf-purge-4");
+  await pageCf.locator("#approvals").waitFor({ timeout: 8000 });
+  await pageCf.locator("#approvals textarea").fill(codeAt(terminal.length - 1));
+  await pageCf.getByRole("button", { name: "確認して実行する" }).click();
+  await pageCf.waitForFunction(
+    () => document.getElementById("notice").innerText.includes("purgeStale"),
+    null,
+    { timeout: 8000 },
+  );
+  cf.afterRunFailureNotice = (await noticeBad()) && purged === 1;
+  failPurge = false;
+  // ほかの入力欄で打っている最中は、新しい確認待ちが出ても、フォーカスを奪わない
+  // （この窓口の判断待ちは前の確認で回答済みのことがあるので、ページの下に入力欄を 1 つ足して確かめる）
+  await pageCf.evaluate(() => {
+    const t = document.createElement("textarea");
+    t.id = "other-input";
+    document.querySelector("main").appendChild(t);
+  });
+  const other = pageCf.locator("#other-input");
+  cf.otherTextareaExists = (await other.count()) === 1;
+  await other.click();
+  await other.type("入力中");
+  await ask("cf-purge-5");
+  await pageCf.locator("#approvals").waitFor({ timeout: 8000 });
+  await pageCf.waitForTimeout(300);
+  cf.focusNotStolen = await pageCf.evaluate(
+    () =>
+      document.activeElement?.tagName === "TEXTAREA" &&
+      document.activeElement?.dataset.approval === undefined,
+  );
+  cf.typedKept = (await other.inputValue()).includes("入力中");
   cf.errors = cfErrors;
   out.confirmation = cf;
   await pageCf.context().close();

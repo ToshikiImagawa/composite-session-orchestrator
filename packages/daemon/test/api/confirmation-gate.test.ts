@@ -3,6 +3,7 @@ import {
   CONFIRMATION_ATTEMPTS,
   CONFIRMATION_TTL_MS,
   createConfirmationGate,
+  NOTIFY_INTERVAL_MS,
 } from "../../src/api/confirmation-gate.js";
 import type { HandlerRequest, Handlers } from "../../src/api/server.js";
 import { EventLog } from "../../src/eventlog.js";
@@ -303,5 +304,103 @@ describe("取り消せない操作の確認（T24-cf。Desktop の木）", () =>
     const res = await r.call("node.purge", { nodeId: "a" }, { role: "integrator" });
     expect(res.ok).toBe(true);
     expect(r.calls).toHaveLength(1);
+  });
+
+  it("端末に書けない（端末なしで動いている）なら、確認待ちを作らず confirmationUnavailable（フェイルクローズ）", async () => {
+    const opened = EventLog.open(createMemoryStore().open(), { clock });
+    if (!opened.ok) throw new Error(opened.error.code);
+    const log = opened.value;
+    let called = 0;
+    const gate = createConfirmationGate({
+      log,
+      clock,
+      writeTerminal: () => {
+        throw new Error("ENXIO");
+      },
+    });
+    const h = gate.wrap({
+      "node.purge": () => {
+        called += 1;
+        return { ok: true, value: { purged: [] } };
+      },
+    });
+    const f = h["node.purge"] as unknown as (q: HandlerRequest) => Promise<{
+      ok: boolean;
+      error?: { code: string; nextActions: string[] };
+    }>;
+    const res = await f({
+      requestId: "x",
+      operation: "node.purge",
+      role: "human",
+      params: { nodeId: "a" },
+    } as HandlerRequest);
+    expect(res.error?.code).toBe("confirmationUnavailable");
+    expect(res.error?.nextActions.join("")).toContain("端末から daemon を起動");
+    expect(gate.pending()).toHaveLength(0);
+    expect(called).toBe(0);
+    expect(log.state().inbox).toHaveLength(0);
+  });
+
+  it("受信箱の info は、同じ操作について一定の間隔に 1 件まで（確認待ちのたびに増やさない）", async () => {
+    const r = rig();
+    for (let i = 0; i < 4; i++)
+      await r.call("node.purge", { nodeId: "a" }, { requestId: `rq-${i}` });
+    expect(r.gate.pending()).toHaveLength(4);
+    expect(r.log.state().inbox.filter((i) => i.kind === "info")).toHaveLength(1);
+    await r.call("node.discardedDrop", { target: "a", expectTip: "a".repeat(40) });
+    expect(r.log.state().inbox.filter((i) => i.kind === "info")).toHaveLength(2);
+    r.advance(NOTIFY_INTERVAL_MS);
+    await r.call("node.purge", { nodeId: "a" }, { requestId: "rq-later" });
+    expect(r.log.state().inbox.filter((i) => i.kind === "info")).toHaveLength(3);
+  });
+
+  it("確認して実行している最中に、同じ要求が届いても、新しい確認待ちを作らない（inProgress）", async () => {
+    const opened = EventLog.open(createMemoryStore().open(), { clock });
+    if (!opened.ok) throw new Error(opened.error.code);
+    const lines: string[] = [];
+    let release: () => void = () => {};
+    let called = 0;
+    const gate = createConfirmationGate({
+      log: opened.value,
+      clock,
+      writeTerminal: (l) => lines.push(l),
+    });
+    const h = gate.wrap({
+      "node.purge": async () => {
+        called += 1;
+        await new Promise<void>((res) => {
+          release = res;
+        });
+        return { ok: true, value: { purged: ["a"] } };
+      },
+    });
+    const req = (operation: string, params: unknown, requestId = "same") =>
+      ({ requestId, operation, role: "human", params }) as HandlerRequest;
+    const purge = h["node.purge"] as unknown as (q: HandlerRequest) => Promise<{
+      ok: boolean;
+      error?: { code: string };
+    }>;
+    const approve = h["confirm.approve"] as unknown as (q: HandlerRequest) => Promise<{
+      ok: boolean;
+    }>;
+    await purge(req("node.purge", { nodeId: "a" }));
+    const [p] = gate.pending();
+    const m = lines[0]?.match(/([0-9A-Z]{4})-([0-9A-Z]{4})/);
+    const running = approve(
+      req(
+        "confirm.approve",
+        { confirmationId: p?.confirmationId, code: `${m?.[1]}${m?.[2]}` },
+        "ap",
+      ),
+    );
+    await Promise.resolve();
+    const during = await purge(req("node.purge", { nodeId: "a" }));
+    expect(during.error?.code).toBe("inProgress");
+    expect(gate.pending()).toHaveLength(0);
+    expect(lines).toHaveLength(1);
+    release();
+    expect((await running).ok).toBe(true);
+    expect((await purge(req("node.purge", { nodeId: "a" }))).ok).toBe(true);
+    expect(called).toBe(1);
   });
 });

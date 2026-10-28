@@ -111,6 +111,7 @@ describe("画面の資産（走査）", () => {
       "autocomplete",
       "ariaLabel",
       "scrollIntoView",
+      "tagName",
       "confirmations",
       "clear",
       "duplicate",

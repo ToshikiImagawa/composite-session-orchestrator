@@ -3,12 +3,14 @@
  *
  * Desktop の子は、同じユーザーとして stateDir の人間のトークンを読めてしまう（範囲外の拒否がまだ効かない）。画面（/ui）も同じ
  * 人間のトークンで動くので、トークンだけでは、人の操作と区別できない。そこで、取り消せない操作（`CONFIRMABLE_OPERATIONS`）は、
- * 人間のトークンで呼ばれても実行せず、確認待ちにする。daemon が起動した端末（標準エラー）にだけ短いコードを出し、人がそれを
+ * 人間のトークンで呼ばれても実行せず、確認待ちにする。daemon の制御端末（/dev/tty）にだけ短いコードを出し、人がそれを
  * 画面に打つ（`confirm.approve`）と、元の要求を 1 回だけ実行する。
  *
  * - コードの平文は持たない（確認待ちごとの塩＋SHA-256 だけ。照合は定数時間）。一度きり・期限つき・試行の回数に上限。
  * - 確認待ちはメモリだけ（daemon を再起動すると消える）。実行は元の要求 ID で行うので、記録の重複の防止がそのまま効く。
- * - コード・確認の番号は、記録・構造化のログに書かない（端末の 1 行は、構造化のログとは別に書く）。端末の行には、番号の先頭
+ * - コードは、標準エラー（構造化のログと同じ）には書かず、制御端末（/dev/tty）を直接開いて書く。開けない（launchd などで、
+ *   端末なしで動いている）ときは、確認待ちを作らずに失敗する（`confirmationUnavailable`。フェイルクローズ）。
+ * - コード・確認の番号は、記録・構造化のログに書かない。端末の行には、番号の先頭
  *   だけを添える（画面の欄と見比べるため）。対象の ID は出さない。
  */
 
@@ -36,6 +38,8 @@ export const CONFIRMATION_MAX_PENDING = 10;
 /** コードの長さ（Crockford base32。約 40 ビット）。 */
 export const CONFIRMATION_CODE_LENGTH = 8;
 const DONE_MAX = 100;
+/** 受信箱の info を、操作ごとに出す間隔の下限（ミリ秒）。 */
+export const NOTIFY_INTERVAL_MS = 10 * 60_000;
 
 const CONFIRMABLE: ReadonlySet<string> = new Set(CONFIRMABLE_OPERATIONS);
 export const isConfirmable = (op: DaemonOperation): op is ConfirmableOperation =>
@@ -62,7 +66,7 @@ export interface ConfirmationGateDeps {
   /** 壁時計（ミリ秒）。期限に使う。 */
   readonly nowMs?: () => number;
   readonly randomBytes?: (n: number) => Buffer;
-  /** 端末（標準エラー）に 1 行書く。構造化のログ（note）とは別。記録・ファイルには書かない。 */
+  /** 制御端末（/dev/tty）に 1 行書く。書けなければ例外（確認待ちを作らない）。標準エラー・記録・ファイルには書かない。 */
   readonly writeTerminal: (line: string) => void;
   readonly throttle?: Throttle;
 }
@@ -109,7 +113,9 @@ export function createConfirmationGate(deps: ConfirmationGateDeps): Confirmation
   /** 要求（操作・要求 ID）→ 確認待ちの番号。同じ要求の再送で、新しいコードを出さない。 */
   const byKey = new Map<string, string>();
   /** 確認して実行した要求の結果（同じ要求の再送に返す。古いものから捨てる）。 */
-  const done = new Map<string, { fingerprint: string; result: AnyResult }>();
+  const done = new Map<string, { fingerprint: string; result: AnyResult | "running" }>();
+  /** 操作ごとの、受信箱の info を最後に出した時刻（増えすぎないように。`NOTIFY_INTERVAL_MS` に 1 件まで）。 */
+  const notifiedAt = new Map<ConfirmableOperation, number>();
   let ver = 0;
 
   const drop = (e: Entry): void => {
@@ -173,6 +179,15 @@ export function createConfirmationGate(deps: ConfirmationGateDeps): Confirmation
               "新しい requestId で要求する",
             ),
           };
+        if (prior.result === "running")
+          return {
+            ok: false,
+            error: failure(
+              "inProgress",
+              "同じ要求を、確認して実行している最中",
+              "少し待ってから、同じ要求をもう一度送る（結果が返る）",
+            ),
+          };
         return prior.result;
       }
       const existing = byKey.get(key);
@@ -216,6 +231,22 @@ export function createConfirmationGate(deps: ConfirmationGateDeps): Confirmation
       const code = newCode();
       const salt = random(16);
       const expiresAtMs = nowMs() + CONFIRMATION_TTL_MS;
+      const until = new Date(expiresAtMs).toISOString().slice(11, 16);
+      try {
+        deps.writeTerminal(
+          `[cso] 確認コード ${code.slice(0, 4)}-${code.slice(4)}（${op}。確認 ${shortOf(id)}…。${until}Z まで。画面の確認の欄に打つ）`,
+        );
+      } catch {
+        // 端末に書けない（端末なしで動いている）なら、確認できないので、確認待ちを作らない（フェイルクローズ）。
+        return {
+          ok: false,
+          error: failure(
+            "confirmationUnavailable",
+            "daemon に端末がない（launchd などで動いている）ため、確認のコードを出せない。取り消せない操作は実行していない",
+            "端末から daemon を起動し直してから、操作をもう一度呼ぶ",
+          ),
+        };
+      }
       const e: Entry = {
         id,
         key,
@@ -231,15 +262,12 @@ export function createConfirmationGate(deps: ConfirmationGateDeps): Confirmation
       entries.set(id, e);
       byKey.set(key, id);
       ver += 1;
-      const until = new Date(expiresAtMs).toISOString().slice(11, 16);
-      try {
-        deps.writeTerminal(
-          `[cso] 確認コード ${code.slice(0, 4)}-${code.slice(4)}（${op}。確認 ${shortOf(id)}…。${until}Z まで。画面の確認の欄に打つ）`,
-        );
-      } catch {
-        // 端末に書けなければ、確認できない（画面で取り消すか、期限で消える）
+      // 受信箱の info は、操作ごとに NOTIFY_INTERVAL_MS に 1 件まで（確認待ちのたびに増やさない）。
+      const last = notifiedAt.get(op);
+      if (last === undefined || nowMs() - last >= NOTIFY_INTERVAL_MS) {
+        notifiedAt.set(op, nowMs());
+        notifyInbox(req, op);
       }
-      notifyInbox(req, op);
       return { ok: false, error: required(shortOf(id)) };
     };
   }
@@ -296,6 +324,8 @@ export function createConfirmationGate(deps: ConfirmationGateDeps): Confirmation
         return { ok: false, error: invalid(`コードが違う（残り ${e.attemptsLeft} 回）`) };
       }
       drop(e); // 一度きり: 実行の前に消す
+      // 実行中の印を先に置く（実行の最中に同じ要求が届いても、新しい確認待ちを作らない）
+      done.set(e.key, { fingerprint: e.fingerprint, result: "running" });
       const inner = inners[e.operation];
       if (inner === undefined)
         return {

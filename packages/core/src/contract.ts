@@ -333,7 +333,7 @@ export interface OperationMap {
   "node.purgeRelease": { params: { nodeId: string }; result: { released: true } };
   /**
    * 確認待ちの操作を実行する（人間のみ。T24-cf）。Desktop の木では、取り消せない操作（`CONFIRMABLE_OPERATIONS`）を人間のトークンで
-   * 呼んでも実行せず、確認待ちにする（失敗の記号 `confirmationRequired`）。daemon が起動した端末（標準エラー）にだけ出した
+   * 呼んでも実行せず、確認待ちにする（失敗の記号 `confirmationRequired`）。daemon の制御端末（/dev/tty）にだけ出した
    * `code` を打つと、元の要求を 1 回だけ実行し、その結果を `result` に入れて返す。
    */
   "confirm.approve": {

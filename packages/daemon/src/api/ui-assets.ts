@@ -873,13 +873,18 @@ export const UI_JS = `'use strict';
           codeDrafts.delete(c.confirmationId);
           notice('確認して実行しました（' + name(CONFIRM_OP_LABELS, c.operation) + '）');
         } else {
-          approvalErrors.set(c.confirmationId, describeFailure(r));
+          // 失敗のあと、確認待ちが消えている（5 回目の誤り・期限切れ・実行のあとの失敗）と、欄の中の理由は描かれないので、
+          // ページ全体の通知（赤）にも出す
+          var why = describeFailure(r);
+          approvalErrors.set(c.confirmationId, why);
+          notice('確認できませんでした（' + name(CONFIRM_OP_LABELS, c.operation) + '）: ' + why, true);
         }
         refresh();
       })
       .catch(function () {
         approvalSending.delete(c.confirmationId);
         approvalErrors.set(c.confirmationId, '送れませんでした（daemon に接続できません）');
+        notice('確認を送れませんでした（daemon に接続できません）', true);
         refresh();
       });
   }
@@ -892,7 +897,10 @@ export const UI_JS = `'use strict';
   function renderApprovals(list) {
     var box = document.getElementById('approvals');
     var items = Array.isArray(list) ? list.filter(function (c) { return c && typeof c.confirmationId === 'string' && ID_RE.test(c.confirmationId); }) : [];
-    var focused = document.activeElement && box.contains(document.activeElement) ? document.activeElement.dataset.approval : '';
+    var active = document.activeElement;
+    var focused = active && box.contains(active) ? active.dataset.approval : '';
+    // 人がほかの入力欄で打っている最中は、確認の欄へフォーカスを移さず、スクロールもしない（入力を奪わない）
+    var typingElsewhere = !!active && !box.contains(active) && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT');
     clear(box);
     if (items.length === 0) { box.hidden = true; shownApprovals = ''; return; }
     box.hidden = false;
@@ -933,7 +941,7 @@ export const UI_JS = `'use strict';
       if (focused === c.confirmationId) keep = area;
     });
     var ids = items.map(function (c) { return c.confirmationId; }).join(',');
-    var target = keep || (ids !== shownApprovals ? first : null);
+    var target = keep || (ids !== shownApprovals && !typingElsewhere ? first : null);
     shownApprovals = ids;
     if (target) {
       target.focus();

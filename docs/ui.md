@@ -81,7 +81,7 @@ daemon の窓口が、状態を見るための HTML 画面を配る。**状態�
 
 ### 取り消せない操作の確認待ち（T24-cf。Desktop の木）
 
-表示モデル（`/v1/ui/state`）の `confirmations`（確認待ち。コードは含まない。Desktop の木でだけ出る）を、ページの**いちばん上に固定した欄**（`#approvals`。`position: sticky`）に出す。スクロールしなくても見え、新しい確認待ちが出たら、コードの入力欄にフォーカスする（T23-ux の (1) の学び）。行は、操作・対象・確認の番号の先頭（端末の行と見比べる）・期限と残りの回数（`approvalLines`。`textContent` だけ）。「確認して実行する」で `confirm.approve`（`{ confirmationId, code }`）、「取り消す」で `confirm.cancel`。失敗の理由は欄の中に出す。確認待ちの変化は、記録の seq を変えないので、表示モデルの ETag と SSE の通知に、確認待ちの版の数を足している。画面の「最終削除…」などの確認から送ったときも `confirmationRequired` が返り、確認の欄に「いちばん上の確認待ちの欄に、端末のコードを打つ」と出る。仕組みは [`docs/desktop-runtime.md`](desktop-runtime.md) の「取り消せない操作の確認」。
+表示モデル（`/v1/ui/state`）の `confirmations`（確認待ち。コードは含まない。Desktop の木でだけ出る）を、ページの**いちばん上に固定した欄**（`#approvals`。`position: sticky`）に出す。スクロールしなくても見え、新しい確認待ちが出たら、コードの入力欄にフォーカスする（T23-ux の (1) の学び）。行は、操作・対象・確認の番号の先頭（端末の行と見比べる）・期限と残りの回数（`approvalLines`。`textContent` だけ）。「確認して実行する」で `confirm.approve`（`{ confirmationId, code }`）、「取り消す」で `confirm.cancel`。失敗の理由は、欄の中と、**ページ全体の通知（赤）**の両方に出す（5 回目の誤り・期限切れ・実行のあとの失敗では、確認待ちが消えて欄の中の理由が描かれないため）。人がほかの入力欄で打っている最中は、新しい確認待ちが出ても、フォーカスを移さず、スクロールもしない。確認待ちの変化は、記録の seq を変えないので、表示モデルの ETag と SSE の通知に、確認待ちの版の数を足している。画面の「最終削除…」などの確認から送ったときも `confirmationRequired` が返り、確認の欄に「いちばん上の確認待ちの欄に、端末のコードを打つ」と出る。仕組みは [`docs/desktop-runtime.md`](desktop-runtime.md) の「取り消せない操作の確認」。
 
 ### 停止の宣言（T22d）
 

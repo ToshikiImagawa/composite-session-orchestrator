@@ -14,12 +14,15 @@
 
 import { randomBytes } from "node:crypto";
 import {
+  closeSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
@@ -157,8 +160,8 @@ export interface DaemonDeps {
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
   /**
-   * 取り消せない操作の確認コードを書く先（T24-cf。Desktop の木だけ）。既定は標準エラー。構造化のログ（`logLine`）とは別に、
-   * 1 行だけ書く。記録・ファイルには書かない（試験で差し替える）。
+   * 取り消せない操作の確認コードを書く先（T24-cf。Desktop の木だけ）。既定は制御端末（/dev/tty）。標準エラー（構造化のログ）・
+   * 記録・ファイルには書かない。書けなければ例外を投げる（確認待ちを作らない。試験で差し替える）。
    */
   readonly confirmationOut?: (line: string) => void;
   /**
@@ -293,6 +296,19 @@ export function apiLimitsOf(
     ...(config.inProgress === undefined ? {} : { inProgress: config.inProgress }),
   };
 }
+
+/**
+ * 確認のコードを、制御端末（/dev/tty）に直接書く（T24-cf）。標準エラー（構造化のログ）に書くと、`2> file` でファイルに残るため。
+ * 開けない（端末なしで動いている）ときは例外（確認待ちを作らない）。
+ */
+const writeControllingTerminal = (line: string): void => {
+  const fd = openSync("/dev/tty", "w");
+  try {
+    writeSync(fd, `${line}\n`);
+  } finally {
+    closeSync(fd);
+  }
+};
 
 export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Daemon, Failure> {
   const clock = deps.clock ?? (() => new Date().toISOString());
@@ -721,8 +737,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       : createConfirmationGate({
           log,
           clock,
-          writeTerminal:
-            deps.confirmationOut ?? ((line: string) => process.stderr.write(`${line}\n`)),
+          writeTerminal: deps.confirmationOut ?? writeControllingTerminal,
         });
   const wrapConfirm = (h: Handlers): Handlers =>
     confirmGate === undefined ? h : confirmGate.wrap(h);

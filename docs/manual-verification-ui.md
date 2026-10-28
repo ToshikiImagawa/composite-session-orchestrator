@@ -114,3 +114,7 @@ daemon の窓口の実物に、記録するだけの仮のハンドラ（`decisi
 | コード | 画面に出ない。番号の先頭は、端末の行と画面で同じ | そのとおり（`codeNotOnPage`・`shortIdMatchesTerminal`） |
 | 誤ったコード | `confirmationInvalid` が欄に出て、実行しない | そのとおり（`wrongCodeRejected`） |
 | 正しいコード（小文字で打つ） | 1 回だけ実行し、欄が消え、通知が出る | そのとおり（`purgedOnce`・`doneNotice`） |
+| 5 回目の誤り | 確認待ちは消え、理由（試行の上限）がページ全体の赤い通知に残る | そのとおり（`fifthWrongNotice`） |
+| 期限切れ | 理由が赤い通知に出る | そのとおり（`expiredNotice`） |
+| 実行のあとの失敗（`purgeStale`） | 理由が赤い通知に出る。実行は数えない | そのとおり（`afterRunFailureNotice`） |
+| ほかの入力欄で打っている最中に、確認待ちが出る | フォーカスを奪わない。打った文字が残る | そのとおり（`focusNotStolen`・`typedKept`） |
