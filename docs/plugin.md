@@ -15,7 +15,7 @@ plugin の名前空間のため、コマンドは `/composite-session-orchestrat
 
 ## 使う順序
 
-1. daemon を起動する（`cso-daemon --config <設定ファイル>`）。
+1. daemon を起動する（`cso-daemon --config <設定ファイル> [--port <1〜65535>]`）。窓口のポートは、`--port` → 設定の `port`（0 以外）→ stateDir の `port` のファイル（前回のポート。0600）→ 空いているポート（そのファイルに保存する）の順で決まり、再起動しても変わらない。保存したポートが使われていれば、別のポートには移らず、起動しない（理由と直し方を出す）。起動の記録（`started`）の `portSource` に、どこから決まったか（`option`・`config`・`saved`・`new`）が出る。OS が選ぶポートは一時的なポートの範囲なので、まれにほかの接続が使う。止まったら `--port` で範囲外の番号を指定する。ファイルが壊れている・権限が緩い・リンクのときは `portFileInvalid` で起動しない（権限を 0600 にするか、ファイルを消す）。新規のポートを保存できないとき、Desktop の子（`childRuntime: "desktop"`）では `portSaveFailed` で起動しない。同じ stateDir で、2 つの daemon を動かさない。
 2. `cso-mcp` を起動する（`cso-mcp --daemon-url <窓口の URL> --config <設定ファイル>`）。手順と確かめ方は `docs/manual-verification-sdk.md` の「MCP サーバーの起動」。
 3. 統合ノードのトークンを、環境変数 `CSO_ROOT_TOKEN` に設定する（daemon の状態ディレクトリの `root-token` の中身。例: `export CSO_ROOT_TOKEN="$(cat <状態ディレクトリ>/root-token)"`）。次に、統合セッションを、この plugin つきで起動し（`claude --plugin-dir <plugin のパス>`）、MCP サーバー `node` を足す（種類 `http`、URL は設定の `mcpUrl`、ヘッダ `Authorization: Bearer ${CSO_ROOT_TOKEN}`。例: `.mcp.json` の `headers` に、この変数の参照を書く）。**トークンの値は、設定ファイルに書かない**（書くと、コミットすれば漏れる）。設定ファイルには変数の参照だけが残る。やむを得ず値を書いたファイルは、`.gitignore` に入れ、コミットしない。チャットにも貼らない。
 4. `/composite-session-orchestrator:start` で接続を確かめ、`cso-integrator` の skill に沿って作業する。

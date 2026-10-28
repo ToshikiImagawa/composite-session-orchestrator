@@ -113,10 +113,26 @@ const call = async (
   params: unknown,
   requestId = `q-${Math.random()}`.replace(".", ""),
 ) => {
-  const res = await fetch(`${url}/v1/request`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ requestId, operation, params }),
+  const send = () =>
+    fetch(`${url}/v1/request`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ requestId, operation, params }),
+    });
+  // 同じポートで起動し直すと（保存したポート）、fetch が前の daemon への使い回しの接続（keep-alive。前の daemon の stop で
+  // 閉じられている）で送ることがある。閉じられ方は OS で違い、Linux では FIN で「other side closed」（UND_ERR_SOCKET）、
+  // macOS では RST で「read ECONNRESET」になる。どちらも、要求が新しい daemon に届く前の失敗なので、1 回だけ送り直す
+  // （同じ requestId なので、届いていても重複して実行されない）。
+  const stale = (e: unknown): boolean => {
+    const cause = (e as { cause?: { code?: unknown } }).cause;
+    return (
+      e instanceof TypeError &&
+      (cause?.code === "UND_ERR_SOCKET" || cause?.code === "ECONNRESET" || cause?.code === "EPIPE")
+    );
+  };
+  const res = await send().catch((e: unknown) => {
+    if (stale(e)) return send();
+    throw e;
   });
   return {
     status: res.status,
@@ -142,6 +158,72 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
     expect(r.logs.join("\n")).not.toContain(d.rootToken);
     expect(r.logs.join("\n")).not.toContain(d.humanToken);
   });
+
+  it("ポートのファイルが使えなければ、照合などの記録を何も書く前に止める（portFileInvalid）", async () => {
+    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const d = await boot(r);
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      objective: "x",
+      acceptanceCriteria: ["x"],
+      scope: {
+        writableLocations: ["src"],
+        forbiddenLocations: [".git"],
+        allowedCommands: ["pnpm test"],
+      },
+    });
+    expect(spawned.json.ok, JSON.stringify(spawned.json)).toBe(true);
+    await d.daemon.stop();
+    cleanups.length = 0;
+    writeFileSync(join(r.config.stateDir, "port"), "x\n", { mode: 0o600 });
+    const made = createDaemon(r.config, r.deps);
+    if (!made.ok) throw new Error(made.error.code);
+    cleanups.push(() => made.value.stop());
+    const seq = made.value.log.state().lastSeq;
+    // 照合が先に走っていたら、根の「daemon 再起動後」の依頼が記録に足される
+    await expect(made.value.start()).rejects.toMatchObject({
+      failure: { code: "portFileInvalid" },
+    });
+    expect(made.value.log.state().lastSeq).toBe(seq);
+  });
+
+  it("新規のポートを保存できないとき: Desktop の子なら起動を止める（portSaveFailed）。ほかは記録して続ける", async () => {
+    const bad = () => {
+      throw new Error("書けない");
+    };
+    const desk = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const madeD = createDaemon(desk.config, { ...desk.deps, savePort: bad });
+    if (!madeD.ok) throw new Error(madeD.error.code);
+    cleanups.push(() => madeD.value.stop());
+    await expect(madeD.value.start()).rejects.toMatchObject({
+      failure: { code: "portSaveFailed" },
+    });
+    const cli = rig();
+    const madeC = createDaemon(cli.config, { ...cli.deps, savePort: bad });
+    if (!madeC.ok) throw new Error(madeC.error.code);
+    cleanups.push(() => madeC.value.stop());
+    await expect(madeC.value.start()).resolves.toMatchObject({
+      url: expect.stringContaining("127.0.0.1"),
+    });
+    expect(cli.logs.some((l) => l.includes("portSaveFailed"))).toBe(true);
+  });
+
+  it("起動の記録に、ポートがどこから決まったか（portSource）を出す: 初回は new、次は saved", async () => {
+    const r = rig();
+    const first = await boot(r);
+    expect(r.logs.some((l) => l.includes('"started"') && l.includes('"portSource":"new"'))).toBe(
+      true,
+    );
+    await first.daemon.stop();
+    cleanups.length = 0;
+    r.logs.length = 0;
+    const second = await boot(r);
+    expect(second.url).toBe(first.url);
+    expect(r.logs.some((l) => l.includes('"started"') && l.includes('"portSource":"saved"'))).toBe(
+      true,
+    );
+  }, 15_000);
 
   it("再起動しても、根を重複させず、根のトークンは変わらず有効", async () => {
     // 手元では全体で 100ms ほど（stop も数 ms）。5 秒の既定を超えたのは、CI の macOS が、git の試験と並んで重かったため（実際の遅れではない）。

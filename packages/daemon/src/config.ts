@@ -165,7 +165,10 @@ export interface DaemonConfig {
   readonly maxBudgetUsd?: number;
   /** スケジューラが同時に起動する数の上限（親ごと・全体。1〜64）。省略した項目は既定の 4。 */
   readonly startLimits?: { readonly perParent?: number; readonly total?: number };
-  /** 窓口の待ち受けポート（127.0.0.1）。0 なら空いているポート。既定 0。 */
+  /**
+   * 窓口の待ち受けポート（127.0.0.1）。0 以外ならそのポート。0（既定）なら、起動オプション `--port` がなければ、stateDir に保存した
+   * 前回のポートを使い、それもなければ空いているポートを選んで保存する（`port-file.ts`）。
+   */
   readonly port: number;
 }
 
