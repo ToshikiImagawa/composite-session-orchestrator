@@ -142,6 +142,56 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
     expect(r.logs.join("\n")).not.toContain(d.humanToken);
   });
 
+  it("ポートのファイルが使えなければ、照合などの記録を何も書く前に止める（portFileInvalid）", async () => {
+    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const d = await boot(r);
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      objective: "x",
+      acceptanceCriteria: ["x"],
+      scope: {
+        writableLocations: ["src"],
+        forbiddenLocations: [".git"],
+        allowedCommands: ["pnpm test"],
+      },
+    });
+    expect(spawned.json.ok, JSON.stringify(spawned.json)).toBe(true);
+    await d.daemon.stop();
+    cleanups.length = 0;
+    writeFileSync(join(r.config.stateDir, "port"), "x\n", { mode: 0o600 });
+    const made = createDaemon(r.config, r.deps);
+    if (!made.ok) throw new Error(made.error.code);
+    cleanups.push(() => made.value.stop());
+    const seq = made.value.log.state().lastSeq;
+    // 照合が先に走っていたら、根の「daemon 再起動後」の依頼が記録に足される
+    await expect(made.value.start()).rejects.toMatchObject({
+      failure: { code: "portFileInvalid" },
+    });
+    expect(made.value.log.state().lastSeq).toBe(seq);
+  });
+
+  it("新規のポートを保存できないとき: Desktop の子なら起動を止める（portSaveFailed）。ほかは記録して続ける", async () => {
+    const bad = () => {
+      throw new Error("書けない");
+    };
+    const desk = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const madeD = createDaemon(desk.config, { ...desk.deps, savePort: bad });
+    if (!madeD.ok) throw new Error(madeD.error.code);
+    cleanups.push(() => madeD.value.stop());
+    await expect(madeD.value.start()).rejects.toMatchObject({
+      failure: { code: "portSaveFailed" },
+    });
+    const cli = rig();
+    const madeC = createDaemon(cli.config, { ...cli.deps, savePort: bad });
+    if (!madeC.ok) throw new Error(madeC.error.code);
+    cleanups.push(() => madeC.value.stop());
+    await expect(madeC.value.start()).resolves.toMatchObject({
+      url: expect.stringContaining("127.0.0.1"),
+    });
+    expect(cli.logs.some((l) => l.includes("portSaveFailed"))).toBe(true);
+  });
+
   it("起動の記録に、ポートがどこから決まったか（portSource）を出す: 初回は new、次は saved", async () => {
     const r = rig();
     const first = await boot(r);

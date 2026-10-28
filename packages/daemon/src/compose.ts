@@ -79,6 +79,7 @@ import type { GitPorts, LossFacts } from "./git-ports.js";
 import {
   choosePort,
   PORT_FILE,
+  portSaveFailed,
   readSavedPort,
   savedPortUnavailable,
   writeSavedPort,
@@ -143,6 +144,8 @@ export interface DaemonDeps {
   readonly timers?: Timers;
   /** 起動オプション `--port` の値（1〜65535）。設定の `port` より優先する（`port-file.ts`）。 */
   readonly port?: number;
+  /** 新規のポートの保存（既定は `writeSavedPort`。試験で、保存の失敗を差し替える）。 */
+  readonly savePort?: (path: string, port: number) => void;
   /** 単調時計（ミリ秒）。既定は `process.hrtime`。自動の最終削除が、時計が飛んだことを検知するのに使う（試験で差し替える）。 */
   readonly monotonicMs?: () => number;
   /** 窓口の件数のまとめを、窓の終わりに出す予約（試験で差し替える。既定は、`unref` したタイマー）。 */
@@ -755,6 +758,14 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       log,
       async start() {
         if (running !== undefined) return running;
+        // 窓口のポート（課題 3）: 起動オプション → 設定 → 保存したポート → 新規（保存する）の順。`port-file.ts`。
+        // 照合・配送し直しより前に決める（ファイルの誤りは、記録を何も書く前に止める）。
+        const portPath = join(config.stateDir, PORT_FILE);
+        const choice = choosePort({
+          ...(deps.port === undefined ? {} : { option: deps.port }),
+          configPort: config.port,
+          saved: () => readSavedPort(portPath),
+        });
         // 待ち受けの前に、前回の実行から残った子（記録は動作中だが、アダプタは管理していない）を、記録とプロセスに合わせる。
         const outcomes = await reconcileOnStartup({
           log,
@@ -778,13 +789,6 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           onFailure: (nodeId, cause) => note("answerDeliveryFailure", { nodeId, cause }),
         });
         for (const o of recovered) note("answerRecovered", { ...o });
-        // 窓口のポート（課題 3）: 起動オプション → 設定 → 保存したポート → 新規（保存する）の順。`port-file.ts`。
-        const portPath = join(config.stateDir, PORT_FILE);
-        const choice = choosePort({
-          ...(deps.port === undefined ? {} : { option: deps.port }),
-          configPort: config.port,
-          saved: () => readSavedPort(portPath),
-        });
         // 身元確認（T10m-i）: 起動ごとに、新しい秘密を作り、待ち受けの前に、ファイルへ書く（異常終了で残った古いファイルは、上書きされる）。
         const identity = createIdentity();
         try {
@@ -806,19 +810,19 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
               (e as NodeJS.ErrnoException).code ?? (e instanceof Error ? e.message : e),
             );
             note("portUnavailable", { port: choice.port, source: choice.source, cause });
-            throw new Error(savedPortUnavailable(choice.port, cause));
+            throw savedPortUnavailable(choice.port, cause);
           }
           throw e;
         }
         if (choice.source === "new") {
           try {
-            writeSavedPort(portPath, listened.port);
+            (deps.savePort ?? writeSavedPort)(portPath, listened.port);
           } catch (e) {
-            // 保存できなくても起動は続ける（次回は、また新しいポートになる）。記録に残す。
-            note("portSaveFailed", {
-              port: listened.port,
-              cause: String(e instanceof Error ? e.message : e),
-            });
+            const cause = String(e instanceof Error ? e.message : e);
+            note("portSaveFailed", { port: listened.port, cause });
+            // Desktop の子は、次の再起動でポートが変わると報告できなくなるので、起動を止める（呼び出し側が stop する）。
+            // ほかは、保存できなくても起動は続ける（次回は、また新しいポートになる）。
+            if (config.childRuntime === "desktop") throw portSaveFailed(listened.port, cause);
           }
         }
         const { port, url } = listened;

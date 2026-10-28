@@ -9,7 +9,7 @@
 import type { Failure, Result } from "@cso/core";
 import { createDaemon, type Daemon, type WorktreePorts } from "./compose.js";
 import { type DaemonConfig, loadConfigFile } from "./config.js";
-import { isPort } from "./port-file.js";
+import { isPort, StartFailure } from "./port-file.js";
 import type { AgentLauncher } from "./sdk/agent.js";
 
 export interface MainDeps {
@@ -49,7 +49,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   for (let k = 0; k < argv.length; k += 2) {
     const name = argv[k];
     const value = argv[k + 1];
-    if (value === undefined) return { ok: false, error: `${name} の値がない` };
+    if (value === undefined || value.startsWith("--"))
+      return { ok: false, error: `${name} の値がない` };
     if (name === "--config" && configPath === undefined) configPath = value;
     else if (name === "--port" && port === undefined) {
       const n = /^\d{1,5}$/.test(value) ? Number(value) : Number.NaN;
@@ -110,6 +111,10 @@ export async function main(argv: readonly string[], deps: MainDeps): Promise<Mai
     return { exitCode: 0, daemon: made.value };
   } catch (e) {
     await made.value.stop().catch(() => undefined);
+    if (e instanceof StartFailure) {
+      deps.stderr(formatFailure(e.failure));
+      return { exitCode: 1 };
+    }
     deps.stderr(
       `失敗 [listenFailed]: 窓口を起動できない（${String(e instanceof Error ? e.message : e)}）\n次の操作:\n  - そのポートを使っているプロセスを確認して止める\n  - --port か設定の port でポートを指定する\n`,
     );

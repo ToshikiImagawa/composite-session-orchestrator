@@ -1,4 +1,13 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -186,6 +195,8 @@ describe("窓口のポートの決め方（課題 3。port-file.ts）", () => {
       expect(err).toContain(`前回のポート ${saved}`);
       expect(err).toContain("別のポートには移らない");
       expect(err).toContain("--port");
+      expect(err).toContain("savedPortUnavailable");
+      expect(err).toContain("一時的なポートの範囲");
       expect(s.out.join("")).not.toContain("起動した");
     } finally {
       await new Promise((res) => blocker.close(res));
@@ -199,11 +210,13 @@ describe("窓口のポートの決め方（課題 3。port-file.ts）", () => {
     const file = join(s.config.stateDir, "port");
     writeFileSync(file, "abc\n", { mode: 0o600 });
     expect((await start(s)).exitCode).toBe(1);
+    expect(s.err.join("")).toContain("portFileInvalid");
     expect(s.err.join("")).toContain("1〜65535 の整数でない");
+    expect(s.err.join("")).toContain("0600");
     writeFileSync(file, "40000\n");
     chmodSync(file, 0o644);
     expect((await start(s)).exitCode).toBe(1);
-    expect(s.err.join("")).toContain("読めない");
+    expect(s.err.join("")).toContain("権限が緩い");
   });
 
   it("--port の誤り（0・範囲外・数字でない・重複・値なし）は、終了コード 2", async () => {
@@ -215,8 +228,24 @@ describe("窓口のポートの決め方（課題 3。port-file.ts）", () => {
       ["--config", s.path, "--port", "1", "--port", "2"],
       ["--config", s.path, "--port"],
       ["--port", "4000"],
+      ["--config", "--port", "4000"],
+      ["--config", s.path, "--port", "--config"],
     ]) {
       expect((await main(argv, s.deps)).exitCode, argv.join(" ")).toBe(2);
     }
+  });
+
+  it("ポートのファイルがシンボリックリンクなら、起動しない（portFileInvalid。リンク先は読まない）", async () => {
+    const s = setup();
+    expect((await start(s)).exitCode).toBe(0);
+    await stopAll();
+    const file = join(s.config.stateDir, "port");
+    const target = join(s.config.stateDir, "elsewhere");
+    writeFileSync(target, "40001\n", { mode: 0o600 });
+    unlinkSync(file);
+    symlinkSync(target, file);
+    expect((await start(s)).exitCode).toBe(1);
+    expect(s.err.join("")).toContain("portFileInvalid");
+    expect(s.err.join("")).toContain("シンボリックリンク");
   });
 });
