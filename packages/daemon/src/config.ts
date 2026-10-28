@@ -540,7 +540,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     const forbidden = (v as string[]).filter(isForbiddenChildEnvName);
     if (forbidden.length > 0) {
       return bad(
-        `childEnvAllow に、子の実行を乗っ取れる名前は指定できない: ${forbidden.join("、")}`,
+        `childEnvAllow に、子に渡せない名前（子の実行を乗っ取れる名前・CSO のトークンの名前）は指定できない: ${forbidden.join("、")}`,
       );
     }
     childEnvAllow = [...(v as string[])];

@@ -74,9 +74,17 @@ daemon が SDK で起動する子（CLI の子）には、plugin の skill を�
 
 ## 子の MCP のトークン（T21-ce）
 
-daemon が起動する CLI の子は、自分のノードのトークンで cso-mcp（`mcp__node__*`）に接続する。**トークンは、SDK の MCP の設定（`--mcp-config` の引数として claude に渡され、`ps` に出る）には置かない**。設定には `Authorization: Bearer ${CSO_NODE_TOKEN}` と参照だけを書き、値は子の環境変数 `CSO_NODE_TOKEN` で渡す（claude は `--mcp-config` の headers の `${VAR}` を展開する。同梱の claude で確かめた）。`CSO_NODE_TOKEN` は、親の環境から子に通さない名前（`childEnvAllow` でも通らない）。
+daemon が起動する CLI の子は、自分のノードのトークンで cso-mcp（`mcp__node__*`）に接続する。**トークンの値は、SDK の MCP の設定（`--mcp-config` の引数として claude に渡され、`ps` に出る）には置かない**。設定には `Authorization: Bearer ${CSO_MCP_TOKEN}` と参照だけを書き、値は子の環境変数 `CSO_MCP_TOKEN` で渡す（claude は `--mcp-config` の headers の `${VAR}` を展開する）。名前は、手動のセッションのフック用の `CSO_NODE_TOKEN`（`cso hook-env`）とは分けた。どちらの名前も、親の環境から子に通さない（`childEnvAllow` に書くと、設定の誤りとして起動しない）。
 
-**弱点（E）**: 同じユーザーの子は、`printenv`・`env`・`echo $CSO_NODE_TOKEN`（許可リストにあれば）や、許可されたコマンド（`pnpm test` など）が動かすスクリプトの中で、値を読める。値が会話・ログに入るおそれがある。**別のユーザーからは見えない**（macOS では、別のユーザーのプロセスの環境変数を `ps` で読めない。V2 で見えていた引数の Bearer は、なくなる）。同じユーザーの子から守るのは、作業範囲外の拒否（FR_014）と、トークンの期限・失効の役目。
+- **展開の確認**: `node scripts/mcp-env-expansion-check.mjs`（同梱の claude を、参照入りの `--mcp-config` で起動し、手元の受け口で受けた Authorization が展開されているかを確かめる。claude の版を上げたら実行する。API への失敗する接続を含むので、`pnpm check` には入れていない）。
+- **展開されなかったとき**: claude の init の `mcp_servers` で、渡した MCP（`node`）がない・`failed`・`needs-auth` なら、子の起動を失敗にする（黙って 401 のまま作業させない。途中の状態〔`pending` など〕は失敗にしない）。
+
+**弱点（E）**: 値は、子の環境変数にある。
+- 止められるもの: `echo $CSO_MCP_TOKEN` など、単一引用符の外に `$` を含む命令（作業範囲の判定が、命令ごと拒否する）。
+- 止められないもの: `printenv`・`env`（許可リストにある場合）、許可されたコマンドが起こす子のプロセスの中（テスト・`postinstall` など）、macOS の `ps eww`・`ps -E`（同じユーザーなら、ほかのプロセスの環境変数を読める）。値が会話・ログに入るおそれがある。Linux の `/proc/self/environ`・`/proc/*/environ` は、読み取りも禁じる場所に入れた（T21-pr の仕組み）。
+- **別のユーザーからは見えない**（macOS では、別のユーザーのプロセスの環境変数を `ps` で読めない。V2 で見えていた、引数の中のトークンの値は、なくなる）。
+- 禁じる場所（T21-pr。ファイルを読ませない）と、この環境変数の守り（引数に値を置かない）は、別の仕組みである。同じユーザーの子から値を守るのは、作業範囲外の拒否（FR_014）と、トークンの期限・失効の役目。
+- **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`**: 同梱の claude（0.3.292）にあることは確かめた。ただし、Linux では bubblewrap が要り、`allowedTools` を明示しないと権限モードが default に強められ、消す名前は既知の秘密の名前の一覧が中心で、`CSO_MCP_TOKEN` が消えるかは確かめられなかった。**今回は、子に設定しない**（効くと確かめられなかった）。
 
 ## Desktop
 

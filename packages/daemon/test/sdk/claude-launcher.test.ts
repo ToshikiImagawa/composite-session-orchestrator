@@ -5,6 +5,7 @@ import {
   DEFAULT_MAX_TURNS,
   launcherWith,
   limitsFrom,
+  mcpInitProblem,
 } from "../../src/sdk/claude-launcher.js";
 
 type Msg = Record<string, unknown>;
@@ -159,8 +160,25 @@ describe("createClaudeLauncher（実 SDK の query() への結線。フェイク
   it("ready は、init メッセージのセッション ID で解決する", async () => {
     const f = fakeQuery();
     const s = launcherWith(f.query).launch(options());
-    f.emit({ type: "system", subtype: "init", session_id: "sess-1" });
+    f.emit({
+      type: "system",
+      subtype: "init",
+      session_id: "sess-1",
+      mcp_servers: [{ name: "node", status: "connected" }],
+    });
     await expect(s.ready()).resolves.toEqual({ sessionId: "sess-1" });
+  });
+
+  it("渡した MCP に接続できない（failed）と init で分かれば、ready は reject する（T21-ce。黙って 401 のまま作業させない）", async () => {
+    const f = fakeQuery();
+    const s = launcherWith(f.query).launch(options());
+    f.emit({
+      type: "system",
+      subtype: "init",
+      session_id: "sess-1",
+      mcp_servers: [{ name: "node", status: "failed" }],
+    });
+    await expect(s.ready()).rejects.toThrow("failed");
   });
 
   it("init のセッション ID が、空でない文字列でなければ、ready は reject する（記録の取り違えを防ぐ）", async () => {
@@ -334,5 +352,22 @@ describe("子に渡す skill の plugin（T22-c）", () => {
     const o = f.calls[0]?.options as Record<string, unknown>;
     expect(o).not.toHaveProperty("plugins");
     expect(o).not.toHaveProperty("skills");
+  });
+});
+
+describe("mcpInitProblem（init の mcp_servers で、渡した MCP に接続できたか。T21-ce）", () => {
+  const conf = { node: { type: "http" } };
+  it("渡していなければ、見ない", () => {
+    expect(mcpInitProblem(undefined, undefined)).toBeUndefined();
+  });
+  it("connected・pending は問題なし", () => {
+    expect(mcpInitProblem([{ name: "node", status: "connected" }], conf)).toBeUndefined();
+    expect(mcpInitProblem([{ name: "node", status: "pending" }], conf)).toBeUndefined();
+  });
+  it("ない・failed・needs-auth は、名前と状態だけの理由", () => {
+    expect(mcpInitProblem([], conf)).toContain("node");
+    expect(mcpInitProblem(undefined, conf)).toContain("読み込まれていない");
+    expect(mcpInitProblem([{ name: "node", status: "failed" }], conf)).toContain("failed");
+    expect(mcpInitProblem([{ name: "node", status: "needs-auth" }], conf)).toContain("needs-auth");
   });
 });

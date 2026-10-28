@@ -184,8 +184,13 @@ export function launcherWith(
             if (!isRec(m)) continue;
             if (m.type === "system" && m.subtype === "init" && !initialized) {
               initialized = true;
+              const mcpProblem = mcpInitProblem(m.mcp_servers, options.mcpServers);
               if (typeof m.session_id !== "string" || m.session_id === "") {
                 readyReject(new Error("init の session_id が、空でない文字列でない"));
+              } else if (mcpProblem !== undefined) {
+                // 渡した MCP（ノードの窓口）に接続できない（トークンの参照が展開されない・claude の版の違いなど）。黙って 401 の
+                // まま作業させず、起動を失敗にする（T21-ce）。途中の状態（pending など）は失敗にしない。
+                readyReject(new Error(mcpProblem));
               } else {
                 readyResolve({ sessionId: m.session_id });
               }
@@ -220,6 +225,25 @@ export function launcherWith(
       };
     },
   };
+}
+
+/**
+ * init の `mcp_servers`（`{ name, status }` の配列）で、渡した MCP の設定のうち、接続できないもの（ない・failed・needs-auth）
+ * があれば、その理由。なければ undefined。値（トークン）は出さない（名前と状態だけ）。
+ */
+export function mcpInitProblem(
+  servers: unknown,
+  configured: Readonly<Record<string, unknown>> | undefined,
+): string | undefined {
+  if (configured === undefined) return undefined;
+  const list = Array.isArray(servers) ? servers : [];
+  for (const name of Object.keys(configured)) {
+    const s = list.find((x) => isRec(x) && x.name === name) as Record<string, unknown> | undefined;
+    if (s === undefined) return `MCP（${name}）が、claude に読み込まれていない`;
+    if (s.status === "failed" || s.status === "needs-auth")
+      return `MCP（${name}）に接続できない（${String(s.status)}）`;
+  }
+  return undefined;
 }
 
 /** `cso-daemon` の `loaders` が読み込む入口。実際の Agent SDK を使う launcher。 */

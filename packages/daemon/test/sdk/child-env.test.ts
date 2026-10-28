@@ -184,3 +184,15 @@ describe("childEnv の NO_PROXY（loopback をプロキシに通さない）", (
     expect(env.no_proxy).toBe("a.b,127.0.0.1,localhost,[::1]");
   });
 });
+
+describe("CSO のトークンの名前（T21-ce）", () => {
+  it("追加の許可に書いても、親の CSO_MCP_TOKEN・CSO_NODE_TOKEN は子に通さず、removed に出す", () => {
+    const r = childEnv({ CSO_MCP_TOKEN: "x", CSO_NODE_TOKEN: "y", PATH: "/usr/bin" }, [
+      "CSO_MCP_TOKEN",
+      "CSO_NODE_TOKEN",
+    ]);
+    expect(r.env.CSO_MCP_TOKEN).toBeUndefined();
+    expect(r.env.CSO_NODE_TOKEN).toBeUndefined();
+    expect(r.removed).toEqual(expect.arrayContaining(["CSO_MCP_TOKEN", "CSO_NODE_TOKEN"]));
+  });
+});

@@ -339,6 +339,25 @@ describe("読み取りも禁じる場所（FR_014 の例外。T21-pr）", () => 
     expect(await reasonOf("Read", { file_path: nfd })).toBe("protected:stateDir");
   });
 
+  it("Linux の /proc の environ（自分・ほかのプロセス）も読めない。/proc のほかのファイルは読める（T21-ce）", async () => {
+    expect(await reasonOf("Read", { file_path: "/proc/self/environ" })).toBe(
+      "protected:processEnv",
+    );
+    expect(await reasonOf("Read", { file_path: "/proc/1234/environ" })).toBe(
+      "protected:processEnv",
+    );
+    expect(await reasonOf("Read", { file_path: "/proc/1234/task/5/environ" })).toBe(
+      "protected:processEnv",
+    );
+    expect(await reasonOf("Bash", { command: "ls /proc/self/environ" })).toBe(
+      "protected:processEnv",
+    );
+    expect(await reasonOf("Grep", { pattern: "TOKEN", path: "/proc" })).toBe(
+      "protected:processEnv",
+    );
+    expect(await reasonOf("Read", { file_path: "/proc/cpuinfo" })).toBeNull();
+  });
+
   it("拒否の文面に、禁じる場所の実パスを出さない（種類だけ）", async () => {
     const r = await d("Read", { file_path: `${S}/human-token` });
     expect(r.allow).toBe(false);

@@ -52,10 +52,11 @@ export interface ProtectedPaths {
   readonly home?: string | undefined;
 }
 /** 禁じる場所の種類（拒否の文面と記録には、種類だけを出す。実パスは出さない）。 */
-export type ProtectedKind = "stateDir" | "daemonConfig";
+export type ProtectedKind = "stateDir" | "daemonConfig" | "processEnv";
 const KIND_TEXT: Readonly<Record<ProtectedKind, string>> = {
   stateDir: "daemon の状態の置き場",
   daemonConfig: "daemon の設定ファイル",
+  processEnv: "プロセスの環境変数（/proc の environ）",
 };
 
 // APFS は大文字小文字・Unicode の正規化（NFD/NFC）の違いを区別しないので、比べる前にそろえる（区別する FS では、厳しめに倒れる）。
@@ -67,6 +68,8 @@ const under = (p: string, root: string): boolean => {
 };
 /** グロブ・波括弧・拡張グロブ（`@( +( !( ?( *(`）の文字。 */
 const GLOB = /[*?[{]|[@+!?*]\(/;
+const PROC_ENVIRON = /^\/proc\/(?:self|thread-self|\d+)(?:\/task\/\d+)?\/environ$/;
+const PROC_DIR = /^\/proc\/(?:self|thread-self|\d+)(?:\/task(?:\/\d+)?)?$/;
 /** 波括弧の展開の候補の上限（超えたら確かめきれないので拒否する）。 */
 const BRACE_MAX = 64;
 
@@ -80,6 +83,10 @@ function protectedKind(
   ancestorToo: boolean,
 ): ProtectedKind | undefined {
   if (p.allow.some((a) => under(real, a))) return undefined;
+  // Linux の /proc の environ（自分と、ほかのプロセスの環境変数。子のトークン〔CSO_MCP_TOKEN〕を含む。T21-ce）。
+  // 再帰で読む道具は、/proc と、その下のプロセスのディレクトリも祖先として拒否する。
+  if (PROC_ENVIRON.test(real)) return "processEnv";
+  if (ancestorToo && (real === "/proc" || PROC_DIR.test(real))) return "processEnv";
   for (const r of p.roots) {
     if (under(real, r.path)) return r.kind;
     if (ancestorToo && (real === "/" || fold(r.path).startsWith(`${fold(real)}/`))) return r.kind;
