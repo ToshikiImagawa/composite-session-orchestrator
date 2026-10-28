@@ -202,6 +202,8 @@ export interface Daemon {
   stop(): Promise<void>;
   /** テスト・診断用: イベントログ。 */
   readonly log: EventLog;
+  /** テスト・診断用: トークンの期限の見回りを、今すぐ 1 回行う（定期の見回りと同じ。失効させたノードの ID）。 */
+  sweepTokens(): string[];
 }
 
 const fail = (code: string, cause: string, ...next: [string, ...string[]]) => ({
@@ -994,6 +996,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     ok: true,
     value: {
       log,
+      sweepTokens: () => credentials.sweepExpired?.() ?? [],
       async start() {
         if (running !== undefined) return running;
         // 窓口のポート（課題 3）: 起動オプション → 設定 → 保存したポート → 新規（保存する）の順。`port-file.ts`。
