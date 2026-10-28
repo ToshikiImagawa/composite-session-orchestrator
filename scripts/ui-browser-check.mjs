@@ -1248,10 +1248,10 @@ out.throttleWindowMs = Date.now() - tt;
     await pageCf.locator("#approvals textarea").fill("00000000");
     await pageCf.getByRole("button", { name: "確認して実行する" }).click();
     await pageCf.waitForFunction(
-      (n) =>
+      () =>
         document.getElementById("approvals").hidden ||
         document.querySelectorAll("#approvals .error").length > 0,
-      k,
+      null,
       { timeout: 8000 },
     );
     if (k < 4) await pageCf.locator("#approvals .error").waitFor({ timeout: 8000 });

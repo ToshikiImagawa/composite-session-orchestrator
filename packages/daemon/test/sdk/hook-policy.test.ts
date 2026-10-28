@@ -262,6 +262,69 @@ describe("読み取りも禁じる場所（FR_014 の例外。T21-pr）", () => 
     expect((await d("Bash", { command: "ls $(echo /home/u/state)" })).allow).toBe(false);
   });
 
+  it("M1: 波括弧・拡張グロブで、すり抜けられない（展開してすべての候補を確かめる。確かめきれなければ拒否）", async () => {
+    expect(await reasonOf("Bash", { command: "ls /home/u/{state,x}/human-token" })).toBe(
+      "protected:stateDir",
+    );
+    expect(await reasonOf("Bash", { command: `ls {${S},/tmp}/human-token` })).toBe(
+      "protected:stateDir",
+    );
+    // 拡張グロブの `(` は、Bash ではもともと解析できず拒否される。Glob の pattern では、固定の部分で判定する
+    expect((await d("Bash", { command: "ls /home/u/@(state|x)/human-token" })).allow).toBe(false);
+    expect(await reasonOf("Glob", { pattern: "/home/u/@(state|x)/*" })).toBe("protected:stateDir");
+    expect(await reasonOf("Bash", { command: "ls /home/u/{1..3}/x" })).toBe(
+      "Bash（パスを確かめられない）",
+    );
+    expect(await reasonOf("Glob", { pattern: "/home/u/{state,x}/*" })).toBe("protected:stateDir");
+    expect(await reasonOf("Glob", { pattern: "../../{state,x}/*" })).toBe("protected:stateDir");
+    // `/` を含まない `{}`（find -exec・xargs -I）は巻き込まない
+    expect(await reasonOf("Bash", { command: "ls src {}" })).toBeNull();
+    expect(await reasonOf("Bash", { command: "ls -I{} src" })).toBeNull();
+    expect(await reasonOf("Bash", { command: "ls src/{a,b}.ts" })).toBeNull();
+  });
+
+  it("M2: `~` と `~/…` 以外の `~` で始まる語（~root・~user・~+・~-）は拒否", async () => {
+    for (const w of ["~root/x", "~u/state", "~+/x", "~-/x", "~root"]) {
+      expect(await reasonOf("Bash", { command: `ls ${w}` }), w).toBe(
+        "Bash（パスを確かめられない）",
+      );
+    }
+  });
+
+  it("R1: 語の途中に続くパス（-C/path・-d@/path・a=b=/p・x:/p・x,/p）も確かめる。末尾の / では妨げない", async () => {
+    for (const w of [`-C${S}`, `-d@${S}/x`, `a=b=${S}/x`, `x:${S}/x`, `x,${S}/x`]) {
+      expect(await reasonOf("Bash", { command: `ls ${w}` }), w).toBe("protected:stateDir");
+    }
+    expect(await reasonOf("Bash", { command: "ls src/" })).toBeNull();
+  });
+
+  it("R2: 複合の命令の cd・pushd を追って、後ろの相対の語を確かめる。行き先の分からない cd は拒否", async () => {
+    expect(await reasonOf("Bash", { command: "cd /home/u && ls state/human-token" })).toBe(
+      "protected:stateDir",
+    );
+    expect(await reasonOf("Bash", { command: "pushd ../.. ; ls state" })).toBe(
+      "protected:stateDir",
+    );
+    expect(await reasonOf("Bash", { command: "cd ; ls ../b/x" })).toBe("protected:stateDir"); // 引数なしの cd は HOME（自分）
+    expect(await reasonOf("Bash", { command: "cd - && ls x" })).toBe(
+      "Bash（パスを確かめられない）",
+    );
+    expect(await reasonOf("Bash", { command: "popd && ls x" })).toBe(
+      "Bash（パスを確かめられない）",
+    );
+    const ok = await d("Bash", { command: "cd src && ls a.ts" });
+    expect(ok.allow ? null : ok.violation?.reason).not.toBe("forbiddenLocation"); // cd は許可リストにないので、範囲の判定で拒否される
+  });
+
+  it("R4: 大文字小文字・Unicode の正規化の違いを、そろえてから比べる（禁じる場所・許す場所の両方）", async () => {
+    expect(await reasonOf("Read", { file_path: "/HOME/U/STATE/human-token" })).toBe(
+      "protected:stateDir",
+    );
+    expect(await reasonOf("Read", { file_path: `${S}/HOMES/A/x` })).toBeNull();
+    const nfd = "/home/u/state/x".normalize("NFD");
+    expect(await reasonOf("Read", { file_path: nfd })).toBe("protected:stateDir");
+  });
+
   it("拒否の文面に、禁じる場所の実パスを出さない（種類だけ）", async () => {
     const r = await d("Read", { file_path: `${S}/human-token` });
     expect(r.allow).toBe(false);

@@ -420,6 +420,16 @@ describe("起動の安全（レビュー反映）", () => {
     if (!made.ok) expect(made.error.code).toBe("invalidConfig");
   });
 
+  it("まだないパスでも、最も深い既存の祖先を実パスにして重なりを確かめる（リンクの先の、まだない作業ツリーの置き場。T21-pr R3）", () => {
+    const r = rig();
+    mkdirSync(r.config.stateDir, { recursive: true, mode: 0o700 });
+    const link = join(tmp(), "statelink");
+    symlinkSync(r.config.stateDir, link);
+    const made = createDaemon({ ...r.config, worktreeRoot: join(link, "not-yet", "wt") }, r.deps);
+    expect(made.ok).toBe(false);
+    if (!made.ok) expect(made.error.code).toBe("invalidConfig");
+  });
+
   it("trackTimers: 止めるときに、残っているタイマーをまとめて取り消す", () => {
     let cancelled = 0;
     const tracker = trackTimers({

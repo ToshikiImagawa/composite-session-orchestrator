@@ -58,8 +58,17 @@ const KIND_TEXT: Readonly<Record<ProtectedKind, string>> = {
   daemonConfig: "daemon の設定ファイル",
 };
 
-const under = (p: string, root: string): boolean => p === root || p.startsWith(`${root}/`);
-const GLOB = /[*?[]/;
+// APFS は大文字小文字・Unicode の正規化（NFD/NFC）の違いを区別しないので、比べる前にそろえる（区別する FS では、厳しめに倒れる）。
+const fold = (x: string): string => x.normalize("NFC").toLowerCase();
+const under = (p: string, root: string): boolean => {
+  const a = fold(p);
+  const b = fold(root);
+  return a === b || a.startsWith(`${b}/`);
+};
+/** グロブ・波括弧・拡張グロブ（`@( +( !( ?( *(`）の文字。 */
+const GLOB = /[*?[{]|[@+!?*]\(/;
+/** 波括弧の展開の候補の上限（超えたら確かめきれないので拒否する）。 */
+const BRACE_MAX = 64;
 
 /**
  * 実パス `real` が、禁じる場所の中（`ancestorToo` なら、禁じる場所を含む祖先も）なら、その種類。許された場所の中なら undefined。
@@ -73,7 +82,7 @@ function protectedKind(
   if (p.allow.some((a) => under(real, a))) return undefined;
   for (const r of p.roots) {
     if (under(real, r.path)) return r.kind;
-    if (ancestorToo && (real === "/" || r.path.startsWith(`${real}/`))) return r.kind;
+    if (ancestorToo && (real === "/" || fold(r.path).startsWith(`${fold(real)}/`))) return r.kind;
   }
   return undefined;
 }
@@ -83,6 +92,68 @@ const denyProtected = (kind: ProtectedKind): ToolDecision => ({
   violation: { reason: "forbiddenLocation", subject: `protected:${kind}` },
   reason: `作業範囲の外の操作です（${KIND_TEXT[kind]}は、読み取りもできません）。この場所は、作業に使いません。`,
 });
+
+/**
+ * 波括弧を展開する（入れ子・カンマ・`a..b` の並びを含む）。候補が多すぎる・対応が取れないときは undefined（確かめきれない）。
+ * 展開できない形の `{`（`{}` など）は、そのまま残る。
+ */
+export function expandBraces(word: string): string[] | undefined {
+  let out = [word];
+  for (let guard = 0; guard < 16; guard++) {
+    const next: string[] = [];
+    let changed = false;
+    for (const w of out) {
+      const e = expandOnce(w);
+      if (e === "bad") return undefined;
+      if (e === null) next.push(w);
+      else {
+        changed = true;
+        next.push(...e);
+      }
+      if (next.length > BRACE_MAX) return undefined;
+    }
+    out = next;
+    if (!changed) return out;
+  }
+  return undefined;
+}
+
+/** いちばん外側の、最初の展開できる `{…}` を 1 つ展開する。なければ null。 */
+function expandOnce(w: string): string[] | null | "bad" {
+  for (let i = 0; i < w.length; i++) {
+    if (w[i] !== "{") continue;
+    let depth = 0;
+    const commas: number[] = [];
+    let j = i;
+    for (; j < w.length; j++) {
+      const c = w[j];
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) break;
+      } else if (c === "," && depth === 1) commas.push(j);
+    }
+    if (j >= w.length) return "bad"; // 閉じていない
+    const body = w.slice(i + 1, j);
+    const pre = w.slice(0, i);
+    const post = w.slice(j + 1);
+    if (commas.length > 0) {
+      const parts: string[] = [];
+      let k = i + 1;
+      for (const c of commas) {
+        parts.push(w.slice(k, c));
+        k = c + 1;
+      }
+      parts.push(w.slice(k, j));
+      return parts.map((x) => pre + x + post);
+    }
+    const range = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(\.\.-?\d+)?$/.exec(body);
+    if (range !== null) return "bad"; // 並びの展開は、候補が多くなりうるので確かめない（拒否）
+    // `{}`・`{x}` は展開されない。次の `{` を探す
+    i = j;
+  }
+  return null;
+}
 
 /** 語の固定の部分（最初のグロブの文字を含む段より前）。 */
 const fixedPrefix = (word: string): string => {
@@ -94,45 +165,100 @@ const fixedPrefix = (word: string): string => {
 };
 
 /**
- * パスを、禁じる場所と照らす。`~` は子の HOME で展開する（なければ拒否）。実パスにできなければ拒否する（フェイルクローズ）。
+ * パスを、禁じる場所と照らす。波括弧は展開して、候補をすべて確かめる。`~` と `~/…` は子の HOME で展開し、それ以外の `~`
+ * で始まる形（`~root`・`~+`・`~-` など）は確かめきれないので拒否する。実パスにできなければ拒否する（フェイルクローズ）。
  */
 async function checkProtectedPath(
   raw: string,
-  cwd: string,
+  cwds: readonly string[],
   p: ProtectedPaths,
   resolve: ResolvePath,
   ancestorToo: boolean,
 ): Promise<ProtectedKind | "unresolvable" | undefined> {
-  let path = fixedPrefix(raw);
-  const glob = path !== raw;
-  if (path === "~" || path.startsWith("~/")) {
-    if (p.home === undefined) return "unresolvable";
-    path = p.home + path.slice(1);
-  }
-  const abs = path.startsWith("/") ? path : `${cwd}/${path}`;
-  let real: string;
-  try {
-    real = await resolve(abs);
-  } catch {
-    return "unresolvable";
-  }
-  return protectedKind(real, p, ancestorToo || glob);
-}
-
-/** Bash の語のうち、パスに見えるもの（/ を含む・~ で始まる・. と ..、`--opt=値` の値）。 */
-function pathLikeWords(command: string): string[] | undefined {
-  const segs = commandWords(command);
-  if (segs === undefined) return undefined;
-  const out: string[] = [];
-  for (const words of segs) {
-    for (const w of words) {
-      const eq = w.indexOf("=");
-      for (const x of eq > 0 ? [w, w.slice(eq + 1)] : [w]) {
-        if (x === "." || x === ".." || x.includes("/") || x.startsWith("~")) out.push(x);
+  const candidates = expandBraces(raw);
+  if (candidates === undefined) return "unresolvable";
+  for (const c of candidates) {
+    let path = fixedPrefix(c);
+    const glob = path !== c;
+    if (path.startsWith("~")) {
+      if (!(path === "~" || path.startsWith("~/")) || p.home === undefined) return "unresolvable";
+      path = p.home + path.slice(1);
+    }
+    for (const cwd of path.startsWith("/") ? [cwds[0] ?? "/"] : cwds) {
+      const abs = path.startsWith("/") ? path : `${cwd}/${path}`;
+      let real: string;
+      try {
+        real = await resolve(abs);
+      } catch {
+        return "unresolvable";
       }
+      const k = protectedKind(real, p, ancestorToo || glob);
+      if (k !== undefined) return k;
     }
   }
-  return out;
+  return undefined;
+}
+
+/** 語がパスに見えるか（/ を含む・~ で始まる・. と ..）。 */
+const pathLike = (x: string): boolean =>
+  x === "." || x === ".." || x.includes("/") || x.startsWith("~");
+
+/**
+ * Bash の命令の、パスに見える語を、禁じる場所と照らす。
+ * - 語全体に加えて、語の中の `/` のたびに、その位置から後ろも絶対パスとして確かめる（`-C/path`・`a=b=/p`・`x:/p` など）。
+ *   語の途中から切り出した部分は、祖先の判定をしない（`src/` の末尾の `/` などで、作業を妨げないため）。
+ * - `cd`・`pushd` を順に追い、相対の語は、元の作業ツリーと、それまでに移った先のすべてを基準に確かめる（パイプの中の cd は
+ *   続かないが、厳しめに倒す）。行き先を確かめきれない `cd`（`cd -`・`popd`・グロブなど）は拒否する。
+ */
+async function checkBash(
+  command: string,
+  cwd: string,
+  p: ProtectedPaths,
+  resolve: ResolvePath,
+): Promise<ProtectedKind | "unresolvable" | undefined> {
+  const segs = commandWords(command);
+  if (segs === undefined) return undefined; // 解析できない命令は、範囲の判定が拒否する
+  const cwds: string[] = [cwd];
+  for (const words of segs) {
+    const name = words[0];
+    if (name === "popd") return "unresolvable";
+    for (const w of words) {
+      if (pathLike(w)) {
+        const k = await checkProtectedPath(w, cwds, p, resolve, true);
+        if (k !== undefined) return k;
+      }
+      for (let i = w.indexOf("/", 1); i > 0; i = w.indexOf("/", i + 1)) {
+        const tail = w.slice(i);
+        if (tail === "/") continue;
+        const k = await checkProtectedPath(tail, cwds, p, resolve, false);
+        if (k !== undefined) return k;
+      }
+    }
+    if (name === "cd" || name === "pushd") {
+      const args = words.slice(1).filter((x) => !(x.startsWith("-") && x !== "-"));
+      const target = args[0];
+      if (args.length > 1 || target === "-" || (target !== undefined && GLOB.test(target)))
+        return "unresolvable";
+      let dest: string | undefined;
+      if (target === undefined) dest = p.home;
+      else if (target.startsWith("~")) {
+        if (!(target === "~" || target.startsWith("~/")) || p.home === undefined)
+          return "unresolvable";
+        dest = p.home + target.slice(1);
+      } else dest = target;
+      if (dest === undefined) return "unresolvable";
+      const next: string[] = [];
+      for (const base of dest.startsWith("/") ? [cwd] : cwds) {
+        try {
+          next.push(await resolve(dest.startsWith("/") ? dest : `${base}/${dest}`));
+        } catch {
+          return "unresolvable";
+        }
+      }
+      cwds.push(...next);
+    }
+  }
+  return undefined;
 }
 
 /** 読み取りの道具 → 対象のパスを持つ入力のキーと、再帰的に読むか。 */
@@ -170,7 +296,7 @@ async function checkProtected(
     const paths = spec.keys
       .map((k) => input[k])
       .filter((v): v is string => typeof v === "string" && v !== "");
-    // Glob・Grep で path がなければ、作業ツリーを読む。Glob の pattern が絶対パスなら、その固定の部分も見る。
+    // Glob・Grep で path がなければ、作業ツリーを読む。Glob の pattern は、絶対でも相対でも、基準につないで確かめる。
     if (toolName === "Glob" && typeof input.pattern === "string") {
       const base = paths[0] ?? cwd;
       const pat = input.pattern;
@@ -178,7 +304,7 @@ async function checkProtected(
     }
     for (const path of paths) {
       const d = verdict(
-        await checkProtectedPath(path, cwd, p, resolve, spec.recursive),
+        await checkProtectedPath(path, [cwd], p, resolve, spec.recursive),
         `${toolName}（パスを確かめられない）`,
       );
       if (d !== undefined) return d;
@@ -187,15 +313,7 @@ async function checkProtected(
   }
   // 書き込みは、今の範囲の決まり（書き込みを許可する場所）のまま判定する（ここでは見ない）。
   if (toolName === "Bash" && typeof input.command === "string") {
-    const words = pathLikeWords(input.command);
-    if (words === undefined) return undefined; // 解析できない命令は、範囲の判定が拒否する
-    for (const w of words) {
-      const d = verdict(
-        await checkProtectedPath(w, cwd, p, resolve, true),
-        "Bash（パスを確かめられない）",
-      );
-      if (d !== undefined) return d;
-    }
+    return verdict(await checkBash(input.command, cwd, p, resolve), "Bash（パスを確かめられない）");
   }
   return undefined;
 }

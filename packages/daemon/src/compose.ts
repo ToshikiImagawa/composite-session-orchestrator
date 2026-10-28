@@ -25,7 +25,7 @@ import {
   writeSync,
 } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   DEFAULT_PURGE_TOMBSTONE,
   type EventBody,
@@ -157,9 +157,9 @@ export interface DaemonDeps {
   /** 窓口の件数のまとめを、窓の終わりに出す予約（試験で差し替える。既定は、`unref` したタイマー）。 */
   readonly summaryScheduler?: SummaryScheduler | null;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
-  /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   /** daemon の設定ファイルのパス（`--config`）。読み取りも禁じる場所に入れる（FR_014 の例外。T21-pr）。 */
   readonly configPath?: string;
+  /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
   /**
    * 取り消せない操作の確認コードを書く先（T24-cf。Desktop の木だけ）。既定は制御端末（/dev/tty）。標準エラー（構造化のログ）・
@@ -250,17 +250,28 @@ export function trackTimers(base: Timers): { timers: Timers; cancelAll(): void }
 
 /** 置き場が、リンクを解決した実パスで、互いに重なっていないか。 */
 function realOverlap(config: DaemonConfig): string | undefined {
+  // まだないパスも、最も深い既存の祖先を実パスにして、残りを足して比べる（resolveForWrite と同じ考え方）。
   const real = (p: string): string => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return p;
+    let head = p;
+    const rest: string[] = [];
+    for (;;) {
+      try {
+        const r = realpathSync(head);
+        return rest.length === 0 ? r : join(r, ...rest.reverse());
+      } catch {
+        const parent = dirname(head);
+        if (parent === head) return p;
+        rest.push(basename(head));
+        head = parent;
+      }
     }
   };
   const s = real(config.stateDir);
   const r = real(config.repoRoot);
   const w = real(config.worktreeRoot);
-  const o = (a: string, b: string): boolean => isPathUnder(a, b) || isPathUnder(b, a);
+  // APFS は大文字小文字・Unicode の正規化の違いを区別しないので、そろえてから比べる（区別する FS では、厳しめに倒れる）。
+  const f = (x: string): string => x.normalize("NFC").toLowerCase();
+  const o = (a: string, b: string): boolean => isPathUnder(f(a), f(b)) || isPathUnder(f(b), f(a));
   if (o(s, w) || o(s, r) || o(w, r)) {
     return "stateDir・repoRoot・worktreeRoot が、リンクを解決すると重なる";
   }
