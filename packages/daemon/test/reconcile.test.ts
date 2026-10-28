@@ -149,15 +149,22 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
     expect(r.probed).toEqual([]);
     expect(r.s().nodes.map((x) => [x.id, x.state])).toEqual(before);
     const asks = () =>
-      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+      r
+        .s()
+        .inbox.filter(
+          (i) => i.resolved === undefined && i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true,
+        );
     expect(asks()).toHaveLength(1);
     const [ask] = asks();
     expect(ask).toMatchObject({ kind: "stopIncomplete", nodeId: "root" });
     // 対象: running（a・g）・waiting（w）・stopping（s）・stopIncomplete（i）の 5 件。done（d）・pending（p）・根は対象外
     expect(ask?.summary).toContain("5 件");
     for (const id of ["a", "w", "s", "i", "g"]) expect(ask?.summary).toContain(id);
+    // 再実行（もう一度の再起動）: 古い依頼を解決済みにして、新しい依頼に置き換える。未解決は 1 件のまま
     await r.run();
     expect(asks()).toHaveLength(1);
+    expect(asks()[0]?.id).not.toBe(ask?.id);
+    expect(r.s().inbox.find((i) => i.id === ask?.id)?.resolved).toBeDefined();
   });
 
   it("文面: 仮置きを外し、決めつけない・画面で子ごとに確かめる・アーカイブで止めて確かめてから宣言する、を書く。docs を指す。長さの上限に収まる", async () => {
@@ -180,7 +187,7 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
     expect(ask?.summary).toContain("5 件");
   });
 
-  it("前の版の文面の未解決の依頼があれば、新しい文面でも出さない（判定は変えない）", async () => {
+  it("前の版の文面の未解決の依頼も置き換える: 解決済みにして、新しい文面で 1 件出す", async () => {
     const r = rig({ external: true });
     const seeded = r.log.append({
       requestId: "legacy-ask",
@@ -197,12 +204,116 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
       },
     });
     expect(seeded.ok).toBe(true);
-    const seq = r.s().lastSeq;
     await r.run();
-    expect(r.s().lastSeq).toBe(seq);
+    expect(r.s().inbox.find((i) => i.id === "inbox-legacy")?.resolved).toBeDefined();
     expect(
-      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true),
-    ).toHaveLength(0);
+      r
+        .s()
+        .inbox.filter(
+          (i) => i.resolved === undefined && i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true,
+        ),
+    ).toHaveLength(1);
+  });
+
+  it("未解決の古い依頼はあるが、対象の子が 0 なら、古い依頼を解決済みにし、新しい依頼は出さない", async () => {
+    const opened = EventLog.open(createMemoryStore().open(), { clock });
+    if (!opened.ok) throw new Error(opened.error.code);
+    const log = opened.value;
+    let k = 0;
+    const add = (body: EventBody): void => {
+      const x = log.append({ requestId: `zero-${++k}`, actor: SYS, body });
+      if (!x.ok) throw new Error(`${x.error.code} ${x.error.cause}`);
+    };
+    for (const [id, parentId] of [
+      ["root", null],
+      ["a", "root"],
+    ] as const) {
+      add({
+        type: "node.created",
+        payload: {
+          nodeId: id,
+          role: parentId === null ? "integrator" : "implement",
+          parentId,
+          dependsOn: [],
+        },
+      });
+      add({ type: "node.stateChanged", payload: { nodeId: id, event: { type: "start" } } });
+    }
+    add({
+      type: "inbox.added",
+      payload: {
+        id: "inbox-old",
+        kind: "stopIncomplete",
+        nodeId: "root",
+        summary: `${EXTERNAL_CHECK_SUMMARY}（1 件: a）`,
+      },
+    });
+    // 子をすべて停止済みにしてから照合する
+    add({
+      type: "node.stateChanged",
+      payload: { nodeId: "a", event: { type: "stop", mode: "immediate" } },
+    });
+    add({ type: "node.stateChanged", payload: { nodeId: "a", event: { type: "stopTimeout" } } });
+    add({ type: "node.stateChanged", payload: { nodeId: "a", event: { type: "confirmStopped" } } });
+    await reconcileOnStartup({
+      log,
+      clock,
+      cwdOf: async () => undefined,
+      probe: async () => [],
+      has: () => false,
+      external: () => true,
+    });
+    const asks = log
+      .state()
+      .inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+    expect(asks).toHaveLength(1);
+    expect(asks[0]?.id).toBe("inbox-old");
+    expect(asks[0]?.resolved).toBeDefined();
+  });
+
+  it("根がない記録で、古い依頼だけあるなら、解決だけ行う（新しい依頼は出せない）", async () => {
+    // 根のない記録は、通常は作れない（受信箱の項目はノードを指す）。根の見えない状態（nodes が空）を返すログで確かめる。
+    const opened = EventLog.open(createMemoryStore().open(), { clock });
+    if (!opened.ok) throw new Error(opened.error.code);
+    const real = opened.value;
+    const add = (requestId: string, body: EventBody): void => {
+      const x = real.append({ requestId, actor: SYS, body });
+      if (!x.ok) throw new Error(`${x.error.code} ${x.error.cause}`);
+    };
+    add("rootless-1", {
+      type: "node.created",
+      payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+    });
+    add("rootless-2", {
+      type: "inbox.added",
+      payload: {
+        id: "inbox-rootless",
+        kind: "stopIncomplete",
+        nodeId: "root",
+        summary: `${EXTERNAL_CHECK_SUMMARY}（1 件: a）`,
+      },
+    });
+    const log = {
+      state: () => ({ ...real.state(), nodes: [] }),
+      append: real.append.bind(real),
+      appendAll: real.appendAll.bind(real),
+    };
+    const failures: string[] = [];
+    await reconcileOnStartup({
+      log,
+      clock,
+      cwdOf: async () => undefined,
+      probe: async () => [],
+      has: () => false,
+      external: () => true,
+      onFailure: (n, c) => void failures.push(`${n}: ${c}`),
+    });
+    expect(failures).toEqual([]);
+    const asks = real
+      .state()
+      .inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+    expect(asks).toHaveLength(1);
+    expect(asks[0]?.resolved).toBeDefined();
   });
 
   it("前の版の文面の依頼が解決済みなら、新しい文面で 1 件出す", async () => {
