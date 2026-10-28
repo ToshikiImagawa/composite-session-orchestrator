@@ -81,7 +81,16 @@ const FORBIDDEN_NAMES = new Set([
   "BASHOPTS",
   "PS4",
   "IFS",
+  // トークンの変数（T21-ce）。CSO_MCP_TOKEN は daemon が起動のたびに入れる（子の MCP 用）。CSO_NODE_TOKEN は手動の
+  // セッションのフック用（`cso hook-env`）。どちらも親の値を通さない（取り違え・すり替えを防ぐ）。
+  "CSO_MCP_TOKEN",
+  "CSO_NODE_TOKEN",
 ]);
+/**
+ * 子の MCP の設定（headers）から参照する、ノードのトークンの環境変数（T21-ce。値は引数に置かない）。手動のセッションの
+ * フック用の `CSO_NODE_TOKEN`（`cso hook-env`）とは別の名前。
+ */
+export const MCP_TOKEN_ENV = "CSO_MCP_TOKEN";
 export const isForbiddenChildEnvName = (name: string): boolean =>
   FORBIDDEN_NAMES.has(name) || FORBIDDEN_PREFIXES.some((p) => name.startsWith(p));
 

@@ -264,6 +264,22 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 - daemon を Claude のセッションから「出力を `daemon.log` に回す形」で起動すると、端末がないので、取り消せない操作の確認（#123）は `confirmationUnavailable` になる。人の端末で起動する。
 - `worktreeRoot` のディレクトリは、先に作っておかないと `invalidConfig` になる。
 
+### R4: 大文字小文字の違う綴りの実パス（T21-pr。2026-10-28、macOS）
+
+- **観察（事実）**: `fs/promises` の `realpath` に、小文字で `/users/<自分>` を渡すと、`/Users/<自分>` が返った（正規の綴りにそろえて返す）。
+- **扱い**: 禁じる場所の判定は実パスで行うので、大文字小文字の違う綴りでも、正規の綴りで比べられる。比べる前に NFC と小文字にそろえる仕組み（`hook-policy.ts`・起動時の重なりの検査）は、念押しとして残す。
+- **未確認**: Unicode の正規化（NFD/NFC）の違う綴りを渡したときの、`realpath` の返し方。
+
+: CLI の子の引数に Bearer が出ないこと
+
+- **前提**: T21-ce を入れた daemon（`childRuntime: "cli"`）。人の端末で起動する。
+- **手順**:
+  1. 子を 1 つ起動し、動いている間に、別の端末で `for i in $(seq 300); do ps -axww | grep -c '[B]earer [^$]'; done | sort | uniq -c` を実行する（V2 と同じ数え方。`[B]` は grep 自身を数えないため。`[^$]` は、参照の `Bearer ${CSO_MCP_TOKEN}` を数えず、値の入った Bearer だけを数えるため）。
+  2. あわせて `ps -axww | grep -- '--mcp-config' | grep -c 'CSO_MCP_TOKEN'` で、引数が参照（`${CSO_MCP_TOKEN}`）になっていることを確かめる（値ではない。参照が見えることの確認）。
+  3. 子が、cso-mcp の道具（`mcp__node__report_progress` など）を使えることを確かめる（参照が展開されて、接続できている）。
+- **期待**: 1 は 300 回すべて 0 件。2 は 1 件以上。3 は使える。
+- **記録**: 回数だけを書く。トークン・ID・ユーザー名は書かない（NFR_012）。
+
 ## 結果のまとめ（統括に報告する表）
 
 | 項目 | 判定 | 変わるタスク | 備考 |

@@ -104,22 +104,45 @@ describe("start", () => {
     expect(JSON.stringify(v)).not.toContain("parent");
   });
 
-  it("MCP の接続設定（ノード専用トークン付き HTTP）を注入する", async () => {
-    const r = rig();
+  it("MCP の接続設定（ノード専用トークン付き HTTP）を注入する。トークンは設定に置かず、子の環境変数で渡して参照する（T21-ce）", async () => {
+    const token = "tok-0123456789-secret";
+    const r = rig({
+      parentEnv: {
+        PATH: "/usr/bin",
+        ANTHROPIC_API_KEY: "k",
+        CSO_MCP_TOKEN: "from-parent",
+        CSO_NODE_TOKEN: "hook-from-parent",
+      },
+      childEnvAllow: ["CSO_MCP_TOKEN", "CSO_NODE_TOKEN"],
+    });
     await r.adapter.start({
       nodeId: "a",
       worktreePath: "/link/a",
       scope: SCOPE,
       instruction: "x",
-      mcp: { url: "http://127.0.0.1:9/mcp", token: "tok" },
+      mcp: { url: "http://127.0.0.1:9/mcp", token },
     });
-    expect(r.launcher.sessions[0]?.options.mcpServers).toEqual({
+    const opts = r.launcher.sessions[0]?.options;
+    expect(opts?.mcpServers).toEqual({
       node: {
         type: "http",
         url: "http://127.0.0.1:9/mcp",
-        headers: { Authorization: "Bearer tok" },
+        headers: { Authorization: `Bearer $${"{"}CSO_MCP_TOKEN}` },
       },
     });
+    // SDK が --mcp-config の引数にする文字列（{ mcpServers } の JSON）に、トークンが入らない
+    expect(JSON.stringify({ mcpServers: opts?.mcpServers })).not.toContain(token);
+    // 値は、子の環境変数で渡す（親の同じ名前の値は、追加の許可があっても通さない）
+    expect(opts?.env.CSO_MCP_TOKEN).toBe(token);
+    expect(opts?.env.CSO_NODE_TOKEN).toBeUndefined();
+  });
+
+  it("MCP なしで起動したときは、子の環境変数にトークンを入れない（T21-ce）", async () => {
+    const r = rig({ parentEnv: { PATH: "/usr/bin", ANTHROPIC_API_KEY: "k", CSO_MCP_TOKEN: "p" } });
+    await startNode(r);
+    const opts = sessionOf(r).options;
+    expect(opts.mcpServers).toBeUndefined();
+    expect(opts.env.CSO_MCP_TOKEN).toBeUndefined();
   });
 
   it("作業ツリーを解決できなければ失敗（子を起動しない）", async () => {

@@ -420,6 +420,11 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
       bad({ desktopRequireVerifiedHooks: v }, "desktopRequireVerifiedHooks");
   });
 
+  it("childEnvAllow に、CSO のトークンの名前（CSO_MCP_TOKEN・CSO_NODE_TOKEN）は書けない（T21-ce）", () => {
+    bad({ childEnvAllow: ["CSO_MCP_TOKEN"] }, "子に渡せない名前");
+    bad({ childEnvAllow: ["CSO_NODE_TOKEN"] }, "子に渡せない名前");
+  });
+
   it("childEnvAllow は、環境変数の名前の配列（任意）", () => {
     const ok1 = parseConfig(JSON.stringify({ ...base, childEnvAllow: ["AWS_PROFILE", "MY_VAR"] }));
     expect(ok1.ok && ok1.value.childEnvAllow).toEqual(["AWS_PROFILE", "MY_VAR"]);
