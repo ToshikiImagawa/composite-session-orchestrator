@@ -596,7 +596,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
               childrenDirs.reset(n.id);
               childrenDirs.writeFile(n.id, "node", n.id);
             } else if (action === "clearSecrets") {
-              childrenDirs.removeFiles(n.id, ["token", "url", "code"]);
+              childrenDirs.removeFiles(n.id, ["token", "url", "code", "report"]);
             } else if (action === "remove") {
               childrenDirs.remove(n.id);
             }
@@ -618,7 +618,14 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       }
     };
     revokeEntered(log.state().nodes, true);
-    log.onCommitted((st) => revokeEntered(st.nodes, false));
+    log.onCommitted((st) => {
+      // 状態にないノード（最終削除で消えた）は、前の状態を忘れる（同じ実行で ID が再び使われたら、新しいノードとして作り直す。R2）
+      if (lastStates.size > st.nodes.length) {
+        const live = new Set(st.nodes.map((n) => n.id));
+        for (const id of [...lastStates.keys()]) if (!live.has(id)) lastStates.delete(id);
+      }
+      revokeEntered(st.nodes, false);
+    });
     // 根のトークン: ファイルがあり、認証に通るならそのまま。なければ・通らなければ、発行し直して、一時ファイルに書いてから置き換える。
     let current: string | undefined;
     try {
@@ -993,11 +1000,12 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         ...(desktopAdapter === undefined ? {} : { desktop: desktopAdapter }),
         baseUrl: () => running?.url,
         ...(config.csoCommand === undefined ? {} : { csoCommand: config.csoCommand }),
-        // 引き出しを用意する（なければ作る。node を書き直し、残っている code を消す。T21-cc）
+        // 引き出しを用意する（なければ作る。node を書き直し、残っている code・token・url・report を消す。T21-cc・R2）。
+        // 紐付けは、新しい文面で 1 からやり直す（前の token は、新しいトークンの発行で無効になる）
         prepareDrawer: (nodeId) => {
           const dir = childrenDirs.create(nodeId);
           childrenDirs.writeFile(nodeId, "node", nodeId);
-          childrenDirs.removeFiles(nodeId, ["code"]);
+          childrenDirs.removeFiles(nodeId, ["code", "token", "url", "report"]);
           return dir;
         },
       }),

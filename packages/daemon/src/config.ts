@@ -148,7 +148,7 @@ export interface DaemonConfig {
   /** 子に渡す環境変数の、既定（PATH・HOME・認証・プロキシなど）に加える名前（完全一致）。 */
   readonly childEnvAllow?: readonly string[];
   /**
-   * Desktop の子が `cso` を起動する語（T21-cc。例: `["node", "/opt/cso/packages/cli/dist/bin.js"]`・`["/usr/local/bin/cso"]`）。
+   * Desktop の子が `cso` を起動する語（T21-cc。例: `["/usr/local/bin/node", "/opt/cso/packages/cli/dist/bin.js"]`・`["/usr/local/bin/cso"]`）。
    * 紐付けの文面（`node.bindCode`）に、そのまま書く。1〜4 語。語は英数字と `. _ / @ : + = -` だけ（空白・引用符なし）。
    * `/` を含む語は絶対パス（`..` なし）で、絶対パスの語が 1 つ以上要る。ないと、`node.bindCode` は `csoCommandMissing` で失敗する。
    */

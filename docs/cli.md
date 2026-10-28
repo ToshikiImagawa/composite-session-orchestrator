@@ -53,9 +53,9 @@ cso reclaim <nodeId>
 | コマンド | すること | 標準出力 |
 | --- | --- | --- |
 | `cso child bind --dir <引き出し> --url <窓口>` | 子が Write の道具で書いた `code` を確かめて読み、**送る前に消す**。`node`（daemon が書いたノード ID）と一緒に `POST /v1/bind` へ送る。受け取ったトークンを `token`、窓口を `url` に置く（一時ファイル〔O_EXCL・O_NOFOLLOW・0600〕に書いて rename） | `bound`、または失敗の記号 1 行 |
-| `cso child report --dir <引き出し> --url <窓口> <種類>` | 本文（標準入力）を送る。種類は `progress`・`out-of-scope`（本文は文）、`decision`・`done`・`scope-extend`（本文は操作の params の JSON）の 5 つだけ（子のロールの操作） | 成功は `{ok, requestId, value}` の JSON。失敗は記号 1 行 |
+| `cso child report --dir <引き出し> --url <窓口> <種類>` | 本文（子が Write の道具で書いた引き出しの `report`。`code` と同じ確かめ方で読み、送る前に消す。64 KiB まで）を送る。種類は `progress`・`out-of-scope`（本文は文）、`decision`・`done`・`scope-extend`（本文は操作の params の JSON）の 5 つだけ（子のロールの操作） | 成功は `{ok, requestId, value}` の JSON。失敗は記号 1 行 |
 
-- **コード・トークンは、引数にも、標準出力・標準エラーにも出さない。** 報告の本文は、Bash の命令の文字列として `ps` に出うるので、秘密を書かない。
+- **コード・トークンは、引数にも、標準出力・標準エラーにも出さない。** 報告の本文は、引き出しの `report` から読む（コマンドの文字列に入らない）が、daemon の記録・受信箱・親の会話に残るので、秘密を書かない。
 - ファイルは、lstat で種類（通常のファイル・リンクでない）・持ち主・リンクの数（1）・権限・大きさを確かめてから O_NOFOLLOW で開き、fstat で同じものかを確かめて読む。`code` は子が Write で書くので 0644 でよい（書き込みの権限がグループ・他者にないこと）。`token`・`url`・`node` は 0600 でなければ読まない。引き出しは、実のディレクトリ・持ち主が自分・0700。
 - `--url` は、ループバックの http(s) の窓口だけ（パスなし。`127.0.0.1`・`localhost`・`[::1]`。`127.1` は `127.0.0.1` と同じに扱い、`localhost.`・`[::ffff:127.0.0.1]` は拒否する）。**`bind` と `report` には、同じ URL を書く**。`report` は、`--url` が `url` のファイル（紐付けた窓口）と違えば、トークンを送らない（`urlMismatch`）。
 - **daemon の身元を確かめる**: `bind` はコードを送る前に、`report` はトークンを送る前に毎回、cso・cso-mcp と同じ仕組み（`/v1/identity`）で、窓口の相手が引き出しを作った daemon かを確かめる。秘密のファイルは、引き出しの場所から決まる `<stateDir>/daemon-identity`（引き出しは `<stateDir>/children.noindex/<鍵>`。ほかの場所の引き出しは `dirInvalid`）。確かめられなければ送らない（`daemonIdentityFailed`）。同じポートで別のプロセスが待ち受けていても、コード・トークンはそこへ送らない。
@@ -66,7 +66,7 @@ cso reclaim <nodeId>
 - 結果が分からない失敗（窓口から応答がない）は、同じ本文で `--request-id <出した ID>` を付けて送り直す（同じ要求として扱われる）。
 - 終了コード: 0 成功・1 失敗・2 使い方の誤り・3 トークンの期限切れ。
 
-**子の作業範囲の判定（FR_014。`hook-policy.ts`）での扱い**: そのノード自身の引き出しだけ、禁じる場所（stateDir）の中のまま、次の 2 つを許す。(1) Bash の `cso child bind|report` の `--dir` の値（引き出しそのもの）。例外が効くのは、区切りの先頭の語が `csoCommand`（設定。なければ `cso` か末尾が `/cso` の語）と一致し、続く 2 語が `child` と `bind`・`report` の命令だけ。その命令の `--dir` が自分の引き出しそのものでなければ、拒否する。外すのは `--dir` の値だけで、ほかの語はふつうに判定する。(2) Write の道具で `<引き出し>/code` を書くこと。引き出しの中のファイルの語（`token` とその一時ファイル `token.tmp-…` を含む）・グロブ・`cd`・読み取りの道具（Read・Glob・Grep など）は、禁じる場所のまま拒否する。ほかのノードの引き出しも拒否する。今これが効くのは CLI の子だけで、Desktop の子には、作業範囲外の拒否のフックが効くようになってから効く（`docs/desktop-runtime.md` の (a)）。
+**子の作業範囲の判定（FR_014。`hook-policy.ts`）での扱い**: そのノード自身の引き出しだけ、禁じる場所（stateDir）の中のまま、次の 2 つを許す。(1) Bash の `cso child bind|report` の `--dir` の値（引き出しそのもの）。例外が効くのは、区切りの先頭の語が `csoCommand`（設定。なければ `cso` か末尾が `/cso` の語）と一致し、続く 2 語が `child` と `bind`・`report` の命令だけ。その命令の `--dir` が自分の引き出しそのものでなければ、拒否する。外すのは `--dir` の値だけで、ほかの語はふつうに判定する。(2) Write の道具で `<引き出し>/code`・`<引き出し>/report` を書くこと。引き出しの中のファイルの語（`token` とその一時ファイル `token.tmp-…` を含む）・グロブ・`cd`・読み取りの道具（Read・Glob・Grep など）は、禁じる場所のまま拒否する。ほかのノードの引き出しも拒否する。今これが効くのは CLI の子だけで、Desktop の子には、作業範囲外の拒否のフックが効くようになってから効く（`docs/desktop-runtime.md` の (a)）。
 
 ## 子の認証（daemon の起動の環境）
 

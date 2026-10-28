@@ -7,7 +7,7 @@
  * - `bind --dir <引き出し> --url <窓口>`: 子が Write の道具で書いた `code` を確かめて読み、送る前に消す。`node`（daemon が書いた
  *   ノード ID）と一緒に `POST /v1/bind` へ送り、受け取ったトークンを `token` に、窓口の URL を `url` に置く（一時ファイルに
  *   O_EXCL・O_NOFOLLOW・0600 で書いて rename）。標準出力は結果の記号 1 行だけ。
- * - `report --dir <引き出し> --url <窓口> <操作>`: 子のロールの 5 つの操作だけ（M7）。本文は標準入力。`--url` が `url` のファイルと
+ * - `report --dir <引き出し> --url <窓口> <操作>`: 子のロールの 5 つの操作だけ（M7）。本文は、子が Write で書いた引き出しの `report`（cso が読んで、送る前に消す）。`--url` が `url` のファイルと
  *   違えば送らない（別の daemon にトークンを送らない）。期限切れ（`tokenExpired`）なら `token` を消して、結び直しを案内する。
  *
  * ファイルは、lstat で持ち主・種類・権限・リンクの数を確かめてから O_NOFOLLOW で開き、fstat で同じものかを確かめて読む（M3）。
@@ -46,6 +46,8 @@ export const CHILD_FILES = {
   url: "url",
   /** ノード ID（daemon が引き出しを作るときに書く。0600）。 */
   node: "node",
+  /** 報告の本文（子が Write で書く。cso が読んだらすぐ消す。T21-cb R1）。 */
+  report: "report",
 } as const;
 /** 一時ファイルの名前の頭（`token.tmp-<乱数>` など）。hook-policy が、Bash の語でこの名前を拒む。 */
 export const TMP_SUFFIX = ".tmp-";
@@ -66,14 +68,13 @@ const CODE_MAX = 64;
 const TOKEN_MAX = 8192;
 const URL_MAX = 2048;
 const NODE_MAX = 256;
-const STDIN_MAX = 256 * 1024;
+/** 報告の本文の大きさの上限（daemon の文の上限〔数千字〕と、done の証拠の JSON に見合う値）。 */
+const REPORT_MAX = 64 * 1024;
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const TOKEN_FORMAT = /^[\x21-\x7e]+$/;
 const BIND_TIMEOUT_MS = 30_000;
 
 export interface ChildDeps {
-  /** 標準入力の全部（report の本文）。 */
-  readonly readStdin: () => Promise<string>;
   readonly fetch?: typeof fetch;
   readonly newRequestId: () => string;
   /** 自分の uid（既定は `process.getuid()`）。 */
@@ -157,7 +158,7 @@ const usage = (cause: string): CommandResult =>
     2,
     cause,
     "使い方: cso child bind --dir <引き出しの絶対パス> --url <窓口の URL>",
-    "        cso child report --dir <引き出しの絶対パス> --url <窓口の URL> <progress|out-of-scope|decision|done|scope-extend>（本文は標準入力）",
+    "        cso child report --dir <引き出しの絶対パス> --url <窓口の URL> <progress|out-of-scope|decision|done|scope-extend>（本文は、引き出しの report のファイル）",
   );
 
 class FileCheckError extends Error {
@@ -523,22 +524,46 @@ async function report(args: readonly string[], deps: ChildDeps): Promise<Command
     }
     throw e;
   }
-  const raw = await deps.readStdin();
-  if (raw.length > STDIN_MAX)
-    return usage(`本文（標準入力）が大きすぎる（${STDIN_MAX} バイトまで）`);
+  // 本文は、子が Write で書いた引き出しの report（code と同じ確かめ方。読めても読めなくても、送る前に消す）
+  const reportPath = join(p.dir, CHILD_FILES.report);
+  let raw: string;
+  try {
+    try {
+      raw = readChecked(reportPath, { max: REPORT_MAX, strict: false, name: "report" }, deps, uid);
+    } finally {
+      removeQuietly(reportPath);
+    }
+  } catch (e) {
+    if (e instanceof FileCheckError) {
+      return failed(
+        e.code,
+        1,
+        e.message,
+        `報告の本文を、Write の道具で ${reportPath} に書いてから、もう一度実行する（${REPORT_MAX} バイトまで）`,
+      );
+    }
+    throw e;
+  }
   let params: unknown;
   if (TEXT_BODY.has(kind)) {
-    const text = raw.replace(/\s+$/, "");
-    if (text === "") return usage("本文（標準入力）に、報告の文を書く");
-    params = { text };
+    if (raw === "") return failed("reportInvalid", 1, "報告の本文（report のファイル）が空");
+    params = { text: raw };
   } else {
     try {
       params = JSON.parse(raw);
     } catch {
-      return usage("本文（標準入力）は、操作の params の JSON にする");
+      return failed(
+        "reportInvalid",
+        1,
+        "報告の本文（report のファイル）は、操作の params の JSON にする",
+      );
     }
     if (typeof params !== "object" || params === null || Array.isArray(params)) {
-      return usage("本文（標準入力）は、操作の params の JSON のオブジェクトにする");
+      return failed(
+        "reportInvalid",
+        1,
+        "報告の本文（report のファイル）は、操作の params の JSON のオブジェクトにする",
+      );
     }
   }
   // 身元の検証は、relay が、トークンつきの要求を送る直前に毎回行う（失敗したら送らない）

@@ -23,6 +23,7 @@ import {
   closeSync,
   constants,
   fstatSync,
+  fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -39,7 +40,7 @@ import type { NodeState } from "@cso/core";
 
 export const CHILDREN_DIR = "children.noindex";
 /** 引き出しの中のファイルの名前（cli の `CHILD_FILES` と同じ。T21-cc）。 */
-export const DRAWER_FILES = ["code", "token", "url", "node"] as const;
+export const DRAWER_FILES = ["code", "token", "url", "node", "report"] as const;
 export type DrawerFile = (typeof DRAWER_FILES)[number];
 export const CHILDREN_KEY_FILE = "children.key";
 /**
@@ -281,10 +282,18 @@ export function prepareChildrenDirs(
       try {
         try {
           writeSync(fd, `${content}\n`);
+          fsyncSync(fd);
         } finally {
           closeSync(fd);
         }
         renameSync(tmp, join(dir, name));
+        // rename を確かに残す（ディレクトリの fsync）
+        const dfd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY);
+        try {
+          fsyncSync(dfd);
+        } finally {
+          closeSync(dfd);
+        }
       } catch (e) {
         try {
           unlinkSync(tmp);
@@ -358,7 +367,8 @@ const defaultExclude = (path: string): Promise<void> =>
  * 状態の移り変わりで、子の引き出しにすること（T21-cc N4。Desktop の子）。`prev` は前に見た状態（初めて見るノードは undefined）。
  * - 新しく記録されたノード（spawn）: 空にして作り直し、`node` を書く（`create`。ノード ID の再利用で、前の中身を残さない。N3）。
  *   起動時に初めて見るノードは、作り直さない（動いている子の引き出しを消さない。掃除は M9 が行う）。
- * - stopped になった: `token`・`url`・`code` を消す（`clearSecrets`。引き出しは残す。再開で結び直す）。
+ * - stopped になった: `token`・`url`・`code`・`report` を消す（`clearSecrets`。引き出しは残す。再開で結び直す）。起動時に
+ *   初めて見たノードが stopped のときも消す（前回、消す前に daemon が止まった分。冪等。R3）。
  * - verified・reclaimable・archived になった: 引き出しを消す（`remove`）。
  * - done・そのほか: 何もしない（差し戻しで動き直す）。
  */
@@ -368,7 +378,7 @@ export function drawerActionFor(
   boot: boolean,
 ): "create" | "clearSecrets" | "remove" | undefined {
   if (prev === next) return undefined;
-  if (prev === undefined && boot) return undefined;
+  if (prev === undefined && boot) return next === "stopped" ? "clearSecrets" : undefined;
   if (next === "verified" || next === "reclaimable" || next === "archived") return "remove";
   if (next === "stopped") return "clearSecrets";
   if (prev === undefined) return "create";

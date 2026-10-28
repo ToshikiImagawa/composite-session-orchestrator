@@ -81,8 +81,7 @@ const daemon = (
 /** 身元の検証の偽物（既定は成功。どの秘密のファイルで確かめたかを残す）。 */
 const verified: string[] = [];
 let identityOk = true;
-const deps = (fetch: typeof globalThis.fetch, stdin = "") => ({
-  readStdin: async () => stdin,
+const deps = (fetch: typeof globalThis.fetch) => ({
   newRequestId: () => "rid-1",
   fetch,
   verifierFor: (_url: string, identityPath: string) => ({
@@ -98,6 +97,11 @@ const deps = (fetch: typeof globalThis.fetch, stdin = "") => ({
     },
   }),
 });
+/** 子が Write で書いた形の report（0644）を置いてから、deps を返す。 */
+const withReport = (d: string, body: string, fetch: typeof globalThis.fetch) => {
+  writeFileSync(join(d, CHILD_FILES.report), body, { mode: 0o644 });
+  return deps(fetch);
+};
 const mode = (p: string) => lstatSync(p).mode & 0o777;
 const all = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
 
@@ -283,7 +287,7 @@ describe("cso child report（T21-cc）", () => {
     const fake = daemon();
     const r = await runChild(
       ["report", "--dir", d, "--url", URL, "progress"],
-      deps(fake.fetch, "半分できた\n"),
+      withReport(d, "半分できた\n", fake.fetch),
     );
     expect(r.exitCode).toBe(0);
     expect(JSON.parse(r.stdout)).toEqual({
@@ -308,18 +312,26 @@ describe("cso child report（T21-cc）", () => {
     });
     const r = await runChild(
       ["report", "--dir", d, "--url", URL, "decision"],
-      deps(fake.fetch, JSON.stringify({ question: "どちら？", options: ["a", "b"] })),
+      withReport(d, JSON.stringify({ question: "どちら？", options: ["a", "b"] }), fake.fetch),
     );
     expect(JSON.parse(r.stdout).value).toEqual({ decisionId: "dec-1" });
     const n = fake.sent.length;
     expect(
-      (await runChild(["report", "--dir", d, "--url", URL, "done"], deps(fake.fetch, "not json")))
-        .exitCode,
-    ).toBe(2);
+      (
+        await runChild(
+          ["report", "--dir", d, "--url", URL, "done"],
+          withReport(d, "not json", fake.fetch),
+        )
+      ).exitCode,
+    ).toBe(1);
     expect(
-      (await runChild(["report", "--dir", d, "--url", URL, "done"], deps(fake.fetch, "[]")))
-        .exitCode,
-    ).toBe(2);
+      (
+        await runChild(
+          ["report", "--dir", d, "--url", URL, "done"],
+          withReport(d, "[]", fake.fetch),
+        )
+      ).exitCode,
+    ).toBe(1);
     expect(fake.sent.length).toBe(n);
   });
 
@@ -328,7 +340,8 @@ describe("cso child report（T21-cc）", () => {
     const fake = daemon();
     for (const op of ["purge", "report.progress", "node.purge", "decision.answer"]) {
       expect(
-        (await runChild(["report", "--dir", d, "--url", URL, op], deps(fake.fetch, "x"))).exitCode,
+        (await runChild(["report", "--dir", d, "--url", URL, op], withReport(d, "x", fake.fetch)))
+          .exitCode,
         op,
       ).toBe(2);
     }
@@ -340,7 +353,7 @@ describe("cso child report（T21-cc）", () => {
     const fake = daemon();
     const r = await runChild(
       ["report", "--dir", d, "--url", "http://127.0.0.1:8888", "progress"],
-      deps(fake.fetch, "x"),
+      withReport(d, "x", fake.fetch),
     );
     expect(r.stdout).toBe("urlMismatch\n");
     expect(fake.sent).toHaveLength(0);
@@ -356,7 +369,7 @@ describe("cso child report（T21-cc）", () => {
     });
     const r = await runChild(
       ["report", "--dir", d, "--url", URL, "progress"],
-      deps(fake.fetch, "x"),
+      withReport(d, "x", fake.fetch),
     );
     expect(r.exitCode).toBe(3);
     expect(r.stdout).toBe("tokenExpired\n");
@@ -377,7 +390,7 @@ describe("cso child report（T21-cc）", () => {
     });
     const r = await runChild(
       ["report", "--dir", d, "--url", URL, "--request-id", "rid-9", "progress"],
-      deps(fake.fetch, "x"),
+      withReport(d, "x", fake.fetch),
     );
     expect(r.stdout).toBe("forbidden\n");
     expect(r.stderr).toContain("--request-id rid-9");
@@ -389,20 +402,32 @@ describe("cso child report（T21-cc）", () => {
     const d = bound();
     chmodSync(join(d, CHILD_FILES.token), 0o644);
     expect(
-      (await runChild(["report", "--dir", d, "--url", URL, "progress"], deps(fake.fetch, "x")))
-        .stdout,
+      (
+        await runChild(
+          ["report", "--dir", d, "--url", URL, "progress"],
+          withReport(d, "x", fake.fetch),
+        )
+      ).stdout,
     ).toBe("tokenInvalid\n");
     const e = bound();
     rmSync(join(e, CHILD_FILES.url));
     symlinkSync(join(d, CHILD_FILES.url), join(e, CHILD_FILES.url));
     expect(
-      (await runChild(["report", "--dir", e, "--url", URL, "progress"], deps(fake.fetch, "x")))
-        .stdout,
+      (
+        await runChild(
+          ["report", "--dir", e, "--url", URL, "progress"],
+          withReport(e, "x", fake.fetch),
+        )
+      ).stdout,
     ).toBe("urlInvalid\n");
     const f = drawer();
     expect(
-      (await runChild(["report", "--dir", f, "--url", URL, "progress"], deps(fake.fetch, "x")))
-        .stdout,
+      (
+        await runChild(
+          ["report", "--dir", f, "--url", URL, "progress"],
+          withReport(f, "x", fake.fetch),
+        )
+      ).stdout,
     ).toBe("urlMissing\n");
     expect(fake.sent).toHaveLength(0);
   });
@@ -443,7 +468,7 @@ describe("cso child（レビューの指摘。T21-cc）", () => {
     const b = bound();
     const r2 = await runChild(
       ["report", "--dir", b, "--url", URL, "progress"],
-      deps(fake.fetch, "x"),
+      withReport(b, "x", fake.fetch),
     );
     expect(r2.stdout).toBe("daemonIdentityFailed\n");
     expect(fake.sent).toHaveLength(0);
@@ -501,7 +526,7 @@ describe("cso child（レビューの指摘。T21-cc）", () => {
     const b = bound();
     const r = await runChild(
       ["report", "--dir", b, "--url", "http://127.1:7777", "progress"],
-      deps(fake.fetch, "x"),
+      withReport(b, "x", fake.fetch),
     );
     expect(r.exitCode).toBe(0);
     expect(fake.sent[0]?.url.startsWith("http://127.0.0.1:7777/")).toBe(true);
@@ -537,8 +562,54 @@ describe("cso child（レビューの指摘。T21-cc）", () => {
     });
     const r2 = await runChild(
       ["report", "--dir", b, "--url", URL, "progress"],
-      deps(f2.fetch, "x"),
+      withReport(b, "x", f2.fetch),
     );
     expect(r2.stderr).toContain("会話で人");
+  });
+});
+
+describe("cso child report の本文のファイル（T21-cb R1）", () => {
+  const bound = () => {
+    const d = drawer();
+    writeFileSync(join(d, CHILD_FILES.token), `${TOKEN}\n`, { mode: 0o600 });
+    writeFileSync(join(d, CHILD_FILES.url), `${URL}\n`, { mode: 0o600 });
+    return d;
+  };
+
+  it("report は送る前に消す。リンク・ハードリンク・大きすぎる・ないときは送らない", async () => {
+    const d = bound();
+    const fake = daemon({
+      request: (body) => {
+        expect(existsSync(join(d, CHILD_FILES.report))).toBe(false);
+        expect(body.params).toEqual({ text: "進んだ" });
+        return { status: 200, json: { ok: true, value: { accepted: true } } };
+      },
+    });
+    const r = await runChild(
+      ["report", "--dir", d, "--url", URL, "progress"],
+      withReport(d, "進んだ\n", fake.fetch),
+    );
+    expect(r.exitCode).toBe(0);
+    const n = fake.sent.length;
+    const outside = drawer();
+    writeFileSync(join(outside, "secret"), "x", { mode: 0o600 });
+    const cases: [string, (x: string) => void][] = [
+      ["reportInvalid", (x) => symlinkSync(join(outside, "secret"), join(x, CHILD_FILES.report))],
+      ["reportInvalid", (x) => linkSync(join(outside, "secret"), join(x, CHILD_FILES.report))],
+      ["reportInvalid", (x) => writeFileSync(join(x, CHILD_FILES.report), "y".repeat(70 * 1024))],
+      ["reportMissing", () => undefined],
+    ];
+    for (const [want, make] of cases) {
+      const x = bound();
+      make(x);
+      const res = await runChild(
+        ["report", "--dir", x, "--url", URL, "progress"],
+        deps(fake.fetch),
+      );
+      expect(res.stdout, want).toBe(`${want}\n`);
+      expect(res.stderr).toContain("Write");
+    }
+    expect(fake.sent.length).toBe(n);
+    expect(readFileSync(join(outside, "secret"), "utf8")).toBe("x");
   });
 });

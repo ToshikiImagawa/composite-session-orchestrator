@@ -235,11 +235,11 @@ describe("引き出しの中身と、状態の移り変わり（T21-cc N3・N4�
     d.removeFiles("zz", ["token"]); // 引き出しがなければ何もしない
   });
 
-  it("drawerActionFor の表: spawn で作る（起動時に初めて見るノードは作らない）、stopped で中を消す、verified・reclaimable・archived で消す、done は何もしない", () => {
+  it("drawerActionFor の表: spawn で作る（起動時に初めて見るノードは作らない。stopped なら中を消す）、stopped で中を消す、verified・reclaimable・archived で消す、done は何もしない", () => {
     expect(drawerActionFor(undefined, "pending", false)).toBe("create");
     expect(drawerActionFor(undefined, "running", true)).toBeUndefined();
     expect(drawerActionFor("running", "stopped", false)).toBe("clearSecrets");
-    expect(drawerActionFor(undefined, "stopped", true)).toBeUndefined();
+    expect(drawerActionFor(undefined, "stopped", true)).toBe("clearSecrets"); // 起動時に見た stopped も消す（R3）
     for (const x of ["verified", "reclaimable", "archived"]) {
       expect(drawerActionFor("done", x, false), x).toBe("remove");
     }
