@@ -142,6 +142,22 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
     expect(r.logs.join("\n")).not.toContain(d.humanToken);
   });
 
+  it("起動の記録に、ポートがどこから決まったか（portSource）を出す: 初回は new、次は saved", async () => {
+    const r = rig();
+    const first = await boot(r);
+    expect(r.logs.some((l) => l.includes('"started"') && l.includes('"portSource":"new"'))).toBe(
+      true,
+    );
+    await first.daemon.stop();
+    cleanups.length = 0;
+    r.logs.length = 0;
+    const second = await boot(r);
+    expect(second.url).toBe(first.url);
+    expect(r.logs.some((l) => l.includes('"started"') && l.includes('"portSource":"saved"'))).toBe(
+      true,
+    );
+  }, 15_000);
+
   it("再起動しても、根を重複させず、根のトークンは変わらず有効", async () => {
     // 手元では全体で 100ms ほど（stop も数 ms）。5 秒の既定を超えたのは、CI の macOS が、git の試験と並んで重かったため（実際の遅れではない）。
     // 時間切れの切り分け用に、区間ごとの所要（ms）を測り、失敗したときだけ出力する。
