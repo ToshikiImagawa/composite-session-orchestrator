@@ -27,8 +27,13 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { isAbsolute, join } from "node:path";
-import { createRelay } from "@cso/mcp/relay";
+import { basename, dirname, isAbsolute, join } from "node:path";
+import {
+  createIdentityVerifier,
+  createRelay,
+  IDENTITY_FILE,
+  type IdentityVerifier,
+} from "@cso/mcp/relay";
 import type { CommandResult } from "./commands.js";
 
 /** 引き出しの中のファイルの名前。 */
@@ -75,7 +80,66 @@ export interface ChildDeps {
   readonly uid?: number;
   /** 試験用: lstat で確かめたあと、開く前に呼ぶ（差し替えの試験）。 */
   readonly afterCheck?: (path: string) => void;
+  /**
+   * daemon の身元の検証を作る（既定は `createIdentityVerifier`。cso・cso-mcp と同じ仕組み）。秘密のファイルは、引き出しから
+   * 決まる `<stateDir>/daemon-identity`（引き出しは `<stateDir>/children.noindex/<鍵>`）。試験で差し替える。
+   */
+  readonly verifierFor?: (daemonUrl: string, identityPath: string) => IdentityVerifier;
 }
+
+/** 引き出しの置き場の名前（daemon の `children-dir.ts` の `CHILDREN_DIR` と同じ）。 */
+export const CHILDREN_DIR_NAME = "children.noindex";
+
+/** 引き出し `<stateDir>/children.noindex/<鍵>` から、daemon の身元の秘密のファイル。形が違えば undefined。 */
+export function identityPathOf(dir: string): string | undefined {
+  const parent = dirname(dir);
+  if (basename(parent) !== CHILDREN_DIR_NAME) return undefined;
+  return join(dirname(parent), IDENTITY_FILE);
+}
+
+/** 文面のコード・トークンを伏せ、制御文字を除き、長さを切る（daemon の失敗の文面を出す前）。 */
+function clean(text: string, secrets: readonly string[], max: number): string {
+  let t = text;
+  for (const s of secrets) if (s !== "") t = t.split(s).join("***");
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: 制御文字を取り除く
+  return t.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, max);
+}
+
+/** 身元を確かめる。失敗なら、送らずに返す結果。 */
+async function verifyDaemon(
+  dir: string,
+  origin: string,
+  deps: Pick<ChildDeps, "verifierFor" | "fetch">,
+): Promise<{ readonly verifier: IdentityVerifier } | CommandResult> {
+  const identityPath = identityPathOf(dir);
+  if (identityPath === undefined) {
+    return failed(
+      "dirInvalid",
+      1,
+      "引き出しの場所が、daemon の置き場（children.noindex）の中でない",
+    );
+  }
+  const verifier =
+    deps.verifierFor?.(origin, identityPath) ??
+    createIdentityVerifier({
+      daemonUrl: origin,
+      identityPath,
+      ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+    });
+  const v = await verifier.verify();
+  if (!v.ok) {
+    return failed(
+      "daemonIdentityFailed",
+      1,
+      "窓口の相手が、引き出しを作った daemon か確かめられない（コード・トークンは送っていない）",
+      "紐付けの文面の URL を、そのまま書く。daemon が動いているか、人に確かめてもらう",
+    );
+  }
+  return { verifier };
+}
+
+const ASK_HUMAN =
+  "報告できないので、会話で人（親）に、node.bindCode で紐付けの文面を出し直してもらうよう頼む";
 
 /** 失敗（標準出力は記号 1 行。理由と次の操作は標準エラー）。 */
 const failed = (
@@ -162,7 +226,15 @@ function readChecked(
   }
   try {
     const f = fstatSync(fd);
-    if (f.ino !== st.ino || f.dev !== st.dev || !f.isFile() || f.size > opts.max) {
+    if (
+      f.ino !== st.ino ||
+      f.dev !== st.dev ||
+      !f.isFile() ||
+      f.uid !== uid ||
+      f.nlink !== 1 ||
+      (f.mode & (opts.strict ? 0o077 : 0o022)) !== 0 ||
+      f.size > opts.max
+    ) {
       throw bad("ファイルが、確かめたあとに差し替えられた");
     }
     const buf = Buffer.alloc(opts.max + 1);
@@ -195,6 +267,13 @@ function writeAtomic(dir: string, name: string, content: string): void {
       closeSync(fd);
     }
     renameSync(tmp, join(dir, name));
+    // rename を確かに残す（ディレクトリの fsync）
+    const dfd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY);
+    try {
+      fsyncSync(dfd);
+    } finally {
+      closeSync(dfd);
+    }
   } catch (e) {
     try {
       unlinkSync(tmp);
@@ -289,18 +368,19 @@ async function bind(args: readonly string[], deps: ChildDeps): Promise<CommandRe
   let nodeId: string;
   try {
     checkDir(p.dir, uid);
-    try {
-      code = readChecked(codePath, { max: CODE_MAX, strict: false, name: "code" }, deps, uid);
-    } finally {
-      // 読めても読めなくても、送る前に消す（コードを残さない。一度きりなので、失敗したら出し直してもらう）
-      removeQuietly(codePath);
-    }
+    // 先に node（daemon が書いたもの）を確かめる。引き出しが daemon のものでなければ、code に触れない
     nodeId = readChecked(
       join(p.dir, CHILD_FILES.node),
       { max: NODE_MAX, strict: true, name: "node" },
       deps,
       uid,
     );
+    try {
+      code = readChecked(codePath, { max: CODE_MAX, strict: false, name: "code" }, deps, uid);
+    } finally {
+      // 読めても読めなくても、送る前に消す（コードを残さない。一度きりなので、失敗したら出し直してもらう）
+      removeQuietly(codePath);
+    }
   } catch (e) {
     if (e instanceof FileCheckError) {
       return failed(
@@ -319,6 +399,8 @@ async function bind(args: readonly string[], deps: ChildDeps): Promise<CommandRe
       "code のファイルが空",
       "親か人に、node.bindCode で紐付けの文面を出し直してもらう",
     );
+  const verified = await verifyDaemon(p.dir, origin, deps);
+  if (!("verifier" in verified)) return verified;
   const doFetch = deps.fetch ?? globalThis.fetch;
   let status: number;
   let body: unknown;
@@ -347,9 +429,15 @@ async function bind(args: readonly string[], deps: ChildDeps): Promise<CommandRe
     if (token.length > TOKEN_MAX || !TOKEN_FORMAT.test(token)) {
       return failed("bindUnknown", 1, "窓口の応答のトークンの形が不正", "親か人に知らせる");
     }
+    // 先に url、そのあと token を置く（token があれば url もある）。token を置けなければ url も消す
     try {
-      writeAtomic(p.dir, CHILD_FILES.token, token);
       writeAtomic(p.dir, CHILD_FILES.url, origin);
+      try {
+        writeAtomic(p.dir, CHILD_FILES.token, token);
+      } catch (e) {
+        removeQuietly(join(p.dir, CHILD_FILES.url));
+        throw e;
+      }
     } catch (e) {
       return failed(
         "tokenSaveFailed",
@@ -360,19 +448,26 @@ async function bind(args: readonly string[], deps: ChildDeps): Promise<CommandRe
     }
     return { exitCode: 0, stdout: "bound\n", stderr: "" };
   }
-  return daemonFailure(v.error, status === 429 ? "rateLimited" : "bindFailed");
+  const out = daemonFailure(v.error, status === 429 ? "rateLimited" : "bindFailed", [code]);
+  return out.stdout === "unauthenticated\n"
+    ? { ...out, stderr: `${out.stderr}${ASK_HUMAN}\n` }
+    : out;
 }
 
 /** daemon の失敗を、記号（標準出力）と、理由・次の操作（標準エラー）にする。トークンは含まれない（daemon の失敗の文面）。 */
-function daemonFailure(error: unknown, fallback: string): CommandResult {
+function daemonFailure(
+  error: unknown,
+  fallback: string,
+  secrets: readonly string[] = [],
+): CommandResult {
   const e = error as { code?: unknown; cause?: unknown; nextActions?: unknown } | undefined;
   const code =
     typeof e?.code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(e.code) ? e.code : fallback;
   const lines: string[] = [];
-  if (typeof e?.cause === "string") lines.push(e.cause.slice(0, 2000));
+  if (typeof e?.cause === "string") lines.push(clean(e.cause, secrets, 500));
   if (Array.isArray(e?.nextActions)) {
-    for (const a of e.nextActions.slice(0, 10))
-      if (typeof a === "string") lines.push(`次の操作: ${a.slice(0, 500)}`);
+    for (const a of e.nextActions.slice(0, 5))
+      if (typeof a === "string") lines.push(`次の操作: ${clean(a, secrets, 300)}`);
   }
   return failed(code, 1, ...lines);
 }
@@ -446,9 +541,26 @@ async function report(args: readonly string[], deps: ChildDeps): Promise<Command
       return usage("本文（標準入力）は、操作の params の JSON のオブジェクトにする");
     }
   }
+  // 身元の検証は、relay が、トークンつきの要求を送る直前に毎回行う（失敗したら送らない）
+  const identityPath = identityPathOf(p.dir);
+  if (identityPath === undefined) {
+    return failed(
+      "dirInvalid",
+      1,
+      "引き出しの場所が、daemon の置き場（children.noindex）の中でない",
+    );
+  }
+  const verifier =
+    deps.verifierFor?.(origin, identityPath) ??
+    createIdentityVerifier({
+      daemonUrl: origin,
+      identityPath,
+      ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+    });
   const relay = createRelay({
     daemonUrl: origin,
     token,
+    verifier,
     ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
   });
   if (!relay.ok) return redact(daemonFailure(relay.error, "invalidConfig"), token);
@@ -478,8 +590,17 @@ async function report(args: readonly string[], deps: ChildDeps): Promise<Command
       token,
     );
   }
-  const out = daemonFailure(r.error, "reportFailed");
-  return redact({ ...out, stderr: `${out.stderr}${rerun}\n` }, token);
+  if (r.error.code === "daemon_identity_failed") {
+    return failed(
+      "daemonIdentityFailed",
+      1,
+      "窓口の相手が、引き出しを作った daemon か確かめられない（トークンは送っていない）",
+      "紐付けの文面の URL を、そのまま書く。daemon が動いているか、人に確かめてもらう",
+    );
+  }
+  const out = daemonFailure(r.error, "reportFailed", [token]);
+  const tail = r.error.code === "unauthenticated" ? `${ASK_HUMAN}\n` : `${rerun}\n`;
+  return redact({ ...out, stderr: `${out.stderr}${tail}` }, token);
 }
 
 /** 出力の中のトークンの値を `***` に置き換える（出す直前。念のため）。 */

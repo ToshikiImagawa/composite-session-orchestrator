@@ -57,6 +57,25 @@ export interface ProtectedPaths {
    * ほかのノードの引き出しは、禁じる場所のまま。
    */
   readonly drawer?: string | undefined;
+  /**
+   * `cso` を起動する語（設定 `csoCommand` を語に分けたもの。例: `["node", "/opt/cso/bin.js"]`）。`drawer` の例外は、区切りの先頭の
+   * 語がこれと一致し、続く 2 語が `child` と `bind`・`report` のときだけ効く。なければ、先頭の語が `cso`（または末尾が `/cso`）のとき。
+   */
+  readonly csoCommand?: readonly string[] | undefined;
+}
+
+/** 区切りの語が `cso child bind|report …` か（`csoCommand` と一致する先頭・`child`・`bind|report`）。 */
+function isCsoChildCommand(words: readonly string[], p: ProtectedPaths): boolean {
+  const head =
+    p.csoCommand !== undefined && p.csoCommand.length > 0
+      ? p.csoCommand
+      : words[0] === "cso" || (words[0]?.endsWith("/cso") ?? false)
+        ? [words[0] as string]
+        : undefined;
+  if (head === undefined || words.length < head.length + 2) return false;
+  if (head.some((w, i) => words[i] !== w)) return false;
+  const sub = words[head.length + 1];
+  return words[head.length] === "child" && (sub === "bind" || sub === "report");
 }
 
 /** 引き出しの中で、子が Write で書いてよいファイル（紐付けのコード）。 */
@@ -249,13 +268,17 @@ async function checkBash(
   for (const words of segs) {
     const name = words[0];
     if (name === "popd") return "unresolvable";
-    // `cso child bind|report --dir <自分の引き出し>` の値だけは、禁じる場所の判定から外す（T21-cc）
-    const childCommand =
-      p.drawer !== undefined &&
-      words.includes("child") &&
-      (words.includes("bind") || words.includes("report"));
+    // `cso child bind|report --dir <自分の引き出し>` の値だけは、禁じる場所の判定から外す（T21-cc）。この命令の --dir は、
+    // 自分の引き出しそのものでなければ拒否する。`--dir=値` の形も拒否する（値を別の語にする）
+    const childCommand = isCsoChildCommand(words, p);
     for (const [i, w] of words.entries()) {
-      if (childCommand && words[i - 1] === "--dir" && (await isDrawer(w, p, resolve))) continue;
+      if (childCommand) {
+        if (w.startsWith("--dir=")) return "unresolvable";
+        if (words[i - 1] === "--dir") {
+          if (await isDrawer(w, p, resolve)) continue;
+          return "unresolvable";
+        }
+      }
       if (pathLike(w)) {
         const k = await checkProtectedPath(w, cwds, p, resolve, true);
         if (k !== undefined) return k;

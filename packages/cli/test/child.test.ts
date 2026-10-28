@@ -26,12 +26,15 @@ const TOKEN = "child-token-0123456789abcdef0123456789";
 const made: string[] = [];
 afterEach(() => {
   for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
+  verified.length = 0;
+  identityOk = true;
 });
 /** daemon が作った形の引き出し（0700・node のファイル 0600）。 */
 const drawer = (): string => {
   const base = mkdtempSync(join(tmpdir(), "cso-child-"));
   made.push(base);
-  const d = join(base, "k");
+  mkdirSync(join(base, "children.noindex"), { mode: 0o700 });
+  const d = join(base, "children.noindex", "k");
   mkdirSync(d, { mode: 0o700 });
   chmodSync(d, 0o700);
   writeFileSync(join(d, CHILD_FILES.node), "node-a\n", { mode: 0o600 });
@@ -70,15 +73,30 @@ const daemon = (
       : (over.request?.(body) ?? { status: 200, json: { ok: true, value: { accepted: true } } });
     return new Response(JSON.stringify(r.json), {
       status: r.status,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-cso-daemon-id": "d" },
     });
   }) as typeof globalThis.fetch;
   return { fetch, sent };
 };
+/** 身元の検証の偽物（既定は成功。どの秘密のファイルで確かめたかを残す）。 */
+const verified: string[] = [];
+let identityOk = true;
 const deps = (fetch: typeof globalThis.fetch, stdin = "") => ({
   readStdin: async () => stdin,
   newRequestId: () => "rid-1",
   fetch,
+  verifierFor: (_url: string, identityPath: string) => ({
+    verify: async () => {
+      verified.push(identityPath);
+      return identityOk
+        ? { ok: true as const, daemonId: "d" }
+        : {
+            ok: false as const,
+            kind: "identity" as const,
+            failure: { code: "daemon_identity_failed", cause: "x", nextActions: ["y"] as [string] },
+          };
+    },
+  }),
 });
 const mode = (p: string) => lstatSync(p).mode & 0o777;
 const all = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
@@ -224,7 +242,7 @@ describe("cso child bind（T21-cc）", () => {
     expect((await runChild(["bind", "--dir", d, "--url", URL], deps(fake.fetch))).stdout).toBe(
       "nodeInvalid\n",
     );
-    expect(existsSync(join(d, CHILD_FILES.code))).toBe(false); // コードは消す
+    expect(existsSync(join(d, CHILD_FILES.code))).toBe(true); // node を先に確かめるので、code に触れない（R3）
   });
 
   it("--url はループバックの窓口だけ（パス・ユーザー名・ほかのホストは拒否）", async () => {
@@ -398,6 +416,129 @@ describe("cso child report（T21-cc）", () => {
       isTTY: { stdin: false, stdout: false },
       fetch: fake.fetch,
     });
-    expect(r.stdout).toBe("bound\n");
+    // 環境変数なしで、身元の確認まで進む（本物の検証は、daemon-identity がないので失敗する。送らない）
+    expect(r.stdout).toBe("daemonIdentityFailed\n");
+    expect(fake.sent).toHaveLength(0);
+  });
+});
+
+describe("cso child（レビューの指摘。T21-cc）", () => {
+  const bound = () => {
+    const d = drawer();
+    writeFileSync(join(d, CHILD_FILES.token), `${TOKEN}\n`, { mode: 0o600 });
+    writeFileSync(join(d, CHILD_FILES.url), `${URL}\n`, { mode: 0o600 });
+    return d;
+  };
+
+  it("R2: bind・report の前に、引き出しから決まる <stateDir>/daemon-identity で daemon の身元を確かめる。失敗なら送らない", async () => {
+    const d = drawer();
+    writeCode(d);
+    const fake = daemon();
+    identityOk = false;
+    const r = await runChild(["bind", "--dir", d, "--url", URL], deps(fake.fetch));
+    expect(r.stdout).toBe("daemonIdentityFailed\n");
+    expect(verified).toEqual([join(d, "..", "..", "daemon-identity")]);
+    expect(fake.sent).toHaveLength(0);
+    expect(existsSync(join(d, CHILD_FILES.code))).toBe(false); // コードは消している
+    const b = bound();
+    const r2 = await runChild(
+      ["report", "--dir", b, "--url", URL, "progress"],
+      deps(fake.fetch, "x"),
+    );
+    expect(r2.stdout).toBe("daemonIdentityFailed\n");
+    expect(fake.sent).toHaveLength(0);
+    expect(all(r2)).not.toContain(TOKEN);
+  });
+
+  it("R2: 引き出しが children.noindex の中でなければ、送らない", async () => {
+    const base = mkdtempSync(join(tmpdir(), "cso-child-"));
+    made.push(base);
+    const d = join(base, "k");
+    mkdirSync(d, { mode: 0o700 });
+    chmodSync(d, 0o700);
+    writeFileSync(join(d, CHILD_FILES.node), "node-a\n", { mode: 0o600 });
+    writeCode(d);
+    const fake = daemon();
+    expect((await runChild(["bind", "--dir", d, "--url", URL], deps(fake.fetch))).stdout).toBe(
+      "dirInvalid\n",
+    );
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  it("R3: node を確かめてから code を読む（node が不正なら code に触れない）", async () => {
+    const d = drawer();
+    writeCode(d);
+    chmodSync(join(d, CHILD_FILES.node), 0o644);
+    const fake = daemon();
+    expect((await runChild(["bind", "--dir", d, "--url", URL], deps(fake.fetch))).stdout).toBe(
+      "nodeInvalid\n",
+    );
+    expect(existsSync(join(d, CHILD_FILES.code))).toBe(true);
+  });
+
+  it("R3: 先に url、そのあと token を置く。token を置けなければ url も消す", async () => {
+    const d = drawer();
+    writeCode(d);
+    mkdirSync(join(d, CHILD_FILES.token)); // rename が失敗する
+    const fake = daemon();
+    const r = await runChild(["bind", "--dir", d, "--url", URL], deps(fake.fetch));
+    expect(r.stdout).toBe("tokenSaveFailed\n");
+    expect(existsSync(join(d, CHILD_FILES.url))).toBe(false);
+    expect(readdirSync(d).filter((x) => x.includes(".tmp-"))).toEqual([]);
+  });
+
+  it("R4: --url の正規化の差: 127.1 は 127.0.0.1 と同じ窓口。[::ffff:127.0.0.1]・localhost. は拒否", async () => {
+    const fake = daemon();
+    for (const url of ["http://[::ffff:127.0.0.1]:7777", "http://localhost.:7777"]) {
+      const d = drawer();
+      writeCode(d);
+      expect(
+        (await runChild(["bind", "--dir", d, "--url", url], deps(fake.fetch))).exitCode,
+        url,
+      ).toBe(2);
+    }
+    expect(fake.sent).toHaveLength(0);
+    const b = bound();
+    const r = await runChild(
+      ["report", "--dir", b, "--url", "http://127.1:7777", "progress"],
+      deps(fake.fetch, "x"),
+    );
+    expect(r.exitCode).toBe(0);
+    expect(fake.sent[0]?.url.startsWith("http://127.0.0.1:7777/")).toBe(true);
+  });
+
+  it("N2: bind の失敗の文面は、コードを伏せ、制御文字を除き、長さを切る。N4: unauthenticated は、人に頼む案内を出す", async () => {
+    const d = drawer();
+    writeCode(d);
+    const fake = daemon({
+      bind: () => ({
+        status: 401,
+        json: {
+          ok: false,
+          error: {
+            code: "unauthenticated",
+            cause: `コード ${CODE} は無効\u001b[31m${"x".repeat(2000)}`,
+            nextActions: ["a"],
+          },
+        },
+      }),
+    });
+    const r = await runChild(["bind", "--dir", d, "--url", URL], deps(fake.fetch));
+    expect(r.stderr).not.toContain(CODE);
+    expect(r.stderr).not.toContain("\u001b");
+    expect(r.stderr.length).toBeLessThan(1500);
+    expect(r.stderr).toContain("会話で人");
+    const b = bound();
+    const f2 = daemon({
+      request: () => ({
+        status: 401,
+        json: { ok: false, error: { code: "unauthenticated", cause: "x", nextActions: ["y"] } },
+      }),
+    });
+    const r2 = await runChild(
+      ["report", "--dir", b, "--url", URL, "progress"],
+      deps(f2.fetch, "x"),
+    );
+    expect(r2.stderr).toContain("会話で人");
   });
 });
