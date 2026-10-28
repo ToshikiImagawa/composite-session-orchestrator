@@ -264,7 +264,13 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 - daemon を Claude のセッションから「出力を `daemon.log` に回す形」で起動すると、端末がないので、取り消せない操作の確認（#123）は `confirmationUnavailable` になる。人の端末で起動する。
 - `worktreeRoot` のディレクトリは、先に作っておかないと `invalidConfig` になる。
 
-### V2 の再確認（T21-ce のあと）: CLI の子の引数に Bearer が出ないこと
+### R4: 大文字小文字の違う綴りの実パス（T21-pr。2026-10-28、macOS）
+
+- **観察（事実）**: `fs/promises` の `realpath` に、小文字で `/users/<自分>` を渡すと、`/Users/<自分>` が返った（正規の綴りにそろえて返す）。
+- **扱い**: 禁じる場所の判定は実パスで行うので、大文字小文字の違う綴りでも、正規の綴りで比べられる。比べる前に NFC と小文字にそろえる仕組み（`hook-policy.ts`・起動時の重なりの検査）は、念押しとして残す。
+- **未確認**: Unicode の正規化（NFD/NFC）の違う綴りを渡したときの、`realpath` の返し方。
+
+: CLI の子の引数に Bearer が出ないこと
 
 - **前提**: T21-ce を入れた daemon（`childRuntime: "cli"`）。人の端末で起動する。
 - **手順**:
