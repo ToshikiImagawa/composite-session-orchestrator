@@ -32,7 +32,14 @@ import {
   summarize,
   waitRequestKey,
 } from "./api/handlers/context.js";
+import {
+  EXTERNAL_CHECK_SUMMARY,
+  openExternalChecks,
+  resolveExternalCheckBodies,
+} from "./external-check.js";
 import type { ProcessProbe } from "./sdk/lsof-probe.js";
+
+export { EXTERNAL_CHECK_SUMMARY };
 
 export interface ReconcileDeps {
   readonly log: LogPort;
@@ -49,7 +56,7 @@ export interface ReconcileDeps {
   readonly has?: (nodeId: string) => boolean;
   /**
    * daemon の外で動く子（Desktop の子。T21）か。真のノードは、プロセスで照合せず（作業ツリーのプロセスでは確かめられない）、
-   * 状態を変えずに、根の受信箱に、人に確かめてもらう項目（stopIncomplete の帯）を、まとめて 1 件出す（未解決の同じ依頼があれば、出さない）。
+   * 状態を変えずに、根の受信箱に、人に確かめてもらう項目（stopIncomplete の帯）を、まとめて 1 件出す（未解決の古い依頼は、置き換える。`external-check.ts`）。
    */
   readonly external?: (nodeId: string) => boolean;
   readonly onFailure?: (nodeId: string, cause: string) => void;
@@ -63,24 +70,6 @@ export interface ReconcileOutcome {
 
 const TARGETS = new Set(["running", "waiting", "stopping", "stopIncomplete"]);
 
-/**
- * daemon の外で動く子（Desktop）を、再起動のあとに人に確かめてもらう依頼の文面（固定。重複の判定にも使う）。
- * 詳しい手順は `docs/desktop-runtime.md` の「根の受信箱の 1 件で、人に確かめてもらうこと」。
- */
-export const EXTERNAL_CHECK_SUMMARY =
-  "daemon 再起動後: 子は止まったと決めつけず、Desktop で子ごとに確かめ、アーカイブし、止まりを確かめて宣言（desktop-runtime.md）";
-
-/**
- * 前の版の文面（記録に残っている未解決の依頼も、同じ依頼として数える。重複して出さない）。
- * 固定文を変えるときは、その時点の文面をここに足す（記録に未解決の依頼が残るため）。
- */
-const LEGACY_EXTERNAL_CHECK_SUMMARIES: readonly string[] = [
-  "daemon の再起動のあと、Desktop の子の状態は daemon から確かめられない。Desktop で確かめ、止まっていれば停止して止めたと宣言する（仮置き）",
-];
-const isExternalCheck = (summary: string | undefined): boolean =>
-  summary !== undefined &&
-  [EXTERNAL_CHECK_SUMMARY, ...LEGACY_EXTERNAL_CHECK_SUMMARIES].some((s) => summary.startsWith(s));
-
 export async function reconcileOnStartup(deps: ReconcileDeps): Promise<ReconcileOutcome[]> {
   const { log } = deps;
   const start: OrchState = log.state();
@@ -91,16 +80,20 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
   );
   const nodes = candidates.filter((n) => deps.external?.(n.id) !== true);
   // daemon の外で動く子（Desktop）は、まとめて 1 件だけ、根の受信箱に出す（停止の代行依頼と同じ stopIncomplete の帯。見逃さない）。
-  // 未解決の同じ依頼があれば、出さない（再起動を繰り返しても、増えない）。
+  // 再起動を繰り返しても、未解決の依頼は 1 件のまま（置き換える）。
   const external = candidates.filter((n) => deps.external?.(n.id) === true);
   const root = start.nodes.find((n) => n.parentId === null);
-  const pending = start.inbox.some((i) => i.resolved === undefined && isExternalCheck(i.summary));
-  if (external.length > 0 && root !== undefined && !pending) {
+  // 未解決の古い依頼（前の版の文面を含む）は、置き換える: 解決済みにして、今の対象の子で新しい依頼を出す（未解決は常に 1 件まで）。
+  // 対象の子がいなければ、古い依頼を解決済みにするだけ。同じプロセスで照合を走らせ直すと、置き換えがもう一度起きる（害はない:
+  // 未解決は 1 件のまま）。
+  const stale = openExternalChecks(start);
+  if ((external.length > 0 && root !== undefined) || stale.length > 0) {
     const key = `reconcile-external-${run}`;
     const shown = external.slice(0, 5).map((n) => n.id);
     const more = external.length > shown.length ? ` ほか ${external.length - shown.length} 件` : "";
-    const r = appendAtomically(log, deps.clock, key, { system: true }, [
-      {
+    const bodies: EventBody[] = [...resolveExternalCheckBodies(stale)];
+    if (external.length > 0 && root !== undefined) {
+      bodies.push({
         type: "inbox.added",
         payload: {
           id: deriveId("inbox", "system", key, "external"),
@@ -110,9 +103,14 @@ export async function reconcileOnStartup(deps: ReconcileDeps): Promise<Reconcile
             `${EXTERNAL_CHECK_SUMMARY}（${external.length} 件: ${shown.join("、")}${more}）`,
           ),
         },
-      },
-    ]);
-    if (!r.ok) deps.onFailure?.(root.id, `確かめる依頼を記録できない: ${r.error.cause}`);
+      });
+    }
+    const r = appendAtomically(log, deps.clock, key, { system: true }, bodies);
+    if (!r.ok)
+      deps.onFailure?.(
+        root?.id ?? "（根なし）",
+        `確かめる依頼を記録できない${root === undefined ? "（根のノードが記録にない）" : ""}: ${r.error.cause}`,
+      );
   }
   // 置き場全体を 1 回だけ調べて共有する（調べられなければ null。全ノードを安全側にする）。
   let shared: readonly ProcessInfo[] | null | undefined;

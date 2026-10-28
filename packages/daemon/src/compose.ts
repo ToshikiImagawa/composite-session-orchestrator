@@ -75,6 +75,7 @@ import type { DaemonConfig } from "./config.js";
 import { createDigestIssuer } from "./digest-issuer.js";
 import { ownedBy } from "./discarded-keys.js";
 import { EventLog } from "./eventlog.js";
+import { withExternalCheckResolution } from "./external-check.js";
 import type { GitPorts, LossFacts } from "./git-ports.js";
 import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
@@ -490,11 +491,25 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         }),
   });
 
+  // Desktop の子（daemon の外で動く子）か。起動時の照合と、根の「daemon 再起動後」の依頼の解決で、同じ判定を使う（T21・C2-4）。
+  const isExternal: ((nodeId: string) => boolean) | undefined =
+    config.childRuntime === "desktop" ? () => true : undefined;
+  // Desktop の子のときは、追記が成功したあとに、動いているかもしれない子がいなくなっていれば、根の依頼を解決済みにする
+  // （操作のハンドラと、Desktop のアダプタの記録口に使う。`external-check.ts`）。
+  const resolvingLog =
+    isExternal === undefined
+      ? log
+      : withExternalCheckResolution(log, isExternal, (cause) =>
+          note("externalCheckFailure", { cause }),
+        );
   // Desktop の子（設定 childRuntime が desktop。T21・仮置き）。木全体で 1 つのアダプタ。フックのゲート（T20）は既定で有効。
   const desktopAdapter =
     config.childRuntime === "desktop"
       ? new DesktopRuntimeAdapter({
-          sink: { record: (r) => log.append(r), recordAll: (rs) => log.appendAll(rs) },
+          sink: {
+            record: (r) => resolvingLog.append(r),
+            recordAll: (rs) => resolvingLog.appendAll(rs),
+          },
           requireVerifiedHooks: config.desktopRequireVerifiedHooks ?? true,
           onWarning: (nodeId, text) => note("desktopHooksGateDisabled", { nodeId, text }),
         })
@@ -561,7 +576,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     tick: schedule,
     close: closeScheduler,
   } = createHandlersWithScheduler(
-    { log, clock },
+    {
+      // Desktop の子のときは、根の「daemon 再起動後」の依頼を、状態が変わったあとに判断する（上の resolvingLog）。
+      log: resolvingLog,
+      clock,
+    },
     {
       adapterFor: () => adapter,
       managed: (id) => adapter.has(id),
@@ -755,7 +774,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           worktreeRoot: config.worktreeRoot,
           has: (id) => adapter.has(id),
           // Desktop の子は、daemon の外で動くので、プロセスで照合せず、受信箱で人に確かめてもらう（T21）。
-          ...(desktopAdapter === undefined ? {} : { external: () => true }),
+          ...(isExternal === undefined ? {} : { external: isExternal }),
           onFailure: (nodeId, cause) => note("reconcileFailure", { nodeId, cause }),
         });
         for (const o of outcomes) note("reconciled", { ...o });
