@@ -331,6 +331,46 @@ export interface OperationMap {
   };
   /** 保留の解除（人間のみ。冪等）。解除後は、保持期間と予告の条件を、改めて満たすまで消えない（予告から出し直す）。 */
   "node.purgeRelease": { params: { nodeId: string }; result: { released: true } };
+  /**
+   * 確認待ちの操作を実行する（人間のみ。T24-cf）。Desktop の木では、取り消せない操作（`CONFIRMABLE_OPERATIONS`）を人間のトークンで
+   * 呼んでも実行せず、確認待ちにする（失敗の記号 `confirmationRequired`）。daemon の制御端末（/dev/tty）にだけ出した
+   * `code` を打つと、元の要求を 1 回だけ実行し、その結果を `result` に入れて返す。
+   */
+  "confirm.approve": {
+    params: { confirmationId: string; code: string };
+    result: {
+      executed: true;
+      operation: ConfirmableOperation;
+      result: Readonly<Record<string, unknown>>;
+    };
+  };
+  /** 確認待ちを捨てる（人間のみ。T24-cf）。 */
+  "confirm.cancel": { params: { confirmationId: string }; result: { cancelled: true } };
+}
+
+/**
+ * Desktop の木で、画面での確認（端末に出たコード）がないと実行しない操作（T24-cf）。どれも取り消せない
+ * （木を消す・保管した成果を消す・成果を捨てる判断）。
+ */
+export const CONFIRMABLE_OPERATIONS = [
+  "node.purge",
+  "node.discardedDrop",
+  "node.reclaimInstruct",
+] as const;
+export type ConfirmableOperation = (typeof CONFIRMABLE_OPERATIONS)[number];
+
+/** 画面に出す確認待ち（T24-cf）。コードは含めない。 */
+export interface PendingConfirmation {
+  readonly confirmationId: string;
+  /** 端末の行と見比べるための、確認の番号の先頭。 */
+  readonly shortId: string;
+  readonly operation: ConfirmableOperation;
+  /** 対象（`nodeId` か `target`）。 */
+  readonly target: string;
+  /** ISO 8601 UTC。 */
+  readonly expiresAt: string;
+  /** 残りの試行回数。 */
+  readonly attemptsLeft: number;
 }
 
 export type DaemonOperation = keyof OperationMap;
@@ -389,6 +429,8 @@ export const ROLE_OPERATIONS = {
     "node.discardedList",
     "node.discardedRestore",
     "node.discardedDrop",
+    "confirm.approve",
+    "confirm.cancel",
   ],
 } as const satisfies Record<ContractRole, readonly DaemonOperation[]>;
 

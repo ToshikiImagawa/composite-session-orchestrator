@@ -119,6 +119,7 @@ depends-on: ["design-initial-spec-design"]
 | T21-ec | daemon: 根の「daemon 再起動後」の依頼が、対象の子を片付けても残る件（手動確認 C2-4）を直す。(A) 操作で状態が変わったあと・起動時の照合で、記録で動作中・判断待ち・停止中・停止未完了の子が 1 つもなければ、未解決の依頼を system が解決済みにする。(C) 起動時の照合で、未解決の古い依頼（前の版の文面を含む）を置き換える（未解決は常に 1 件まで）。記録の形は変えない（STATE_VERSION は不変） | あり（`external-check.test.ts`・`reconcile.test.ts`・`compose.test.ts`） | T21 | 完了（本 PR）。`docs/desktop-runtime.md` | NFR_002 |
 | T21-ec2 | daemon: `pause-handlers.ts`・`spawn-handlers.ts` が、停止の要求を追記したあとの `log.state().lastSeq` を停止の要求の seq として使っている所を、追記の結果の seq を使う形に直す（T21-ec の包み〔追記のあとの解決〕が、停止の追記のあとに記録を足しうるようになったときに、seq がずれないように。今は停止中のままで解決が起きないので、ずれない） | 要 | T21-ec | 未着手（起票のみ） | NFR_002 |
 | T21-port | daemon: 窓口のポートが再起動のたびに変わる件（手動確認 C2 の課題 3）を直す。`--port`（起動オプション）→ 設定の `port`（0 以外）→ stateDir の `port`（0600。前回のポート）→ 空いているポート（保存する）の順で決める。保存したポートが使われていれば、別のポートに移らず、理由と直し方を出して起動しない。起動の記録に `portSource` | あり（`main.test.ts`・`compose.test.ts`） | T21 | 完了（本 PR）。`docs/plugin.md`・`docs/desktop-runtime.md` | NFR_002 |
+| T24-cf | daemon・画面: Desktop の木（`childRuntime: "desktop"`）で、取り消せない操作（`node.purge`・`node.discardedDrop`・`node.reclaimInstruct`）を、人間のトークンだけでは実行しない。確認待ちにして、daemon の端末（標準エラー）にだけ短いコードを出し、画面（`/ui`）のいちばん上の欄で打つと 1 回だけ実行（`confirm.approve`・`confirm.cancel`。人間のみ）。コードはハッシュだけ・一度きり・期限 5 分・5 回まで。確認待ちはメモリだけ（再起動で消える）。`decision.answer` は対象外（破棄の経路がない）。コードは制御端末（`/dev/tty`）にだけ書き、開けなければ失敗（フェイルクローズ）。守れないもの（tmux・AppleScript・画面収録、daemon の起動し直し、嫌がらせ）と、根本の対策 (a) は `docs/desktop-runtime.md`。残り（計画）: 画面から送った確認待ちと、そうでないもの（cli・子）を見分けて表示する | なし | T21 | 完了（本 PR） | FR_014・NFR_012 |
 
 ## 実装前に決める未解決事項（設計 9.2 より）
 

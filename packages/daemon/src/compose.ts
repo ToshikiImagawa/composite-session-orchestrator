@@ -14,12 +14,15 @@
 
 import { randomBytes } from "node:crypto";
 import {
+  closeSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
@@ -31,6 +34,7 @@ import {
   isPathUnder,
   type Result,
 } from "@cso/core";
+import { createConfirmationGate } from "./api/confirmation-gate.js";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import { recoverAnswerDeliveries } from "./api/handlers/answer-delivery.js";
 import { createBindHandlers } from "./api/handlers/bind-handlers.js";
@@ -64,6 +68,7 @@ import {
   type SummaryScheduler,
   type WorktreeFacts,
 } from "./api/index.js";
+import type { Handlers } from "./api/server.js";
 import {
   ALERT_ID_PREFIX,
   createApiAlert,
@@ -154,6 +159,11 @@ export interface DaemonDeps {
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
+  /**
+   * 取り消せない操作の確認コードを書く先（T24-cf。Desktop の木だけ）。既定は制御端末（/dev/tty）。標準エラー（構造化のログ）・
+   * 記録・ファイルには書かない。書けなければ例外を投げる（確認待ちを作らない。試験で差し替える）。
+   */
+  readonly confirmationOut?: (line: string) => void;
   /**
    * 最終削除の後に、イベントログの追記のみの保証を確かめられなかったとき（以降の書き込みは拒否される）に呼ぶ。
    * 呼び出し側は daemon を止める（fail closed）。記録（`fatal`）は、これとは別に残す。
@@ -286,6 +296,19 @@ export function apiLimitsOf(
     ...(config.inProgress === undefined ? {} : { inProgress: config.inProgress }),
   };
 }
+
+/**
+ * 確認のコードを、制御端末（/dev/tty）に直接書く（T24-cf）。標準エラー（構造化のログ）に書くと、`2> file` でファイルに残るため。
+ * 開けない（端末なしで動いている）ときは例外（確認待ちを作らない）。
+ */
+const writeControllingTerminal = (line: string): void => {
+  const fd = openSync("/dev/tty", "w");
+  try {
+    writeSync(fd, `${line}\n`);
+  } finally {
+    closeSync(fd);
+  }
+};
 
 export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Daemon, Failure> {
   const clock = deps.clock ?? (() => new Date().toISOString());
@@ -707,6 +730,17 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     apiAlert?.(e);
   };
   const bind: BindCodes = createBindCodes();
+  // 取り消せない操作の確認（T24-cf）。Desktop の木だけ（子が人間のトークンを読めてしまうため）。CLI の子だけの木は今までどおり。
+  const confirmGate =
+    desktopAdapter === undefined
+      ? undefined
+      : createConfirmationGate({
+          log,
+          clock,
+          writeTerminal: deps.confirmationOut ?? writeControllingTerminal,
+        });
+  const wrapConfirm = (h: Handlers): Handlers =>
+    confirmGate === undefined ? h : confirmGate.wrap(h);
   const identityPath = join(config.stateDir, IDENTITY_FILE);
   let currentIdentity: Identity | undefined;
   const server = createApiServer({
@@ -727,7 +761,13 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     // 画面の停止の宣言（T22d）。ハンドラ（node.confirmStopped）と同じく、能力表の stopDelegated だけで決める（管理しているか
     // は見ない。再起動の後も出す）。childRuntime が desktop のとき、Desktop のアダプタの能力表から真になる（T21）。
     stopDelegated: stopDelegatedOf(adapter),
-    handlers: {
+    ...(confirmGate === undefined
+      ? {}
+      : {
+          confirmations: () => confirmGate.pending(),
+          confirmationsVersion: () => confirmGate.version(),
+        }),
+    handlers: wrapConfirm({
       ...handlers,
       // フックの結び付けを外す（人間・祖先の統合ノード。T22-hu）。
       ...createHookHandlers({
@@ -763,7 +803,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
             },
             audit: (event, data) => note(`discarded.${event}`, data),
           })),
-    },
+    }),
     logger,
     bind,
     clock,
