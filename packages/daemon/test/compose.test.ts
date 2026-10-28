@@ -34,7 +34,7 @@ import type { DaemonConfig } from "../src/config.js";
 import { EventLog } from "../src/eventlog.js";
 import { EXTERNAL_CHECK_SUMMARY } from "../src/external-check.js";
 import { openSqliteStore } from "../src/sqlite-store.js";
-import { FakeLauncher } from "./sdk/fakes.js";
+import { FakeLauncher, type FakeSession } from "./sdk/fakes.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -726,6 +726,167 @@ describe("createDaemon（起動時のトークンの掃除）", () => {
     await boot(r);
     expect(repo.load().map((x) => x.nodeId)).not.toContain("ghost");
     expect(r.logs.join("\n")).toContain("orphanTokenRevoked");
+  });
+
+  /** 根から CLI の子を 1 つ起動し、そのノード ID と、子の MCP のトークン（子の環境変数）を返す。 */
+  const spawnChild = async (d: Awaited<ReturnType<typeof boot>>, r: ReturnType<typeof rig>) => {
+    const spawn = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      objective: "x",
+      acceptanceCriteria: ["x"],
+      scope: { writableLocations: ["src"], forbiddenLocations: [".git"], allowedCommands: [] },
+    });
+    expect(spawn.json.ok, JSON.stringify(spawn.json)).toBe(true);
+    const session = r.launcher.sessions[r.launcher.sessions.length - 1];
+    return {
+      nodeId: spawn.json.value.nodeId as string,
+      token: session?.options.env.CSO_MCP_TOKEN ?? "",
+    };
+  };
+
+  it("期限の切れたトークン（T21-te）: 401 tokenExpired。受信箱への知らせは、動いている子について同じトークンで 1 回だけ。根は切れない", async () => {
+    let mono = 0;
+    const r = rig();
+    const d = await boot({ ...r, deps: { ...r.deps, monoMs: () => mono } });
+    const c = await spawnChild(d, r);
+    expect(c.token).not.toBe("");
+    expect((await call(d.url, c.token, "node.get", { nodeId: c.nodeId })).status).not.toBe(401);
+    mono += 6 * 3_600_000; // 最後に使ってから 6 時間（CLI の子の既定）
+    for (let i = 0; i < 2; i++) {
+      const res = await call(d.url, c.token, "node.get", { nodeId: c.nodeId });
+      expect(res.status).toBe(401);
+      expect(res.json.error?.code).toBe("tokenExpired");
+    }
+    const notices = d.daemon.log
+      .state()
+      .inbox.filter((x) => x.nodeId === c.nodeId && x.summary?.includes("期限"));
+    expect(notices).toHaveLength(1);
+    expect(r.logs.join("\n")).not.toContain(c.token);
+    expect((await call(d.url, d.rootToken, "node.get", { nodeId: c.nodeId })).status).not.toBe(401);
+  });
+
+  /** 再開できる rig（作業ツリーの場所を返す。既定の rig は返さない）。 */
+  const resumable = () => {
+    const r = rig();
+    const worktree = {
+      ...r.deps.worktree,
+      cwdOf: async (id: string) => join(r.config.worktreeRoot, id),
+    };
+    return { ...r, deps: { ...r.deps, worktree } };
+  };
+
+  /** 根の判断で子を止める（pauseNodeIds）。判断の ID を返す。 */
+  const pauseChild = async (
+    d: Awaited<ReturnType<typeof boot>>,
+    nodeId: string,
+    sessions: readonly FakeSession[],
+  ) => {
+    const p = await call(d.url, d.rootToken, "decision.present", {
+      question: "どちらにする？",
+      options: ["a", "b"],
+      pauseNodeIds: [nodeId],
+    });
+    expect(p.json.ok, JSON.stringify(p.json)).toBe(true);
+    await vi.waitFor(() => {
+      // 子のセッションを終わらせる（偽の子は、止める要求のあと、自分では終わらない）
+      for (const x of sessions) x.emitResult();
+      expect(d.daemon.log.state().nodes.find((n) => n.id === nodeId)?.state).toBe("stopped");
+    });
+    return p.json.value.decisionId as string;
+  };
+
+  it("再開（T21-te M1）: 新しいトークンの発行から running までのあいだに、別のコミットと見回りが走っても、新しいトークンは生きていて、running のあとに報告が通る。止まる前のトークンは 401", async () => {
+    const r = resumable();
+    const d = await boot(r);
+    const c = await spawnChild(d, r);
+    const decisionId = await pauseChild(d, c.nodeId, r.launcher.sessions);
+    expect((await call(d.url, c.token, "report.progress", { text: "x" })).json.error?.code).toBe(
+      "tokenExpired",
+    );
+    r.launcher.autoInit = false; // 起動を init で止め、running を記録する前のあいだを作る
+    const before = r.launcher.sessions.length;
+    const answering = call(d.url, d.humanToken, "decision.answer", { decisionId, choice: "a" });
+    await vi.waitFor(() => expect(r.launcher.sessions.length).toBe(before + 1));
+    const session = r.launcher.sessions[before];
+    const fresh = session?.options.env.CSO_MCP_TOKEN ?? "";
+    expect(fresh).not.toBe("");
+    expect(fresh).not.toBe(c.token);
+    expect(d.daemon.log.state().nodes.find((n) => n.id === c.nodeId)?.state).toBe("stopped");
+    // あいだに、別のコミット（根の判断の提示）と、見回り
+    const other = await call(d.url, d.rootToken, "decision.present", {
+      question: "別の判断",
+      options: ["x", "y"],
+    });
+    expect(other.json.ok, JSON.stringify(other.json)).toBe(true);
+    expect(d.daemon.sweepTokens()).not.toContain(c.nodeId);
+    session?.init();
+    const answered = await answering;
+    expect(answered.json.ok, JSON.stringify(answered.json)).toBe(true);
+    expect(answered.json.value.notResumed).toBeUndefined();
+    expect(d.daemon.log.state().nodes.find((n) => n.id === c.nodeId)?.state).toBe("running");
+    const report = await call(d.url, fresh, "report.progress", { text: "再開した" });
+    expect(report.json.ok, JSON.stringify(report.json)).toBe(true);
+    const old = await call(d.url, c.token, "report.progress", { text: "古い" });
+    expect(old.status).toBe(401);
+    expect(old.json.error?.code).toBe("tokenExpired");
+  });
+
+  it("再開の途中で daemon が再起動したら（T21-te M1）: 止まったままの子に発行したトークンは、起動時に失効させる。子は止まったままで、もう一度再開すると、新しいトークンで動く", async () => {
+    const r = resumable();
+    const first = await boot(r);
+    const c = await spawnChild(first, r);
+    const decisionId = await pauseChild(first, c.nodeId, r.launcher.sessions);
+    r.launcher.autoInit = false;
+    const before = r.launcher.sessions.length;
+    // 再開を始め、新しいトークンを発行して起動を待っているあいだに、daemon を止める
+    const answering = call(first.url, first.humanToken, "decision.answer", {
+      decisionId,
+      choice: "a",
+    }).catch(() => undefined);
+    await vi.waitFor(() => expect(r.launcher.sessions.length).toBe(before + 1));
+    const inFlight = r.launcher.sessions[before]?.options.env.CSO_MCP_TOKEN ?? "";
+    expect(inFlight).not.toBe("");
+    await first.daemon.stop();
+    await answering;
+    cleanups.length = 0;
+    r.launcher.autoInit = true;
+    const second = await boot(r);
+    expect(second.daemon.log.state().nodes.find((n) => n.id === c.nodeId)?.state).toBe("stopped");
+    const res = await call(second.url, inFlight, "report.progress", { text: "x" });
+    expect(res.status).toBe(401);
+    expect(res.json.error?.code).toBe("tokenExpired");
+    // 同じ回答を送り直すと、再開をやり直す（新しいトークンを発行する）
+    const n = r.launcher.sessions.length;
+    const again = await call(second.url, second.humanToken, "decision.answer", {
+      decisionId,
+      choice: "a",
+    });
+    expect(again.json.ok, JSON.stringify(again.json)).toBe(true);
+    expect(second.daemon.log.state().nodes.find((x) => x.id === c.nodeId)?.state).toBe("running");
+    const fresh = r.launcher.sessions[n]?.options.env.CSO_MCP_TOKEN ?? "";
+    expect(fresh).not.toBe(inFlight);
+    expect((await call(second.url, fresh, "report.progress", { text: "再開した" })).json.ok).toBe(
+      true,
+    );
+  });
+
+  it("子が止まったら、見回りを待たずに、その場でトークンを失効させる（T21-te M1）。知らせは出さない", async () => {
+    const r = rig();
+    const d = await boot(r);
+    const c = await spawnChild(d, r);
+    const stop = await call(d.url, d.rootToken, "node.stop", {
+      nodeId: c.nodeId,
+      mode: "immediate",
+    });
+    expect(stop.json.ok, JSON.stringify(stop.json)).toBe(true);
+    await vi.waitFor(() =>
+      expect(d.daemon.log.state().nodes.find((n) => n.id === c.nodeId)?.state).toBe("stopped"),
+    );
+    const res = await call(d.url, c.token, "node.get", { nodeId: c.nodeId });
+    expect(res.status).toBe(401);
+    expect(res.json.error?.code).toBe("tokenExpired");
+    expect(d.daemon.log.state().inbox.some((x) => x.summary?.includes("期限"))).toBe(false);
   });
 });
 

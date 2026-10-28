@@ -166,6 +166,17 @@ export interface DaemonConfig {
   /** スケジューラが同時に起動する数の上限（親ごと・全体。1〜64）。省略した項目は既定の 4。 */
   readonly startLimits?: { readonly perParent?: number; readonly total?: number };
   /**
+   * トークンの期限（分。T21-te・M5）。`sdkIdle`: daemon が起動する子の、使わなければ切れる期限（既定 360）。`bindAbsolute`:
+   * 紐付け（Desktop の子）の、発行からの期限（既定 1440）。`bindIdle`: 紐付けの、使わなければ切れる期限（既定 60）。
+   * `hookAbsolute`: フック用のトークンの、発行からの期限（既定 1440）。根のトークンには付けない。
+   */
+  readonly tokenExpiryMinutes?: {
+    readonly sdkIdle?: number;
+    readonly bindAbsolute?: number;
+    readonly bindIdle?: number;
+    readonly hookAbsolute?: number;
+  };
+  /**
    * 窓口の待ち受けポート（127.0.0.1）。0 以外ならそのポート。0（既定）なら、起動オプション `--port` がなければ、stateDir に保存した
    * 前回のポートを使い、それもなければ空いているポートを選んで保存する（`port-file.ts`）。
    */
@@ -184,6 +195,7 @@ const KEYS = [
   "regenerableIgnored",
   "discardedRefsMax",
   "startLimits",
+  "tokenExpiryMinutes",
   "retentionDays",
   "purgeTombstone",
   "desktopRequireVerifiedHooks",
@@ -583,6 +595,28 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     };
   }
 
+  let tokenExpiryMinutes: Record<string, number> | undefined;
+  if (raw.tokenExpiryMinutes !== undefined) {
+    const v = raw.tokenExpiryMinutes as Record<string, unknown>;
+    const names = ["sdkIdle", "bindAbsolute", "bindIdle", "hookAbsolute"];
+    const okMin = (x: unknown): boolean =>
+      x === undefined || (typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= 525_600);
+    if (
+      typeof v !== "object" ||
+      v === null ||
+      Array.isArray(v) ||
+      Object.keys(v).some((k) => !names.includes(k)) ||
+      !names.every((k) => okMin(v[k]))
+    ) {
+      return bad(
+        "tokenExpiryMinutes は、sdkIdle・bindAbsolute・bindIdle・hookAbsolute（どれも 1〜525600 の整数〔分〕。任意）だけを持つオブジェクト",
+      );
+    }
+    tokenExpiryMinutes = Object.fromEntries(
+      names.filter((k) => v[k] !== undefined).map((k) => [k, v[k] as number]),
+    );
+  }
+
   let regenerableIgnored: string[] | undefined;
   if (raw.regenerableIgnored !== undefined) {
     const v = raw.regenerableIgnored;
@@ -661,6 +695,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       port,
       ...(regenerableIgnored === undefined ? {} : { regenerableIgnored }),
       ...(startLimits === undefined ? {} : { startLimits }),
+      ...(tokenExpiryMinutes === undefined ? {} : { tokenExpiryMinutes }),
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
       ...(autoPurge === undefined ? {} : { autoPurge }),
       ...(digest === undefined ? {} : { digest }),

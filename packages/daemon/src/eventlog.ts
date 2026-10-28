@@ -233,6 +233,24 @@ export class EventLog {
   /** 最終削除の後の保証が確かめられなかった。以降の書き込みを拒否する。 */
   private broken = false;
 
+  /** コミットのあとに呼ぶ関数（T21-te。止まった子のトークンを、すぐ失効させる）。 */
+  private readonly committedListeners: ((state: OrchState) => void)[] = [];
+
+  /** 新しいイベントをコミットしたあと（状態に反映したあと）に、同期で呼ぶ関数を足す。関数の例外は、追記の結果に響かせない。 */
+  onCommitted(listener: (state: OrchState) => void): void {
+    this.committedListeners.push(listener);
+  }
+
+  private notifyCommitted(): void {
+    for (const l of this.committedListeners) {
+      try {
+        l(this.current);
+      } catch {
+        // 呼んだ側の失敗は、コミット済みの追記を失敗にしない（呼んだ側で記録する）
+      }
+    }
+  }
+
   private brokenFailure(): Failure {
     return failure(
       "logBroken",
@@ -381,7 +399,10 @@ export class EventLog {
         next = r.value.state;
         return ok({ event, applied: true, state: r.value.state });
       });
-      if (result.ok && next !== undefined) this.current = next; // コミット後に反映する
+      if (result.ok && next !== undefined) {
+        this.current = next; // コミット後に反映する
+        this.notifyCommitted();
+      }
       return result;
     } catch (e) {
       return {
@@ -485,7 +506,10 @@ export class EventLog {
         next = state;
         return out;
       });
-      if (next !== undefined) this.current = next; // コミット後に反映する
+      if (next !== undefined) {
+        this.current = next; // コミット後に反映する
+        this.notifyCommitted();
+      }
       return ok(outcomes);
     } catch (e) {
       if (e instanceof Abort) return { ok: false, error: e.failure };

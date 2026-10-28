@@ -49,12 +49,19 @@ type KindKey = (typeof KINDS)[number]["key"];
 const SAFE_NAME = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
 const MAX_NAMES = 8;
 
+/**
+ * 閾値に数えない名前（T21-te N1）。期限切れのトークンでの呼び出し（`expired`・`hookExpired`）は、攻撃の兆しでなく、
+ * 長く止まっていた子が戻ってきただけのことが多い（受信箱には、期限切れの知らせが別に出る）。
+ */
+const NOT_COUNTED = new Set(["expired", "hookExpired"]);
+
 /** 件数の表（名前 → 件数）の合計と、内訳の文（固定の語だけ。件数の多い順）。 */
 function summarize(counts: Readonly<Record<string, number>>): { total: number; detail: string } {
   let total = 0;
   const named: { name: string; n: number }[] = [];
   for (const [name, n] of Object.entries(counts)) {
     if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) continue;
+    if (NOT_COUNTED.has(name)) continue;
     total += n;
     if (SAFE_NAME.test(name)) named.push({ name, n });
   }

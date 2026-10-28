@@ -37,6 +37,13 @@ export interface TokenRecord {
   readonly nodeId: string;
   /** ISO 8601（UTC）。 */
   readonly issuedAt: string;
+  /** 最後に使った時刻（ISO 8601 UTC。版 2。T21-te）。なければ issuedAt とみなす。 */
+  readonly lastUsedAt?: string;
+  /**
+   * 発行のしかた（版 2。T21-te）。`sdk`: daemon が起動する子（生成・再開）、`bind`: 紐付け（Desktop の子）。
+   * なければ `sdk` とみなす（版 1 のファイル）。期限の決まりが違う。
+   */
+  readonly kind?: "sdk" | "bind";
 }
 
 export interface TokenRepository {
@@ -46,7 +53,9 @@ export interface TokenRepository {
   remove(nodeId: string): void;
 }
 
-const FILE_VERSION = 1;
+/** 書く版（T21-te で 2。読みは 1 と 2）。 */
+const FILE_VERSION = 2;
+const READABLE_VERSIONS: ReadonlySet<unknown> = new Set([1, 2]);
 const HASH = /^[0-9a-f]{64}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
@@ -60,7 +69,12 @@ export function isTokenRecord(x: unknown): x is TokenRecord {
     isSafeId(r.nodeId) &&
     typeof r.issuedAt === "string" &&
     ISO.test(r.issuedAt) &&
-    !Number.isNaN(Date.parse(r.issuedAt))
+    !Number.isNaN(Date.parse(r.issuedAt)) &&
+    (r.lastUsedAt === undefined ||
+      (typeof r.lastUsedAt === "string" &&
+        ISO.test(r.lastUsedAt) &&
+        !Number.isNaN(Date.parse(r.lastUsedAt)))) &&
+    (r.kind === undefined || r.kind === "sdk" || r.kind === "bind")
   );
 }
 
@@ -107,7 +121,7 @@ export class FileTokenRepository implements TokenRepository {
       typeof parsed !== "object" ||
       parsed === null ||
       Array.isArray(parsed) ||
-      p.version !== FILE_VERSION ||
+      !READABLE_VERSIONS.has(p.version) ||
       !Array.isArray(p.tokens) ||
       !p.tokens.every(isTokenRecord)
     ) {

@@ -91,7 +91,8 @@ export function createSessionBinder(): SessionBinder {
 
 /**
  * 手動の CLI セッション用の、フック専用のトークンの表（T22-ht）。ノードのトークン（`CredentialStore`）とは別に持ち、`POST /v1/hook` だけで使う。
- * ノードごとに 1 つ（発行し直すと、古いものは無効）。ハッシュだけを持ち、メモリだけ（daemon の再起動で無効）。
+ * ノードごとに 1 つ（発行し直すと、古いものは無効）。ハッシュだけを持ち、メモリだけ（daemon の再起動で無効）。発行から
+ * 24 時間（設定で変えられる）で切れる（T21-te）。
  */
 export interface HookTokens {
   /** 発行する（そのノードの古いフック用トークンは無効になる）。 */
@@ -99,31 +100,61 @@ export interface HookTokens {
   /** トークンのノード。未知・不正なら undefined。 */
   authenticate(token: unknown): string | undefined;
   revoke(nodeId: string): void;
+  /** 直近に期限で失効させたトークンか（応答の失敗の記号を tokenExpired にするため。メモリだけ）。 */
+  wasExpired?(token: unknown): boolean;
 }
 
 const sha256 = (s: string): Buffer => createHash("sha256").update(s).digest();
 
+/** フック用のトークンの、発行からの絶対の期限（T21-te。既定 24 時間。使わなければ切れる期限は付けない）。 */
+export const DEFAULT_HOOK_TOKEN_MAX_AGE_MS = 24 * 3_600_000;
+
 export function createHookTokens(
-  options: { readonly randomBytes?: (n: number) => Buffer } = {},
+  options: {
+    readonly randomBytes?: (n: number) => Buffer;
+    /** 発行からの絶対の期限（ミリ秒）。 */
+    readonly maxAgeMs?: number;
+    /** 時計（ミリ秒）。経過だけを使う（既定は単調時計。壁時計が巻き戻っても、期限が延びない）。 */
+    readonly nowMs?: () => number;
+  } = {},
 ): HookTokens {
   const random = options.randomBytes ?? randomBytes;
-  const byNode = new Map<string, Buffer>();
+  const maxAge = options.maxAgeMs ?? DEFAULT_HOOK_TOKEN_MAX_AGE_MS;
+  const nowMs = options.nowMs ?? (() => performance.now());
+  const byNode = new Map<string, { hash: Buffer; issuedMs: number }>();
+  const expired = new Set<string>();
+  const EXPIRED_MAX = 1000;
   return {
     issue(nodeId) {
       const token = random(32).toString("base64url");
-      byNode.set(nodeId, sha256(token));
+      byNode.set(nodeId, { hash: sha256(token), issuedMs: nowMs() });
       return token;
     },
     authenticate(token) {
       if (typeof token !== "string" || token === "") return undefined;
       const h = sha256(token);
       for (const [nodeId, stored] of byNode) {
-        if (timingSafeEqual(stored, h)) return nodeId;
+        if (timingSafeEqual(stored.hash, h)) {
+          if (nowMs() - stored.issuedMs >= maxAge) {
+            byNode.delete(nodeId); // 期限切れ: 失効させる（`cso hook-env` で出し直す）
+            expired.add(h.toString("hex"));
+            if (expired.size > EXPIRED_MAX) {
+              const first = expired.values().next().value;
+              if (first !== undefined) expired.delete(first);
+            }
+            return undefined;
+          }
+          return nodeId;
+        }
       }
       return undefined;
     },
     revoke(nodeId) {
       byNode.delete(nodeId);
+    },
+    wasExpired(token) {
+      if (typeof token !== "string" || token === "") return false;
+      return expired.has(sha256(token).toString("hex"));
     },
   };
 }

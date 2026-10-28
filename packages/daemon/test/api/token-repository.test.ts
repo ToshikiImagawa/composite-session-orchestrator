@@ -82,7 +82,7 @@ describe("FileTokenRepository（ハッシュ・ロール・nodeId・発行日時
     writeFileSync(path, "{not json", { mode: 0o600 });
     expect(() => new FileTokenRepository(path).load()).toThrow();
     for (const bad of [
-      { version: 2, tokens: [] },
+      { version: 3, tokens: [] },
       { version: 1, tokens: [{ ...rec("a"), role: "human" }] },
       { version: 1, tokens: [{ ...rec("a"), tokenHash: "xyz" }] },
       { version: 1, tokens: [{ ...rec("a"), nodeId: "../x" }] },
@@ -170,11 +170,14 @@ describe("保存先の安全性（ディレクトリ・ファイルの検査）"
 
 describe("永続化つきの認証情報（再起動後も有効）", () => {
   it("発行したトークンは、ストアを作り直しても認証できる。失効は永続する。再発行で古いトークンは無効", () => {
+    // 使わなければ切れる期限（T21-te）に掛からないよう、発行の少しあとの時計で読み直す
+    const soon = () => Date.parse("2026-10-20T01:05:00.000Z");
     const path = join(tmp(), "tokens.json");
     const s1 = createCredentialStore({
       humanToken: HUMAN,
       repository: new FileTokenRepository(path),
       clock: () => "2026-10-20T01:02:03.000Z",
+      nowMs: soon,
     });
     const a = s1.issueNodeToken("a", "child");
     const m = s1.issueNodeToken("m1", "integrator");
@@ -184,6 +187,7 @@ describe("永続化つきの認証情報（再起動後も有効）", () => {
     const s2 = createCredentialStore({
       humanToken: HUMAN,
       repository: new FileTokenRepository(path),
+      nowMs: soon,
     });
     expect(s2.authenticate(a)).toEqual({ role: "child", nodeId: "a" });
     expect(s2.authenticate(m)).toEqual({ role: "integrator", nodeId: "m1" });
@@ -197,6 +201,7 @@ describe("永続化つきの認証情報（再起動後も有効）", () => {
     const s3 = createCredentialStore({
       humanToken: HUMAN,
       repository: new FileTokenRepository(path),
+      nowMs: soon,
     });
     expect(s3.authenticate(a)).toBeUndefined();
     expect(s3.authenticate(a2)).toEqual({ role: "child", nodeId: "a" });

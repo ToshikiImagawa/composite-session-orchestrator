@@ -105,6 +105,8 @@ export interface SdkAdapterDeps {
   readonly interruptTimeoutMs?: number;
   /** 稼働中の子が、停止の要求なしに終了したときの通知。アダプタは `node.exited` を記録した上で通知する。 */
   readonly onUnexpectedExit?: (nodeId: string, reason: string) => void;
+  /** 子が道具を使おうとした（PreToolUse のフック）ときの通知（トークンを使ったものとして数える。T21-te R3）。 */
+  readonly onToolUse?: (nodeId: string) => void;
 }
 
 /** 起動の記録に残す、除いた環境変数の名前の上限（残りは「ほか N 件」）。 */
@@ -618,6 +620,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
     input: HookInput,
   ): Promise<HookOutcome> {
     try {
+      this.deps.onToolUse?.(nodeId);
       if (!isRec(input) || typeof input.toolName !== "string") {
         return { allow: false, reason: "フックの入力が不正なため拒否した。" };
       }

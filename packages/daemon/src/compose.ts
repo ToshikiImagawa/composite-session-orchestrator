@@ -38,7 +38,7 @@ import { createConfirmationGate } from "./api/confirmation-gate.js";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import { recoverAnswerDeliveries } from "./api/handlers/answer-delivery.js";
 import { createBindHandlers } from "./api/handlers/bind-handlers.js";
-import { waitRequestKey } from "./api/handlers/context.js";
+import { appendAtomically, deriveId, summarize, waitRequestKey } from "./api/handlers/context.js";
 import { createHookHandlers } from "./api/handlers/hook-handlers.js";
 import { createInstructionDelivery } from "./api/handlers/instruction-delivery.js";
 import { createPurger, type PurgeHandlerDeps } from "./api/handlers/purge-handlers.js";
@@ -154,6 +154,8 @@ export interface DaemonDeps {
   /** プロセスの調査。既定は `lsof`。 */
   readonly probe?: ProcessProbe;
   readonly clock?: () => string;
+  /** 単調時計（ミリ秒）。トークンの期限の経過に使う（T21-te）。既定 `performance.now`。試験で差し込む。 */
+  readonly monoMs?: () => number;
   readonly timers?: Timers;
   /** 起動オプション `--port` の値（1〜65535）。設定の `port` より優先する（`port-file.ts`）。 */
   readonly port?: number;
@@ -200,6 +202,8 @@ export interface Daemon {
   stop(): Promise<void>;
   /** テスト・診断用: イベントログ。 */
   readonly log: EventLog;
+  /** テスト・診断用: トークンの期限の見回りを、今すぐ 1 回行う（定期の見回りと同じ。失効させたノードの ID）。 */
+  sweepTokens(): string[];
 }
 
 const fail = (code: string, cause: string, ...next: [string, ...string[]]) => ({
@@ -331,6 +335,29 @@ const writeControllingTerminal = (line: string): void => {
     closeSync(fd);
   }
 };
+
+/** トークンの期限の見回りの間隔（T21-te）。 */
+const TOKEN_SWEEP_MS = 5 * 60_000;
+
+/**
+ * ノードのトークンが、もう要らない状態か（T21-te。種類〔sdk・bind〕を問わない。認証・見回りのたびに見る）。記録にないノードも
+ * 要らない。done は残す（差し戻しで動き直す）。
+ */
+export const TOKEN_RETIRED_STATES: ReadonlySet<string> = new Set([
+  "verified",
+  "reclaimable",
+  "archived",
+]);
+export const isTokenRetired = (state: string | undefined): boolean =>
+  state === undefined || TOKEN_RETIRED_STATES.has(state);
+/**
+ * その状態に**なったとき**に、トークンを失効させる状態（T21-te M1）。stopped は、なったときだけ見る（再開は、止まったまま新しい
+ * トークンを発行してから起動し、running を記録するので、止まっていることだけで失効させると、再開のトークンを消してしまう）。
+ */
+export const TOKEN_REVOKE_ON_ENTER: ReadonlySet<string> = new Set([
+  "stopped",
+  ...TOKEN_RETIRED_STATES,
+]);
 
 export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Daemon, Failure> {
   const clock = deps.clock ?? (() => new Date().toISOString());
@@ -469,9 +496,46 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   // フックの受け口の session_id の結び付け（T22-hu）。トークンを発行し直した・失効させたら外す。
   const hookSessions = createSessionBinder();
   // 手動の CLI セッション用の、フック専用のトークン（T22-ht）。CLI の子のときだけ。ノードのトークンが変わったら、一緒に無効にする。
-  const hookTokens = config.childRuntime === "desktop" ? undefined : createHookTokens();
+  const minutes = (m: number | undefined, d: number): number => (m ?? d) * 60_000;
+  const te = config.tokenExpiryMinutes;
+  const hookTokens =
+    config.childRuntime === "desktop"
+      ? undefined
+      : createHookTokens({
+          maxAgeMs: minutes(te?.hookAbsolute, 1440),
+          ...(deps.monoMs === undefined ? {} : { nowMs: deps.monoMs }),
+        });
   // 認証。
   let humanToken: string;
+  // トークンの期限（T21-te）: ノードの状態と、期限切れの受信箱への知らせ（同じトークンについて 1 回だけ。要求 ID を、ノードと
+  // 発行の時刻から決めるので、重ねて書かれない）。記録にはトークン・ハッシュを書かない。
+  const tokenStateOf = (nodeId: string): string | undefined =>
+    log.state().nodes.find((n) => n.id === nodeId)?.state;
+  const notifyTokenExpired = (
+    nodeId: string,
+    reason: "absolute" | "idle",
+    kind: "sdk" | "bind",
+    issuedAt: string,
+  ): void => {
+    const key = `token-expired/${nodeId}/${issuedAt}`;
+    const why = reason === "absolute" ? "発行から時間がたった" : "使わなかった時間が長い";
+    const next =
+      kind === "bind"
+        ? "node.bindCode で紐付けのコードを出し直し、子が結び直す"
+        : "子を再開するか、作り直す";
+    const r = appendAtomically(log, clock, key, { system: true }, [
+      {
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", key, "token-expired"),
+          kind: "info",
+          nodeId,
+          summary: summarize(`子 ${nodeId} のトークンの期限が切れた（${why}）。${next}`),
+        },
+      },
+    ]);
+    if (!r.ok) note("tokenExpiredNoticeFailure", { nodeId, cause: r.error.code });
+  };
   let credentials: ReturnType<typeof createCredentialStore>;
   const rootTokenPath = join(config.stateDir, "root-token");
   const humanTokenPath = join(config.stateDir, "human-token");
@@ -481,11 +545,57 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       humanToken,
       repository: new FileTokenRepository(join(config.stateDir, "node-tokens.json")),
       clock,
+      // 起動時の基準は壁時計（保存した時刻と比べる）。動いている間の経過は単調時計で数える（巻き戻しで延びない）
+      nowMs: () => Date.parse(clock()),
+      monoMs: deps.monoMs ?? (() => performance.now()),
       onNodeTokenChanged: (nodeId) => {
         hookTokens?.revoke(nodeId);
         if (hookSessions.unbind(nodeId)) note("hookUnbound", { reason: "tokenReissued" });
       },
+      // トークンの期限（T21-te・M5）。根には付けない。
+      expiry: {
+        sdkIdleMs: minutes(te?.sdkIdle, 360),
+        bindAbsoluteMs: minutes(te?.bindAbsolute, 1440),
+        bindIdleMs: minutes(te?.bindIdle, 60),
+      },
+      exemptNodeId: config.rootNodeId,
+      // 役目の終わり: verified・reclaimable・archived（記録にないノードも）。種類を問わない。stopped は、なったときに失効させる
+      // （下の onCommitted と、起動時）。
+      isRetired: (nodeId) => isTokenRetired(tokenStateOf(nodeId)),
+      // 判断待ち・done のあいだは、使わなければ切れる時計を進めない（bind の絶対の期限は進む）
+      isIdlePaused: (nodeId) => {
+        const n = tokenStateOf(nodeId);
+        return n === "waiting" || n === "done";
+      },
+      onExpired: (nodeId, reason, kind, issuedAt) => {
+        note("tokenExpired", { nodeId, reason, kind });
+        // 知らせは、動いている子についてだけ（役目の終わり・止まった子は、知らせても次の操作がない）
+        if (reason !== "retired" && tokenStateOf(nodeId) === "running") {
+          notifyTokenExpired(nodeId, reason, kind, issuedAt);
+        }
+      },
     });
+    // 止まった・役目の終わった子のトークンを、その状態になったその場で失効させる（見回りを待たない。種類を問わない。T21-te M1）。
+    // 起動時は、いま止まっている子のトークンも失効させる（前回、止まったあとに失効させられなかった分。再開で発行し直す）。
+    const live = credentials;
+    const lastStates = new Map<string, string>();
+    const revokeEntered = (nodes: readonly { id: string; state: string }[]): void => {
+      for (const n of nodes) {
+        const prev = lastStates.get(n.id);
+        lastStates.set(n.id, n.state);
+        if (prev === n.state || !TOKEN_REVOKE_ON_ENTER.has(n.state)) continue;
+        try {
+          live.expireNode?.(n.id);
+        } catch (e) {
+          note("tokenRevokeFailure", {
+            nodeId: n.id,
+            cause: e instanceof Error ? e.name : "unknown",
+          });
+        }
+      }
+    };
+    revokeEntered(log.state().nodes);
+    log.onCommitted((st) => revokeEntered(st.nodes));
     // 根のトークン: ファイルがあり、認証に通るならそのまま。なければ・通らなければ、発行し直して、一時ファイルに書いてから置き換える。
     let current: string | undefined;
     try {
@@ -577,6 +687,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     ...(config.childEnvAllow === undefined ? {} : { childEnvAllow: config.childEnvAllow }),
     ...(childPluginPath === undefined ? {} : { childPluginPath }),
     onUnexpectedExit: (nodeId, reason) => note("unexpectedExit", { nodeId, reason }),
+    onToolUse: (nodeId) => credentials.touchNode?.(nodeId),
     onFailure: (nodeId, cause) => note("handlerFailure", { nodeId, cause }),
     waitKeyOf: (nodeId) => {
       const st = log.state();
@@ -880,10 +991,12 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   });
 
   let running: RunningDaemon | undefined;
+  let tokenSweep: NodeJS.Timeout | undefined;
   return {
     ok: true,
     value: {
       log,
+      sweepTokens: () => credentials.sweepExpired?.() ?? [],
       async start() {
         if (running !== undefined) return running;
         // 窓口のポート（課題 3）: 起動オプション → 設定 → 保存したポート → 新規（保存する）の順。`port-file.ts`。
@@ -969,6 +1082,17 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         running = { port, url, humanTokenPath, rootTokenPath, identityPath };
         // 待ち受けの後で、前回から残った、依存の揃った pending の子を起動する（子が窓口へ接続できるように）。
         void schedule();
+        // トークンの期限の見回り（T21-te）: 使われずに放置された・役目の終わったトークンも失効させる。
+        tokenSweep = setInterval(() => {
+          try {
+            credentials.sweepExpired?.();
+          } catch (e) {
+            note("tokenSweepFailure", {
+              cause: String((e as NodeJS.ErrnoException)?.code ?? "unknown"),
+            });
+          }
+        }, TOKEN_SWEEP_MS);
+        tokenSweep.unref();
         autoPurger?.start();
         digestIssuer?.start();
         waker?.start();
@@ -976,6 +1100,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         return running;
       },
       async stop() {
+        if (tokenSweep !== undefined) clearInterval(tokenSweep);
+        tokenSweep = undefined;
         await waker?.stop(); // 実行中の 1 回が終わるのを待つ
         await digestIssuer?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
         await autoPurger?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）
