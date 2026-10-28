@@ -39,7 +39,18 @@ export interface DesktopAdapterDeps {
   readonly capabilities?: Capabilities;
   /** ゲートを外して起動したときの警告の記録先（起動のたびに呼ぶ）。 */
   readonly onWarning?: (nodeId: string, text: string) => void;
+  /**
+   * 子の範囲のコマンドの許可に、daemon が足すもの（T21-cc。`<csoCommand> child bind`・`<csoCommand> child report` の 2 つだけ。
+   * 前方一致）。人が書いた範囲の決まりは、ほかは変えない。記録（node.created の scope）は変えず、アダプタが持つ範囲にだけ足す。
+   */
+  readonly extraAllowedCommands?: readonly string[];
 }
+
+/** `csoCommand` から、Desktop の子に足すコマンドの許可（`cso child bind`・`cso child report` の 2 つ）。 */
+export const csoChildCommands = (csoCommand: readonly string[]): string[] => {
+  const head = csoCommand.join(" ");
+  return [`${head} child bind`, `${head} child report`];
+};
 
 const fail = (
   code: string,
@@ -90,7 +101,10 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
       }
       this.deps.onWarning?.(request.nodeId, `フックのゲートを設定で外して起動した: ${UNSAFE}`);
     }
-    this.nodes.set(request.nodeId, { scope: request.scope, instruction: request.instruction });
+    this.nodes.set(request.nodeId, {
+      scope: this.withExtra(request.scope),
+      instruction: request.instruction,
+    });
     // 子のセッション識別子は Desktop のタスク生成の戻り値にない。紐付け（T21）までは、ノードの ID で代える。
     return ok({ sessionId: request.nodeId, cwd: request.worktreePath, removedEnv: [] });
   }
@@ -101,6 +115,21 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
       `Desktop の子（ノード ${nodeId}）には、daemon から直接指示を届けられない`,
       "親（統合セッション）に、Desktop のメッセージ送信で代わりに送るよう頼む",
     );
+  }
+
+  /** 範囲に、daemon が足すコマンドの許可を足す（重複は足さない）。 */
+  private withExtra(scope: Scope): Scope {
+    const extra = (this.deps.extraAllowedCommands ?? []).filter(
+      (c) => !scope.allowedCommands.includes(c),
+    );
+    return extra.length === 0
+      ? scope
+      : { ...scope, allowedCommands: [...scope.allowedCommands, ...extra] };
+  }
+
+  /** アダプタが持つ、子の範囲（daemon が足したコマンドの許可を含む）。起動を受け付けていなければ undefined。 */
+  scopeOf(nodeId: string): Scope | undefined {
+    return this.nodes.get(nodeId)?.scope;
   }
 
   /** 起動の指示（ID・ブリーフ）。起動を受け付けていなければ（daemon の再起動のあとなど）undefined。 */
@@ -151,7 +180,7 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
       return fail("notManaged", `ノード ${nodeId} の子を管理していない`, "ノードの状態を確認する");
     }
     const cur = this.nodes.get(nodeId);
-    if (cur !== undefined) this.nodes.set(nodeId, { ...cur, scope });
+    if (cur !== undefined) this.nodes.set(nodeId, { ...cur, scope: this.withExtra(scope) });
     return ok(undefined);
   }
 }

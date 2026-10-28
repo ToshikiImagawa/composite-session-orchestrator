@@ -29,6 +29,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   unlinkSync,
   writeSync,
@@ -37,6 +38,9 @@ import { join } from "node:path";
 import type { NodeState } from "@cso/core";
 
 export const CHILDREN_DIR = "children.noindex";
+/** 引き出しの中のファイルの名前（cli の `CHILD_FILES` と同じ。T21-cc）。 */
+export const DRAWER_FILES = ["code", "token", "url", "node"] as const;
+export type DrawerFile = (typeof DRAWER_FILES)[number];
 export const CHILDREN_KEY_FILE = "children.key";
 /**
  * 状態ごとに、子の引き出しが要るか（起動時の掃除で残すか）。すべての状態を書く（型で網羅する）。
@@ -87,6 +91,14 @@ export interface ChildrenDirs {
   create(nodeId: string): string;
   /** 子の引き出しを消す（なければ何もしない）。リンクはたどらない。 */
   remove(nodeId: string): void;
+  /** 子の引き出しのパス（作らない）。 */
+  pathOf(nodeId: string): string;
+  /** 子の引き出しを空にして作り直す（ノード ID の再利用で、前の中身を残さない。T21-cc N3）。そのパスを返す。 */
+  reset(nodeId: string): string;
+  /** 引き出しの中に、一時ファイル（O_EXCL・O_NOFOLLOW・0600）に書いてから rename でファイルを置く（daemon が書く `node`）。 */
+  writeFile(nodeId: string, name: DrawerFile, content: string): void;
+  /** 引き出しの中のファイルを消す（なければ何もしない。リンクはリンクだけ）。引き出しそのものは残す。 */
+  removeFiles(nodeId: string, names: readonly DrawerFile[]): void;
   /**
    * 要る子（`neededNodeIds`）の鍵でない引き出しを消す（M9）。1 件ずつ続け、消した数と、消せなかった数を返す。
    * 新しい秘密を作った起動では、何もしない。
@@ -248,6 +260,64 @@ export function prepareChildrenDirs(
       assertSameRoot();
       removeNoFollow(join(root, keyOf(nodeId)));
     },
+    pathOf: (nodeId) => join(root, keyOf(nodeId)),
+    reset(nodeId) {
+      assertSameRoot();
+      const dir = join(root, keyOf(nodeId));
+      removeNoFollow(dir);
+      ensurePrivateDir(dir, "子の引き出し");
+      return dir;
+    },
+    writeFile(nodeId, name, content) {
+      assertSameRoot();
+      const dir = join(root, keyOf(nodeId));
+      assertPrivateDir(dir, "子の引き出し");
+      const tmp = join(dir, `${name}.tmp-${randomBytes(8).toString("hex")}`);
+      const fd = openSync(
+        tmp,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+      try {
+        try {
+          writeSync(fd, `${content}\n`);
+        } finally {
+          closeSync(fd);
+        }
+        renameSync(tmp, join(dir, name));
+      } catch (e) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // 元の失敗を返す
+        }
+        throw e;
+      }
+    },
+    removeFiles(nodeId, names) {
+      assertSameRoot();
+      const dir = join(root, keyOf(nodeId));
+      let present: string[];
+      try {
+        present = readdirSync(dir);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw e;
+      }
+      // その名前と、その一時ファイル（`<名前>.tmp-…`。cso が書きかけて残したもの）
+      const targets = present.filter((x) =>
+        names.some((n) => x === n || x.startsWith(`${n}.tmp-`)),
+      );
+      for (const n of targets) {
+        const path = join(dir, n);
+        try {
+          if (lstatSync(path).isDirectory()) rmSync(path, { recursive: true, force: true });
+          else unlinkSync(path);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        }
+      }
+    },
     sweep(neededNodeIds) {
       if (createdKey) return { removed: 0, failed: 0 };
       assertSameRoot();
@@ -283,3 +353,24 @@ const defaultExclude = (path: string): Promise<void> =>
           e ? reject(e) : resolve(),
         );
       });
+
+/**
+ * 状態の移り変わりで、子の引き出しにすること（T21-cc N4。Desktop の子）。`prev` は前に見た状態（初めて見るノードは undefined）。
+ * - 新しく記録されたノード（spawn）: 空にして作り直し、`node` を書く（`create`。ノード ID の再利用で、前の中身を残さない。N3）。
+ *   起動時に初めて見るノードは、作り直さない（動いている子の引き出しを消さない。掃除は M9 が行う）。
+ * - stopped になった: `token`・`url`・`code` を消す（`clearSecrets`。引き出しは残す。再開で結び直す）。
+ * - verified・reclaimable・archived になった: 引き出しを消す（`remove`）。
+ * - done・そのほか: 何もしない（差し戻しで動き直す）。
+ */
+export function drawerActionFor(
+  prev: string | undefined,
+  next: string,
+  boot: boolean,
+): "create" | "clearSecrets" | "remove" | undefined {
+  if (prev === next) return undefined;
+  if (prev === undefined && boot) return undefined;
+  if (next === "verified" || next === "reclaimable" || next === "archived") return "remove";
+  if (next === "stopped") return "clearSecrets";
+  if (prev === undefined) return "create";
+  return undefined;
+}

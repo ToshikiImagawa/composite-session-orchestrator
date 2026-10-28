@@ -147,6 +147,12 @@ export interface DaemonConfig {
   };
   /** 子に渡す環境変数の、既定（PATH・HOME・認証・プロキシなど）に加える名前（完全一致）。 */
   readonly childEnvAllow?: readonly string[];
+  /**
+   * Desktop の子が `cso` を起動する語（T21-cc。例: `["node", "/opt/cso/packages/cli/dist/bin.js"]`・`["/usr/local/bin/cso"]`）。
+   * 紐付けの文面（`node.bindCode`）に、そのまま書く。1〜4 語。語は英数字と `. _ / @ : + = -` だけ（空白・引用符なし）。
+   * `/` を含む語は絶対パス（`..` なし）で、絶対パスの語が 1 つ以上要る。ないと、`node.bindCode` は `csoCommandMissing` で失敗する。
+   */
+  readonly csoCommand?: readonly string[];
   /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
   readonly childHome?: "isolated" | "inherit";
   /**
@@ -208,6 +214,7 @@ const KEYS = [
   "maxTurns",
   "maxBudgetUsd",
   "childEnvAllow",
+  "csoCommand",
   "childHome",
   "childPluginDir",
   "childRuntime",
@@ -557,6 +564,25 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     }
     childEnvAllow = [...(v as string[])];
   }
+  let csoCommand: string[] | undefined;
+  if (raw.csoCommand !== undefined) {
+    const v = raw.csoCommand;
+    const word = /^[A-Za-z0-9._/@:+=-]{1,1024}$/;
+    const absOk = (x: string): boolean =>
+      !x.includes("/") || (x.startsWith("/") && !x.split("/").includes(".."));
+    if (
+      !Array.isArray(v) ||
+      v.length < 1 ||
+      v.length > 4 ||
+      !v.every((x) => typeof x === "string" && word.test(x) && absOk(x)) ||
+      !(v as string[]).some((x) => x.startsWith("/"))
+    ) {
+      return bad(
+        "csoCommand は、cso を起動する語の配列（1〜4 語。英数字と . _ / @ : + = - だけ。/ を含む語は絶対パスで、絶対パスの語が 1 つ以上）",
+      );
+    }
+    csoCommand = [...(v as string[])];
+  }
   let childPluginDir: string | undefined;
   if (raw.childPluginDir !== undefined) {
     childPluginDir = absPath(raw.childPluginDir);
@@ -697,6 +723,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(startLimits === undefined ? {} : { startLimits }),
       ...(tokenExpiryMinutes === undefined ? {} : { tokenExpiryMinutes }),
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
+      ...(csoCommand === undefined ? {} : { csoCommand }),
       ...(autoPurge === undefined ? {} : { autoPurge }),
       ...(digest === undefined ? {} : { digest }),
       ...(wake === undefined ? {} : { wake }),

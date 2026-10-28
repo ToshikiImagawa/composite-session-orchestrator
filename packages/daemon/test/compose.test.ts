@@ -1805,8 +1805,13 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(open(d)[0]?.summary).not.toContain(a);
   }, 20_000);
 
-  it("紐付けの通し: spawn → node.bindCode → POST /v1/bind → トークン → POST /v1/request。コードはログ・記録に残らない", async () => {
-    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+  it("紐付けの通し（T21-cc）: spawn で引き出しと node → node.bindCode → code を書く → cso child bind → cso child report。コード・トークンはログ・記録・出力に残らない。止めの宣言で token・url・code が消える", async () => {
+    const cliBin = fileURLToPath(new URL("../../cli/dist/bin.js", import.meta.url));
+    const r = rig({
+      childRuntime: "desktop",
+      desktopRequireVerifiedHooks: false,
+      csoCommand: [process.execPath, cliBin],
+    });
     const d = await boot(r);
     const spawned = await call(d.url, d.rootToken, "node.spawn", {
       parentId: "root",
@@ -1819,18 +1824,21 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
     expect(bc.json.ok, JSON.stringify(bc.json)).toBe(true);
     const instruction = bc.json.value.instruction as string;
-    expect(instruction).toContain(`${d.url}/v1/bind`);
-    const code = (/"bindCode":"([0-9A-Z-]+)"/.exec(instruction) as RegExpExecArray)[1] as string;
-    // 子: 文面のコマンドを、そのままシェルで実行する（トークンは変数に入れ、標準入力から渡す。コマンドの引数に置かない）
-    const lines = instruction.split("\n");
-    const bindLine = lines.find((l) => l.startsWith("CSO_TOKEN=")) as string;
-    const reportLine = (lines.find((l) => l.startsWith("printf 'authorization")) as string)
-      .replace("<一意な ID>", "p1")
-      .replace("<進捗>", "進んだ");
-    expect(bindLine).toContain("-d @-");
-    expect(reportLine).toContain("-H @-");
-    expect(reportLine).not.toContain('Bearer $CSO_TOKEN"');
-    // 同じプロセスの daemon が応答できるよう、非同期で実行する。プロキシの環境変数は外す（ループバックへ直接）。
+    const lines = instruction.split("\n").map((l) => l.replace(/^ {3}/, ""));
+    const drawer = (lines.find((l) => l.startsWith("ファイル: ")) as string)
+      .slice("ファイル: ".length)
+      .replace(/\/code$/, "");
+    const code = (lines.find((l) => l.startsWith("中身: ")) as string).slice("中身: ".length);
+    // spawn のときに、daemon が引き出し（0700）と node（0600）を作っている
+    expect(lstatSync(drawer).mode & 0o777).toBe(0o700);
+    expect(readFileSync(join(drawer, "node"), "utf8").trim()).toBe(nodeId);
+    expect(lstatSync(join(drawer, "node")).mode & 0o777).toBe(0o600);
+    // 子: Write の道具で code を書く（0644）→ 文面のコマンドを、そのままシェルで実行する
+    writeFileSync(join(drawer, "code"), `${code}\n`, { mode: 0o644 });
+    const bindLine = lines.find((l) => l.includes(" child bind ")) as string;
+    const reportAt = lines.findIndex((l) => l.includes(" child report "));
+    const report = [lines[reportAt], "進んだ", "EOF"].join("\n");
+    for (const c of [bindLine, lines[reportAt] as string]) expect(c).not.toContain(code);
     const env = { ...process.env };
     for (const k of [
       "HTTP_PROXY",
@@ -1841,12 +1849,19 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       "all_proxy",
     ])
       delete env[k];
-    const { stdout: out } = await promisify(execFile)(
-      "bash",
-      ["-c", `${bindLine}\ntest -n "$CSO_TOKEN" || exit 3\n${reportLine}`],
-      { encoding: "utf8", env, timeout: 20_000 },
-    );
-    expect(JSON.parse(out).ok, out).toBe(true);
+    const sh = (script: string) =>
+      promisify(execFile)("bash", ["-c", script], { encoding: "utf8", env, timeout: 20_000 });
+    const bound = await sh(bindLine);
+    expect(bound.stdout).toBe("bound\n");
+    expect(existsSync(join(drawer, "code"))).toBe(false);
+    expect(lstatSync(join(drawer, "token")).mode & 0o777).toBe(0o600);
+    const token = readFileSync(join(drawer, "token"), "utf8").trim();
+    const reported = await sh(report);
+    expect(JSON.parse(reported.stdout).ok, reported.stdout).toBe(true);
+    for (const o of [bound, reported]) {
+      expect(o.stdout + o.stderr).not.toContain(token);
+      expect(o.stdout + o.stderr).not.toContain(code);
+    }
     const reports = await call(d.url, d.rootToken, "inbox.fetch", {});
     expect(JSON.stringify(reports.json)).toContain("進んだ");
     // 使ったコードは、もう使えない
@@ -1856,18 +1871,42 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       body: JSON.stringify({ nodeId, bindCode: code }),
     });
     expect(again.status).toBe(401);
-    // コード（区切りあり・なし）は、イベントログ（SQLite のファイル）・記録（logLine）・受信箱に残らない
+    // コード（区切りあり・なし）・トークンは、イベントログ（SQLite のファイル）・記録（logLine）・受信箱に残らない
     const raw = code.replace(/-/g, "");
     for (const f of ["state.db", "state.db-wal"]) {
       const p = join(r.config.stateDir, f);
       if (!existsSync(p)) continue;
       const bytes = readFileSync(p).toString("latin1");
-      expect(bytes.includes(raw), f).toBe(false);
-      expect(bytes.includes(code), f).toBe(false);
+      for (const secret of [raw, code, token]) expect(bytes.includes(secret), f).toBe(false);
     }
-    expect(r.logs.join("\n").includes(raw)).toBe(false);
+    for (const secret of [raw, token]) expect(r.logs.join("\n").includes(secret)).toBe(false);
     const inbox = await call(d.url, d.rootToken, "inbox.fetch", {});
     expect(JSON.stringify(inbox.json).includes(raw)).toBe(false);
+    // 止める → 止めたと宣言（stopped）: token・url・code を消す。引き出しと node は残す（再開で結び直す）
+    const stop = await call(d.url, d.rootToken, "node.stop", { nodeId, mode: "graceful" });
+    expect(stop.json.ok, JSON.stringify(stop.json)).toBe(true);
+    writeFileSync(join(drawer, "code"), "STALE\n", { mode: 0o644 });
+    const confirmed = await call(d.url, d.humanToken, "node.confirmStopped", { nodeId });
+    expect(confirmed.json.ok, JSON.stringify(confirmed.json)).toBe(true);
+    expect(d.daemon.log.state().nodes.find((n) => n.id === nodeId)?.state).toBe("stopped");
+    for (const f of ["token", "url", "code"]) expect(existsSync(join(drawer, f)), f).toBe(false);
+    expect(existsSync(join(drawer, "node"))).toBe(true);
+    // 止まったあとの報告は、通らない（トークンは失効済み・ファイルもない）
+    const after = await sh(report).catch((e: { stdout: string }) => e);
+    expect(after.stdout).toBe("urlMissing\n");
+  });
+
+  it("csoCommand がなければ、node.bindCode は csoCommandMissing", async () => {
+    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const d = await boot(r);
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    const nodeId = spawned.json.value.nodeId as string;
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    expect(bc.json.error?.code).toBe("csoCommandMissing");
   });
 
   it("画面の表示モデルで、Desktop の子は stopDelegated（停止の宣言を出せる）", async () => {

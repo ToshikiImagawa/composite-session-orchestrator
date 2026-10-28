@@ -80,6 +80,7 @@ import {
   CHILD_DIR_NEEDED,
   ChildrenDirError,
   type ChildrenDirs,
+  drawerActionFor,
   prepareChildrenDirs,
   safeCause as safeCauseOfChildrenDir,
 } from "./children-dir.js";
@@ -100,7 +101,7 @@ import {
 import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
 import { buildChildPlugin, CHILD_PLUGIN_DIR } from "./sdk/child-plugin.js";
-import { DesktopRuntimeAdapter } from "./sdk/desktop-adapter.js";
+import { csoChildCommands, DesktopRuntimeAdapter } from "./sdk/desktop-adapter.js";
 import { createLsofProbe, nodeExec, type ProcessProbe } from "./sdk/lsof-probe.js";
 import { nodeTimers } from "./sdk/node-timers.js";
 import { nodeFsOps, resolveForWrite } from "./sdk/path-resolve.js";
@@ -578,11 +579,33 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     // 止まった・役目の終わった子のトークンを、その状態になったその場で失効させる（見回りを待たない。種類を問わない。T21-te M1）。
     // 起動時は、いま止まっている子のトークンも失効させる（前回、止まったあとに失効させられなかった分。再開で発行し直す）。
     const live = credentials;
+    const desktopTree = config.childRuntime === "desktop";
     const lastStates = new Map<string, string>();
-    const revokeEntered = (nodes: readonly { id: string; state: string }[]): void => {
+    const revokeEntered = (
+      nodes: readonly { id: string; state: string; parentId: string | null }[],
+      boot: boolean,
+    ): void => {
       for (const n of nodes) {
         const prev = lastStates.get(n.id);
         lastStates.set(n.id, n.state);
+        // Desktop の子の引き出し（T21-cc N3・N4）: 作る・中のファイルを消す・引き出しを消す
+        if (desktopTree && n.parentId !== null) {
+          const action = drawerActionFor(prev, n.state, boot);
+          try {
+            if (action === "create") {
+              childrenDirs.reset(n.id);
+              childrenDirs.writeFile(n.id, "node", n.id);
+            } else if (action === "clearSecrets") {
+              childrenDirs.removeFiles(n.id, ["token", "url", "code"]);
+            } else if (action === "remove") {
+              childrenDirs.remove(n.id);
+            }
+          } catch (e) {
+            note("childrenDirWarning", {
+              cause: `引き出しを${action === "create" ? "作れない" : "片付けられない"}（${safeCauseOfChildrenDir(e)}）`,
+            });
+          }
+        }
         if (prev === n.state || !TOKEN_REVOKE_ON_ENTER.has(n.state)) continue;
         try {
           live.expireNode?.(n.id);
@@ -594,8 +617,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         }
       }
     };
-    revokeEntered(log.state().nodes);
-    log.onCommitted((st) => revokeEntered(st.nodes));
+    revokeEntered(log.state().nodes, true);
+    log.onCommitted((st) => revokeEntered(st.nodes, false));
     // 根のトークン: ファイルがあり、認証に通るならそのまま。なければ・通らなければ、発行し直して、一時ファイルに書いてから置き換える。
     let current: string | undefined;
     try {
@@ -679,6 +702,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         config.childHome === "inherit"
           ? (deps.parentEnv ?? process.env).HOME
           : join(protectedStateDir, "homes", nodeId),
+      // T21-cc: cso child の命令の判定に使う。daemon が起動する子（CLI の子）は引き出しを持たないので、drawer はない
+      // （Desktop の子にフックが効くようになったら、その子の引き出しを渡す。docs/desktop-runtime.md の (a)）
+      ...(config.csoCommand === undefined ? {} : { csoCommand: config.csoCommand }),
     }),
     sink: { record: (r) => log.append(r), recordAll: (rs) => log.appendAll(rs) },
     timers,
@@ -727,6 +753,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           },
           requireVerifiedHooks: config.desktopRequireVerifiedHooks ?? true,
           onWarning: (nodeId, text) => note("desktopHooksGateDisabled", { nodeId, text }),
+          ...(config.csoCommand === undefined
+            ? {}
+            : { extraAllowedCommands: csoChildCommands(config.csoCommand) }),
         })
       : undefined;
   const adapter: RuntimeAdapter & { has(nodeId: string): boolean } = desktopAdapter ?? sdkAdapter;
@@ -963,6 +992,14 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         bind,
         ...(desktopAdapter === undefined ? {} : { desktop: desktopAdapter }),
         baseUrl: () => running?.url,
+        ...(config.csoCommand === undefined ? {} : { csoCommand: config.csoCommand }),
+        // 引き出しを用意する（なければ作る。node を書き直し、残っている code を消す。T21-cc）
+        prepareDrawer: (nodeId) => {
+          const dir = childrenDirs.create(nodeId);
+          childrenDirs.writeFile(nodeId, "node", nodeId);
+          childrenDirs.removeFiles(nodeId, ["code"]);
+          return dir;
+        },
       }),
       // 保管している、破棄した成果の操作（人間のみ。T13f-r）。git の口が、保管の操作を持つときだけ有効。
       ...(deps.worktree.discardedList === undefined ||

@@ -30,37 +30,61 @@ export interface BindHandlerDeps {
   readonly desktop?: Pick<DesktopRuntimeAdapter, "instructionOf">;
   /** 窓口の URL（`http://127.0.0.1:<port>`。待ち受けの前は undefined）。 */
   readonly baseUrl: () => string | undefined;
+  /** 設定 `csoCommand`（Desktop の子が cso を起動する語）。ないと `csoCommandMissing`。 */
+  readonly csoCommand?: readonly string[];
+  /**
+   * 子の引き出しを用意する（なければ作り、`node` を書き、残っている `code` を消す）。そのパスを返す。失敗は例外。
+   * T21-cc。コードを出す前に呼ぶ。
+   */
+  readonly prepareDrawer?: (nodeId: string) => string;
 }
 
 const LIVE = new Set(["running", "waiting"]);
 
+/** シェルの 1 語にする（安全な文字だけなら、そのまま。ほかは単一引用符で囲む）。 */
+export function shellWord(x: string): string {
+  return /^[A-Za-z0-9._/@:+=-]+$/.test(x) ? x : `'${x.replace(/'/g, "'\\''")}'`;
+}
+
 /**
- * 子が紐付けと報告に使う手順（仮置き: curl が使えるかは、実機確認〔Spike 01 の項目 4〕で確かめる）。
+ * 子が紐付けと報告に使う手順（T21-cc。`cso child`。`docs/cli.md`）。
  *
- * トークンとコードを、コマンドの引数に置かない（`ps` のプロセス一覧に出さない）: ヘッダーと本文は、シェルの組み込みの `printf` で
- * 標準入力から渡す（`-H @-`・`-d @-`）。トークンは、応答から直接シェルの変数（`CSO_TOKEN`）に入れ、画面に出さない。
+ * - コードは、Write の道具で引き出しの `code` に書かせる（Bash のコマンドの文字列に置かない。`ps` に出さない。M2）。
+ * - Bash の呼び出しは、毎回、絶対パス（cso・引き出し）と窓口の URL を書く形にする（変数は呼び出しをまたがない。V5）。
+ * - トークンは、cso が引き出しの `token` に置いて、そこから読む（文面にも、出力にも出さない。M6）。
  *
- * 注意: `nodeId` は `isSafeId`（英数字と `. _ : -`）を通ったものなので、シェルの単一引用符・JSON の中にそのまま置ける。
- * ノード ID の文字種を広げるときは、ここで引用・エスケープを見直す（`'`・`"`・`\`・`$`・改行が入ると、コマンドが壊れるか、
- * 別のコマンドとして解釈される）。
+ * 注意: `nodeId` は `isSafeId` を通ったもの。パスと URL は `shellWord` で 1 語にする。
  */
 export function bindInstruction(
   start: string,
-  nodeId: string,
   code: string,
   baseUrl: string,
   expiresAt: string,
+  drawer: string,
+  csoCommand: readonly string[],
 ): string {
-  const bindBody = JSON.stringify({ nodeId, bindCode: formatBindCodeForDisplay(code) });
+  const cso = csoCommand.map(shellWord).join(" ");
+  const dir = shellWord(drawer);
+  const url = shellWord(baseUrl);
+  const codePath = `${drawer}/code`;
   return [
     start,
     "",
-    "---- daemon への紐付け（仮置きの手順）----",
-    `最初のメッセージを受けたら、次のコマンドで、このノードのトークンをシェルの変数 CSO_TOKEN に受け取る（コードは一度きり。${expiresAt} まで）:`,
-    `CSO_TOKEN=$(printf '%s' '${bindBody}' | curl -sS -X POST ${baseUrl}/v1/bind -H 'content-type: application/json' -d @- | sed -n 's/.*"token":"\\([^"]*\\)".*/\\1/p')`,
-    "トークンは、画面・ファイル・ほかの場所へ書き出さない。",
-    "以後の報告（report.progress・report.decision・report.outOfScope・report.done・scope.extend）は、トークンのヘッダーを標準入力から渡して送る（コマンドの引数にトークンを置かない）:",
-    `printf 'authorization: Bearer %s\\n' "$CSO_TOKEN" | curl -sS -X POST ${baseUrl}/v1/request -H @- -H 'content-type: application/json' -d '{"requestId":"<一意な ID>","role":"child","operation":"report.progress","params":{"text":"<進捗>"}}'`,
+    "---- daemon への紐付けと報告（cso child）----",
+    `1. 最初のメッセージを受けたら、Write の道具で、次のファイルに、次のコードだけを書く（コードは一度きり。${expiresAt} まで。Bash のコマンドにはコードを書かない）:`,
+    `   ファイル: ${codePath}`,
+    `   中身: ${formatBindCodeForDisplay(code)}`,
+    "2. 次のコマンドで紐付ける（`bound` と出れば成功。コードは cso が読んで消す）:",
+    `   ${cso} child bind --dir ${dir} --url ${url}`,
+    "3. 以後の報告は、毎回、次の形で送る（本文は標準入力。--dir と値・--url と値は、それぞれ別の語のまま書く。bind と同じ URL を使う）:",
+    `   ${cso} child report --dir ${dir} --url ${url} progress <<'EOF'`,
+    "   <進捗の文>",
+    "   EOF",
+    "   種類: progress・out-of-scope（本文は文）、decision・done・scope-extend（本文は操作の params の JSON）。",
+    "注意:",
+    "- 報告に秘密（トークン・パスワード・鍵など）を書かない（報告の本文は、コマンドの文字列として、ほかのプロセスから見えうる）。",
+    "- 引き出しの中のファイル（token など）を、読んだり、表示したり、ほかへ写したりしない。",
+    "- `tokenExpired` と出たら、報告をやめて、会話で人（親）に、紐付けの文面の出し直しを頼む。新しい文面が届いたら、1 からやり直す。",
   ].join("\n");
 }
 
@@ -111,16 +135,40 @@ export function createBindHandlers(deps: BindHandlerDeps) {
           "子を止めたと宣言し、新しく node.spawn で作り直す",
         );
       }
+      if (deps.csoCommand === undefined || deps.prepareDrawer === undefined) {
+        return fail(
+          "csoCommandMissing",
+          "daemon の設定に csoCommand（Desktop の子が cso を起動する語）がない",
+          'daemon の設定に csoCommand を書いて、daemon を起動し直す（例: ["node", "<cli の dist/bin.js の絶対パス>"]）',
+        );
+      }
       const baseUrl = deps.baseUrl();
       if (baseUrl === undefined) {
         return fail("unavailable", "窓口がまだ待ち受けていない", "少し待って、もう一度呼び出す");
+      }
+      let drawer: string;
+      try {
+        drawer = deps.prepareDrawer(nodeId);
+      } catch {
+        return fail(
+          "childDirFailed",
+          "子の引き出しを用意できない（状態の置き場を確かめる）",
+          "daemon の記録（childrenDirWarning）を確かめ、daemon を起動し直す",
+        );
       }
       const issued = deps.bind.issueWithExpiry(nodeId);
       const expiresAt = new Date(issued.expiresAtMs).toISOString();
       return {
         ok: true,
         value: {
-          instruction: bindInstruction(start, nodeId, issued.code, baseUrl, expiresAt),
+          instruction: bindInstruction(
+            start,
+            issued.code,
+            baseUrl,
+            expiresAt,
+            drawer,
+            deps.csoCommand,
+          ),
           expiresAt,
         },
       };

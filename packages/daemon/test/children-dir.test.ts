@@ -4,6 +4,8 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -18,6 +20,7 @@ import {
   CHILDREN_DIR,
   CHILDREN_KEY_FILE,
   ChildrenDirError,
+  drawerActionFor,
   prepareChildrenDirs,
 } from "../src/children-dir.js";
 
@@ -196,5 +199,52 @@ describe("子の引き出しの置き場（T21-d）", () => {
     } catch (e) {
       expect((e as Error).message).not.toContain(s);
     }
+  });
+});
+
+describe("引き出しの中身と、状態の移り変わり（T21-cc N3・N4）", () => {
+  it("reset は前の中身を消して作り直す（ノード ID の再利用）。writeFile は 0600 で置き、一時ファイルを残さない", () => {
+    const s = state();
+    prepareChildrenDirs(s, { exclude: noExclude });
+    const d = prepareChildrenDirs(s, { exclude: noExclude });
+    const dir = d.create("a");
+    writeFileSync(join(dir, "token"), "old");
+    expect(d.reset("a")).toBe(dir);
+    expect(readdirSync(dir)).toEqual([]);
+    expect(mode(dir)).toBe(0o700);
+    d.writeFile("a", "node", "a");
+    expect(readFileSync(join(dir, "node"), "utf8")).toBe("a\n");
+    expect(mode(join(dir, "node"))).toBe(0o600);
+    expect(readdirSync(dir)).toEqual(["node"]);
+    expect(d.pathOf("a")).toBe(dir);
+  });
+
+  it("removeFiles は指定の名前とその一時ファイルだけを消す（引き出しと node は残す。リンクはリンクだけ）", () => {
+    const s = state();
+    prepareChildrenDirs(s, { exclude: noExclude });
+    const d = prepareChildrenDirs(s, { exclude: noExclude });
+    const dir = d.create("a");
+    d.writeFile("a", "node", "a");
+    const outside = state();
+    writeFileSync(join(outside, "keep"), "x");
+    for (const f of ["token", "url", "token.tmp-1234"]) writeFileSync(join(dir, f), "x");
+    symlinkSync(join(outside, "keep"), join(dir, "code"));
+    d.removeFiles("a", ["token", "url", "code"]);
+    expect(readdirSync(dir)).toEqual(["node"]);
+    expect(existsSync(join(outside, "keep"))).toBe(true);
+    d.removeFiles("zz", ["token"]); // 引き出しがなければ何もしない
+  });
+
+  it("drawerActionFor の表: spawn で作る（起動時に初めて見るノードは作らない）、stopped で中を消す、verified・reclaimable・archived で消す、done は何もしない", () => {
+    expect(drawerActionFor(undefined, "pending", false)).toBe("create");
+    expect(drawerActionFor(undefined, "running", true)).toBeUndefined();
+    expect(drawerActionFor("running", "stopped", false)).toBe("clearSecrets");
+    expect(drawerActionFor(undefined, "stopped", true)).toBeUndefined();
+    for (const x of ["verified", "reclaimable", "archived"]) {
+      expect(drawerActionFor("done", x, false), x).toBe("remove");
+    }
+    expect(drawerActionFor("running", "done", false)).toBeUndefined();
+    expect(drawerActionFor("stopped", "running", false)).toBeUndefined();
+    expect(drawerActionFor("running", "running", false)).toBeUndefined();
   });
 });

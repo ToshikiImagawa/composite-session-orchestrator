@@ -542,3 +542,29 @@ describe("loadConfigFile", () => {
     expect(loadConfigFile(link).ok).toBe(false);
   });
 });
+
+describe("csoCommand（T21-cc）", () => {
+  it("cso を起動する語の配列（1〜4 語、絶対パスの語が 1 つ以上）だけを受け付ける", () => {
+    const ok1 = parseConfig(JSON.stringify({ ...base, csoCommand: ["node", "/opt/cso/bin.js"] }));
+    expect(ok1.ok).toBe(true);
+    if (ok1.ok) expect(ok1.value.csoCommand).toEqual(["node", "/opt/cso/bin.js"]);
+    expect(parseConfig(JSON.stringify({ ...base, csoCommand: ["/usr/local/bin/cso"] })).ok).toBe(
+      true,
+    );
+    for (const bad of [
+      [],
+      ["cso"],
+      ["node", "rel/bin.js"],
+      ["node", "/a/../b.js"],
+      ["node", "/a b/bin.js"],
+      ["node", "/a/bin.js'; rm -rf /"],
+      ["a", "b", "c", "d", "/e"],
+      "node /a/bin.js",
+    ]) {
+      expect(
+        parseConfig(JSON.stringify({ ...base, csoCommand: bad })).ok,
+        JSON.stringify(bad),
+      ).toBe(false);
+    }
+  });
+});
