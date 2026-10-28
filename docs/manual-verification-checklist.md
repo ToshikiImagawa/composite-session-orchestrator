@@ -197,6 +197,8 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 - **前提（C 全体）**: B1 のうち 2 点（子が `curl` を実行できる〔`-H @-`・`-d @-` が使える〕こと、spawn_task の prompt が人間のメッセージとして扱われること）が可。daemon の設定 `childRuntime: "desktop"`。フックのゲートは既定で有効なので、B1 の結果で能力表を見直すまでは、確認のためだけに `desktopRequireVerifiedHooks: false` にする（確認のあとで戻す）。仕組みは [`docs/desktop-runtime.md`](desktop-runtime.md) の「配線と紐付け（T21。仮置き）」。
 
+- **注意（C 全体。未解決）**: Desktop の子には、作業範囲外の拒否（FR_014）がまだ効かない。確認のために `desktopRequireVerifiedHooks: false` で起動した子は、同じユーザーとして、stateDir の人間のトークン・根のトークンのファイルを読める（人間のトークンで、`node.purge` など取り消せない操作もできる）。C の確認では、子に信頼できない文章（他人のリポジトリ・Issue・Web の内容など）を読ませない。詳しくは [`docs/desktop-runtime.md`](desktop-runtime.md) の冒頭の注意。直し方は未決定（計画）。
+
 ### C1. Desktop の子の紐付けと報告（T21）
 
 - **手順**: [`docs/desktop-runtime.md`](desktop-runtime.md) の「紐付けの手順（案 A）」の 1〜4（親が `node_spawn` → `node_bindCode` → `instruction` を spawn_task に渡す → 子が `curl` で bind・報告）。
