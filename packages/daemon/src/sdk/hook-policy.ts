@@ -78,8 +78,8 @@ function isCsoChildCommand(words: readonly string[], p: ProtectedPaths): boolean
   return words[head.length] === "child" && (sub === "bind" || sub === "report");
 }
 
-/** 引き出しの中で、子が Write で書いてよいファイル（紐付けのコード）。 */
-export const DRAWER_CODE_FILE = "code";
+/** 引き出しの中で、子が Write で書いてよいファイル（紐付けのコードと、報告の本文。T21-cb R1）。 */
+export const DRAWER_WRITABLE_FILES = ["code", "report"] as const;
 /** 禁じる場所の種類（拒否の文面と記録には、種類だけを出す。実パスは出さない）。 */
 export type ProtectedKind = "stateDir" | "daemonConfig" | "processEnv";
 const KIND_TEXT: Readonly<Record<ProtectedKind, string>> = {
@@ -464,11 +464,12 @@ export async function decideToolUse(
     } catch {
       return deny("invalidPath", `${path}（実パスを解決できない）`);
     }
-    // 自分の引き出しの code（紐付けのコード）だけは、Write の道具で書いてよい（T21-cc。Edit などは許さない）
+    // 自分の引き出しの code（紐付けのコード）と report（報告の本文）だけは、Write の道具で書いてよい（T21-cc。Edit などは許さない）
+    const drawer = protectedPaths?.drawer;
     if (
       toolName === "Write" &&
-      protectedPaths?.drawer !== undefined &&
-      fold(target) === fold(`${protectedPaths.drawer}/${DRAWER_CODE_FILE}`)
+      drawer !== undefined &&
+      DRAWER_WRITABLE_FILES.some((f) => fold(target) === fold(`${drawer}/${f}`))
     ) {
       return ALLOW;
     }

@@ -4,6 +4,7 @@ import { summarize } from "../../src/api/handlers/context.js";
 import { EventLog } from "../../src/eventlog.js";
 import { createMemoryStore } from "../../src/memory-store.js";
 import {
+  csoChildCommands,
   DELEGATION_STEPS,
   DESKTOP_CAPABILITIES,
   type DesktopAdapterDeps,
@@ -192,5 +193,38 @@ describe("管理から外す（release。停止の宣言の後）", () => {
     await adapter.start(START);
     adapter.release("a");
     expect(adapter.has("a")).toBe(false);
+  });
+});
+
+describe("Desktop の子の範囲に、cso child の 2 つのコマンドを足す（T21-cc）", () => {
+  it("足すのは csoChildCommands の 2 つだけ。人が書いた範囲は、ほかは変えない。記録の範囲（引数）も変えない", async () => {
+    const extra = csoChildCommands(["node", "/opt/cso/bin.js"]);
+    expect(extra).toEqual(["node /opt/cso/bin.js child bind", "node /opt/cso/bin.js child report"]);
+    const { adapter } = rig({ requireVerifiedHooks: false, extraAllowedCommands: extra });
+    const scope: Scope = {
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: ["pnpm test", "node /opt/cso/bin.js child bind"],
+    };
+    expect((await adapter.start({ ...START, scope })).ok).toBe(true);
+    expect(adapter.scopeOf("a")).toEqual({
+      writableLocations: ["src"],
+      forbiddenLocations: [".git"],
+      allowedCommands: [
+        "pnpm test",
+        "node /opt/cso/bin.js child bind",
+        "node /opt/cso/bin.js child report",
+      ],
+    });
+    expect(scope.allowedCommands).toEqual(["pnpm test", "node /opt/cso/bin.js child bind"]);
+    // 範囲の拡張（updateScope）のあとも、足したまま
+    adapter.updateScope("a", { ...scope, allowedCommands: ["ls"] });
+    expect(adapter.scopeOf("a")?.allowedCommands).toEqual(["ls", ...extra]);
+  });
+
+  it("csoCommand がなければ（extraAllowedCommands なし）、何も足さない", async () => {
+    const { adapter } = rig({ requireVerifiedHooks: false });
+    await adapter.start(START);
+    expect(adapter.scopeOf("a")).toEqual(SCOPE);
   });
 });

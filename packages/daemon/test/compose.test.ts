@@ -1805,32 +1805,9 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(open(d)[0]?.summary).not.toContain(a);
   }, 20_000);
 
-  it("紐付けの通し: spawn → node.bindCode → POST /v1/bind → トークン → POST /v1/request。コードはログ・記録に残らない", async () => {
-    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
-    const d = await boot(r);
-    const spawned = await call(d.url, d.rootToken, "node.spawn", {
-      parentId: "root",
-      role: "implement",
-      ...brief,
-    });
-    expect(spawned.json.ok, JSON.stringify(spawned.json)).toBe(true);
-    const nodeId = spawned.json.value.nodeId as string;
-    expect(r.launcher.sessions).toHaveLength(0); // SDK では起動しない
-    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
-    expect(bc.json.ok, JSON.stringify(bc.json)).toBe(true);
-    const instruction = bc.json.value.instruction as string;
-    expect(instruction).toContain(`${d.url}/v1/bind`);
-    const code = (/"bindCode":"([0-9A-Z-]+)"/.exec(instruction) as RegExpExecArray)[1] as string;
-    // 子: 文面のコマンドを、そのままシェルで実行する（トークンは変数に入れ、標準入力から渡す。コマンドの引数に置かない）
-    const lines = instruction.split("\n");
-    const bindLine = lines.find((l) => l.startsWith("CSO_TOKEN=")) as string;
-    const reportLine = (lines.find((l) => l.startsWith("printf 'authorization")) as string)
-      .replace("<一意な ID>", "p1")
-      .replace("<進捗>", "進んだ");
-    expect(bindLine).toContain("-d @-");
-    expect(reportLine).toContain("-H @-");
-    expect(reportLine).not.toContain('Bearer $CSO_TOKEN"');
-    // 同じプロセスの daemon が応答できるよう、非同期で実行する。プロキシの環境変数は外す（ループバックへ直接）。
+  // 通しの試験は、build した本物の cso（cli の dist）をシェルで実行する。`pnpm check`（scripts/check.sh）は、test の前に build する
+  const cliBin = fileURLToPath(new URL("../../cli/dist/bin.js", import.meta.url));
+  const shEnv = (() => {
     const env = { ...process.env };
     for (const k of [
       "HTTP_PROXY",
@@ -1841,33 +1818,258 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       "all_proxy",
     ])
       delete env[k];
-    const { stdout: out } = await promisify(execFile)(
-      "bash",
-      ["-c", `${bindLine}\ntest -n "$CSO_TOKEN" || exit 3\n${reportLine}`],
-      { encoding: "utf8", env, timeout: 20_000 },
+    return env;
+  })();
+  /** シェルで実行する。失敗（終了コードが 0 でない）でも、stdout・stderr・終了コードを返す。 */
+  const sh = async (script: string) => {
+    try {
+      const o = await promisify(execFile)("bash", ["-c", script], {
+        encoding: "utf8",
+        env: shEnv,
+        timeout: 20_000,
+      });
+      return { ...o, code: 0 };
+    } catch (e) {
+      const x = e as { stdout: string; stderr: string; code: number };
+      return { stdout: x.stdout, stderr: x.stderr, code: x.code };
+    }
+  };
+  const desktopRig = (over: Partial<DaemonConfig> = {}) => {
+    if (!existsSync(cliBin)) {
+      throw new Error(
+        `cli の dist（${cliBin}）がない。先に pnpm build を実行する（pnpm check は test の前に build する）`,
+      );
+    }
+    const r = rig({
+      childRuntime: "desktop",
+      desktopRequireVerifiedHooks: false,
+      csoCommand: [process.execPath, cliBin],
+      ...over,
+    });
+    // 再開できるように、作業ツリーの場所を返す（既定の rig は返さない）
+    const worktree = {
+      ...r.deps.worktree,
+      cwdOf: async (id: string) => join(r.config.worktreeRoot, id),
+    };
+    return { ...r, deps: { ...r.deps, worktree } };
+  };
+  const spawnDesktop = async (d: Awaited<ReturnType<typeof boot>>) => {
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(spawned.json.ok, JSON.stringify(spawned.json)).toBe(true);
+    return spawned.json.value.nodeId as string;
+  };
+  /** node.bindCode の文面のとおりに、子が紐付ける（Write の代わりに code を書き、bind の行を実行する）。 */
+  const bindByInstruction = async (d: Awaited<ReturnType<typeof boot>>, nodeId: string) => {
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    expect(bc.json.ok, JSON.stringify(bc.json)).toBe(true);
+    const instruction = bc.json.value.instruction as string;
+    const lines = instruction.split("\n").map((l) => l.replace(/^ {3}/, ""));
+    const codePath = (lines.find((l) => l.startsWith("ファイル: ")) as string).slice(
+      "ファイル: ".length,
     );
-    expect(JSON.parse(out).ok, out).toBe(true);
+    const drawer = codePath.replace(/\/code$/, "");
+    const code = (lines.find((l) => l.startsWith("中身: ")) as string).slice("中身: ".length);
+    const bindLine = lines.find((l) => l.includes(" child bind ")) as string;
+    const reportLine = lines.find((l) => l.includes(" child report ")) as string;
+    writeFileSync(codePath, `${code}\n`, { mode: 0o644 });
+    const bound = await sh(bindLine);
+    expect(bound.stdout, bound.stderr).toBe("bound\n");
+    /** 文面のとおりに報告する（Write の代わりに report を書き、report の行を実行する）。 */
+    const report = (text: string, kind = "progress") => {
+      writeFileSync(join(drawer, "report"), text, { mode: 0o644 });
+      return sh(reportLine.replace(/ progress$/, ` ${kind}`));
+    };
+    return { instruction, drawer, code, bindLine, reportLine, report, bound };
+  };
+  const stateOfNode = (d: Awaited<ReturnType<typeof boot>>, id: string) =>
+    d.daemon.log.state().nodes.find((n) => n.id === id)?.state;
+
+  it("紐付けの通し（T21-cc）: spawn で引き出しと node → node.bindCode → code を書く → cso child bind → report を書いて cso child report。コード・トークンはログ・記録・出力に残らない。止めの宣言で中のファイルが消える", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    expect(r.launcher.sessions).toHaveLength(0); // SDK では起動しない
+    const b = await bindByInstruction(d, nodeId);
+    // spawn のときに、daemon が引き出し（0700）と node（0600）を作っている
+    expect(lstatSync(b.drawer).mode & 0o777).toBe(0o700);
+    expect(readFileSync(join(b.drawer, "node"), "utf8").trim()).toBe(nodeId);
+    expect(lstatSync(join(b.drawer, "node")).mode & 0o777).toBe(0o600);
+    for (const c of [b.bindLine, b.reportLine]) expect(c).not.toContain(b.code);
+    expect(existsSync(join(b.drawer, "code"))).toBe(false);
+    expect(lstatSync(join(b.drawer, "token")).mode & 0o777).toBe(0o600);
+    const token = readFileSync(join(b.drawer, "token"), "utf8").trim();
+    const reported = await b.report("進んだ\n");
+    expect(JSON.parse(reported.stdout).ok, reported.stdout + reported.stderr).toBe(true);
+    expect(existsSync(join(b.drawer, "report"))).toBe(false); // 本文は cso が読んで消す
+    for (const o of [b.bound, reported]) {
+      expect(o.stdout + o.stderr).not.toContain(token);
+      expect(o.stdout + o.stderr).not.toContain(b.code);
+    }
     const reports = await call(d.url, d.rootToken, "inbox.fetch", {});
     expect(JSON.stringify(reports.json)).toContain("進んだ");
     // 使ったコードは、もう使えない
     const again = await fetch(`${d.url}/v1/bind`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId, bindCode: code }),
+      body: JSON.stringify({ nodeId, bindCode: b.code }),
     });
     expect(again.status).toBe(401);
-    // コード（区切りあり・なし）は、イベントログ（SQLite のファイル）・記録（logLine）・受信箱に残らない
-    const raw = code.replace(/-/g, "");
+    // コード（区切りあり・なし）・トークンは、イベントログ（SQLite のファイル）・記録（logLine）・受信箱に残らない
+    const raw = b.code.replace(/-/g, "");
     for (const f of ["state.db", "state.db-wal"]) {
       const p = join(r.config.stateDir, f);
       if (!existsSync(p)) continue;
       const bytes = readFileSync(p).toString("latin1");
-      expect(bytes.includes(raw), f).toBe(false);
-      expect(bytes.includes(code), f).toBe(false);
+      for (const secret of [raw, b.code, token]) expect(bytes.includes(secret), f).toBe(false);
     }
-    expect(r.logs.join("\n").includes(raw)).toBe(false);
+    for (const secret of [raw, token]) expect(r.logs.join("\n").includes(secret)).toBe(false);
     const inbox = await call(d.url, d.rootToken, "inbox.fetch", {});
     expect(JSON.stringify(inbox.json).includes(raw)).toBe(false);
+    // 止める → 止めたと宣言（stopped）: token・url・code・report を消す。引き出しと node は残す（再開で結び直す）
+    const stop = await call(d.url, d.rootToken, "node.stop", { nodeId, mode: "graceful" });
+    expect(stop.json.ok, JSON.stringify(stop.json)).toBe(true);
+    writeFileSync(join(b.drawer, "code"), "STALE\n", { mode: 0o644 });
+    const confirmed = await call(d.url, d.humanToken, "node.confirmStopped", { nodeId });
+    expect(confirmed.json.ok, JSON.stringify(confirmed.json)).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("stopped");
+    for (const f of ["token", "url", "code", "report"])
+      expect(existsSync(join(b.drawer, f)), f).toBe(false);
+    expect(existsSync(join(b.drawer, "node"))).toBe(true);
+    // 止まったあとの報告は、通らない（トークンは失効済み・ファイルもない）
+    expect((await b.report("x")).stdout).toBe("urlMissing\n");
+  });
+
+  it("文面の bind・report の行と、Write で書く code・report は、作業範囲の判定（decideToolUse）を通る（Desktop の子にフックが効くようになったときの形。R1）", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const { decideToolUse } = await import("../src/sdk/hook-policy.js");
+    const { csoChildCommands } = await import("../src/sdk/desktop-adapter.js");
+    const { realpath } = await import("node:fs/promises");
+    const scope = {
+      ...brief.scope,
+      allowedCommands: [
+        ...brief.scope.allowedCommands,
+        ...csoChildCommands([process.execPath, cliBin]),
+      ],
+    };
+    const cwd = await realpath(r.config.worktreeRoot);
+    const prot = {
+      roots: [{ path: await realpath(r.config.stateDir), kind: "stateDir" as const }],
+      allow: [],
+      drawer: await realpath(b.drawer),
+      csoCommand: [process.execPath, cliBin],
+    };
+    // daemon と同じ解決（まだない場所は、いちばん深い既存の祖先を実パスにする）
+    const { resolveForWrite, nodeFsOps } = await import("../src/sdk/path-resolve.js");
+    const resolve = (p: string) => resolveForWrite(p, nodeFsOps);
+    const decide = (tool: string, input: unknown) =>
+      decideToolUse(scope, cwd, tool, input, resolve, prot);
+    expect(await decide("Bash", { command: b.bindLine }), b.bindLine).toEqual({ allow: true });
+    expect(await decide("Bash", { command: b.reportLine }), b.reportLine).toEqual({ allow: true });
+    expect(await decide("Write", { file_path: join(b.drawer, "code"), content: "X" })).toEqual({
+      allow: true,
+    });
+    expect(await decide("Write", { file_path: join(b.drawer, "report"), content: "X" })).toEqual({
+      allow: true,
+    });
+    expect((await decide("Read", { file_path: join(b.drawer, "token") })).allow).toBe(false);
+  });
+
+  it("止めたあとで再開し、もう一度 bind してから report できる。止める前のトークンは通らない（R5）", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const oldToken = readFileSync(join(b.drawer, "token"), "utf8").trim();
+    const p = await call(d.url, d.rootToken, "decision.present", {
+      question: "どちら？",
+      options: ["a", "b"],
+      pauseNodeIds: [nodeId],
+    });
+    expect(p.json.ok, JSON.stringify(p.json)).toBe(true);
+    const confirmed = await call(d.url, d.humanToken, "node.confirmStopped", { nodeId });
+    expect(confirmed.json.ok, JSON.stringify(confirmed.json)).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("stopped");
+    const answered = await call(d.url, d.humanToken, "decision.answer", {
+      decisionId: p.json.value.decisionId,
+      choice: "a",
+    });
+    expect(answered.json.ok, JSON.stringify(answered.json)).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("running");
+    const old = await fetch(`${d.url}/v1/whoami`, {
+      headers: { authorization: `Bearer ${oldToken}` },
+    });
+    expect(old.status).toBe(401);
+    const again = await bindByInstruction(d, nodeId);
+    const res = await again.report("再開した\n");
+    expect(JSON.parse(res.stdout).ok, res.stdout + res.stderr).toBe(true);
+  });
+
+  it("tokenExpired からの結び直し: 期限が切れたら report は終了コード 3。node.bindCode を出し直して bind すると、報告できる（R5）", async () => {
+    let mono = 0;
+    const r = desktopRig();
+    const d = await boot({ ...r, deps: { ...r.deps, monoMs: () => mono } });
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    mono += 61 * 60_000; // 使わなければ切れる期限（bind。既定 1 時間）
+    const expired = await b.report("x\n");
+    expect(expired.code).toBe(3);
+    expect(expired.stdout).toBe("tokenExpired\n");
+    expect(existsSync(join(b.drawer, "token"))).toBe(false);
+    const again = await bindByInstruction(d, nodeId);
+    const res = await again.report("結び直した\n");
+    expect(JSON.parse(res.stdout).ok, res.stdout + res.stderr).toBe(true);
+  });
+
+  it("R2: node.bindCode を出し直すと、前の token・url を消す（新しい文面で 1 からやり直す）", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    writeFileSync(join(b.drawer, "report"), "残り", { mode: 0o644 });
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    expect(bc.json.ok).toBe(true);
+    for (const f of ["token", "url", "code", "report"])
+      expect(existsSync(join(b.drawer, f)), f).toBe(false);
+    expect(existsSync(join(b.drawer, "node"))).toBe(true);
+  });
+
+  it("R3: 起動したときに stopped の子の引き出しに token・url が残っていたら、消す", async () => {
+    const r = desktopRig();
+    const first = await boot(r);
+    const nodeId = await spawnDesktop(first);
+    const b = await bindByInstruction(first, nodeId);
+    await call(first.url, first.rootToken, "node.stop", { nodeId, mode: "graceful" });
+    const confirmed = await call(first.url, first.humanToken, "node.confirmStopped", { nodeId });
+    expect(confirmed.json.ok, JSON.stringify(confirmed.json)).toBe(true);
+    await first.daemon.stop();
+    cleanups.length = 0;
+    // 前回、消す前に daemon が止まった形を作る
+    writeFileSync(join(b.drawer, "token"), "stale-token\n", { mode: 0o600 });
+    writeFileSync(join(b.drawer, "url"), "http://127.0.0.1:1\n", { mode: 0o600 });
+    const second = await boot(r);
+    expect(stateOfNode(second, nodeId)).toBe("stopped");
+    for (const f of ["token", "url"]) expect(existsSync(join(b.drawer, f)), f).toBe(false);
+    expect(existsSync(join(b.drawer, "node"))).toBe(true);
+  });
+
+  it("csoCommand がなければ、node.bindCode は csoCommandMissing", async () => {
+    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const d = await boot(r);
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    const nodeId = spawned.json.value.nodeId as string;
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    expect(bc.json.error?.code).toBe("csoCommandMissing");
   });
 
   it("画面の表示モデルで、Desktop の子は stopDelegated（停止の宣言を出せる）", async () => {

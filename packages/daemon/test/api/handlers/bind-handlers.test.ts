@@ -11,7 +11,16 @@ const clock = (): string => "2026-10-20T00:00:00Z";
 let n = 0;
 
 /** root ─ m1 ─ a（running）・p（pending）。root ─ m2。 */
-const rig = (opts: { desktop?: boolean; instructions?: Record<string, string> } = {}) => {
+const DRAWER = "/home/u/state/children.noindex/0123abcd";
+const CSO = ["node", "/opt/cso/packages/cli/dist/bin.js"];
+const rig = (
+  opts: {
+    desktop?: boolean;
+    instructions?: Record<string, string>;
+    cso?: boolean;
+    drawerFails?: boolean;
+  } = {},
+) => {
   const opened = EventLog.open(createMemoryStore().open(), { clock });
   if (!opened.ok) throw new Error(opened.error.code);
   const log = opened.value;
@@ -39,6 +48,12 @@ const rig = (opts: { desktop?: boolean; instructions?: Record<string, string> } 
     bind,
     ...(opts.desktop === false ? {} : { desktop: { instructionOf: (id) => instructions[id] } }),
     baseUrl: () => "http://127.0.0.1:7777",
+    ...(opts.cso === false ? {} : { csoCommand: CSO }),
+    prepareDrawer: (id) => {
+      if (opts.drawerFails === true) throw new Error("EACCES");
+      prepared.push(id);
+      return DRAWER;
+    },
   });
   const call = (caller: string, nodeId: string, requestId = `q-${++n}`) =>
     h["node.bindCode"]({
@@ -48,10 +63,11 @@ const rig = (opts: { desktop?: boolean; instructions?: Record<string, string> } 
       ...(caller === "human" ? {} : { caller: { nodeId: caller } }),
       params: { nodeId },
     } as unknown as HandlerRequest<"node.bindCode">);
-  return { log, bind, call };
+  return { log, bind, call, prepared };
 };
+const prepared: string[] = [];
 const codeOf = (instruction: string): string => {
-  const m = /"bindCode":"([0-9A-Z-]+)"/.exec(instruction);
+  const m = /中身: ([0-9A-Z-]+)/.exec(instruction);
   if (!m) throw new Error("no code");
   return m[1] as string;
 };
@@ -62,9 +78,13 @@ describe("node.bindCode（Desktop の子の紐付けの文面。T21・仮置き�
     const res = r.call("m1", "a");
     if (!res.ok) throw new Error(res.error.code);
     expect(res.value.instruction.startsWith("あなたのノード ID: a\n目的: x")).toBe(true);
-    expect(res.value.instruction).toContain("http://127.0.0.1:7777/v1/bind");
-    expect(res.value.instruction).toContain('"nodeId":"a"');
-    expect(res.value.instruction).toContain("$CSO_TOKEN");
+    expect(res.value.instruction).toContain(`ファイル: ${DRAWER}/code`);
+    expect(res.value.instruction).toContain(
+      `node /opt/cso/packages/cli/dist/bin.js child bind --dir ${DRAWER} --url http://127.0.0.1:7777`,
+    );
+    expect(res.value.instruction).toContain("報告に秘密");
+    expect(res.value.instruction).toContain("bind と同じ URL");
+    expect(r.prepared).toContain("a");
     expect(res.value.expiresAt).toBe("2026-10-20T00:10:00.000Z");
     expect(r.call("human", "a").ok).toBe(true);
   });
@@ -90,19 +110,37 @@ describe("node.bindCode（Desktop の子の紐付けの文面。T21・仮置き�
     expect(res.error.nextActions.length).toBeGreaterThan(0);
   });
 
-  it("文面のコマンドは、トークン・コードを引数に置かない（標準入力から渡す）", () => {
+  it("文面の Bash のコマンドに、コードを置かない（コードは Write で code のファイルに書く。M2）。毎回、絶対パスと URL を書く（V5）", () => {
     const r = rig();
     const res = r.call("m1", "a");
     if (!res.ok) throw new Error(res.error.code);
+    const code = codeOf(res.value.instruction);
     const lines = res.value.instruction.split("\n");
-    const bind = lines.find((l) => l.startsWith("CSO_TOKEN=")) as string;
-    const report = lines.find((l) => l.startsWith("printf 'authorization")) as string;
-    expect(bind).toMatch(/^CSO_TOKEN=\$\(printf '%s' '\{.*\}' \| curl .* -d @- \|/);
-    expect(report).toContain("-H @-");
-    // curl の引数に、トークン（$CSO_TOKEN）・コードを置かない
-    const curlArgs = (line: string) => line.slice(line.indexOf("curl "));
-    expect(curlArgs(report)).not.toContain("CSO_TOKEN");
-    expect(curlArgs(bind)).not.toContain("bindCode");
+    const commands = lines.filter((l) => l.includes(" child "));
+    expect(commands).toHaveLength(2);
+    for (const c of commands) {
+      expect(c).not.toContain(code);
+      expect(c).toContain(`--dir ${DRAWER} `);
+      expect(c).toContain("--url http://127.0.0.1:7777");
+      expect(c).not.toContain("--dir=");
+      expect(c).not.toMatch(/token/i);
+    }
+    // コードが出るのは、Write で書く中身の行だけ
+    expect(lines.filter((l) => l.includes(code))).toEqual([`   中身: ${code}`]);
+  });
+
+  it("csoCommand がなければ csoCommandMissing。引き出しを用意できなければ childDirFailed（コードを出さない）", () => {
+    const code = (x: { ok: boolean; error?: { code: string } }) => (x.ok ? "ok" : x.error?.code);
+    expect(code(rig({ cso: false }).call("m1", "a"))).toBe("csoCommandMissing");
+    const f = rig({ drawerFails: true });
+    expect(code(f.call("m1", "a"))).toBe("childDirFailed");
+  });
+
+  it("パスに空白などがあれば、単一引用符で 1 語にする", async () => {
+    const { shellWord } = await import("../../../src/api/handlers/bind-handlers.js");
+    expect(shellWord("/a/b-c_d.e")).toBe("/a/b-c_d.e");
+    expect(shellWord("/Users/x/Application Support/s")).toBe("'/Users/x/Application Support/s'");
+    expect(shellWord("/a/it's")).toBe("'/a/it'\\''s'");
   });
 
   it("呼ぶたびに新しいコード（古いものは使えない）。同じ requestId の再送も、新しいコードを出す", () => {

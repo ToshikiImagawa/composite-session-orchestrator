@@ -280,6 +280,27 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 - **期待**: 1 は 300 回すべて 0 件。2 は 1 件以上。3 は使える。
 - **記録**: 回数だけを書く。トークン・ID・ユーザー名は書かない（NFR_012）。
 
+### C1'. Desktop の子の紐付けと報告のやり直し（T21-cc。`cso child`）
+
+- **前提**:
+  - T21-cb を入れた daemon（`childRuntime: "desktop"`、`desktopRequireVerifiedHooks: false`、`csoCommand` を設定。node も絶対パス）。人の端末で起動する（端末がないと、取り消せない操作の確認が使えない）。cli を build しておく（`pnpm build`）。
+  - **フックのない新しいリポジトリ**を使う（`dummy-repo` は使わない。B1 のデモのフックが Write を拒否するので、V1 の注意のとおり、必ず失敗する）。
+  - 設定の `worktreeRoot` のディレクトリを、先に作っておく（ないと `invalidConfig`）。
+  - 数える命令は、シェルの履歴に残さない（行の先頭に空白を入れ、`HISTCONTROL=ignorespace`〔zsh は `setopt HIST_IGNORE_SPACE`〕にしておく）。
+- **手順**:
+  1. 親が子を作り、`node_bindCode` の `instruction` を、新しい Desktop のセッションに渡す（チップの経路もあれば試す）。
+  2. 子が、文面のとおりに Write で `code` を書き、`cso child bind` を実行する。報告は、Write で `report` を書いてから `cso child report`。`bound` と出ること。Write で作業ツリーの外に書くときに、確認が出ないこと（auto。V1 の再確認）。
+  3. 子が、**別々の Bash の呼び出しで**、`progress` を 2 回以上、最後に `done` を報告する（C1 の「長い作業の途中で複数回の報告」）。受信箱・画面に届くこと。
+  4. 子が動いているあいだ、別の端末で、次の 2 つを数える（どちらも、行の先頭に空白を入れて、履歴に残さない）。
+     - トークン: ` for i in $(seq 300); do ps -axww | grep -c '[B]earer [^$]'; done | sort | uniq -c`（V2 の再確認と同じ数え方）。
+     - コード: コードの先頭の 6〜8 文字の、最初の 1 文字を括弧で囲む（例: コードが `ABCDEFGH-…` なら `[A]BCDEFG`。grep が自分の行に当たらないため）。` for i in $(seq 300); do ps -axww | grep -c '[A]BCDEFG'; done | sort | uniq -c`。コードの文字は、記録に書かない。
+  5. bind のあと、`<D>/<鍵>/` に `code` が残っていないこと、`token`・`url` が 0600 であること（`ls -l` の権限の列だけを見る。中身は見ない）。
+  6. 期限切れのあとの結び直し: 設定 `tokenExpiryMinutes.bindIdle` を短く（例: 2）して起動し直し、子に 3 分待ってから報告させる → `tokenExpired`（終了コード 3）と、受信箱の知らせ → 親が `node_bindCode` を出し直す → 子が 1 からやり直して、報告が通ること。
+  7. 止める → 止めたと宣言（`cso confirm-stopped`）→ `<D>/<鍵>/` の `token`・`url`・`code` がなくなっていること（`node` は残る）。
+  8. **V2 の再確認**（上の「CLI の子の引数に Bearer が出ないこと」を、同じ版で行う）。
+- **期待**: 2・3 は通る。4 は 300 回すべて 0 件。5・7 はそのとおり。6 は結び直せる。8 は上の期待のとおり。
+- **記録**: 回数と、通ったかどうかだけを書く。コード・トークン・ID・パス・ユーザー名は書かない（NFR_012）。
+
 ## 結果のまとめ（統括に報告する表）
 
 | 項目 | 判定 | 変わるタスク | 備考 |

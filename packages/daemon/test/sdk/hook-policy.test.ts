@@ -479,6 +479,8 @@ describe("自分の引き出しの例外（T21-cc）", () => {
 
   it("Write: 自分の引き出しの code だけ書ける。Edit・ほかのファイル・他人の引き出しは拒否", async () => {
     expect(await reasonOf("Write", { file_path: `${mine}/code`, content: "X" })).toBeNull();
+    expect(await reasonOf("Write", { file_path: `${mine}/report`, content: "進んだ" })).toBeNull();
+    expect(await reasonOf("Write", { file_path: `${other}/report` })).not.toBeNull();
     expect(await reasonOf("Edit", { file_path: `${mine}/code` })).not.toBeNull();
     expect(await reasonOf("Write", { file_path: `${mine}/token` })).not.toBeNull();
     expect(await reasonOf("Write", { file_path: `${other}/code` })).not.toBeNull();
