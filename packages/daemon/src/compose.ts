@@ -76,6 +76,13 @@ import {
   DEFAULT_ALERT_THRESHOLD,
 } from "./api-alert.js";
 import { createAutoPurger } from "./auto-purge.js";
+import {
+  CHILD_DIR_NEEDED,
+  ChildrenDirError,
+  type ChildrenDirs,
+  prepareChildrenDirs,
+  safeCause as safeCauseOfChildrenDir,
+} from "./children-dir.js";
 import type { DaemonConfig } from "./config.js";
 import { createDigestIssuer } from "./digest-issuer.js";
 import { ownedBy } from "./discarded-keys.js";
@@ -157,6 +164,8 @@ export interface DaemonDeps {
   /** 窓口の件数のまとめを、窓の終わりに出す予約（試験で差し替える。既定は、`unref` したタイマー）。 */
   readonly summaryScheduler?: SummaryScheduler | null;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
+  /** 子の引き出しの置き場を Time Machine から外す処理（既定は macOS の `tmutil addexclusion`。試験で差し替える）。 */
+  readonly excludeFromBackup?: (path: string) => Promise<void>;
   /** daemon の設定ファイルのパス（`--config`）。読み取りも禁じる場所に入れる（FR_014 の例外。T21-pr）。 */
   readonly configPath?: string;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
@@ -341,6 +350,28 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     return fail("invalidConfig", `設定が不正: ${overlap}`, "置き場を、重ならない別の場所にする");
   }
   // 読み取りも禁じる場所（FR_014 の例外。T21-pr）。起動時に実パスにして、全ノード共通で使う。
+  // 子の引き出しの置き場（T21-d。① の順番 3）。違っていれば、直さずに起動を止める（理由に実パスを出さない）。
+  let childrenDirs: ChildrenDirs;
+  try {
+    childrenDirs = prepareChildrenDirs(config.stateDir, {
+      ...(deps.excludeFromBackup === undefined ? {} : { exclude: deps.excludeFromBackup }),
+      onWarning: (cause) => note("childrenDirWarning", { cause }),
+    });
+  } catch (e) {
+    const recovery = e instanceof ChildrenDirError ? e.recovery : [];
+    const next = (
+      recovery.length > 0
+        ? recovery
+        : [
+            "状態の置き場の children.noindex・children.key を確かめる（自分のもの・0700／0600・リンクでない）",
+          ]
+    ) as [string, ...string[]];
+    return fail(
+      "stateDirInvalid",
+      `子の引き出しの置き場を使えない（${safeCauseOfChildrenDir(e)}）`,
+      ...next,
+    );
+  }
   const protectedStateDir = realpathSync(config.stateDir);
   const protectedRoots: { path: string; kind: "stateDir" | "daemonConfig" }[] = [
     { path: protectedStateDir, kind: "stateDir" },
@@ -876,6 +907,18 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           onFailure: (nodeId, cause) => note("reconcileFailure", { nodeId, cause }),
         });
         for (const o of outcomes) note("reconciled", { ...o });
+        // M9: 引き出しが要る状態の子の鍵でない引き出しを消す（daemon の異常終了・片付いた子の残り）。記録は件数だけ。
+        try {
+          const needed = log
+            .state()
+            .nodes.filter((n) => n.parentId !== null && CHILD_DIR_NEEDED[n.state])
+            .map((n) => n.id);
+          const { removed, failed } = childrenDirs.sweep(needed);
+          if (removed > 0) note("childrenDirSwept", { removed });
+          if (failed > 0) note("childrenDirWarning", { cause: "消せない引き出しがある", failed });
+        } catch (e) {
+          note("childrenDirWarning", { cause: `掃除できない（${safeCauseOfChildrenDir(e)}）` });
+        }
         // 判断の回答の指示が、記録と配送の間で途切れていたら、配送し直す（届けられなければ、受信箱に failure を出す）。
         const delivery = createInstructionDelivery({ log, clock, adapterFor: () => adapter });
         const recovered = await recoverAnswerDeliveries({
