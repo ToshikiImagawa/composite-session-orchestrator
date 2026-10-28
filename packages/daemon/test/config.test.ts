@@ -62,6 +62,7 @@ describe("parseConfig（設定は厳密に検査し、不正なら起動を失�
     bad({ stateDir: "/work/worktrees/state" }, "重な");
     bad({ worktreeRoot: "/work/repo/wt" }, "重な");
     bad({ stateDir: "/work/repo/.cso" }, "重な");
+    bad({ worktreeRoot: "/var/cso/state/wt" }, "重な"); // 子の作業ツリーが stateDir の中（T21-pr）
   });
 
   it("port は 0〜65535 の整数、rootNodeId は識別子", () => {

@@ -158,6 +158,8 @@ export interface DaemonDeps {
   readonly summaryScheduler?: SummaryScheduler | null;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
+  /** daemon の設定ファイルのパス（`--config`）。読み取りも禁じる場所に入れる（FR_014 の例外。T21-pr）。 */
+  readonly configPath?: string;
   readonly logLine?: (line: string) => void;
   /**
    * 取り消せない操作の確認コードを書く先（T24-cf。Desktop の木だけ）。既定は制御端末（/dev/tty）。標準エラー（構造化のログ）・
@@ -326,6 +328,18 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   const overlap = realOverlap(config);
   if (overlap !== undefined) {
     return fail("invalidConfig", `設定が不正: ${overlap}`, "置き場を、重ならない別の場所にする");
+  }
+  // 読み取りも禁じる場所（FR_014 の例外。T21-pr）。起動時に実パスにして、全ノード共通で使う。
+  const protectedStateDir = realpathSync(config.stateDir);
+  const protectedRoots: { path: string; kind: "stateDir" | "daemonConfig" }[] = [
+    { path: protectedStateDir, kind: "stateDir" },
+  ];
+  if (deps.configPath !== undefined) {
+    try {
+      protectedRoots.push({ path: realpathSync(deps.configPath), kind: "daemonConfig" });
+    } catch {
+      protectedRoots.push({ path: deps.configPath, kind: "daemonConfig" });
+    }
   }
 
   // SQLite のファイル（state.db・-wal・-shm）が、他のユーザーから読めないよう、作る間は umask を 077 にする。
@@ -501,6 +515,19 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     probe,
     realpath: (p) => realpath(p),
     resolvePath: (p) => resolveForWrite(p, nodeFsOps),
+    // 読み取りも禁じる場所（FR_014 の例外。T21-pr）: stateDir と daemon の設定ファイル。許すのは、そのノード自身の HOME と、
+    // 子に渡す skill の写しだけ。実パスは起動時に決めたもの（全ノード共通）。
+    protectedPaths: (nodeId) => ({
+      roots: protectedRoots,
+      allow: [
+        join(protectedStateDir, CHILD_PLUGIN_DIR),
+        ...(config.childHome === "inherit" ? [] : [join(protectedStateDir, "homes", nodeId)]),
+      ],
+      home:
+        config.childHome === "inherit"
+          ? (deps.parentEnv ?? process.env).HOME
+          : join(protectedStateDir, "homes", nodeId),
+    }),
     sink: { record: (r) => log.append(r), recordAll: (rs) => log.appendAll(rs) },
     timers,
     newRequestId: () => `adp-${randomBytes(12).toString("hex")}`,

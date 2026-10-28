@@ -168,3 +168,105 @@ describe("書き込み先の解決（シンボリックリンク対策）", () =
     );
   });
 });
+
+describe("読み取りも禁じる場所（FR_014 の例外。T21-pr）", () => {
+  const S = "/home/u/state";
+  const prot = {
+    roots: [
+      { path: S, kind: "stateDir" as const },
+      { path: "/home/u/cso.json", kind: "daemonConfig" as const },
+    ],
+    allow: [`${S}/child-plugin`, `${S}/homes/a`],
+    home: `${S}/homes/a`,
+  };
+  // 実パスにする（.. を畳み、/link を stateDir へのリンクとして解決する）
+  const resolve = async (p: string) => {
+    const { posix } = await import("node:path");
+    const n = posix.resolve(p);
+    return n === "/link" || n.startsWith("/link/") ? S + n.slice("/link".length) : n;
+  };
+  const d = (tool: string, input: unknown) =>
+    decideToolUse(scope, "/home/u/wt/a", tool, input, resolve, prot);
+  const reasonOf = async (tool: string, input: unknown) => {
+    const r = await d(tool, input);
+    return r.allow ? null : (r.violation?.subject ?? r.violation?.reason ?? "unknownTool");
+  };
+
+  it("Read・NotebookRead・LS: stateDir と設定ファイルの中は拒否。ほかの場所は今までどおり許可", async () => {
+    expect(await reasonOf("Read", { file_path: `${S}/human-token` })).toBe("protected:stateDir");
+    expect(await reasonOf("Read", { file_path: "/home/u/cso.json" })).toBe(
+      "protected:daemonConfig",
+    );
+    expect(await reasonOf("NotebookRead", { notebook_path: `${S}/x.ipynb` })).toBe(
+      "protected:stateDir",
+    );
+    expect(await reasonOf("LS", { path: `${S}/children.noindex` })).toBe("protected:stateDir");
+    expect(await reasonOf("Read", { file_path: "/etc/hosts" })).toBeNull();
+    expect(await reasonOf("LS", { path: "/home/u" })).toBeNull(); // 一覧だけ（再帰しない）の祖先は許す
+  });
+
+  it("リンク・.. を通っても、実パスで判定する", async () => {
+    expect(await reasonOf("Read", { file_path: "/link/root-token" })).toBe("protected:stateDir");
+    expect(await reasonOf("Read", { file_path: "/home/u/wt/a/../../state/human-token" })).toBe(
+      "protected:stateDir",
+    );
+  });
+
+  it("自分の HOME と、子に渡す skill の写しは読める。ほかのノードの HOME は拒否", async () => {
+    expect(await reasonOf("Read", { file_path: `${S}/homes/a/.claude/settings.json` })).toBeNull();
+    expect(await reasonOf("Read", { file_path: `${S}/child-plugin/skills/x/SKILL.md` })).toBeNull();
+    expect(await reasonOf("Read", { file_path: `${S}/homes/b/x` })).toBe("protected:stateDir");
+  });
+
+  it("Glob・Grep: 中も、禁じる場所を含む祖先（再帰で読まれる）も拒否。作業ツリーは許可", async () => {
+    expect(await reasonOf("Grep", { pattern: "x", path: S })).toBe("protected:stateDir");
+    expect(await reasonOf("Grep", { pattern: "x", path: "/home/u" })).toBe("protected:stateDir");
+    expect(await reasonOf("Glob", { pattern: "/home/*/state/**" })).toBe("protected:stateDir");
+    expect(await reasonOf("Glob", { pattern: "**/*", path: "/" })).toBe("protected:stateDir");
+    expect(await reasonOf("Glob", { pattern: "**/*.ts" })).toBeNull();
+    expect(await reasonOf("Grep", { pattern: "x" })).toBeNull();
+  });
+
+  it("書き込みも、禁じる場所なら拒否（範囲より先に、種類だけを出す）", async () => {
+    expect(await reasonOf("Write", { file_path: `${S}/x`, content: "y" })).toBe(
+      "protected:stateDir",
+    );
+  });
+
+  it("Bash: パスに見える語（絶対・相対・~・--opt=値・グロブ）を実パスで判定する", async () => {
+    expect(await reasonOf("Bash", { command: `ls ${S}/human-token` })).toBe("protected:stateDir");
+    expect(await reasonOf("Bash", { command: "pnpm test ../../state/human-token" })).toBe(
+      "protected:stateDir",
+    );
+    expect(await reasonOf("Bash", { command: "pnpm test --config=/home/u/cso.json" })).toBe(
+      "protected:daemonConfig",
+    );
+    expect(await reasonOf("Bash", { command: "ls ~/../b" })).toBe("protected:stateDir"); // 自分の HOME の外（別のノードの HOME）
+    expect(await reasonOf("Bash", { command: "ls ~/.claude" })).toBeNull(); // 自分の HOME
+    expect(await reasonOf("Bash", { command: "ls /home/*/state" })).toBe("protected:stateDir");
+    expect(await reasonOf("Bash", { command: "ls /link" })).toBe("protected:stateDir");
+    expect(await reasonOf("Bash", { command: "ls src" })).toBeNull();
+    expect(await reasonOf("Bash", { command: "git status" })).toBeNull();
+  });
+
+  it("Bash: 変数・置換を含む命令は、もともと解析できないので拒否される", async () => {
+    expect((await d("Bash", { command: 'ls "$HOME"/x' })).allow).toBe(false);
+    expect((await d("Bash", { command: "ls $(echo /home/u/state)" })).allow).toBe(false);
+  });
+
+  it("拒否の文面に、禁じる場所の実パスを出さない（種類だけ）", async () => {
+    const r = await d("Read", { file_path: `${S}/human-token` });
+    expect(r.allow).toBe(false);
+    if (!r.allow) {
+      expect(r.reason).not.toContain(S);
+      expect(r.violation?.subject).not.toContain(S);
+      expect(r.reason).toContain("daemon の状態の置き場");
+    }
+  });
+
+  it("禁じる場所を渡さなければ、今までどおり（読み込みは場所を問わず許可）", async () => {
+    expect(
+      (await decideToolUse(scope, CWD, "Read", { file_path: `${S}/human-token` }, identity)).allow,
+    ).toBe(true);
+  });
+});
