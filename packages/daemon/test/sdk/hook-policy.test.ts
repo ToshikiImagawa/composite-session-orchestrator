@@ -183,7 +183,10 @@ describe("読み取りも禁じる場所（FR_014 の例外。T21-pr）", () => 
   const resolve = async (p: string) => {
     const { posix } = await import("node:path");
     const n = posix.resolve(p);
-    return n === "/link" || n.startsWith("/link/") ? S + n.slice("/link".length) : n;
+    if (n === "/link" || n.startsWith("/link/")) return S + n.slice("/link".length);
+    const esc = `${S}/homes/a/escape`; // 自分の HOME の中の、stateDir の直下を指すリンク
+    if (n === esc || n.startsWith(`${esc}/`)) return S + n.slice(esc.length);
+    return n;
   };
   const d = (tool: string, input: unknown) =>
     decideToolUse(scope, "/home/u/wt/a", tool, input, resolve, prot);
@@ -227,8 +230,13 @@ describe("読み取りも禁じる場所（FR_014 の例外。T21-pr）", () => 
     expect(await reasonOf("Grep", { pattern: "x" })).toBeNull();
   });
 
-  it("書き込みも、禁じる場所なら拒否（範囲より先に、種類だけを出す）", async () => {
-    expect(await reasonOf("Write", { file_path: `${S}/x`, content: "y" })).toBe(
+  it("書き込みの道具は、今の範囲の決まりのまま（禁じる場所の判定では見ない）", async () => {
+    const r = await d("Write", { file_path: `${S}/x`, content: "y" });
+    expect(r.allow ? null : r.violation?.reason).toBe("outsideWritable");
+  });
+
+  it("許す場所の判定も実パスで行う（自分の HOME の中のリンクで、ほかの場所を指しても通らない）", async () => {
+    expect(await reasonOf("Read", { file_path: `${S}/homes/a/escape/human-token` })).toBe(
       "protected:stateDir",
     );
   });

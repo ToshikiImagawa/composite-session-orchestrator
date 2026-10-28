@@ -146,7 +146,7 @@ const READ_PATHS: Readonly<
   Grep: { keys: ["path"], recursive: true },
 };
 
-/** 禁じる場所の判定（読み取り・書き込み・Bash の引数）。禁じる場所がなければ、何もしない（undefined）。 */
+/** 禁じる場所の判定（読み取りの道具と Bash の引数。書き込みの道具は見ない）。禁じる場所がなければ、何もしない（undefined）。 */
 async function checkProtected(
   p: ProtectedPaths | undefined,
   cwd: string,
@@ -185,14 +185,7 @@ async function checkProtected(
     }
     return undefined;
   }
-  if (Object.hasOwn(WRITE_TOOLS, toolName)) {
-    const path = input[WRITE_TOOLS[toolName] as string];
-    if (typeof path !== "string" || path === "") return undefined; // 書き込みの判定が拒否する
-    return verdict(
-      await checkProtectedPath(path, cwd, p, resolve, false),
-      `${toolName}（パスを確かめられない）`,
-    );
-  }
+  // 書き込みは、今の範囲の決まり（書き込みを許可する場所）のまま判定する（ここでは見ない）。
   if (toolName === "Bash" && typeof input.command === "string") {
     const words = pathLikeWords(input.command);
     if (words === undefined) return undefined; // 解析できない命令は、範囲の判定が拒否する
