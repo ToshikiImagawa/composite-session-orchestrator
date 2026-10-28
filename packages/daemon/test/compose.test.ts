@@ -31,6 +31,7 @@ import {
 } from "../src/compose.js";
 import type { DaemonConfig } from "../src/config.js";
 import { EventLog } from "../src/eventlog.js";
+import { EXTERNAL_CHECK_SUMMARY } from "../src/external-check.js";
 import { openSqliteStore } from "../src/sqlite-store.js";
 import { FakeLauncher } from "./sdk/fakes.js";
 
@@ -1396,6 +1397,67 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(r.logs.join("\n")).toContain("hooksUnverified");
     expect(r.launcher.sessions).toHaveLength(0);
   });
+
+  it("再起動のあとの依頼（C2-4）: 1 件 → 再起動しても 1 件 → 子を宣言すると解決済み → 新しい子がいれば、次の再起動で新しい依頼", async () => {
+    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const open = (d: { daemon: Daemon }) =>
+      d.daemon.log
+        .state()
+        .inbox.filter(
+          (i) => i.resolved === undefined && i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true,
+        );
+    const restart = async (d: { daemon: Daemon }) => {
+      await d.daemon.stop();
+      cleanups.length = 0;
+      return boot(r);
+    };
+    let d = await boot(r);
+    const spawned = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(spawned.json.ok, JSON.stringify(spawned.json)).toBe(true);
+    const a = spawned.json.value.nodeId as string;
+    expect(open(d)).toHaveLength(0);
+    d = await restart(d);
+    expect(open(d)).toHaveLength(1);
+    expect(open(d)[0]?.summary).toContain(a);
+    d = await restart(d);
+    expect(open(d)).toHaveLength(1);
+    // 子を止めて（代行依頼）、止めたと宣言すると、動いているかもしれない子がいなくなるので、根の依頼も解決済みになる
+    expect(
+      (await call(d.url, d.rootToken, "node.stop", { nodeId: a, mode: "immediate" })).json.ok,
+    ).toBe(true);
+    for (
+      let k = 0;
+      k < 50 && d.daemon.log.state().nodes.find((n) => n.id === a)?.state !== "stopIncomplete";
+      k++
+    )
+      await new Promise((res) => setTimeout(res, 10));
+    expect(open(d)).toHaveLength(1); // 停止未完了は、まだ動いているかもしれない
+    const declared = await call(d.url, d.humanToken, "node.confirmStopped", {
+      nodeId: a,
+      note: "確かめた",
+    });
+    expect(declared.json.ok, JSON.stringify(declared.json)).toBe(true);
+    expect(open(d)).toHaveLength(0);
+    // 解決済みのあとは、再起動しても、対象がいなければ出さない
+    d = await restart(d);
+    expect(open(d)).toHaveLength(0);
+    // 新しい子がいれば、次の再起動で、新しい依頼が出る（残った依頼に止められない）
+    const next = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(next.json.ok, JSON.stringify(next.json)).toBe(true);
+    const b = next.json.value.nodeId as string;
+    d = await restart(d);
+    expect(open(d)).toHaveLength(1);
+    expect(open(d)[0]?.summary).toContain(b);
+    expect(open(d)[0]?.summary).not.toContain(a);
+  }, 20_000);
 
   it("紐付けの通し: spawn → node.bindCode → POST /v1/bind → トークン → POST /v1/request。コードはログ・記録に残らない", async () => {
     const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });

@@ -149,15 +149,22 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
     expect(r.probed).toEqual([]);
     expect(r.s().nodes.map((x) => [x.id, x.state])).toEqual(before);
     const asks = () =>
-      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true);
+      r
+        .s()
+        .inbox.filter(
+          (i) => i.resolved === undefined && i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true,
+        );
     expect(asks()).toHaveLength(1);
     const [ask] = asks();
     expect(ask).toMatchObject({ kind: "stopIncomplete", nodeId: "root" });
     // 対象: running（a・g）・waiting（w）・stopping（s）・stopIncomplete（i）の 5 件。done（d）・pending（p）・根は対象外
     expect(ask?.summary).toContain("5 件");
     for (const id of ["a", "w", "s", "i", "g"]) expect(ask?.summary).toContain(id);
+    // 再実行（もう一度の再起動）: 古い依頼を解決済みにして、新しい依頼に置き換える。未解決は 1 件のまま
     await r.run();
     expect(asks()).toHaveLength(1);
+    expect(asks()[0]?.id).not.toBe(ask?.id);
+    expect(r.s().inbox.find((i) => i.id === ask?.id)?.resolved).toBeDefined();
   });
 
   it("文面: 仮置きを外し、決めつけない・画面で子ごとに確かめる・アーカイブで止めて確かめてから宣言する、を書く。docs を指す。長さの上限に収まる", async () => {
@@ -180,7 +187,7 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
     expect(ask?.summary).toContain("5 件");
   });
 
-  it("前の版の文面の未解決の依頼があれば、新しい文面でも出さない（判定は変えない）", async () => {
+  it("前の版の文面の未解決の依頼も置き換える: 解決済みにして、新しい文面で 1 件出す", async () => {
     const r = rig({ external: true });
     const seeded = r.log.append({
       requestId: "legacy-ask",
@@ -197,12 +204,15 @@ describe("daemon の外で動く子（Desktop。T21）", () => {
       },
     });
     expect(seeded.ok).toBe(true);
-    const seq = r.s().lastSeq;
     await r.run();
-    expect(r.s().lastSeq).toBe(seq);
+    expect(r.s().inbox.find((i) => i.id === "inbox-legacy")?.resolved).toBeDefined();
     expect(
-      r.s().inbox.filter((i) => i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true),
-    ).toHaveLength(0);
+      r
+        .s()
+        .inbox.filter(
+          (i) => i.resolved === undefined && i.summary?.startsWith(EXTERNAL_CHECK_SUMMARY) === true,
+        ),
+    ).toHaveLength(1);
   });
 
   it("前の版の文面の依頼が解決済みなら、新しい文面で 1 件出す", async () => {

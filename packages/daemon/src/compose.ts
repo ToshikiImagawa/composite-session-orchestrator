@@ -75,6 +75,7 @@ import type { DaemonConfig } from "./config.js";
 import { createDigestIssuer } from "./digest-issuer.js";
 import { ownedBy } from "./discarded-keys.js";
 import { EventLog } from "./eventlog.js";
+import { withExternalCheckResolution } from "./external-check.js";
 import type { GitPorts, LossFacts } from "./git-ports.js";
 import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
@@ -561,7 +562,15 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     tick: schedule,
     close: closeScheduler,
   } = createHandlersWithScheduler(
-    { log, clock },
+    {
+      // Desktop の子のときは、操作で状態が変わったあとに、動いているかもしれない子がいなくなっていれば、
+      // 根の「daemon 再起動後」の依頼を解決済みにする（C2-4。`external-check.ts`）。
+      log:
+        desktopAdapter === undefined
+          ? log
+          : withExternalCheckResolution(log, (cause) => note("externalCheckFailure", { cause })),
+      clock,
+    },
     {
       adapterFor: () => adapter,
       managed: (id) => adapter.has(id),
