@@ -42,9 +42,27 @@ cso reclaim <nodeId>
 
 ## 終了コード
 
-0 成功 / 1 失敗・結果が確認できない / 2 引数・環境の誤り
+0 成功 / 1 失敗・結果が確認できない / 2 引数・環境の誤り / 3 子のトークンの期限切れ（`cso child report` だけ）
 
 **Desktop の木（設定 `childRuntime: "desktop"`）では、`cso purge`・`cso discarded-drop`・回収の指示（`node.reclaimInstruct`）は、すぐには実行されない**（T24-cf）。daemon は確認待ちにして `confirmationRequired` を返す（終了コード 1）。daemon の端末（`/dev/tty`）に出たコードを、画面（`/ui`）のいちばん上の「確認待ち」の欄に打つと、実行する。daemon が端末なしで動いているときは `confirmationUnavailable`（終了コード 1。端末から daemon を起動する）。CLI の子だけの木は、今までどおり。詳しくは [`docs/desktop-runtime.md`](desktop-runtime.md) の「取り消せない操作の確認」。
+
+## Desktop の子が使う `cso child`（T21-cc）
+
+`cso child bind`・`cso child report` は、Desktop の子が、daemon に紐付けて報告するためのコマンド。人間のトークン・環境変数（`CSO_DAEMON_URL` など）は使わない。使うのは、子の引き出し `<D>/<鍵>/`（daemon が 0700 で作る。`docs/desktop-runtime.md` の「子の引き出し」）のファイルと、引数の窓口の URL だけ。手順の文面は、`node.bindCode` が出す（文面の配線は次の PR）。
+
+| コマンド | すること | 標準出力 |
+| --- | --- | --- |
+| `cso child bind --dir <引き出し> --url <窓口>` | 子が Write の道具で書いた `code` を確かめて読み、**送る前に消す**。`node`（daemon が書いたノード ID）と一緒に `POST /v1/bind` へ送る。受け取ったトークンを `token`、窓口を `url` に置く（一時ファイル〔O_EXCL・O_NOFOLLOW・0600〕に書いて rename） | `bound`、または失敗の記号 1 行 |
+| `cso child report --dir <引き出し> --url <窓口> <種類>` | 本文（標準入力）を送る。種類は `progress`・`out-of-scope`（本文は文）、`decision`・`done`・`scope-extend`（本文は操作の params の JSON）の 5 つだけ（子のロールの操作） | 成功は `{ok, requestId, value}` の JSON。失敗は記号 1 行 |
+
+- **コード・トークンは、引数にも、標準出力・標準エラーにも出さない。** 報告の本文は、Bash の命令の文字列として `ps` に出うるので、秘密を書かない。
+- ファイルは、lstat で種類（通常のファイル・リンクでない）・持ち主・リンクの数（1）・権限・大きさを確かめてから O_NOFOLLOW で開き、fstat で同じものかを確かめて読む。`code` は子が Write で書くので 0644 でよい（書き込みの権限がグループ・他者にないこと）。`token`・`url`・`node` は 0600 でなければ読まない。引き出しは、実のディレクトリ・持ち主が自分・0700。
+- `--url` は、ループバックの http(s) の窓口だけ（パスなし）。`report` は、`--url` が `url` のファイル（紐付けた窓口）と違えば、トークンを送らない（`urlMismatch`）。
+- 期限切れ（`tokenExpired`）: 終了コード 3。`token` を消す。報告はもう通らないので、子は会話で人（親）に、`node.bindCode` で文面を出し直してもらう。届いた文面の手順（`code` を書く → `cso child bind`）で結び直す。
+- 結果が分からない失敗（窓口から応答がない）は、同じ本文で `--request-id <出した ID>` を付けて送り直す（同じ要求として扱われる）。
+- 終了コード: 0 成功・1 失敗・2 使い方の誤り・3 トークンの期限切れ。
+
+**子の作業範囲の判定（FR_014。`hook-policy.ts`）での扱い**: そのノード自身の引き出しだけ、禁じる場所（stateDir）の中のまま、次の 2 つを許す。(1) Bash の `cso child bind|report` の `--dir` の値（引き出しそのもの）。(2) Write の道具で `<引き出し>/code` を書くこと。引き出しの中のファイルの語（`token` とその一時ファイル `token.tmp-…` を含む）・グロブ・`cd`・読み取りの道具（Read・Glob・Grep など）は、禁じる場所のまま拒否する。ほかのノードの引き出しも拒否する。今これが効くのは CLI の子だけで、Desktop の子には、作業範囲外の拒否のフックが効くようになってから効く（`docs/desktop-runtime.md` の (a)）。
 
 ## 子の認証（daemon の起動の環境）
 
