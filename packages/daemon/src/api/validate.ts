@@ -397,6 +397,16 @@ const VALIDATORS: Validators = {
     if (!isCommitSha(expectTip)) fail("expectTip が不正（小文字の 16 進で 40 桁か 64 桁）");
     return { target: id(o, "target"), expectTip: expectTip as string };
   },
+  "confirm.approve": (p) => {
+    const o = strict(p, ["confirmationId", "code"]);
+    const code = text(o, "code", 32);
+    if (code.trim() === "") fail("code が空");
+    return { confirmationId: id(o, "confirmationId"), code };
+  },
+  "confirm.cancel": (p) => {
+    const o = strict(p, ["confirmationId"]);
+    return { confirmationId: id(o, "confirmationId") };
+  },
 };
 
 /** 操作ごとの引数を検査し、新しいオブジェクトに写して返す。 */

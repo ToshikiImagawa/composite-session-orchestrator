@@ -17,6 +17,7 @@ const { createCredentialStore } = await import(`${R}/daemon/dist/api/credentials
 const { createApiServer } = await import(`${R}/daemon/dist/api/server.js`);
 const { stopDelegatedOf } = await import(`${R}/daemon/dist/compose.js`);
 const { DesktopRuntimeAdapter } = await import(`${R}/daemon/dist/sdk/desktop-adapter.js`);
+const { createConfirmationGate } = await import(`${R}/daemon/dist/api/confirmation-gate.js`);
 const HUMAN = "human-token-human-token-human-token-1234";
 let n = 0;
 const ev = (b) => ({
@@ -1146,6 +1147,85 @@ for (let i = 0; i < 30; i++) {
 }
 out.stateRequestsDuring3sOfChanges = stateRequests; // 最短 1 秒ごとなので、4 回前後（30 回ではない）
 out.throttleWindowMs = Date.now() - tt;
+// ---- 取り消せない操作の確認待ち（T24-cf。Desktop の木）----
+// 人間のトークンで最終削除を呼ぶと、確認待ちになり、ページのいちばん上（スクロールなしで見える位置）に欄が出る。端末に出た
+// コードを打つと、1 回だけ実行する。画面にコードは出ない。
+{
+  const cf = {};
+  const terminal = [];
+  let purged = 0;
+  const gate = createConfirmationGate({
+    log: { state: () => state, appendAll: () => ({ ok: true, value: [] }) },
+    clock: () => "2026-10-28T00:00:00Z",
+    writeTerminal: (l) => terminal.push(l),
+  });
+  const csrv = createApiServer({
+    credentials,
+    getState: () => state,
+    handlers: gate.wrap({
+      ...handlers,
+      "node.purge": () => {
+        purged += 1;
+        return { ok: true, value: { purged: ["t"] } };
+      },
+    }),
+    confirmations: () => gate.pending(),
+    confirmationsVersion: () => gate.version(),
+  });
+  const cUrl = (await csrv.listen(0)).url;
+  const pageCf = await (await browser.newContext()).newPage();
+  const cfErrors = [];
+  pageCf.on("pageerror", (e) => cfErrors.push(String(e)));
+  await pageCf.goto(`${cUrl}/ui#token=${HUMAN}`);
+  await pageCf.waitForSelector("#view:not([hidden])", { timeout: 8000 });
+  cf.hiddenWithoutPending = !(await pageCf.locator("#approvals").isVisible());
+  const asked = await fetch(`${cUrl}/v1/request`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${HUMAN}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: "cf-purge-1",
+      operation: "node.purge",
+      params: { nodeId: "t" },
+    }),
+  }).then((x) => x.json());
+  cf.requiredCode = asked.error?.code;
+  await pageCf.locator("#approvals").waitFor({ timeout: 8000 });
+  const box = await pageCf.locator("#approvals").boundingBox();
+  const vh = pageCf.viewportSize()?.height ?? 0;
+  cf.visibleWithoutScroll = box !== null && box.y >= 0 && box.y < vh;
+  cf.focusedInput = await pageCf.evaluate(
+    () =>
+      document.activeElement?.tagName === "TEXTAREA" &&
+      document.activeElement?.dataset.approval !== undefined,
+  );
+  const m = terminal[0]?.match(/確認コード ([0-9A-Z]{4})-([0-9A-Z]{4})/);
+  const code = `${m?.[1] ?? ""}${m?.[2] ?? ""}`;
+  const text = await pageCf.locator("#approvals").innerText();
+  cf.codeNotOnPage = code !== "" && !text.includes(code) && !text.includes(`${m?.[1]}-${m?.[2]}`);
+  cf.shortIdMatchesTerminal = gate
+    .pending()
+    .every((p) => terminal[0].includes(`確認 ${p.shortId}…`) && text.includes(`${p.shortId}…`));
+  cf.notPurgedBeforeConfirm = purged === 0;
+  // 誤ったコードは拒否され、欄に理由が出る
+  await pageCf.locator("#approvals textarea").fill("00000000");
+  await pageCf.getByRole("button", { name: "確認して実行する" }).click();
+  await pageCf.locator("#approvals .error").waitFor({ timeout: 8000 });
+  cf.wrongCodeRejected =
+    (await pageCf.locator("#approvals .error").innerText()).includes("confirmationInvalid") &&
+    purged === 0;
+  await pageCf.locator("#approvals textarea").fill(code.toLowerCase());
+  await pageCf.getByRole("button", { name: "確認して実行する" }).click();
+  await pageCf.waitForFunction(() => document.getElementById("approvals").hidden === true, null, {
+    timeout: 8000,
+  });
+  cf.purgedOnce = purged === 1;
+  cf.doneNotice = (await pageCf.locator("#notice").innerText()).includes("確認して実行しました");
+  cf.errors = cfErrors;
+  out.confirmation = cf;
+  await pageCf.context().close();
+  await csrv.close();
+}
+
 // 使い終わったページを閉じる（SSE の同時接続の上限）
 await pageT.context().close();
 await page4.context().close();

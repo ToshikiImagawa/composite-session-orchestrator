@@ -101,6 +101,18 @@ describe("画面の資産（走査）", () => {
       "unbound",
       // 回答の結果の、再開しなかった子（T24-rs）
       "notResumed",
+      "shortId",
+      "expiresAt",
+      "attemptsLeft",
+      "confirmationId",
+      "contains",
+      "approval",
+      "spellcheck",
+      "autocomplete",
+      "ariaLabel",
+      "scrollIntoView",
+      "confirmations",
+      "clear",
       "duplicate",
       "label",
       "days",
@@ -337,7 +349,13 @@ describe("画面の資産（走査）", () => {
         fn("answerDoneText"),
         fn("hookUnbindLines"),
         fn("hookUnbindDoneText"),
-        "({ answerDoneText: answerDoneText, hookUnbindLines: hookUnbindLines, hookUnbindDoneText: hookUnbindDoneText, checkNote: checkNote, confirmStoppedParams: confirmStoppedParams, confirmStoppedLines: confirmStoppedLines, isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
+        "var CONFIRM_OP_LABELS = " +
+          UI_JS.slice(
+            UI_JS.indexOf("{", UI_JS.indexOf("var CONFIRM_OP_LABELS =")),
+            UI_JS.indexOf("};", UI_JS.indexOf("var CONFIRM_OP_LABELS =")) + 2,
+          ),
+        fn("approvalLines"),
+        "({ approvalLines: approvalLines, answerDoneText: answerDoneText, hookUnbindLines: hookUnbindLines, hookUnbindDoneText: hookUnbindDoneText, checkNote: checkNote, confirmStoppedParams: confirmStoppedParams, confirmStoppedLines: confirmStoppedLines, isReclaimPreview: isReclaimPreview, reclaimBlocked: reclaimBlocked, reclaimLines: reclaimLines, failureHint: failureHint, checkAnswer: checkAnswer, waitSecondsOf: waitSecondsOf, describeFailure: describeFailure, typedMatches: typedMatches, purgeRoots: purgeRoots, holdParams: holdParams, holdDoneText: holdDoneText, parseDays: parseDays, checkDays: checkDays, checkReason: checkReason, cleanText: cleanText })",
       ].join("\n"),
       {},
     ) as {
@@ -358,6 +376,7 @@ describe("画面の資産（走査）", () => {
       answerDoneText(value: unknown): string;
       hookUnbindLines(nodeId: string): [string, string][];
       hookUnbindDoneText(nodeId: string, value: unknown): string;
+      approvalLines(c: Record<string, unknown>): [string, string][];
       isReclaimPreview(v: unknown): boolean;
       reclaimBlocked(v: unknown): string;
       reclaimLines(nodeId: string, v: unknown): [string, string][];
@@ -437,6 +456,31 @@ describe("画面の資産（走査）", () => {
       const ten = api.answerDoneText({ accepted: true, notResumed: many.slice(0, 10) });
       expect(ten).toContain("n9（破棄の判断を経たため）");
       expect(ten).not.toContain("ほか");
+    });
+
+    it("T24-cf: 確認待ちの行。操作の名前・対象・番号の先頭（端末と見比べる）・期限。コードは持たない", () => {
+      const lines = api.approvalLines({
+        confirmationId: "cf-0123456789abcdef",
+        shortId: "012345",
+        operation: "node.purge",
+        target: "t",
+        expiresAt: "2026-10-28T00:05:00.000Z",
+        attemptsLeft: 5,
+      });
+      expect(lines.map((l) => l[0])).toEqual(["操作", "対象", "確認の番号", "期限"]);
+      expect(lines[0]?.[1]).toContain("最終削除");
+      expect(lines[2]?.[1]).toContain("012345…");
+      expect(lines[2]?.[1]).not.toContain("cf-0123456789abcdef");
+      expect(lines[3]?.[1]).toContain("残り 5 回");
+    });
+
+    it("T24-cf: 確認待ちの欄は、ページの上（判断待ちや確認の欄より前）にあり、上に固定される", () => {
+      const a = UI_HTML.indexOf('id="approvals"');
+      expect(a).toBeGreaterThan(-1);
+      expect(a).toBeLessThan(UI_HTML.indexOf('id="confirm"'));
+      expect(a).toBeLessThan(UI_HTML.indexOf('id="view"'));
+      expect(UI_CSS).toMatch(/\.approvals\{position:sticky;top:0/);
+      expect(api.failureHint("confirmationRequired")).toContain("確認待ち");
     });
 
     it("T22-hub: フックの結び付けを外す確認の行と、結果の 3 通りの文", () => {

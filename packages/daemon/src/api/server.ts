@@ -34,6 +34,7 @@ import {
   isSafeId,
   type OperationMap,
   type OrchState,
+  type PendingConfirmation,
   type Result,
   uiViewOf,
 } from "@cso/core";
@@ -162,6 +163,12 @@ export interface ApiDeps {
    * 能力表がアダプタごとに固定であること（同じノードの値が、記録なしに変わらない）が前提。
    */
   readonly stopDelegated?: (nodeId: string) => boolean;
+  /**
+   * 画面の表示モデルに出す、取り消せない操作の確認待ち（T24-cf。`confirmation-gate.ts`）。コードは含まない。`confirmationsVersion` は、
+   * 確認待ちが変わるたびに増える数で、表示モデルのキャッシュの鍵と、SSE の変化の通知に足す（記録の seq は変わらないため）。
+   */
+  readonly confirmations?: () => readonly PendingConfirmation[];
+  readonly confirmationsVersion?: () => number;
   readonly handlers: Handlers;
   /** 本文の上限（バイト）。既定 1 MiB。 */
   readonly maxBodyBytes?: number;
@@ -1032,19 +1039,25 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     if (authenticateHuman(req, res) === undefined) return;
     // 表示モデルは、`lastSeq` が同じなら同じ（直近の 1 件だけ持つ）。`If-None-Match` が一致すれば 304（本文なし）。
     const current = deps.getState();
-    if (uiCache === undefined || uiCache.seq !== current.lastSeq) {
-      const etag = `"${current.lastSeq}"`;
+    const cv = deps.confirmationsVersion?.() ?? 0;
+    if (uiCache === undefined || uiCache.seq !== current.lastSeq || uiCache.cv !== cv) {
+      const etag =
+        deps.confirmations === undefined ? `"${current.lastSeq}"` : `"${current.lastSeq}.${cv}"`;
       uiCache = {
         seq: current.lastSeq,
+        cv,
         etag,
         // 能力表（stopDelegated）は、アダプタごとに固定なので、lastSeq の鍵のままでよい。将来、能力表が記録なしに変わりうる
         // （実機確認の結果を実行中に差し替えるなど）なら、キャッシュの鍵に能力表を含めるよう見直す。
         json: JSON.stringify({
           ok: true,
-          value: uiViewOf(
-            current,
-            deps.stopDelegated === undefined ? {} : { stopDelegated: deps.stopDelegated },
-          ),
+          value: {
+            ...uiViewOf(
+              current,
+              deps.stopDelegated === undefined ? {} : { stopDelegated: deps.stopDelegated },
+            ),
+            ...(deps.confirmations === undefined ? {} : { confirmations: deps.confirmations() }),
+          },
         }),
       };
     }
@@ -1076,7 +1089,8 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       drainTimeoutMs: deps.sse?.drainTimeoutMs ?? 10_000,
       maxLifetimeMs: deps.sse?.maxLifetimeMs ?? 3_600_000,
     },
-    getSeq: () => deps.getState().lastSeq,
+    // 確認待ちの変化（記録の seq は変わらない）も、画面に知らせる（どちらも増えるだけなので、和も増えるだけ）。
+    getSeq: () => deps.getState().lastSeq + (deps.confirmationsVersion?.() ?? 0),
     isTokenValid: (token) => deps.credentials.authenticate(token) !== undefined,
     nowMs: hrtimeMs,
   });
@@ -1100,7 +1114,9 @@ export function createApiServer(deps: ApiDeps): ApiServer {
   }
 
   /** `GET /v1/ui/state` の直近の 1 件（`lastSeq` が鍵）。 */
-  let uiCache: { readonly seq: number; readonly etag: string; readonly json: string } | undefined;
+  let uiCache:
+    | { readonly seq: number; readonly cv: number; readonly etag: string; readonly json: string }
+    | undefined;
 
   const now = (): string => (deps.clock ?? (() => new Date().toISOString()))();
   const throttle: Throttle = deps.bindThrottle ?? createThrottle({});

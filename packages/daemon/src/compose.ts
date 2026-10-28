@@ -31,6 +31,7 @@ import {
   isPathUnder,
   type Result,
 } from "@cso/core";
+import { createConfirmationGate } from "./api/confirmation-gate.js";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import { recoverAnswerDeliveries } from "./api/handlers/answer-delivery.js";
 import { createBindHandlers } from "./api/handlers/bind-handlers.js";
@@ -64,6 +65,7 @@ import {
   type SummaryScheduler,
   type WorktreeFacts,
 } from "./api/index.js";
+import type { Handlers } from "./api/server.js";
 import {
   ALERT_ID_PREFIX,
   createApiAlert,
@@ -154,6 +156,11 @@ export interface DaemonDeps {
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
+  /**
+   * 取り消せない操作の確認コードを書く先（T24-cf。Desktop の木だけ）。既定は標準エラー。構造化のログ（`logLine`）とは別に、
+   * 1 行だけ書く。記録・ファイルには書かない（試験で差し替える）。
+   */
+  readonly confirmationOut?: (line: string) => void;
   /**
    * 最終削除の後に、イベントログの追記のみの保証を確かめられなかったとき（以降の書き込みは拒否される）に呼ぶ。
    * 呼び出し側は daemon を止める（fail closed）。記録（`fatal`）は、これとは別に残す。
@@ -707,6 +714,18 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     apiAlert?.(e);
   };
   const bind: BindCodes = createBindCodes();
+  // 取り消せない操作の確認（T24-cf）。Desktop の木だけ（子が人間のトークンを読めてしまうため）。CLI の子だけの木は今までどおり。
+  const confirmGate =
+    desktopAdapter === undefined
+      ? undefined
+      : createConfirmationGate({
+          log,
+          clock,
+          writeTerminal:
+            deps.confirmationOut ?? ((line: string) => process.stderr.write(`${line}\n`)),
+        });
+  const wrapConfirm = (h: Handlers): Handlers =>
+    confirmGate === undefined ? h : confirmGate.wrap(h);
   const identityPath = join(config.stateDir, IDENTITY_FILE);
   let currentIdentity: Identity | undefined;
   const server = createApiServer({
@@ -727,7 +746,13 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     // 画面の停止の宣言（T22d）。ハンドラ（node.confirmStopped）と同じく、能力表の stopDelegated だけで決める（管理しているか
     // は見ない。再起動の後も出す）。childRuntime が desktop のとき、Desktop のアダプタの能力表から真になる（T21）。
     stopDelegated: stopDelegatedOf(adapter),
-    handlers: {
+    ...(confirmGate === undefined
+      ? {}
+      : {
+          confirmations: () => confirmGate.pending(),
+          confirmationsVersion: () => confirmGate.version(),
+        }),
+    handlers: wrapConfirm({
       ...handlers,
       // フックの結び付けを外す（人間・祖先の統合ノード。T22-hu）。
       ...createHookHandlers({
@@ -763,7 +788,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
             },
             audit: (event, data) => note(`discarded.${event}`, data),
           })),
-    },
+    }),
     logger,
     bind,
     clock,

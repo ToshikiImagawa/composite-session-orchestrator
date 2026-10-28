@@ -29,6 +29,7 @@ export const UI_HTML = `<!doctype html>
 <p>人間のトークンのファイルの中身を、貼り付けてください（推奨）。トークンはこのページのメモリにだけ置き、保存しません。</p>
 <form id="auth-form"><input id="token" type="password" autocomplete="off" spellcheck="false" aria-label="人間のトークン"><button type="submit">接続</button></form>
 </section>
+<section id="approvals" class="approvals" hidden></section>
 <section id="confirm" class="confirm" hidden></section>
 <p id="notice" class="notice" hidden></p>
 <section id="view" hidden>
@@ -62,6 +63,7 @@ button{cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.opts{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
 button.primary{background:var(--blocking);color:#fff;border-color:var(--blocking)}
 textarea{display:block;width:100%;min-height:64px;margin:6px 0;font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+.approvals{position:sticky;top:0;z-index:2;border:2px solid var(--blocking);border-radius:6px;padding:4px 12px 12px;margin:12px 0;background:var(--bg)}.approvals textarea{width:12em;min-height:0;height:2.2em;font:inherit;letter-spacing:.1em;text-transform:uppercase}
 .confirm{border:2px solid var(--blocking);border-radius:6px;padding:4px 12px 12px;margin:16px 0;background:var(--card)}
 .confirm-title{font-weight:600;margin:10px 0 6px}.confirm-line{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .error{color:var(--blocking);margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}.notice{color:var(--ok);margin:12px 0}.notice.bad{color:var(--blocking)}
@@ -158,6 +160,7 @@ export const UI_JS = `'use strict';
   }
   // 失敗の種類ごとの案内。なければ ''。
   function failureHint(code) {
+    if (code === 'confirmationRequired') return 'まだ実行していません。ページのいちばん上の「確認待ち」の欄に、daemon を起動した端末に出たコードを打って、確認してください。';
     if (code === 'tipMismatch' || code === 'tipUnknown') return '表示したあとで、先端が変わった（または確かめられない）ため、何も指示していません。もう一度、「破棄して回収を指示…」から、内容を確かめ直してください。';
     return '';
   }
@@ -842,7 +845,108 @@ export const UI_JS = `'use strict';
     });
   }
 
+  // ---- 取り消せない操作の確認待ち（T24-cf。Desktop の木）。ページのいちばん上に固定して出す（スクロールしなくても見える）----
+  var CONFIRM_OP_LABELS = { 'node.purge': '最終削除', 'node.discardedDrop': '保管の削除', 'node.reclaimInstruct': '破棄して回収の指示' };
+  var codeDrafts = new Map();
+  var approvalErrors = new Map();
+  var approvalSending = new Set();
+  var shownApprovals = '';
+  // 確認待ちの 1 件の説明の行（textContent で描く）。
+  function approvalLines(c) {
+    return [
+      ['操作', name(CONFIRM_OP_LABELS, c.operation) + '（' + c.operation + '）'],
+      ['対象', c.target],
+      ['確認の番号', c.shortId + '…（端末の行の「確認 ' + c.shortId + '…」と同じか、見比べる）'],
+      ['期限', c.expiresAt + '（残り ' + c.attemptsLeft + ' 回まで打てる）']
+    ];
+  }
+  function approve(c, code) {
+    if (approvalSending.has(c.confirmationId)) return;
+    if (!window.crypto || !window.crypto.randomUUID) { notice('このブラウザでは、操作できません（crypto.randomUUID がありません）', true); return; }
+    approvalSending.add(c.confirmationId);
+    approvalErrors.delete(c.confirmationId);
+    callOperation('confirm.approve', { confirmationId: c.confirmationId, code: code }, window.crypto.randomUUID())
+      .then(function (r) {
+        approvalSending.delete(c.confirmationId);
+        if (r === null) return;
+        if (r.status === 200 && r.body && r.body.ok === true) {
+          codeDrafts.delete(c.confirmationId);
+          notice('確認して実行しました（' + name(CONFIRM_OP_LABELS, c.operation) + '）');
+        } else {
+          approvalErrors.set(c.confirmationId, describeFailure(r));
+        }
+        refresh();
+      })
+      .catch(function () {
+        approvalSending.delete(c.confirmationId);
+        approvalErrors.set(c.confirmationId, '送れませんでした（daemon に接続できません）');
+        refresh();
+      });
+  }
+  function cancelApproval(c) {
+    if (!window.crypto || !window.crypto.randomUUID) return;
+    callOperation('confirm.cancel', { confirmationId: c.confirmationId }, window.crypto.randomUUID())
+      .then(function () { codeDrafts.delete(c.confirmationId); refresh(); })
+      .catch(function () { refresh(); });
+  }
+  function renderApprovals(list) {
+    var box = document.getElementById('approvals');
+    var items = Array.isArray(list) ? list.filter(function (c) { return c && typeof c.confirmationId === 'string' && ID_RE.test(c.confirmationId); }) : [];
+    var focused = document.activeElement && box.contains(document.activeElement) ? document.activeElement.dataset.approval : '';
+    clear(box);
+    if (items.length === 0) { box.hidden = true; shownApprovals = ''; return; }
+    box.hidden = false;
+    box.appendChild(el('div', 'confirm-title', '確認待ち（取り消せない操作。まだ実行していません）'));
+    box.appendChild(el('p', '', 'daemon を起動した端末に出たコードを打つと、実行します。端末の行の確認の番号と、ここの番号が同じか見比べてください。心当たりがなければ「取り消す」を押してください。'));
+    var first = null;
+    var keep = null;
+    items.forEach(function (c) {
+      var card = el('div', 'card');
+      approvalLines(c).forEach(function (line) {
+        var row = el('div', 'confirm-line');
+        row.appendChild(el('span', 'tag', line[0]));
+        row.appendChild(el('span', '', line[1]));
+        card.appendChild(row);
+      });
+      var area = el('textarea', '');
+      area.maxLength = 16;
+      area.rows = 1;
+      area.spellcheck = false;
+      area.autocomplete = 'off';
+      area.ariaLabel = '確認コード';
+      area.dataset.approval = c.confirmationId;
+      area.value = codeDrafts.get(c.confirmationId) || '';
+      area.addEventListener('input', function () { codeDrafts.set(c.confirmationId, area.value); });
+      area.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') { ev.preventDefault(); approve(c, area.value); } });
+      card.appendChild(area);
+      var go = el('button', '', approvalSending.has(c.confirmationId) ? '送っています…' : '確認して実行する');
+      go.disabled = approvalSending.has(c.confirmationId);
+      go.addEventListener('click', function () { approve(c, area.value); });
+      card.appendChild(go);
+      var stop = el('button', '', '取り消す');
+      stop.addEventListener('click', function () { cancelApproval(c); });
+      card.appendChild(stop);
+      var why = approvalErrors.get(c.confirmationId);
+      if (why) card.appendChild(el('p', 'error', why));
+      box.appendChild(card);
+      if (first === null) first = area;
+      if (focused === c.confirmationId) keep = area;
+    });
+    var ids = items.map(function (c) { return c.confirmationId; }).join(',');
+    var target = keep || (ids !== shownApprovals ? first : null);
+    shownApprovals = ids;
+    if (target) {
+      target.focus();
+      target.setSelectionRange(target.value.length, target.value.length);
+      if (!keep) box.scrollIntoView({ block: 'start' });
+    }
+    var live = new Set(items.map(function (c) { return c.confirmationId; }));
+    codeDrafts.forEach(function (_v, id) { if (!live.has(id)) codeDrafts.delete(id); });
+    approvalErrors.forEach(function (_v, id) { if (!live.has(id)) approvalErrors.delete(id); });
+  }
+
   function render(view) {
+    renderApprovals(view.confirmations);
     renderDecisions(view.decisions);
     renderExtensions(view.extensions, document.getElementById('decisions'));
     if (!view.decisions.length && !view.extensions.length) document.getElementById('decisions').appendChild(el('p', 'empty', '判断待ちはありません'));
@@ -864,6 +968,7 @@ export const UI_JS = `'use strict';
   function rejectToken(message) {
     token = ''; etag = ''; lastView = null; generation += 1; sseUp = false; keptList = null; purgeSignature = null; pending = null;
     if (controller) controller.abort();
+    document.getElementById('approvals').hidden = true; codeDrafts.clear(); approvalErrors.clear();
     showAuth(true); setStatus(message);
   }
 

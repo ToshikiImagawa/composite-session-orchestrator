@@ -44,6 +44,8 @@ cso reclaim <nodeId>
 
 0 成功 / 1 失敗・結果が確認できない / 2 引数・環境の誤り
 
+**Desktop の木（設定 `childRuntime: "desktop"`）では、`cso purge`・`cso discarded-drop`・回収の指示（`node.reclaimInstruct`）は、すぐには実行されない**（T24-cf）。daemon は確認待ちにして `confirmationRequired` を返す（終了コード 1）。daemon を起動した端末に出たコードを、画面（`/ui`）のいちばん上の「確認待ち」の欄に打つと、実行する。CLI の子だけの木は、今までどおり。詳しくは [`docs/desktop-runtime.md`](desktop-runtime.md) の「取り消せない操作の確認」。
+
 ## 子の認証（daemon の起動の環境）
 
 `cso` が使うのは人間のトークンだけだが、daemon が起動する子には、別に Claude の認証が要る。既定の `childHome: "isolated"` では、

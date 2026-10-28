@@ -53,6 +53,8 @@ export const RESULT_KEYS: ResultKeys = {
   "node.discardedList": ["items", "max"],
   "node.discardedRestore": ["branch", "tip"],
   "node.discardedDrop": ["dropped", "key", "tip"],
+  "confirm.approve": ["executed", "operation", "result"],
+  "confirm.cancel": ["cancelled"],
 };
 
 /** 結果のキーだけを写す。結果がオブジェクトでなければ `undefined`（ハンドラの不具合として扱う）。 */

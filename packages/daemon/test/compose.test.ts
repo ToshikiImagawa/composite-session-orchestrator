@@ -80,15 +80,17 @@ const rig = (over: Partial<DaemonConfig> = {}, stateDir?: string) => {
     cwdOf: async () => undefined,
   };
   const logs: string[] = [];
+  const terminal: string[] = [];
   const deps: DaemonDeps = {
     launcher,
     worktree,
     probe: async () => [],
     logLine: (l) => logs.push(l),
+    confirmationOut: (l) => terminal.push(l),
     // 既定の childHome（isolated）では、子に認証の環境変数が要る（T22-auth）
     parentEnv: { PATH: process.env.PATH, ANTHROPIC_API_KEY: "test-key" },
   };
-  return { config, deps, launcher, calls, logs };
+  return { config, deps, launcher, calls, logs, terminal };
 };
 
 const boot = async (
@@ -528,6 +530,55 @@ describe("createDaemon（最終削除）", () => {
     }
     store.value.close();
   };
+
+  it("Desktop の木（T24-cf）: 人間のトークンの最終削除は確認待ち。画面に確認待ち（コードなし）。端末のコードで確認すると 1 回だけ実行", async () => {
+    const r = rig({ retentionDays: 0, childRuntime: "desktop" });
+    seedArchivedTree(r);
+    const d = await boot(r);
+    const asked = await call(d.url, d.humanToken, "node.purge", { nodeId: "t" }, "purge-1");
+    expect(asked.json.ok).toBe(false);
+    expect(asked.json.error?.code).toBe("confirmationRequired");
+    expect(d.daemon.log.state().nodes.some((n) => n.id === "t")).toBe(true);
+    expect(r.terminal).toHaveLength(1);
+    const m = r.terminal[0]?.match(/確認コード ([0-9A-Z]{4})-([0-9A-Z]{4})/);
+    const code = `${m?.[1]}${m?.[2]}`;
+    const ui = await fetch(`${d.url}/v1/ui/state`, {
+      headers: { authorization: `Bearer ${d.humanToken}` },
+    });
+    const body = await ui.text();
+    expect(body).not.toContain(code);
+    const view = JSON.parse(body) as {
+      value: { confirmations: { confirmationId: string; operation: string }[] };
+    };
+    expect(view.value.confirmations).toHaveLength(1);
+    expect(view.value.confirmations[0]?.operation).toBe("node.purge");
+    const confirmationId = view.value.confirmations[0]?.confirmationId ?? "";
+    // 根（統合）のトークンでは、確認できない
+    const byRoot = await call(d.url, d.rootToken, "confirm.approve", { confirmationId, code });
+    expect(byRoot.json.ok).toBe(false);
+    const done = await call(d.url, d.humanToken, "confirm.approve", { confirmationId, code });
+    expect(done.json.ok, JSON.stringify(done.json)).toBe(true);
+    expect(done.json.value.result.purged).toEqual(["c", "t"]);
+    expect(d.daemon.log.state().nodes.map((n) => n.id)).toEqual(["root"]);
+    const again = await call(d.url, d.humanToken, "confirm.approve", { confirmationId, code });
+    expect(again.json.ok).toBe(false);
+    // 同じ要求の再送は、前の結果を返す（二重に実行しない）
+    const resent = await call(d.url, d.humanToken, "node.purge", { nodeId: "t" }, "purge-1");
+    expect(resent.json.ok).toBe(true);
+    // コード・確認の番号は、構造化のログ・記録に出ない
+    const all = `${r.logs.join("\n")}${JSON.stringify(d.daemon.log.state())}`;
+    expect(all).not.toContain(code);
+    expect(all).not.toContain(confirmationId);
+  });
+
+  it("CLI の子だけの木（T24-cf）: 最終削除は今までどおり、すぐ実行される（確認待ちにしない）", async () => {
+    const r = rig({ retentionDays: 0 });
+    seedArchivedTree(r);
+    const d = await boot(r);
+    const done = await call(d.url, d.humanToken, "node.purge", { nodeId: "t" });
+    expect(done.json.ok).toBe(true);
+    expect(r.terminal).toHaveLength(0);
+  });
 
   it("人間のトークンで、事前確認と最終削除ができる。根（統合）のトークンでは拒否される。墓標が残る", async () => {
     const r = rig({ retentionDays: 0 });
