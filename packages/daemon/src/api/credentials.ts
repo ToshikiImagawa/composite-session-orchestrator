@@ -16,10 +16,36 @@ export type Principal =
 
 export type NodeRoleForToken = "integrator" | "child";
 
+/** トークンの期限（T21-te。M5）。値はミリ秒。 */
+export interface TokenExpiry {
+  /** daemon が起動する子（`sdk`）の、使わなければ切れる期限。絶対の期限は付けない。既定 6 時間。 */
+  readonly sdkIdleMs: number;
+  /** 紐付け（`bind`。Desktop の子）の、発行からの絶対の期限。既定 24 時間。 */
+  readonly bindAbsoluteMs: number;
+  /** 紐付け（`bind`）の、使わなければ切れる期限。既定 1 時間。 */
+  readonly bindIdleMs: number;
+}
+export const DEFAULT_TOKEN_EXPIRY: TokenExpiry = {
+  sdkIdleMs: 6 * 3_600_000,
+  bindAbsoluteMs: 24 * 3_600_000,
+  bindIdleMs: 3_600_000,
+};
+/** 最後に使った時刻を、保存先へ書く間隔の下限（1 ノードにつき）。 */
+export const LAST_USED_WRITE_MS = 60_000;
+
+/** 期限切れ・役目の終わりで失効させた理由。 */
+export type ExpiryReason = "absolute" | "idle" | "retired";
+
+export type TokenKind = "sdk" | "bind";
+
 export interface CredentialStore {
   authenticate(token: unknown): Principal | undefined;
-  /** ノード専用のトークンを発行する（そのノードの既存のトークンは無効になる）。 */
-  issueNodeToken(nodeId: string, role: NodeRoleForToken): string;
+  /** 直近に期限切れ・役目の終わりで失効させたトークンか（応答の失敗の記号を tokenExpired にするため。メモリだけ）。 */
+  wasExpired?(token: unknown): boolean;
+  /** 期限・役目の終わりを見回り、失効させる（定期の見回り）。失効させたノードの ID。 */
+  sweepExpired?(): string[];
+  /** ノード専用のトークンを発行する（そのノードの既存のトークンは無効になる）。`kind` の既定は `sdk`。 */
+  issueNodeToken(nodeId: string, role: NodeRoleForToken, kind?: TokenKind): string;
   revokeNode(nodeId: string): void;
   /** トークンを持つノードの ID（起動時に、ストアにないノードのトークンを掃除するのに使う）。 */
   nodeIds(): string[];
@@ -56,6 +82,21 @@ export function createCredentialStore(options: {
    * 両方で、古いトークンの要求は、発行し直したあとに結び付けを作れない。
    */
   readonly onNodeTokenChanged?: (nodeId: string) => void;
+  /** 期限（T21-te）。省略すると既定。 */
+  readonly expiry?: TokenExpiry;
+  /** 期限を付けないノード（根）。 */
+  readonly exemptNodeId?: string;
+  /** 壁時計（ミリ秒）。期限に使う。 */
+  readonly nowMs?: () => number;
+  /** そのノードのトークンが、もう要らないか（verified・reclaimable・archived、CLI の子なら停止など）。 */
+  readonly isRetired?: (nodeId: string, kind: TokenKind) => boolean;
+  /** 期限切れ・役目の終わりで失効させたとき（受信箱への知らせなど）。`issuedAt` は、同じトークンを見分けるのに使う。 */
+  readonly onExpired?: (
+    nodeId: string,
+    reason: ExpiryReason,
+    kind: TokenKind,
+    issuedAt: string,
+  ) => void;
 }): CredentialStore {
   if (typeof options.humanToken !== "string" || options.humanToken.length < MIN_HUMAN_TOKEN) {
     throw new RangeError(`人間のトークンは ${MIN_HUMAN_TOKEN} 文字以上が必要`);
@@ -66,32 +107,142 @@ export function createCredentialStore(options: {
   const byHash = new Map<string, Principal>();
   /** nodeId → 現在のトークンのハッシュ。 */
   const byNode = new Map<string, string>();
+  /** nodeId → 期限の情報（発行・最後に使った時刻〔ミリ秒〕、保存先へ最後に書いた時刻）。 */
+  const meta = new Map<
+    string,
+    {
+      kind: TokenKind;
+      role: NodeRoleForToken;
+      issuedAt: string;
+      issuedMs: number;
+      lastUsedMs: number;
+      writtenMs: number;
+    }
+  >();
+  /** 直近に失効させたトークンのハッシュ（応答で tokenExpired にする。上限つき。メモリだけ）。 */
+  const expiredHashes = new Set<string>();
+  const EXPIRED_MAX = 1000;
   const repository = options.repository;
   const clock = options.clock ?? (() => new Date().toISOString());
+  const nowMs = options.nowMs ?? Date.now;
+  const expiry = options.expiry ?? DEFAULT_TOKEN_EXPIRY;
+  const parseMs = (iso: string | undefined, fallback: number): number => {
+    const t = iso === undefined ? Number.NaN : Date.parse(iso);
+    return Number.isNaN(t) ? fallback : t;
+  };
   // 保存済みのトークンを復元する（壊れたファイルなどは例外。黙って捨てない）。
   for (const r of repository?.load() ?? []) {
     byHash.set(r.tokenHash, { role: r.role, nodeId: r.nodeId });
     byNode.set(r.nodeId, r.tokenHash);
+    const issuedMs = parseMs(r.issuedAt, nowMs());
+    // 時計が戻った（最後に使った時刻が未来）ときは、今の時刻に丸める
+    const lastUsedMs = Math.min(parseMs(r.lastUsedAt, issuedMs), nowMs());
+    meta.set(r.nodeId, {
+      kind: r.kind ?? "sdk",
+      role: r.role,
+      issuedAt: r.issuedAt,
+      issuedMs,
+      lastUsedMs,
+      writtenMs: lastUsedMs,
+    });
   }
+  /** 期限切れ・役目の終わりなら、その理由。 */
+  const expiredReason = (nodeId: string, now: number): ExpiryReason | undefined => {
+    if (nodeId === options.exemptNodeId) return undefined;
+    const m = meta.get(nodeId);
+    if (m === undefined) return undefined;
+    if (options.isRetired?.(nodeId, m.kind) === true) return "retired";
+    if (m.kind === "bind") {
+      if (now - m.issuedMs >= expiry.bindAbsoluteMs) return "absolute";
+      if (now - m.lastUsedMs >= expiry.bindIdleMs) return "idle";
+      return undefined;
+    }
+    return now - m.lastUsedMs >= expiry.sdkIdleMs ? "idle" : undefined;
+  };
+  /** 期限切れで失効させる（今の revoke と同じ流れ。フック用も onNodeTokenChanged で一緒に無効）。 */
+  const expire = (nodeId: string, reason: ExpiryReason): void => {
+    const h = byNode.get(nodeId);
+    const m = meta.get(nodeId);
+    if (h === undefined || m === undefined) return;
+    repository?.remove(nodeId);
+    byHash.delete(h);
+    byNode.delete(nodeId);
+    meta.delete(nodeId);
+    expiredHashes.add(h);
+    if (expiredHashes.size > EXPIRED_MAX) {
+      const first = expiredHashes.values().next().value;
+      if (first !== undefined) expiredHashes.delete(first);
+    }
+    options.onNodeTokenChanged?.(nodeId);
+    options.onExpired?.(nodeId, reason, m.kind, m.issuedAt);
+  };
+  /** 最後に使った時刻を更新し、保存先へは 1 ノードにつき LAST_USED_WRITE_MS に 1 回まで書く。 */
+  const touch = (nodeId: string, h: string, now: number): void => {
+    const m = meta.get(nodeId);
+    if (m === undefined) return;
+    m.lastUsedMs = Math.max(m.lastUsedMs, now);
+    if (repository === undefined || now - m.writtenMs < LAST_USED_WRITE_MS) return;
+    try {
+      repository.put({
+        tokenHash: h,
+        role: m.role,
+        nodeId,
+        issuedAt: m.issuedAt,
+        lastUsedAt: new Date(m.lastUsedMs).toISOString(),
+        kind: m.kind,
+      });
+      m.writtenMs = now;
+    } catch {
+      // 書けなくても認証は続ける（次の機会に書く。daemon が落ちれば、古い時刻が残る＝期限が早く来る側）
+    }
+  };
 
   return {
     authenticate(token) {
       if (typeof token !== "string" || token === "") return undefined;
       const h = sha256(token);
       if (timingSafeEqual(h, humanHash)) return { role: "human" };
-      return byHash.get(h.toString("hex"));
+      const hex = h.toString("hex");
+      const p = byHash.get(hex);
+      if (p === undefined || p.role === "human") return p;
+      const now = nowMs();
+      const reason = expiredReason(p.nodeId, now);
+      if (reason !== undefined) {
+        expire(p.nodeId, reason);
+        return undefined;
+      }
+      touch(p.nodeId, hex, now);
+      return p;
     },
-    issueNodeToken(nodeId, role) {
+    wasExpired(token) {
+      if (typeof token !== "string" || token === "") return false;
+      return expiredHashes.has(sha256(token).toString("hex"));
+    },
+    sweepExpired() {
+      const now = nowMs();
+      const out: string[] = [];
+      for (const nodeId of [...byNode.keys()]) {
+        const reason = expiredReason(nodeId, now);
+        if (reason === undefined) continue;
+        expire(nodeId, reason);
+        out.push(nodeId);
+      }
+      return out;
+    },
+    issueNodeToken(nodeId, role, kind = "sdk") {
       if (typeof nodeId !== "string" || nodeId === "") throw new RangeError("nodeId が不正");
       if (role !== "integrator" && role !== "child") throw new RangeError("ロールが不正");
       const old = byNode.get(nodeId);
       const token = random(32).toString("base64url");
       const h = sha256(token).toString("hex");
       // 保存に成功してから有効にする（失敗したら例外で、トークンは発行されず、古いトークンも残る）。
-      repository?.put({ tokenHash: h, role, nodeId, issuedAt: clock() });
+      const issuedAt = clock();
+      repository?.put({ tokenHash: h, role, nodeId, issuedAt, lastUsedAt: issuedAt, kind });
       if (old !== undefined) byHash.delete(old);
       byHash.set(h, { role, nodeId });
       byNode.set(nodeId, h);
+      const now = nowMs();
+      meta.set(nodeId, { kind, role, issuedAt, issuedMs: now, lastUsedMs: now, writtenMs: now });
       options.onNodeTokenChanged?.(nodeId);
       return token;
     },
@@ -103,6 +254,7 @@ export function createCredentialStore(options: {
       repository?.remove(nodeId);
       byHash.delete(h);
       byNode.delete(nodeId);
+      meta.delete(nodeId);
       options.onNodeTokenChanged?.(nodeId);
     },
   };

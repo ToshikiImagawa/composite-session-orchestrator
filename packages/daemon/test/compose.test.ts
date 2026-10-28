@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -726,6 +727,55 @@ describe("createDaemon（起動時のトークンの掃除）", () => {
     await boot(r);
     expect(repo.load().map((x) => x.nodeId)).not.toContain("ghost");
     expect(r.logs.join("\n")).toContain("orphanTokenRevoked");
+  });
+
+  it("期限の切れたトークン（T21-te）: 401 tokenExpired。受信箱への知らせは同じトークンについて 1 回だけ。根は切れない", async () => {
+    const r = rig();
+    mkdirSync(r.config.stateDir, { mode: 0o700 });
+    const store = openSqliteStore(join(r.config.stateDir, "state.db"));
+    if (!store.ok) throw new Error("store");
+    const log = EventLog.open(store.value, { clock: () => "2026-01-01T00:00:00Z" });
+    if (!log.ok) throw new Error("log");
+    let n = 0;
+    const add = (body: Parameters<typeof log.value.append>[0]["body"]) => {
+      const res = log.value.append({ requestId: `seed-${++n}`, actor: { system: true }, body });
+      if (!res.ok) throw new Error(res.error.cause);
+    };
+    add({
+      type: "node.created",
+      payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
+    });
+    add({
+      type: "node.stateChanged",
+      payload: { nodeId: "root", event: { type: "start" } },
+    } as never);
+    add({
+      type: "node.created",
+      payload: { nodeId: "c", role: "implement", parentId: "root", dependsOn: [] },
+    });
+    add({ type: "node.stateChanged", payload: { nodeId: "c", event: { type: "start" } } } as never);
+    store.value.close?.();
+    const token = "t".repeat(43);
+    new FileTokenRepository(join(r.config.stateDir, "node-tokens.json")).put({
+      tokenHash: createHash("sha256").update(token, "utf8").digest("hex"),
+      role: "child",
+      nodeId: "c",
+      issuedAt: "2026-01-01T00:00:00.000Z",
+      lastUsedAt: "2026-01-01T00:00:00.000Z",
+      kind: "bind",
+    });
+    const d = await boot(r);
+    for (let i = 0; i < 2; i++) {
+      const res = await call(d.url, token, "node.get", { nodeId: "c" });
+      expect(res.status).toBe(401);
+      expect(res.json.error?.code).toBe("tokenExpired");
+    }
+    const notices = d.daemon.log
+      .state()
+      .inbox.filter((x) => x.nodeId === "c" && x.summary?.includes("期限"));
+    expect(notices).toHaveLength(1);
+    expect(r.logs.join("\n")).not.toContain(token);
+    expect((await call(d.url, d.rootToken, "node.get", { nodeId: "c" })).status).not.toBe(401);
   });
 });
 

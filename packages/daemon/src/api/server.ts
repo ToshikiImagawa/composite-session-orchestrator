@@ -267,6 +267,7 @@ const BIND_MAX_BODY = 1024;
 
 const STATUS: Readonly<Record<string, number>> = {
   unauthenticated: 401,
+  tokenExpired: 401,
   forbidden: 403,
   invalidHost: 403,
   notFound: 404,
@@ -461,11 +462,18 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       ),
       { "retry-after": String(retryAfterSec), ...(early ? CLOSE : {}) },
     );
+  /** 認証の失敗の理由。直近に期限で失効させたトークンなら expired（T21-te）。 */
+  const failReason = (token: string | undefined): "missing" | "invalid" | "expired" =>
+    token === undefined
+      ? "missing"
+      : deps.credentials.wasExpired?.(token) === true
+        ? "expired"
+        : "invalid";
   /** 認証の失敗を数え、接続元ごとの制限に達していれば 429、そうでなければ 401。 */
   const authFailed = (
     req: IncomingMessage,
     res: ServerResponse,
-    reason: "missing" | "invalid",
+    reason: "missing" | "invalid" | "expired",
   ): void => {
     counters.count("authFailed", reason);
     const origin = req.socket.remoteAddress ?? "unknown";
@@ -475,12 +483,19 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     if (!c.ok) counters.count("rateLimited", "origin");
     reject(
       res,
-      failure(
-        "unauthenticated",
-        "資格情報がないか、正しくない",
-        "正しい資格情報で呼び出す",
-        "資格情報を再発行する",
-      ),
+      reason === "expired"
+        ? failure(
+            "tokenExpired",
+            "ノードのトークンの期限が切れた（使わなかった時間が長い・発行から時間がたった・子の役目が終わった）",
+            "親か人が node.bindCode で紐付けのコードを出し直し、子が結び直す（Desktop の子）",
+            "daemon が起動した子なら、親か人が子を再開するか、作り直す",
+          )
+        : failure(
+            "unauthenticated",
+            "資格情報がないか、正しくない",
+            "正しい資格情報で呼び出す",
+            "資格情報を再発行する",
+          ),
       {
         "www-authenticate": "Bearer",
         ...CLOSE,
@@ -528,7 +543,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const token = parseBearer(req.headers.authorization);
     const principal = deps.credentials.authenticate(token);
     if (principal === undefined) {
-      return authFailed(req, res, token === undefined ? "missing" : "invalid");
+      return authFailed(req, res, failReason(token));
     }
     const valid = checkPrincipal(principal, deps.getState());
     if (!valid.ok) {
@@ -804,7 +819,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const wsToken = parseBearer(req.headers.authorization);
     const principal = deps.credentials.authenticate(wsToken);
     if (principal === undefined) {
-      authFailed(req, res, wsToken === undefined ? "missing" : "invalid");
+      authFailed(req, res, failReason(wsToken));
       return;
     }
     // 失効・止まったノード・ロールの食い違いは、理由を教えずに 401 にする。
@@ -858,7 +873,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const token = parseBearer(req.headers.authorization);
     const principal = hookPrincipal(token);
     if (principal === undefined) {
-      return authFailed(req, res, token === undefined ? "missing" : "invalid");
+      return authFailed(req, res, failReason(token));
     }
     const valid = checkPrincipal(principal, deps.getState());
     if (!valid.ok) {
@@ -1001,7 +1016,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const token = parseBearer(req.headers.authorization);
     const principal = deps.credentials.authenticate(token);
     if (principal === undefined || token === undefined) {
-      authFailed(req, res, token === undefined ? "missing" : "invalid");
+      authFailed(req, res, failReason(token));
       return undefined;
     }
     if (!checkPrincipal(principal, deps.getState()).ok) {
@@ -1248,7 +1263,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     if (!redeemed.ok) return unauthorized(redeemed.reason);
     let token: string;
     try {
-      token = deps.credentials.issueNodeToken(redeemed.nodeId, "child");
+      token = deps.credentials.issueNodeToken(redeemed.nodeId, "child", "bind");
     } catch (error) {
       return internalError(res, "bind", "bind", error);
     }
