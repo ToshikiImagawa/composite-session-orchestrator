@@ -78,6 +78,8 @@ Desktop の子へのフックの継承と、接続設定の引き継ぎは、**�
 
 **注意（未解決）**: Desktop の子には、CSO の作業範囲外の拒否（FR_014）が、まだ効かない（フックの受け口は Desktop の子に許可を返さず、プロジェクトのフックは確認用の deny だけ）。子は同じユーザーとして、stateDir の人間のトークン・根のトークンのファイルを読める（stateDir のパスは、`ps` に出る daemon の `--config` から分かる）。人間のトークンを使えば、`node.purge` など取り消せない操作もできる。**今は、Desktop の子を、信頼できない文章（他人のリポジトリ・Issue・Web の内容など）を読む作業に使わない。** 直し方は未決定（計画）。詳しくは [`docs/desktop-runtime.md`](desktop-runtime.md) の冒頭の注意。
 
+**訂正と対策（2026-10-28。T21-pr）**: CLI の子も、Read の道具で stateDir のトークンを読めていた（FR_014 のフックは読み込みを制限しなかった）。いまは、stateDir と daemon の設定ファイルを、読み取りも範囲外にしている（自分の HOME と skill の写しは除く。拒否の文面には場所の種類だけを出す）。Bash は書かれたパスに見える語だけを見る歯止めで、確実ではない。詳しくは [`docs/desktop-runtime.md`](desktop-runtime.md) の冒頭の注意。
+
 ## 検証（`pnpm check` に入っている）
 
 `node scripts/validate-plugin.mjs`（`pnpm validate:plugin`。先に `pnpm build` が要る）が、次を検査する。検査の中身は `scripts/plugin-check.mjs`、試験は `scripts/plugin-check.test.mjs`（`node --test scripts/*.test.mjs`）。

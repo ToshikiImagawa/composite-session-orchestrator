@@ -98,6 +98,7 @@ export async function main(argv: readonly string[], deps: MainDeps): Promise<Mai
     worktree: worktree.value,
     ...(deps.onFatal === undefined ? {} : { onFatal: deps.onFatal }),
     ...(port === undefined ? {} : { port }),
+    configPath,
   });
   if (!made.ok) {
     deps.stderr(formatFailure(made.error));

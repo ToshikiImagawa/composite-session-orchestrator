@@ -307,6 +307,15 @@ export function evaluateScope(scope: Scope, cwd: string, op: ScopeOperation): Sc
 /** 場所の判定（`normalize` と `isUnder`）を、他の判定（回収可能など）が同じ規則で使うための公開。 */
 export { isUnder as isPathUnder, normalize as normalizePath };
 
+/**
+ * 命令を、判定と同じ規則で語に分ける（区切りごとの語の並び）。解析できなければ `undefined`（判定では拒否される）。
+ * 禁じる場所の読み取りの判定（daemon の hook-policy）が、語のうちパスに見えるものを確かめるのに使う。
+ */
+export function commandWords(input: string): string[][] | undefined {
+  const parsed = parseCommand(input);
+  return parsed.ok ? parsed.segments.map((s) => [...s.words]) : undefined;
+}
+
 /** 語の並びの前方一致: `entry` の語がすべて `command` の先頭の語に一致する（`checkCommand` と同じ規則）。 */
 const commandCovers = (entry: string, command: string): boolean => {
   const want = entry.trim().split(/\s+/);

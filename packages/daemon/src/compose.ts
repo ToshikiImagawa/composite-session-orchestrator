@@ -25,7 +25,7 @@ import {
   writeSync,
 } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   DEFAULT_PURGE_TOMBSTONE,
   type EventBody,
@@ -157,6 +157,8 @@ export interface DaemonDeps {
   /** 窓口の件数のまとめを、窓の終わりに出す予約（試験で差し替える。既定は、`unref` したタイマー）。 */
   readonly summaryScheduler?: SummaryScheduler | null;
   readonly parentEnv?: Readonly<Record<string, string | undefined>>;
+  /** daemon の設定ファイルのパス（`--config`）。読み取りも禁じる場所に入れる（FR_014 の例外。T21-pr）。 */
+  readonly configPath?: string;
   /** 運用の記録（1 行の JSON。秘密を含めない）。既定は標準エラー。 */
   readonly logLine?: (line: string) => void;
   /**
@@ -248,17 +250,28 @@ export function trackTimers(base: Timers): { timers: Timers; cancelAll(): void }
 
 /** 置き場が、リンクを解決した実パスで、互いに重なっていないか。 */
 function realOverlap(config: DaemonConfig): string | undefined {
+  // まだないパスも、最も深い既存の祖先を実パスにして、残りを足して比べる（resolveForWrite と同じ考え方）。
   const real = (p: string): string => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return p;
+    let head = p;
+    const rest: string[] = [];
+    for (;;) {
+      try {
+        const r = realpathSync(head);
+        return rest.length === 0 ? r : join(r, ...rest.reverse());
+      } catch {
+        const parent = dirname(head);
+        if (parent === head) return p;
+        rest.push(basename(head));
+        head = parent;
+      }
     }
   };
   const s = real(config.stateDir);
   const r = real(config.repoRoot);
   const w = real(config.worktreeRoot);
-  const o = (a: string, b: string): boolean => isPathUnder(a, b) || isPathUnder(b, a);
+  // APFS は大文字小文字・Unicode の正規化の違いを区別しないので、そろえてから比べる（区別する FS では、厳しめに倒れる）。
+  const f = (x: string): string => x.normalize("NFC").toLowerCase();
+  const o = (a: string, b: string): boolean => isPathUnder(f(a), f(b)) || isPathUnder(f(b), f(a));
   if (o(s, w) || o(s, r) || o(w, r)) {
     return "stateDir・repoRoot・worktreeRoot が、リンクを解決すると重なる";
   }
@@ -326,6 +339,18 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   const overlap = realOverlap(config);
   if (overlap !== undefined) {
     return fail("invalidConfig", `設定が不正: ${overlap}`, "置き場を、重ならない別の場所にする");
+  }
+  // 読み取りも禁じる場所（FR_014 の例外。T21-pr）。起動時に実パスにして、全ノード共通で使う。
+  const protectedStateDir = realpathSync(config.stateDir);
+  const protectedRoots: { path: string; kind: "stateDir" | "daemonConfig" }[] = [
+    { path: protectedStateDir, kind: "stateDir" },
+  ];
+  if (deps.configPath !== undefined) {
+    try {
+      protectedRoots.push({ path: realpathSync(deps.configPath), kind: "daemonConfig" });
+    } catch {
+      protectedRoots.push({ path: deps.configPath, kind: "daemonConfig" });
+    }
   }
 
   // SQLite のファイル（state.db・-wal・-shm）が、他のユーザーから読めないよう、作る間は umask を 077 にする。
@@ -501,6 +526,19 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     probe,
     realpath: (p) => realpath(p),
     resolvePath: (p) => resolveForWrite(p, nodeFsOps),
+    // 読み取りも禁じる場所（FR_014 の例外。T21-pr）: stateDir と daemon の設定ファイル。許すのは、そのノード自身の HOME と、
+    // 子に渡す skill の写しだけ。実パスは起動時に決めたもの（全ノード共通）。
+    protectedPaths: (nodeId) => ({
+      roots: protectedRoots,
+      allow: [
+        join(protectedStateDir, CHILD_PLUGIN_DIR),
+        ...(config.childHome === "inherit" ? [] : [join(protectedStateDir, "homes", nodeId)]),
+      ],
+      home:
+        config.childHome === "inherit"
+          ? (deps.parentEnv ?? process.env).HOME
+          : join(protectedStateDir, "homes", nodeId),
+    }),
     sink: { record: (r) => log.append(r), recordAll: (rs) => log.appendAll(rs) },
     timers,
     newRequestId: () => `adp-${randomBytes(12).toString("hex")}`,

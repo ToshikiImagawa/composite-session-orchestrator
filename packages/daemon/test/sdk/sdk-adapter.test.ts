@@ -1260,3 +1260,24 @@ describe("子の認証の確認（T22-auth）", () => {
     expect(r.launcher.sessions).toHaveLength(1);
   });
 });
+
+describe("読み取りも禁じる場所（FR_014 の例外。T21-pr）", () => {
+  it("SDK のコールバックとファイルのフックの両方で、stateDir の読み取りを拒否し、scope.violation に種類だけを記録する", async () => {
+    const S = "/state";
+    const r = rig({
+      protectedPaths: () => ({ roots: [{ path: S, kind: "stateDir" }], allow: [] }),
+    });
+    await startNode(r);
+    const viaFile = await r.adapter.decideHook("a", "Read", { file_path: `${S}/human-token` });
+    expect(viaFile.allow).toBe(false);
+    const viaSdk = await sessionOf(r).options.hooks.preToolUse({
+      toolName: "Read",
+      toolInput: { file_path: `${S}/root-token` },
+      cwd: WT,
+    });
+    expect(viaSdk.allow).toBe(false);
+    expect(r.sink.types).toContain("scope.violation");
+    expect(JSON.stringify(r.sink.records)).not.toContain(`${S}/`);
+    expect((await r.adapter.decideHook("a", "Read", { file_path: "/etc/hosts" })).allow).toBe(true);
+  });
+});
