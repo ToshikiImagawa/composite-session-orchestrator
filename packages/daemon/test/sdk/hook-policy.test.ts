@@ -235,6 +235,20 @@ describe("読み取りも禁じる場所（FR_014 の例外。T21-pr）", () => 
     expect(r.allow ? null : r.violation?.reason).toBe("outsideWritable");
   });
 
+  it("書き込みの拒否（outsideWritable）でも、対象が禁じる場所の中なら、件名と文面には種類だけを書く（判定は変えない）", async () => {
+    for (const path of [`${S}/x`, `${S}/homes/a/y`]) {
+      const r = await d("Write", { file_path: path, content: "y" });
+      expect(r.allow).toBe(false);
+      if (!r.allow) {
+        expect(r.violation?.reason).toBe("outsideWritable");
+        expect(r.violation?.subject).toBe("protected:stateDir");
+        expect(r.reason).not.toContain(S);
+      }
+    }
+    const other = await d("Write", { file_path: "/etc/x", content: "y" });
+    expect(other.allow ? null : other.violation?.subject).toBe("/etc/x");
+  });
+
   it("許す場所の判定も実パスで行う（自分の HOME の中のリンクで、ほかの場所を指しても通らない）", async () => {
     expect(await reasonOf("Read", { file_path: `${S}/homes/a/escape/human-token` })).toBe(
       "protected:stateDir",

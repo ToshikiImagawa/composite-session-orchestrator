@@ -409,7 +409,10 @@ export async function decideToolUse(
       return deny("invalidPath", `${path}（実パスを解決できない）`);
     }
     const d = evaluateScope(scope, cwd, { kind: "write", path: target });
-    return d.allowed ? ALLOW : deny(d.reason, d.subject);
+    if (d.allowed) return ALLOW;
+    // 判定は今の範囲の決まりのまま。ただし、対象が禁じる場所の中なら、件名（記録と文面）には種類だけを書く（実パスを出さない）
+    const hidden = protectedPaths?.roots.find((r) => under(target, r.path));
+    return deny(d.reason, hidden === undefined ? d.subject : `protected:${hidden.kind}`);
   }
 
   if (toolName === "Bash") {
