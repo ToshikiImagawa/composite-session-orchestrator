@@ -72,6 +72,12 @@ daemon が SDK で起動する子（CLI の子）には、plugin の skill を�
 
 子の認証（T22-auth）: 既定の `childHome: "isolated"` では、子の HOME が空のディレクトリなので、`claude` CLI のログインは使えない。daemon を起動する環境に、認証の環境変数（`ANTHROPIC_API_KEY`・`ANTHROPIC_AUTH_TOKEN`・`CLAUDE_CODE_OAUTH_TOKEN` のどれか。`claude setup-token` で作った値を `CLAUDE_CODE_OAUTH_TOKEN` に入れる）が要る。**CLI のログインだけの環境は、子の起動が `childAuthMissing` で拒否される**（理由と対処が、親に返る。spawn・判断の回答による再開・スケジューラのどれでも同じ。受信箱の項目は、同じ子の同じ失敗では増えない）。Bedrock・Vertex・Foundry の経路は、切り替えの変数（`CLAUDE_CODE_USE_BEDROCK`・`_VERTEX`・`_FOUNDRY`）が**あることだけで通す**（ただし `0`・`false`・`no`・`off`〔大文字小文字を問わない〕は、なしとみなす。API キー・トークンの 3 変数は、空かどうかだけで見る）（その資格情報は `childEnvAllow` で渡す前提で、中身までは確かめない）。`childHome: "inherit"` では確かめない（親の HOME と CLI のログインを共有する。分離は弱まる）。値は、記録・失敗の文面に出さない。直して再開できたら（daemon を起動し直して、再開・作り直しが通ったら）、その失敗の受信箱の項目を解決済みにする（未解決のあいだ、同じ子の同じ失敗の項目は増えない）。
 
+## 子の MCP のトークン（T21-ce）
+
+daemon が起動する CLI の子は、自分のノードのトークンで cso-mcp（`mcp__node__*`）に接続する。**トークンは、SDK の MCP の設定（`--mcp-config` の引数として claude に渡され、`ps` に出る）には置かない**。設定には `Authorization: Bearer ${CSO_NODE_TOKEN}` と参照だけを書き、値は子の環境変数 `CSO_NODE_TOKEN` で渡す（claude は `--mcp-config` の headers の `${VAR}` を展開する。同梱の claude で確かめた）。`CSO_NODE_TOKEN` は、親の環境から子に通さない名前（`childEnvAllow` でも通らない）。
+
+**弱点（E）**: 同じユーザーの子は、`printenv`・`env`・`echo $CSO_NODE_TOKEN`（許可リストにあれば）や、許可されたコマンド（`pnpm test` など）が動かすスクリプトの中で、値を読める。値が会話・ログに入るおそれがある。**別のユーザーからは見えない**（macOS では、別のユーザーのプロセスの環境変数を `ps` で読めない。V2 で見えていた引数の Bearer は、なくなる）。同じユーザーの子から守るのは、作業範囲外の拒否（FR_014）と、トークンの期限・失効の役目。
+
 ## Desktop
 
 Desktop の子へのフックの継承と、接続設定の引き継ぎは、**実機での確認（`.sdd/` の要求の項目 4）のあと**に扱う。この版は、CLI の分だけ。

@@ -44,7 +44,7 @@ import type {
   McpServerConfig,
 } from "./agent.js";
 import { childAuthProblem } from "./child-auth.js";
-import { childEnv } from "./child-env.js";
+import { childEnv, NODE_TOKEN_ENV } from "./child-env.js";
 import { qualifiedSkill, skillFor } from "./child-plugin.js";
 import {
   decideToolUse,
@@ -269,12 +269,15 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
         inboxItems: 0,
         overflowNoted: false,
       };
+      // トークンは、MCP の設定（SDK が --mcp-config の引数として渡す。ps に出る）に置かず、子の環境変数で渡し、設定からは
+      // `${CSO_NODE_TOKEN}` で参照する（claude が --mcp-config の headers を展開する。T21-ce。別のユーザーから見えない）。
+      if (request.mcp) env[NODE_TOKEN_ENV] = request.mcp.token;
       const mcpServers: Record<string, McpServerConfig> | undefined = request.mcp
         ? {
             node: {
               type: "http",
               url: request.mcp.url,
-              headers: { Authorization: `Bearer ${request.mcp.token}` },
+              headers: { Authorization: `Bearer \${${NODE_TOKEN_ENV}}` },
             },
           }
         : undefined;
