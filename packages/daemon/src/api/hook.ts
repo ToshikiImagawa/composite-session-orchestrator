@@ -100,6 +100,8 @@ export interface HookTokens {
   /** トークンのノード。未知・不正なら undefined。 */
   authenticate(token: unknown): string | undefined;
   revoke(nodeId: string): void;
+  /** 直近に期限で失効させたトークンか（応答の失敗の記号を tokenExpired にするため。メモリだけ）。 */
+  wasExpired?(token: unknown): boolean;
 }
 
 const sha256 = (s: string): Buffer => createHash("sha256").update(s).digest();
@@ -112,14 +114,16 @@ export function createHookTokens(
     readonly randomBytes?: (n: number) => Buffer;
     /** 発行からの絶対の期限（ミリ秒）。 */
     readonly maxAgeMs?: number;
-    /** 壁時計（ミリ秒）。 */
+    /** 時計（ミリ秒）。経過だけを使う（既定は単調時計。壁時計が巻き戻っても、期限が延びない）。 */
     readonly nowMs?: () => number;
   } = {},
 ): HookTokens {
   const random = options.randomBytes ?? randomBytes;
   const maxAge = options.maxAgeMs ?? DEFAULT_HOOK_TOKEN_MAX_AGE_MS;
-  const nowMs = options.nowMs ?? Date.now;
+  const nowMs = options.nowMs ?? (() => performance.now());
   const byNode = new Map<string, { hash: Buffer; issuedMs: number }>();
+  const expired = new Set<string>();
+  const EXPIRED_MAX = 1000;
   return {
     issue(nodeId) {
       const token = random(32).toString("base64url");
@@ -133,6 +137,11 @@ export function createHookTokens(
         if (timingSafeEqual(stored.hash, h)) {
           if (nowMs() - stored.issuedMs >= maxAge) {
             byNode.delete(nodeId); // 期限切れ: 失効させる（`cso hook-env` で出し直す）
+            expired.add(h.toString("hex"));
+            if (expired.size > EXPIRED_MAX) {
+              const first = expired.values().next().value;
+              if (first !== undefined) expired.delete(first);
+            }
             return undefined;
           }
           return nodeId;
@@ -142,6 +151,10 @@ export function createHookTokens(
     },
     revoke(nodeId) {
       byNode.delete(nodeId);
+    },
+    wasExpired(token) {
+      if (typeof token !== "string" || token === "") return false;
+      return expired.has(sha256(token).toString("hex"));
     },
   };
 }

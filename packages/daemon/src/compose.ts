@@ -154,6 +154,8 @@ export interface DaemonDeps {
   /** プロセスの調査。既定は `lsof`。 */
   readonly probe?: ProcessProbe;
   readonly clock?: () => string;
+  /** 単調時計（ミリ秒）。トークンの期限の経過に使う（T21-te）。既定 `performance.now`。試験で差し込む。 */
+  readonly monoMs?: () => number;
   readonly timers?: Timers;
   /** 起動オプション `--port` の値（1〜65535）。設定の `port` より優先する（`port-file.ts`）。 */
   readonly port?: number;
@@ -335,6 +337,26 @@ const writeControllingTerminal = (line: string): void => {
 /** トークンの期限の見回りの間隔（T21-te）。 */
 const TOKEN_SWEEP_MS = 5 * 60_000;
 
+/**
+ * ノードのトークンが、もう要らない状態か（T21-te。種類〔sdk・bind〕を問わない。認証・見回りのたびに見る）。記録にないノードも
+ * 要らない。done は残す（差し戻しで動き直す）。
+ */
+export const TOKEN_RETIRED_STATES: ReadonlySet<string> = new Set([
+  "verified",
+  "reclaimable",
+  "archived",
+]);
+export const isTokenRetired = (state: string | undefined): boolean =>
+  state === undefined || TOKEN_RETIRED_STATES.has(state);
+/**
+ * その状態に**なったとき**に、トークンを失効させる状態（T21-te M1）。stopped は、なったときだけ見る（再開は、止まったまま新しい
+ * トークンを発行してから起動し、running を記録するので、止まっていることだけで失効させると、再開のトークンを消してしまう）。
+ */
+export const TOKEN_REVOKE_ON_ENTER: ReadonlySet<string> = new Set([
+  "stopped",
+  ...TOKEN_RETIRED_STATES,
+]);
+
 export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Daemon, Failure> {
   const clock = deps.clock ?? (() => new Date().toISOString());
   const logLine = deps.logLine ?? ((line: string) => process.stderr.write(`${line}\n`));
@@ -477,7 +499,10 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   const hookTokens =
     config.childRuntime === "desktop"
       ? undefined
-      : createHookTokens({ maxAgeMs: minutes(te?.hookAbsolute, 1440) });
+      : createHookTokens({
+          maxAgeMs: minutes(te?.hookAbsolute, 1440),
+          ...(deps.monoMs === undefined ? {} : { nowMs: deps.monoMs }),
+        });
   // 認証。
   let humanToken: string;
   // トークンの期限（T21-te）: ノードの状態と、期限切れの受信箱への知らせ（同じトークンについて 1 回だけ。要求 ID を、ノードと
@@ -518,7 +543,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       humanToken,
       repository: new FileTokenRepository(join(config.stateDir, "node-tokens.json")),
       clock,
+      // 起動時の基準は壁時計（保存した時刻と比べる）。動いている間の経過は単調時計で数える（巻き戻しで延びない）
       nowMs: () => Date.parse(clock()),
+      monoMs: deps.monoMs ?? (() => performance.now()),
       onNodeTokenChanged: (nodeId) => {
         hookTokens?.revoke(nodeId);
         if (hookSessions.unbind(nodeId)) note("hookUnbound", { reason: "tokenReissued" });
@@ -530,18 +557,43 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         bindIdleMs: minutes(te?.bindIdle, 60),
       },
       exemptNodeId: config.rootNodeId,
-      // 役目の終わり: verified・reclaimable・archived（記録にないノードも）。daemon が起動した子は、止まったら（stopped）。
-      isRetired: (nodeId, kind) => {
+      // 役目の終わり: verified・reclaimable・archived（記録にないノードも）。種類を問わない。stopped は、なったときに失効させる
+      // （下の onCommitted と、起動時）。
+      isRetired: (nodeId) => isTokenRetired(tokenStateOf(nodeId)),
+      // 判断待ち・done のあいだは、使わなければ切れる時計を進めない（bind の絶対の期限は進む）
+      isIdlePaused: (nodeId) => {
         const n = tokenStateOf(nodeId);
-        if (n === undefined) return true;
-        if (n === "verified" || n === "reclaimable" || n === "archived") return true;
-        return kind === "sdk" && n === "stopped";
+        return n === "waiting" || n === "done";
       },
       onExpired: (nodeId, reason, kind, issuedAt) => {
         note("tokenExpired", { nodeId, reason, kind });
-        if (reason !== "retired") notifyTokenExpired(nodeId, reason, kind, issuedAt);
+        // 知らせは、動いている子についてだけ（役目の終わり・止まった子は、知らせても次の操作がない）
+        if (reason !== "retired" && tokenStateOf(nodeId) === "running") {
+          notifyTokenExpired(nodeId, reason, kind, issuedAt);
+        }
       },
     });
+    // 止まった・役目の終わった子のトークンを、その状態になったその場で失効させる（見回りを待たない。種類を問わない。T21-te M1）。
+    // 起動時は、いま止まっている子のトークンも失効させる（前回、止まったあとに失効させられなかった分。再開で発行し直す）。
+    const live = credentials;
+    const lastStates = new Map<string, string>();
+    const revokeEntered = (nodes: readonly { id: string; state: string }[]): void => {
+      for (const n of nodes) {
+        const prev = lastStates.get(n.id);
+        lastStates.set(n.id, n.state);
+        if (prev === n.state || !TOKEN_REVOKE_ON_ENTER.has(n.state)) continue;
+        try {
+          live.expireNode?.(n.id);
+        } catch (e) {
+          note("tokenRevokeFailure", {
+            nodeId: n.id,
+            cause: e instanceof Error ? e.name : "unknown",
+          });
+        }
+      }
+    };
+    revokeEntered(log.state().nodes);
+    log.onCommitted((st) => revokeEntered(st.nodes));
     // 根のトークン: ファイルがあり、認証に通るならそのまま。なければ・通らなければ、発行し直して、一時ファイルに書いてから置き換える。
     let current: string | undefined;
     try {
@@ -633,6 +685,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     ...(config.childEnvAllow === undefined ? {} : { childEnvAllow: config.childEnvAllow }),
     ...(childPluginPath === undefined ? {} : { childPluginPath }),
     onUnexpectedExit: (nodeId, reason) => note("unexpectedExit", { nodeId, reason }),
+    onToolUse: (nodeId) => credentials.touchNode?.(nodeId),
     onFailure: (nodeId, cause) => note("handlerFailure", { nodeId, cause }),
     waitKeyOf: (nodeId) => {
       const st = log.state();

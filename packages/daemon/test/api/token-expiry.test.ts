@@ -1,6 +1,7 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NODE_STATES } from "@cso/core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createCredentialStore,
@@ -13,6 +14,7 @@ import {
   type TokenRecord,
   type TokenRepository,
 } from "../../src/api/token-repository.js";
+import { isTokenRetired, TOKEN_REVOKE_ON_ENTER } from "../../src/compose.js";
 import { parseConfig } from "../../src/config.js";
 
 const HUMAN = "h".repeat(40);
@@ -162,15 +164,15 @@ describe("トークンの期限（T21-te）", () => {
     const s3 = createCredentialStore({ ...opts, repository: new FileTokenRepository(path) });
     expect(s3.authenticate(t)).toBeUndefined();
 
-    // 版 1（lastUsedAt・kind なし）: CLI の子として、発行日時から数える
+    // 版 1（lastUsedAt・kind なし）: 厳しい側の bind とみなす。使わなければ切れる時計は、読んだ時から数える
     const v1 = { ...file.tokens[0] };
     delete v1.lastUsedAt;
     delete v1.kind;
-    v1.issuedAt = new Date(now - H).toISOString();
+    v1.issuedAt = new Date(now - 23.5 * H).toISOString();
     writeFileSync(path, JSON.stringify({ version: 1, tokens: [v1] }), { mode: 0o600 });
     const s4 = createCredentialStore({ ...opts, repository: new FileTokenRepository(path) });
-    expect(s4.authenticate(t)).toBeDefined(); // sdk は 6 時間まで
-    now += 6 * H;
+    expect(s4.authenticate(t)).toBeDefined();
+    now += 30 * 60_000; // 発行から 24 時間（bind の絶対の期限）
     expect(s4.authenticate(t)).toBeUndefined();
   });
 
@@ -228,5 +230,167 @@ describe("設定 tokenExpiryMinutes", () => {
     ]) {
       expect(parseConfig(JSON.stringify({ ...base, tokenExpiryMinutes: bad })).ok).toBe(false);
     }
+  });
+});
+
+describe("トークンの期限の境界と、状態の扱い（T21-te R4）", () => {
+  const E = DEFAULT_TOKEN_EXPIRY;
+  /** 発行して、ちょうど `at` ミリ秒たったときに通るか（その間は使わない）。 */
+  const validAt = (kind: TokenKind, at: number): boolean => {
+    const { s, advance } = setup();
+    const t = s.issueNodeToken("a", "child", kind);
+    advance(at);
+    return s.authenticate(t) !== undefined;
+  };
+  it("種類ごとに、期限の −1ms は有効、±0 と +1ms は失効", () => {
+    for (const [kind, limit] of [
+      ["sdk", E.sdkIdleMs],
+      ["bind", E.bindIdleMs],
+    ] as const) {
+      expect(validAt(kind, limit - 1), `${kind} -1`).toBe(true);
+      expect(validAt(kind, limit), `${kind} 0`).toBe(false);
+      expect(validAt(kind, limit + 1), `${kind} +1`).toBe(false);
+    }
+    // bind の絶対の期限（使い続けても、発行から数える）
+    for (const [d, want] of [
+      [-1, true],
+      [0, false],
+      [1, false],
+    ] as const) {
+      const { s, advance } = setup();
+      const t = s.issueNodeToken("a", "child", "bind");
+      for (let i = 0; i < 24; i++) {
+        advance(H - 10);
+        s.authenticate(t);
+      }
+      advance(240 + d);
+      expect(s.authenticate(t) !== undefined, `bind 絶対 ${d}`).toBe(want);
+    }
+    // フック専用
+    for (const [d, want] of [
+      [-1, true],
+      [0, false],
+      [1, false],
+    ] as const) {
+      let now = 0;
+      const h = createHookTokens({ nowMs: () => now });
+      const t = h.issue("a");
+      now = 24 * H + d;
+      expect(h.authenticate(t) !== undefined, `hook ${d}`).toBe(want);
+    }
+  });
+
+  it("状態 × 種類の表: verified・reclaimable・archived と、記録にないノードは、いつ見ても失効。ほかは残す（done・stopped も）", () => {
+    const retired = ["verified", "reclaimable", "archived"];
+    for (const state of NODE_STATES) {
+      for (const kind of ["sdk", "bind"] as const) {
+        const { s } = setup({ isRetired: () => isTokenRetired(state) });
+        const t = s.issueNodeToken("a", "child", kind);
+        expect(s.authenticate(t) === undefined, `${state} × ${kind}`).toBe(retired.includes(state));
+      }
+    }
+    expect(isTokenRetired(undefined)).toBe(true);
+    // なったときに失効させる状態: 上の 3 つと stopped（再開のトークンは、止まったまま発行するので、なったときだけ見る）
+    expect([...TOKEN_REVOKE_ON_ENTER].sort()).toEqual([...retired, "stopped"].sort());
+    expect(NODE_STATES.filter((x) => TOKEN_REVOKE_ON_ENTER.has(x)).sort()).toEqual(
+      [...TOKEN_REVOKE_ON_ENTER].sort(),
+    );
+  });
+
+  it("動いている最中に壁時計が巻き戻っても、期限は延びない（経過は単調時計で数える）", () => {
+    let wall = T0;
+    let mono = 0;
+    const s = createCredentialStore({
+      humanToken: HUMAN,
+      nowMs: () => wall,
+      monoMs: () => mono,
+    });
+    const t = s.issueNodeToken("a", "child");
+    wall -= 100 * H; // 巻き戻し
+    mono += 6 * H;
+    expect(s.authenticate(t)).toBeUndefined();
+    // フック専用も同じ（既定は単調時計）
+    let m2 = 0;
+    const h = createHookTokens({ nowMs: () => m2 });
+    const ht = h.issue("a");
+    m2 += 24 * H;
+    expect(h.authenticate(ht)).toBeUndefined();
+  });
+
+  it("done → 差し戻し → 再開: 判断待ち・done のあいだは、使わなければ切れる時計が進まない。動き出すと、また数える", () => {
+    let paused = false;
+    let now = T0;
+    const s = createCredentialStore({
+      humanToken: HUMAN,
+      nowMs: () => now,
+      isIdlePaused: () => paused,
+    });
+    const t = s.issueNodeToken("a", "child");
+    paused = true; // done
+    now += 10 * H;
+    s.sweepExpired?.();
+    paused = false; // 差し戻しで running に戻る
+    expect(s.authenticate(t)).toBeDefined();
+    now += 6 * H - 1;
+    expect(s.authenticate(t)).toBeDefined();
+    now += 6 * H;
+    expect(s.authenticate(t)).toBeUndefined();
+    // bind の絶対の期限は、止めない
+    paused = true;
+    const b = s.issueNodeToken("b", "child", "bind");
+    now += 24 * H;
+    expect(s.authenticate(b)).toBeUndefined();
+  });
+
+  it("道具を使う（touchNode）と、使ったものとして数える。切れたものは延ばさない", () => {
+    const { s, advance } = setup();
+    const t = s.issueNodeToken("a", "child");
+    advance(5 * H);
+    s.touchNode?.("a");
+    advance(5 * H);
+    expect(s.authenticate(t)).toBeDefined();
+    advance(6 * H);
+    s.touchNode?.("a");
+    expect(s.authenticate(t)).toBeUndefined();
+  });
+
+  it("ノードのトークンが失効したら、フック専用のトークンも無効になる（onNodeTokenChanged）", () => {
+    let now = T0;
+    const hooks = createHookTokens({ nowMs: () => now });
+    const s = createCredentialStore({
+      humanToken: HUMAN,
+      nowMs: () => now,
+      onNodeTokenChanged: (n) => hooks.revoke(n),
+    });
+    s.issueNodeToken("a", "child");
+    const ht = hooks.issue("a");
+    expect(hooks.authenticate(ht)).toBe("a");
+    now += 6 * H;
+    s.sweepExpired?.();
+    expect(hooks.authenticate(ht)).toBeUndefined();
+    expect(hooks.wasExpired?.(ht)).toBe(false); // 期限ではなく、失効
+  });
+
+  it("フック専用のトークンの期限切れは、wasExpired で分かる", () => {
+    let now = 0;
+    const h = createHookTokens({ nowMs: () => now });
+    const t = h.issue("a");
+    now = 24 * H;
+    expect(h.authenticate(t)).toBeUndefined();
+    expect(h.wasExpired?.(t)).toBe(true);
+    expect(h.wasExpired?.("y".repeat(43))).toBe(false);
+  });
+
+  it("expireNode: 役目の終わりとして失効させ、その後は tokenExpired と分かる。根・トークンのないノードは何もしない", () => {
+    const { s, expired } = setup();
+    const a = s.issueNodeToken("a", "child", "bind");
+    const r = s.issueNodeToken("root", "integrator");
+    expect(s.expireNode?.("a")).toBe(true);
+    expect(s.expireNode?.("a")).toBe(false);
+    expect(s.expireNode?.("root")).toBe(false);
+    expect(s.authenticate(a)).toBeUndefined();
+    expect(s.wasExpired?.(a)).toBe(true);
+    expect(s.authenticate(r)).toBeDefined();
+    expect(expired).toEqual([["a", "retired", "bind"]]);
   });
 });

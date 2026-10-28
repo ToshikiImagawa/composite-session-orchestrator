@@ -44,6 +44,13 @@ export interface CredentialStore {
   wasExpired?(token: unknown): boolean;
   /** 期限・役目の終わりを見回り、失効させる（定期の見回り）。失効させたノードの ID。 */
   sweepExpired?(): string[];
+  /**
+   * そのノードのトークンを、役目の終わりとして失効させる（止まった子。T21-te M1）。`revokeNode` と違い、その後の呼び出しは
+   * tokenExpired になる。トークンがなければ何もしない（false）。
+   */
+  expireNode?(nodeId: string): boolean;
+  /** そのノードのトークンを使ったものとして数える（フックの呼び出し・道具の使用。T21-te R3）。 */
+  touchNode?(nodeId: string): void;
   /** ノード専用のトークンを発行する（そのノードの既存のトークンは無効になる）。`kind` の既定は `sdk`。 */
   issueNodeToken(nodeId: string, role: NodeRoleForToken, kind?: TokenKind): string;
   revokeNode(nodeId: string): void;
@@ -86,8 +93,15 @@ export function createCredentialStore(options: {
   readonly expiry?: TokenExpiry;
   /** 期限を付けないノード（根）。 */
   readonly exemptNodeId?: string;
-  /** 壁時計（ミリ秒）。期限に使う。 */
+  /** 壁時計（ミリ秒）。起動時の基準と、保存した時刻の読み直しに使う。 */
   readonly nowMs?: () => number;
+  /**
+   * 単調時計（ミリ秒）。動いている間の経過は、これで数える（壁時計が巻き戻っても、期限が延びない。T21-te R1）。
+   * 省略すると `nowMs`（試験で時計を差し込むとき）、それもなければ `performance.now`。
+   */
+  readonly monoMs?: () => number;
+  /** 使わなければ切れる時計を止めるノードか（判断待ち・done の子。T21-te R3）。bind の絶対の期限は止めない。 */
+  readonly isIdlePaused?: (nodeId: string) => boolean;
   /** そのノードのトークンが、もう要らないか（verified・reclaimable・archived、CLI の子なら停止など）。 */
   readonly isRetired?: (nodeId: string, kind: TokenKind) => boolean;
   /** 期限切れ・役目の終わりで失効させたとき（受信箱への知らせなど）。`issuedAt` は、同じトークンを見分けるのに使う。 */
@@ -124,7 +138,12 @@ export function createCredentialStore(options: {
   const EXPIRED_MAX = 1000;
   const repository = options.repository;
   const clock = options.clock ?? (() => new Date().toISOString());
-  const nowMs = options.nowMs ?? Date.now;
+  // 今の時刻 = 起動時の壁時計 + 単調時計の経過。
+  const wallMs = options.nowMs ?? Date.now;
+  const mono = options.monoMs ?? options.nowMs ?? (() => performance.now());
+  const wall0 = wallMs();
+  const mono0 = mono();
+  const nowMs = (): number => wall0 + (mono() - mono0);
   const expiry = options.expiry ?? DEFAULT_TOKEN_EXPIRY;
   const parseMs = (iso: string | undefined, fallback: number): number => {
     const t = iso === undefined ? Number.NaN : Date.parse(iso);
@@ -135,10 +154,11 @@ export function createCredentialStore(options: {
     byHash.set(r.tokenHash, { role: r.role, nodeId: r.nodeId });
     byNode.set(r.nodeId, r.tokenHash);
     const issuedMs = parseMs(r.issuedAt, nowMs());
-    // 時計が戻った（最後に使った時刻が未来）ときは、今の時刻に丸める
-    const lastUsedMs = Math.min(parseMs(r.lastUsedAt, issuedMs), nowMs());
+    // 時計が戻った（最後に使った時刻が未来）ときは、今の時刻に丸める。版 1（最後に使った時刻がない）は、読んだ時から数える
+    const lastUsedMs = Math.min(parseMs(r.lastUsedAt, nowMs()), nowMs());
     meta.set(r.nodeId, {
-      kind: r.kind ?? "sdk",
+      // 版 1（種類がない）は、厳しい側の bind とみなす（発行から 24 時間。どの子のものか分からないため。T21-te R2）
+      kind: r.kind ?? "bind",
       role: r.role,
       issuedAt: r.issuedAt,
       issuedMs,
@@ -152,6 +172,8 @@ export function createCredentialStore(options: {
     const m = meta.get(nodeId);
     if (m === undefined) return undefined;
     if (options.isRetired?.(nodeId, m.kind) === true) return "retired";
+    // 判断待ち・done のあいだは、使ったものとして数える（使わなければ切れる時計を進めない）
+    if (options.isIdlePaused?.(nodeId) === true) m.lastUsedMs = Math.max(m.lastUsedMs, now);
     if (m.kind === "bind") {
       if (now - m.issuedMs >= expiry.bindAbsoluteMs) return "absolute";
       if (now - m.lastUsedMs >= expiry.bindIdleMs) return "idle";
@@ -217,6 +239,18 @@ export function createCredentialStore(options: {
     wasExpired(token) {
       if (typeof token !== "string" || token === "") return false;
       return expiredHashes.has(sha256(token).toString("hex"));
+    },
+    expireNode(nodeId) {
+      if (nodeId === options.exemptNodeId || !byNode.has(nodeId)) return false;
+      expire(nodeId, "retired");
+      return true;
+    },
+    touchNode(nodeId) {
+      const h = byNode.get(nodeId);
+      if (h === undefined) return;
+      const now = nowMs();
+      if (expiredReason(nodeId, now) !== undefined) return; // 切れたものは延ばさない（次の認証・見回りで失効）
+      touch(nodeId, h, now);
     },
     sweepExpired() {
       const now = nowMs();

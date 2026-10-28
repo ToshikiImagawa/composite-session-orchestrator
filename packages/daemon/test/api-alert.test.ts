@@ -76,6 +76,15 @@ describe("createApiAlert（窓口の 429・401 の件数の見える化。T10l-f
     expect(JSON.stringify(r.added())).not.toContain("1000");
   });
 
+  it("期限切れのトークンでの失敗（expired・hookExpired。T21-te N1）は、閾値に数えない", () => {
+    const r = rig({ threshold: 5 });
+    r.alert(summary({ expired: 100, hookExpired: 100, invalid: 4 }));
+    expect(r.added()).toEqual([]);
+    r.alert(summary({ expired: 100, invalid: 5 }));
+    expect(r.added()).toHaveLength(1);
+    expect(String(r.added()[0]?.body.payload.summary)).not.toContain("expired");
+  });
+
   it("閾値以上なら、根の受信箱に info を 1 件出す。文面は件数と固定の語だけ", () => {
     const r = rig();
     r.alert(summary({ invalid: 25, missing: 10, bindFailed: 2 }));

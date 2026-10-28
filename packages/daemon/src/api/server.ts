@@ -463,18 +463,18 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       { "retry-after": String(retryAfterSec), ...(early ? CLOSE : {}) },
     );
   /** 認証の失敗の理由。直近に期限で失効させたトークンなら expired（T21-te）。 */
-  const failReason = (token: string | undefined): "missing" | "invalid" | "expired" =>
+  type FailReason = "missing" | "invalid" | "expired" | "hookExpired";
+  /** フック専用のトークンの期限切れ（`hookExpired`）は、フックの受け口でだけ見る。 */
+  const failReason = (token: string | undefined, hook = false): FailReason =>
     token === undefined
       ? "missing"
       : deps.credentials.wasExpired?.(token) === true
         ? "expired"
-        : "invalid";
+        : hook && deps.hookTokens?.wasExpired?.(token) === true
+          ? "hookExpired"
+          : "invalid";
   /** 認証の失敗を数え、接続元ごとの制限に達していれば 429、そうでなければ 401。 */
-  const authFailed = (
-    req: IncomingMessage,
-    res: ServerResponse,
-    reason: "missing" | "invalid" | "expired",
-  ): void => {
+  const authFailed = (req: IncomingMessage, res: ServerResponse, reason: FailReason): void => {
     counters.count("authFailed", reason);
     const origin = req.socket.remoteAddress ?? "unknown";
     const c = failureLimiter.tryConsume(origin, 1);
@@ -483,19 +483,25 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     if (!c.ok) counters.count("rateLimited", "origin");
     reject(
       res,
-      reason === "expired"
+      reason === "hookExpired"
         ? failure(
             "tokenExpired",
-            "ノードのトークンの期限が切れた（使わなかった時間が長い・発行から時間がたった・子の役目が終わった）",
-            "親か人が node.bindCode で紐付けのコードを出し直し、子が結び直す（Desktop の子）",
-            "daemon が起動した子なら、親か人が子を再開するか、作り直す",
+            "フック専用のトークンの期限が切れた（発行から時間がたった）",
+            '人が eval "$(cso hook-env <nodeId>)" で出し直し、セッションを起動し直す',
           )
-        : failure(
-            "unauthenticated",
-            "資格情報がないか、正しくない",
-            "正しい資格情報で呼び出す",
-            "資格情報を再発行する",
-          ),
+        : reason === "expired"
+          ? failure(
+              "tokenExpired",
+              "ノードのトークンの期限が切れた（使わなかった時間が長い・発行から時間がたった・子の役目が終わった）",
+              "親か人が node.bindCode で紐付けのコードを出し直し、子が結び直す（Desktop の子）",
+              "daemon が起動した子なら、親か人が子を再開するか、作り直す",
+            )
+          : failure(
+              "unauthenticated",
+              "資格情報がないか、正しくない",
+              "正しい資格情報で呼び出す",
+              "資格情報を再発行する",
+            ),
       {
         "www-authenticate": "Bearer",
         ...CLOSE,
@@ -873,7 +879,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
     const token = parseBearer(req.headers.authorization);
     const principal = hookPrincipal(token);
     if (principal === undefined) {
-      return authFailed(req, res, failReason(token));
+      return authFailed(req, res, failReason(token, true));
     }
     const valid = checkPrincipal(principal, deps.getState());
     if (!valid.ok) {

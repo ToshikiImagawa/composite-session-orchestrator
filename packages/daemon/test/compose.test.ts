@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -729,53 +728,60 @@ describe("createDaemon（起動時のトークンの掃除）", () => {
     expect(r.logs.join("\n")).toContain("orphanTokenRevoked");
   });
 
-  it("期限の切れたトークン（T21-te）: 401 tokenExpired。受信箱への知らせは同じトークンについて 1 回だけ。根は切れない", async () => {
-    const r = rig();
-    mkdirSync(r.config.stateDir, { mode: 0o700 });
-    const store = openSqliteStore(join(r.config.stateDir, "state.db"));
-    if (!store.ok) throw new Error("store");
-    const log = EventLog.open(store.value, { clock: () => "2026-01-01T00:00:00Z" });
-    if (!log.ok) throw new Error("log");
-    let n = 0;
-    const add = (body: Parameters<typeof log.value.append>[0]["body"]) => {
-      const res = log.value.append({ requestId: `seed-${++n}`, actor: { system: true }, body });
-      if (!res.ok) throw new Error(res.error.cause);
+  /** 根から CLI の子を 1 つ起動し、そのノード ID と、子の MCP のトークン（子の環境変数）を返す。 */
+  const spawnChild = async (d: Awaited<ReturnType<typeof boot>>, r: ReturnType<typeof rig>) => {
+    const spawn = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      objective: "x",
+      acceptanceCriteria: ["x"],
+      scope: { writableLocations: ["src"], forbiddenLocations: [".git"], allowedCommands: [] },
+    });
+    expect(spawn.json.ok, JSON.stringify(spawn.json)).toBe(true);
+    const session = r.launcher.sessions[r.launcher.sessions.length - 1];
+    return {
+      nodeId: spawn.json.value.nodeId as string,
+      token: session?.options.env.CSO_MCP_TOKEN ?? "",
     };
-    add({
-      type: "node.created",
-      payload: { nodeId: "root", role: "integrator", parentId: null, dependsOn: [] },
-    });
-    add({
-      type: "node.stateChanged",
-      payload: { nodeId: "root", event: { type: "start" } },
-    } as never);
-    add({
-      type: "node.created",
-      payload: { nodeId: "c", role: "implement", parentId: "root", dependsOn: [] },
-    });
-    add({ type: "node.stateChanged", payload: { nodeId: "c", event: { type: "start" } } } as never);
-    store.value.close?.();
-    const token = "t".repeat(43);
-    new FileTokenRepository(join(r.config.stateDir, "node-tokens.json")).put({
-      tokenHash: createHash("sha256").update(token, "utf8").digest("hex"),
-      role: "child",
-      nodeId: "c",
-      issuedAt: "2026-01-01T00:00:00.000Z",
-      lastUsedAt: "2026-01-01T00:00:00.000Z",
-      kind: "bind",
-    });
-    const d = await boot(r);
+  };
+
+  it("期限の切れたトークン（T21-te）: 401 tokenExpired。受信箱への知らせは、動いている子について同じトークンで 1 回だけ。根は切れない", async () => {
+    let mono = 0;
+    const r = rig();
+    const d = await boot({ ...r, deps: { ...r.deps, monoMs: () => mono } });
+    const c = await spawnChild(d, r);
+    expect(c.token).not.toBe("");
+    expect((await call(d.url, c.token, "node.get", { nodeId: c.nodeId })).status).not.toBe(401);
+    mono += 6 * 3_600_000; // 最後に使ってから 6 時間（CLI の子の既定）
     for (let i = 0; i < 2; i++) {
-      const res = await call(d.url, token, "node.get", { nodeId: "c" });
+      const res = await call(d.url, c.token, "node.get", { nodeId: c.nodeId });
       expect(res.status).toBe(401);
       expect(res.json.error?.code).toBe("tokenExpired");
     }
     const notices = d.daemon.log
       .state()
-      .inbox.filter((x) => x.nodeId === "c" && x.summary?.includes("期限"));
+      .inbox.filter((x) => x.nodeId === c.nodeId && x.summary?.includes("期限"));
     expect(notices).toHaveLength(1);
-    expect(r.logs.join("\n")).not.toContain(token);
-    expect((await call(d.url, d.rootToken, "node.get", { nodeId: "c" })).status).not.toBe(401);
+    expect(r.logs.join("\n")).not.toContain(c.token);
+    expect((await call(d.url, d.rootToken, "node.get", { nodeId: c.nodeId })).status).not.toBe(401);
+  });
+
+  it("子が止まったら、見回りを待たずに、その場でトークンを失効させる（T21-te M1）。知らせは出さない", async () => {
+    const r = rig();
+    const d = await boot(r);
+    const c = await spawnChild(d, r);
+    const stop = await call(d.url, d.rootToken, "node.stop", {
+      nodeId: c.nodeId,
+      mode: "immediate",
+    });
+    expect(stop.json.ok, JSON.stringify(stop.json)).toBe(true);
+    await vi.waitFor(() =>
+      expect(d.daemon.log.state().nodes.find((n) => n.id === c.nodeId)?.state).toBe("stopped"),
+    );
+    const res = await call(d.url, c.token, "node.get", { nodeId: c.nodeId });
+    expect(res.status).toBe(401);
+    expect(res.json.error?.code).toBe("tokenExpired");
+    expect(d.daemon.log.state().inbox.some((x) => x.summary?.includes("期限"))).toBe(false);
   });
 });
 

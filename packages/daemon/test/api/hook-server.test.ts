@@ -400,4 +400,30 @@ describe("拒否の経路ごとの要求数（T24-hc）: received が 1 増え�
     hookTokens.issue("a");
     expect((await post(url, hookToken, pre("Read", {}, "s-manual"))).status).toBe(401);
   });
+
+  it("フック専用のトークンの期限切れ（T21-te R5）: /v1/hook で 401 tokenExpired と、cso hook-env で出し直す案内", async () => {
+    let now = 0;
+    const credentials = createCredentialStore({ humanToken: HUMAN });
+    const hookTokens = createHookTokens({ nowMs: () => now });
+    const st = state();
+    server = createApiServer({
+      credentials,
+      getState: () => st,
+      handlers: {} as never,
+      hook: async () => ({ allow: true }),
+      hookTokens,
+    });
+    const { url } = await server.listen(0);
+    credentials.issueNodeToken("a", "child");
+    const hookToken = hookTokens.issue("a");
+    now = 24 * 3_600_000;
+    const res = await post(url, hookToken, pre("Read", {}, "s-manual"));
+    expect(res.status).toBe(401);
+    const body = res.json as { error: { code: string; nextActions: string[] } };
+    expect(body.error.code).toBe("tokenExpired");
+    expect(body.error.nextActions.join("")).toContain("cso hook-env");
+    // 期限切れでない、知らないトークンは unauthenticated のまま
+    const other = await post(url, "z".repeat(43), pre("Read", {}, "s-manual"));
+    expect((other.json as { error: { code: string } }).error.code).toBe("unauthenticated");
+  });
 });
