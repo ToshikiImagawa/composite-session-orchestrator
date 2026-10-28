@@ -431,17 +431,33 @@ describe("起動の安全（レビュー反映）", () => {
     if (!made.ok) expect(made.error.code).toBe("invalidConfig");
   });
 
-  it("起動時に子の引き出しの置き場（0700）を作り、動いている子の鍵でない引き出しを消す（T21-d・M9）", async () => {
+  it("起動時に子の引き出しの置き場（0700）を作り、要る子の鍵でない引き出しを消す（T21-d・M9）", async () => {
     const r = rig();
     r.deps = { ...r.deps, excludeFromBackup: async () => undefined };
+    const first = await boot(r); // 1 回目: 秘密を作る（この起動では掃除しない）
+    await first.daemon.stop();
+    cleanups.length = 0;
+    const root = join(r.config.stateDir, "children.noindex");
+    expect(lstatSync(root).mode & 0o777).toBe(0o700);
+    mkdirSync(join(root, "0".repeat(32)), { mode: 0o700 });
+    await boot(r);
+    expect(existsSync(join(root, "0".repeat(32)))).toBe(false);
+    expect(r.logs.join("\n")).toContain("childrenDirSwept");
+  });
+
+  it("鍵のファイルがないのに、鍵の形の引き出しが残っていれば、起動を止める（T21-d・M1。実パスを出さない）", () => {
+    const r = rig();
     mkdirSync(r.config.stateDir, { recursive: true, mode: 0o700 });
     const root = join(r.config.stateDir, "children.noindex");
     mkdirSync(join(root, "0".repeat(32)), { recursive: true, mode: 0o700 });
     chmodSync(root, 0o700);
-    await boot(r);
-    expect(lstatSync(root).mode & 0o777).toBe(0o700);
-    expect(existsSync(join(root, "0".repeat(32)))).toBe(false);
-    expect(r.logs.join("\n")).toContain("childrenDirSwept");
+    const made = createDaemon(r.config, r.deps);
+    expect(made.ok).toBe(false);
+    if (!made.ok) {
+      expect(made.error.code).toBe("stateDirInvalid");
+      expect(made.error.cause).not.toContain(r.config.stateDir);
+      expect(made.error.nextActions.join("")).toContain("空にして");
+    }
   });
 
   it("trackTimers: 止めるときに、残っているタイマーをまとめて取り消す", () => {
