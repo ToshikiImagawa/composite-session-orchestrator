@@ -8,7 +8,7 @@
 - MCP サーバー（`cso-mcp`）: 統合・子のロール別のツール（`mcp__node__*`）、daemon の身元の検証
 - 人間用のコマンド（`cso`）: `purge`・`hook-env`・`hook-unbind`・`child` など
 - plugin: skill `cso-integrator`・`cso-child`、コマンド `start`・`status`、フック（PreToolUse・PostToolUse・Stop）、統合セッションの MCP の設定（`.mcp.json`）
-- ライセンスを MIT にした（著作権者は COMCREATE。marketplace と同じ）
+- ライセンスを MIT にした
 - skill・コマンドは、MCP のツールの名前が `mcp__node__*` でも、plugin から入れたときの `mcp__plugin_composite-session-orchestrator_node__*` でも動く（`scripts/plugin-mcp-name-check.mjs` で 2.1.308 の名前を確認）
 - 設定の説明（`docs/config.md`）とリリースの手順（`docs/release.md`）を足した
 

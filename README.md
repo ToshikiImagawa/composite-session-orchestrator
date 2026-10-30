@@ -118,4 +118,4 @@ pnpm check   # lint、typecheck、build、test、plugin 検証をまとめて実
 
 ## ライセンス
 
-MIT（著作権者は COMCREATE。[`LICENSE`](LICENSE)）。
+MIT（[`LICENSE`](LICENSE)）。
