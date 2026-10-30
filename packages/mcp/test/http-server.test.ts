@@ -242,7 +242,7 @@ describe("実 HTTP の統合（MCP クライアント ↔ cso-mcp ↔ daemon の
     expect((await raw(r, { body: "{not json", headers: h })).status).toBe(400);
     // 上限を超える本文は、読まずに 413 を返して、接続を閉じる（`connection: close`）。巨大な本文を送りきる前に閉じられると、
     // クライアントは、413 の応答を受け取れず、接続のエラー（EPIPE・ECONNRESET・UND_ERR_SOCKET）になることがある（OS・タイミング次第）。
-    // 実際に、macOS の CI で起きた（PR #61 の Actions run #237 の 1 回目の実行。再実行で成功）:
+    // 実際に、macOS の CI で起きた（PR #61 の Actions run #237 の 1 回目の実行。再実行で成功）。
     // この試験は、どちらでも通す緩い版。応答を必ず 413 で確かめる決定的な版は、下の 2 本（宣言した長さ・チャンク形式）。
     // どちらでも、実行はされない（daemon の窓口に届かない）。
     const big = JSON.stringify({ x: "y".repeat(1024 * 1024 + 1) });
