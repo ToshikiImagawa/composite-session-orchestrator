@@ -7,6 +7,7 @@
  *   cso purge-hold <nodeId> [--until <ISO 8601 UTC> | --days <1〜365>] [--reason <文>] [--request-id <id>]
  *   cso purge-release <nodeId> [--request-id <id>]
  *   cso confirm-stopped <nodeId> [--note <根拠>] [--request-id <id>]
+ *   cso accept <nodeId> [--request-id <id>]
  *   cso hook-unbind <nodeId> [--request-id <id>]
  *   eval "$(cso hook-env <nodeId>)"
  *   cso discarded list
@@ -68,6 +69,10 @@ const USAGE = `使い方:
       daemon が直接止められないノード（Desktop の子。受信箱に停止の代行依頼が出ている）を、親が Desktop で止めた
       （またはアーカイブした）あとに、止めたと宣言する（取り消せない）。停止未完了から停止済みに進み、宣言した者（人間）と根拠が記録に残る。
       --note  根拠（200 文字まで。例: 「Desktop でアーカイブした」）
+  cso accept <nodeId> [--request-id <id>]
+      完了報告済み（done）の子を、人間が受理する（done → verified。取り消せない）。確認のために作った子の片付けに使う。
+      受理すると、子のトークン・フック専用のトークンが失効し、Desktop の子の引き出しが消える。そのあとは cso reclaim で回収できる。
+      差し戻しは、親の統合ノードだけができる
   cso hook-unbind <nodeId> [--request-id <id>]
       子のフック（plugin のファイルで設定するフック）の session_id の結び付けを外す。/clear・--resume で session_id が変わって、
       フックが拒否され続けるときに使う。次に来たセッションに結び直す。外した者（人間）が記録に残る。
@@ -93,6 +98,7 @@ const ALLOWED_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "purge-hold": ["--until", "--days", "--reason"],
   "purge-release": [],
   "confirm-stopped": ["--note"],
+  accept: [],
   "hook-unbind": [],
   "hook-env": [],
   "discarded-list": [],
@@ -643,6 +649,22 @@ export async function runCommand(
       stdout: res.value.duplicate
         ? `すでに記録済み（再送。もう一度は外さない）: ${nodeId}\nrequestId: ${id}\n`
         : `${res.value.unbound ? "フックの結び付けを外した" : "フックの結び付けはなかった（記録だけ残した）"}: ${nodeId}\n次に来たセッションに結び直す\nrequestId: ${id}\n`,
+      stderr: "",
+    };
+  }
+
+  if (command === "accept") {
+    const res = await invoke(
+      deps.client,
+      id,
+      "node.review",
+      { nodeId, verdict: "accept" },
+      isConfirmedStopped,
+    );
+    if (res.kind !== "ok") return fail(res);
+    return {
+      exitCode: 0,
+      stdout: `受理した: ${nodeId}（状態: ${terminalSafe(res.value.state, 40)}）\n子のトークンは失効した。回収は cso reclaim ${nodeId}\nrequestId: ${id}\n`,
       stderr: "",
     };
   }

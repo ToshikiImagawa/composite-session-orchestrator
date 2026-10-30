@@ -416,6 +416,7 @@ export const ROLE_OPERATIONS = {
   human: [
     "decision.answer",
     "node.confirmStopped",
+    "node.review",
     "node.bindCode",
     "node.hookUnbind",
     "node.hookToken",

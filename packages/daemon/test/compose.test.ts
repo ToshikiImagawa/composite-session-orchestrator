@@ -1710,6 +1710,29 @@ describe("子に渡す skill（T22-c）", () => {
     expect(impl?.settingSources).toEqual([]);
   });
 
+  it("T21-cw: CLI の子にも、利用者の設定（~/.claude と CLAUDE_CONFIG_DIR）の読み書きを禁じる", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const envDir = mkdtempSync(join(tmpdir(), "cso-cfg-"));
+    const r = rig();
+    r.deps = {
+      ...r.deps,
+      parentEnv: { ...r.deps.parentEnv, HOME: home, CLAUDE_CONFIG_DIR: envDir },
+    } as typeof r.deps;
+    const d = await boot(r);
+    const res = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(res.json.ok, JSON.stringify(res.json)).toBe(true);
+    const pre = r.launcher.sessions[0]?.options.hooks.preToolUse;
+    for (const f of [join(envDir, "settings.json"), join(home, ".claude", "settings.local.json")]) {
+      const out = await pre?.({ toolName: "Read", toolInput: { file_path: f }, cwd: "/" });
+      expect(out?.allow, f).toBe(false);
+    }
+    for (const x of [home, envDir]) rmSync(x, { recursive: true, force: true });
+  });
+
   it("childPluginDir がなければ、plugin を渡さず、起動時に一言記録する", async () => {
     const r = rig();
     const d = await boot(r);
@@ -1738,7 +1761,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     },
   };
 
-  it("フックのゲートが有効（既定）なら、子は起動しない（起動の失敗）", async () => {
+  it("hooks が ok（T21-cw）なら、フックのゲートが有効（既定）のままで子を起動でき、ゲートを外した警告は出ない", async () => {
     const r = rig({ childRuntime: "desktop", csoCommand: [process.execPath, "/opt/cso/bin.js"] });
     const d = await boot(r);
     const res = await call(d.url, d.rootToken, "node.spawn", {
@@ -1746,11 +1769,10 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       role: "implement",
       ...brief,
     });
-    expect(res.json.ok).toBe(false);
-    expect(res.json.error?.code).toBe("startFailed");
-    // 原因（ゲート）は、記録（logLine）に残る
-    expect(r.logs.join("\n")).toContain("hooksUnverified");
-    expect(r.launcher.sessions).toHaveLength(0);
+    expect(res.json.ok, JSON.stringify(res.json)).toBe(true);
+    expect(r.logs.join("\n")).not.toContain("hooksUnverified");
+    expect(r.logs.join("\n")).not.toContain("desktopHooksGateDisabled");
+    expect(r.launcher.sessions).toHaveLength(0); // SDK では起動しない
   });
 
   it("再起動のあとの依頼（C2-4）: 1 件 → 再起動しても 1 件 → 子を宣言すると解決済み → 新しい子がいれば、次の再起動で新しい依頼", async () => {
@@ -2213,6 +2235,83 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       "disableAllHooks",
     );
     rmSync(realHome, { recursive: true, force: true });
+  });
+
+  it("T21-cw: CLAUDE_CONFIG_DIR と claudeConfigDirs の設定も守る（読み書きの禁止と見回り）", async () => {
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const envDir = mkdtempSync(join(tmpdir(), "cso-cfg-"));
+    const extraDir = mkdtempSync(join(tmpdir(), "cso-cfg2-"));
+    const r = desktopRig({ hookSettingsCheckSeconds: 1, claudeConfigDirs: [extraDir] });
+    r.deps = {
+      ...r.deps,
+      parentEnv: { ...r.deps.parentEnv, HOME: realHome, CLAUDE_CONFIG_DIR: envDir },
+    } as typeof r.deps;
+    r0 = r;
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const hookLine = b.bindLine.replace(" child bind ", " child hook ");
+    for (const f of [
+      join(envDir, "settings.json"),
+      join(extraDir, "settings.local.json"),
+      join(realHome, ".claude", "settings.json"),
+    ]) {
+      const rd = await runHook(hookLine, {
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        tool_name: "Read",
+        tool_input: { file_path: f },
+        cwd: b.worktree,
+      });
+      expect(rd.code, f).toBe(2);
+    }
+    // CLAUDE_CONFIG_DIR の設定で disableAllHooks にされたら、見回りで見つける
+    writeFileSync(join(envDir, "settings.json"), JSON.stringify({ disableAllHooks: true }));
+    await vi.waitFor(
+      () =>
+        expect(
+          d.daemon.log
+            .state()
+            .inbox.some((x) => x.nodeId === nodeId && x.summary?.includes("CLAUDE_CONFIG_DIR")),
+        ).toBe(true),
+      { timeout: 5000, interval: 100 },
+    );
+    for (const x of [realHome, envDir, extraDir]) rmSync(x, { recursive: true, force: true });
+  });
+
+  it("T21-cw: 人間は done の子を受理（verified）にでき、入館証（トークン・hook-token）が失効して引き出しが消える。人間の差し戻しは forbidden", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const token = readFileSync(join(b.drawer, "token"), "utf8").trim();
+    const hookToken = readFileSync(join(b.drawer, "hook-token"), "utf8").trim();
+    const done = await b.report(
+      JSON.stringify({ evidence: [{ criterion: "x", evidence: "済んだ" }] }),
+      "done",
+    );
+    expect(JSON.parse(done.stdout).ok, done.stdout + done.stderr).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("done");
+    const rejected = await call(d.url, d.humanToken, "node.review", {
+      nodeId,
+      verdict: "reject",
+      feedback: "やり直し",
+    });
+    expect(rejected.json.error?.code).toBe("forbidden");
+    const accepted = await call(d.url, d.humanToken, "node.review", { nodeId, verdict: "accept" });
+    expect(accepted.json.ok, JSON.stringify(accepted.json)).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("verified");
+    const who = await fetch(`${d.url}/v1/whoami`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(who.status).toBe(401);
+    const hooked = await fetch(`${d.url}/v1/hook`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${hookToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ hook_event_name: "Stop", session_id: "desktop-session-1" }),
+    });
+    expect(hooked.status).toBe(401);
+    expect(existsSync(b.drawer)).toBe(false);
   });
 
   it("T21-cs R1: 作業ツリーの .claude がリンクなら、spawn は失敗する", async () => {

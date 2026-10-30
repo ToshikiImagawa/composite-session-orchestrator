@@ -421,6 +421,36 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     }
   }
 
+  /**
+   * 見張りが守る「利用者の設定のディレクトリ」（T21-cw）。`~/.claude`（常に）、daemon の環境の `CLAUDE_CONFIG_DIR`（あれば）、
+   * 設定 `claudeConfigDirs`。Desktop の子の環境は daemon には見えないので、ありうる場所をすべて守る。重なりは 1 つにまとめる。
+   */
+  const claudeConfigDirs: readonly string[] = (() => {
+    const envDir = (deps.parentEnv ?? process.env).CLAUDE_CONFIG_DIR;
+    const homeDir = (deps.parentEnv ?? process.env).HOME;
+    const dirs = [
+      ...(homeDir === undefined ? [] : [join(homeDir, ".claude")]),
+      ...(envDir !== undefined && envDir.startsWith("/") ? [envDir] : []),
+      ...(config.claudeConfigDirs ?? []),
+    ];
+    return [...new Set(dirs)];
+  })();
+  /** 守る利用者の設定ファイル（各ディレクトリの settings.json・settings.local.json）。 */
+  const userSettingsFiles = (): string[] =>
+    claudeConfigDirs.flatMap((d) =>
+      ["settings.json", "settings.local.json"].map((f) => join(d, f)),
+    );
+  /** CLI の子にも、利用者の設定ファイルの読み書きを禁じる（T21-cw。実パスは起動時に決める。ないディレクトリはそのまま）。 */
+  const userSettingsRoots = userSettingsFiles().map((f) => {
+    let path = f;
+    try {
+      path = join(realpathSync(dirname(f)), basename(f));
+    } catch {
+      // ない（そのまま）
+    }
+    return { path, kind: "hookSettings" as const };
+  });
+
   // SQLite のファイル（state.db・-wal・-shm）が、他のユーザーから読めないよう、作る間は umask を 077 にする。
   const previousUmask = process.umask(0o077);
   let opened: ReturnType<typeof openSqliteStore>;
@@ -712,7 +742,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     // 読み取りも禁じる場所（FR_014 の例外。T21-pr）: stateDir と daemon の設定ファイル。許すのは、そのノード自身の HOME と、
     // 子に渡す skill の写しだけ。実パスは起動時に決めたもの（全ノード共通）。
     protectedPaths: (nodeId) => ({
-      roots: protectedRoots,
+      roots: [...protectedRoots, ...userSettingsRoots],
       allow: [
         join(protectedStateDir, CHILD_PLUGIN_DIR),
         ...(config.childHome === "inherit" ? [] : [join(protectedStateDir, "homes", nodeId)]),
@@ -784,7 +814,6 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   // 足したもの）、作業ツリーは daemon が作ったもの、禁じる場所は CLI の子と同じ（stateDir・設定ファイル）に、そのノードの
   // 引き出しの例外を加える。フック入力の cwd が、daemon の作業ツリーと違えば拒否する（チップで作った子など）。
   const lastHookAt = new Map<string, number>();
-  const homeDir = (deps.parentEnv ?? process.env).HOME;
   /**
    * git の共通ディレクトリの info/exclude に、行を足す（なければ）。作業ツリーが git の作業ツリーでなければ、何もしない
    * （コミットに混ざる心配がない）。足したファイルの実パスを返す。
@@ -821,14 +850,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   /** 利用者の設定（`~/.claude/settings*.json`）の、フックに関わる値（`disableAllHooks`・`hooks`）の控え（M1。書き戻さない）。 */
   let homeHookSnapshot: string | undefined;
   const homeHookKeys = (): string => {
-    if (homeDir === undefined) return "";
+    if (claudeConfigDirs.length === 0) return "";
     const out: Record<string, unknown> = {};
-    for (const f of ["settings.json", "settings.local.json"]) {
+    for (const f of userSettingsFiles()) {
       try {
-        const j = JSON.parse(readFileSync(join(homeDir, ".claude", f), "utf8")) as Record<
-          string,
-          unknown
-        >;
+        const j = JSON.parse(readFileSync(f, "utf8")) as Record<string, unknown>;
         out[f] = { disableAllHooks: j.disableAllHooks ?? null, hooks: j.hooks ?? null };
       } catch (e) {
         out[f] = (e as NodeJS.ErrnoException).code === "ENOENT" ? null : "unreadable";
@@ -885,7 +911,10 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       // ない（よい）
     }
     if (homeHookSnapshot !== undefined && homeHookKeys() !== homeHookSnapshot) {
-      return { kind: "home", text: "利用者の設定（~/.claude）のフックの値が変わった" };
+      return {
+        kind: "home",
+        text: "利用者の設定（~/.claude または CLAUDE_CONFIG_DIR）のフックの値が変わった",
+      };
     }
     return undefined;
   };
@@ -1197,14 +1226,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       };
     }
     const resolved = await resolveScope(scope, wt, resolveHookPath);
-    const homeSettings =
-      homeDir === undefined
-        ? []
-        : await Promise.all(
-            ["settings.json", "settings.local.json"].map((f) =>
-              resolveHookPath(join(homeDir, ".claude", f)),
-            ),
-          );
+    const homeSettings = await Promise.all(userSettingsFiles().map((f) => resolveHookPath(f)));
     const d = await decideToolUse(
       resolved,
       wt,

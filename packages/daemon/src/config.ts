@@ -160,6 +160,11 @@ export interface DaemonConfig {
   readonly hookFreshSeconds?: number;
   /** Desktop の子の見張りの設定を見回る間隔（秒。T21-cs M1）。1〜60 の整数。既定 2。 */
   readonly hookSettingsCheckSeconds?: number;
+  /**
+   * 見張りが守る「利用者の設定のディレクトリ」に足す場所（絶対パス。T21-cw）。既定の `~/.claude` と daemon の環境の
+   * `CLAUDE_CONFIG_DIR` に加えて守る（direnv などで、子の環境の `CLAUDE_CONFIG_DIR` が daemon と違うとき）。20 件以下。
+   */
+  readonly claudeConfigDirs?: readonly string[];
   /** daemon が使う git の絶対パス（T21-cs N2。info/exclude の場所を調べる）。既定 `/usr/bin/git`。 */
   readonly gitPath?: string;
   /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
@@ -226,6 +231,7 @@ const KEYS = [
   "csoCommand",
   "hookFreshSeconds",
   "hookSettingsCheckSeconds",
+  "claudeConfigDirs",
   "gitPath",
   "childHome",
   "childPluginDir",
@@ -611,6 +617,18 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     }
     hookSettingsCheckSeconds = v;
   }
+  let claudeConfigDirs: string[] | undefined;
+  if (raw.claudeConfigDirs !== undefined) {
+    const v = raw.claudeConfigDirs;
+    if (
+      !Array.isArray(v) ||
+      v.length > 20 ||
+      !v.every((x) => typeof x === "string" && x.length <= 4096 && x.startsWith("/"))
+    ) {
+      return bad("claudeConfigDirs は、絶対パスの配列（20 件以下）");
+    }
+    claudeConfigDirs = [...(v as string[])];
+  }
   let gitPath: string | undefined;
   if (raw.gitPath !== undefined) {
     gitPath = absPath(raw.gitPath);
@@ -759,6 +777,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(csoCommand === undefined ? {} : { csoCommand }),
       ...(hookFreshSeconds === undefined ? {} : { hookFreshSeconds }),
       ...(hookSettingsCheckSeconds === undefined ? {} : { hookSettingsCheckSeconds }),
+      ...(claudeConfigDirs === undefined ? {} : { claudeConfigDirs }),
       ...(gitPath === undefined ? {} : { gitPath }),
       ...(autoPurge === undefined ? {} : { autoPurge }),
       ...(digest === undefined ? {} : { digest }),

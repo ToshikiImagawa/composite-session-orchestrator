@@ -26,8 +26,8 @@ const rig = (over: Partial<DesktopAdapterDeps> = {}) => {
   return { adapter, sink, warnings };
 };
 
-describe("DesktopRuntimeAdapter の能力表（Spike 01 の確認前の控えめな値）", () => {
-  it("直接の指示・停止はできず、停止は代行。フックは未確認、識別子は取れない", () => {
+describe("DesktopRuntimeAdapter の能力表", () => {
+  it("直接の指示・停止はできず、停止は代行。フックは確認済み（手動確認 (a)。T21-cw）、識別子は取れない", () => {
     const { adapter } = rig();
     expect(adapter.kind).toBe("desktop");
     expect(adapter.capabilities("a")).toEqual({
@@ -35,16 +35,17 @@ describe("DesktopRuntimeAdapter の能力表（Spike 01 の確認前の控えめ
       stopGraceful: false,
       stopImmediate: false,
       stopDelegated: true,
-      hooks: "unverified",
+      hooks: "ok",
       sessionId: false,
     });
-    expect(DESKTOP_CAPABILITIES.hooks).toBe("unverified");
+    expect(DESKTOP_CAPABILITIES.hooks).toBe("ok");
   });
 });
 
 describe("フックのゲート（既定で有効）", () => {
+  const UNVERIFIED = { capabilities: { ...DESKTOP_CAPABILITIES, hooks: "unverified" as const } };
   it("フックが確認済みでない間は、起動を拒否する（理由と代替手段つき）", async () => {
-    const { adapter, warnings } = rig();
+    const { adapter, warnings } = rig(UNVERIFIED);
     const r = await adapter.start(START);
     expect(r.ok).toBe(false);
     if (r.ok) return;
@@ -64,8 +65,8 @@ describe("フックのゲート（既定で有効）", () => {
     expect(r.error.cause).toContain("hooks: unsupported");
   });
 
-  it("設定でゲートを外すと起動を受け付け、起動のたびに警告を記録する", async () => {
-    const { adapter, warnings } = rig({ requireVerifiedHooks: false });
+  it("設定でゲートを外すと起動を受け付け、起動のたびに警告を記録する（hooks が unverified のとき）", async () => {
+    const { adapter, warnings } = rig({ ...UNVERIFIED, requireVerifiedHooks: false });
     const r = await adapter.start(START);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -77,10 +78,8 @@ describe("フックのゲート（既定で有効）", () => {
     expect(warnings[0]?.[1]).toContain("FR_014");
   });
 
-  it("フックが確認済み（ok）になれば、ゲートが有効でも起動できる", async () => {
-    const { adapter, warnings } = rig({
-      capabilities: { ...DESKTOP_CAPABILITIES, hooks: "ok" },
-    });
+  it("フックが確認済み（ok。既定）なら、ゲートが有効でも起動でき、警告も出ない", async () => {
+    const { adapter, warnings } = rig();
     expect((await adapter.start(START)).ok).toBe(true);
     expect(warnings).toEqual([]);
   });
