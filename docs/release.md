@@ -20,18 +20,29 @@ plugin は、社内マーケットプレイス（`comcreate/comcreate-marketplac
 ```json
 {
   "name": "composite-session-orchestrator",
+  "description": "統合セッション 1 対 作業セッション n の木構造で Claude セッションを束ねるオーケストレーター（daemon・cso-mcp は別に入れる）",
   "version": "<版>",
   "strict": false,
   "source": {
     "source": "archive",
     "url": "https://api.github.com/repos/comcreate/composite-session-orchestrator/releases/assets/<asset の ID>",
-    "sha256": "<zip の sha256>",
-    "headersHelper": "<qiita-mcp と同じもの（`gh auth token` で Bearer のヘッダーを作る）>"
-  }
+    "sha256": "<zip の sha256>"
+  },
+  "headersHelper": "printf '{\"Authorization\":\"Bearer %s\",\"Accept\":\"application/octet-stream\"}' \"$(gh auth token --hostname github.com)\""
 }
 ```
 
-このリポジトリは私有なので、asset の取得に認証が要ります。`headersHelper` は qiita-mcp の項目と同じものを使います（形は marketplace の README と qiita-mcp の項目を正とします）。
+- `source` の中は `source`・`url`・`sha256` だけ。`headersHelper` は項目の最上位（`source` と同じ階層）に置く（qiita-mcp と同じ値）。
+- リポジトリは private で使う前提なので、asset の取得に認証が要る。使う人は `gh auth login` 済み（comcreate を読める権限）であること。
+
+## 最初の 1 回（手で出す）
+
+自動化のジョブは、既存の項目を書き換えるだけです。最初の 1 回は、marketplace に手で PR を出します。
+
+1. 題は `[add] composite-session-orchestrator を marketplace.json に追加`。
+2. `.claude-plugin/marketplace.json` に、上の項目を足す（`url`・`sha256` は Release の実行の Summary の値）。
+3. marketplace の README の表に行を足す（プラグイン: `composite-session-orchestrator`／内容: 上の description／本体リポジトリ: `comcreate/composite-session-orchestrator`／配布方法: archive）。
+4. marketplace の `SECURITY.md` のサポート表にも行を足す。
 
 ## marketplace への PR の自動化（任意）
 
@@ -48,4 +59,6 @@ plugin は、社内マーケットプレイス（`comcreate/comcreate-marketplac
 2. App を `comcreate/comcreate-marketplace` にだけインストールする。
 3. App の秘密鍵を作り、このリポジトリの Settings → Secrets and variables → Actions に、上の 2 つを登録する。
 
-ジョブは、marketplace.json の `name` が `composite-session-orchestrator` の項目の `source.url`・`source.sha256`・`version` を書き換え、draft の PR を出します。**項目がまだないときは何もしない**ので、最初の 1 回は手で足します。
+ジョブは、marketplace.json の `name` が `composite-session-orchestrator` の項目の `source`（`source`・`url`・`sha256`）と `version` を書き換え、ブランチ `release/composite-session-orchestrator-<版>` から `main` へ、題 `[update] composite-session-orchestrator <版> を marketplace.json に反映` の draft の PR を出します（本文に Release の URL）。**項目がまだないとき・version がすでに同じときは何もしません**。`headersHelper` などほかのキーは変えません。
+
+タグとの照合: `release` のジョブは、タグと plugin.json・ルートと `packages/*` の `package.json` の version が全部同じでなければ失敗します。zip の中身は許可リスト（plugin.json・.mcp.json・hooks・skills・commands・agents の決まったファイル）と比べ、ほかのファイル（`.env`・`node_modules` など）があれば失敗します。同じタグで再実行すると、Release の asset を付け直します（`--clobber`）。

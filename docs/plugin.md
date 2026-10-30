@@ -10,7 +10,7 @@
 | skill | `cso-child` | 子ノードの手順。進捗・判断・範囲外の申告・完了の報告・範囲拡張の要求（子ロールの全ツールを説明している） |
 | コマンド | `start` | 接続の確認（`mcp__node__whoami`）と、daemon・`cso-mcp` の起動の案内。設定ファイルのパスと窓口の URL は、環境変数 `CSO_DAEMON_CONFIG`・`CSO_DAEMON_URL` か、人間への質問で決める。トークンは `CSO_ROOT_TOKEN` で渡す |
 | コマンド | `status` | 木と受信箱の読み取りだけの要約 |
-| MCP | `node`（`.mcp.json`） | 統合セッションの MCP サーバー（種類 http）。URL は `${CSO_MCP_URL:-http://127.0.0.1:7777/mcp}`、ヘッダは `Authorization: Bearer ${CSO_ROOT_TOKEN}`（参照だけ。値は書かない）。Claude Code は、ツールを `mcp__plugin_composite-session-orchestrator_node__*` の名前で出す（2.1.308 で確認。確かめ方は `node scripts/plugin-mcp-name-check.mjs`）。skill・コマンドは、この名前と `mcp__node__*` のどちらでも動くように書く（`allowed-tools` は両方を対にする。`pnpm validate:plugin` が検査する） |
+| MCP | `node`（`.mcp.json`） | 統合セッションの MCP サーバー（種類 http）。URL は `${CSO_MCP_URL:-http://127.0.0.1:7777/mcp}`、ヘッダは `Authorization: Bearer ${CSO_ROOT_TOKEN}`（参照だけ。値は書かない）。Claude Code は、ツールを `mcp__plugin_composite-session-orchestrator_node__*` の名前で出す（2.1.308 で、`--plugin-dir` と marketplace から入れた場合の両方で確認。確かめ方は `node scripts/plugin-mcp-name-check.mjs [--installed]`）。skill・コマンドは、この名前と `mcp__node__*` のどちらでも動くように書く（`allowed-tools` は両方を対にする。`pnpm validate:plugin` が検査する） |
 
 plugin の名前空間のため、コマンドは `/composite-session-orchestrator:start` のように呼ぶ。
 
@@ -60,7 +60,7 @@ daemon が SDK で起動する子は、MCP の設定を daemon が組み立て�
 
 daemon が SDK で起動する子（CLI の子）には、plugin の skill を渡せる。daemon の設定 `childPluginDir`（この plugin のディレクトリの絶対パス）を指定する。
 
-- SDK の `options.plugins` は、plugin の skills・hooks・agents・commands をまとめて読む（hooks だけを外せない）。そのまま渡すと `hooks/hooks.json` も読まれ、SDK のフックと二重の判定になる。そこで daemon は、起動のたびに、状態の置き場の下の `child-plugin/` を消して作り直し、**`skills/cso-child/SKILL.md`・`skills/cso-integrator/SKILL.md` と `plugin.json`（名前 `cso-child-skills`）だけ**を写す。hooks・commands・agents・`.mcp.json` は写さない。写す先は状態の置き場の下だけ、写す元のシンボリックリンクは辿らない、SKILL.md の `name` はディレクトリ名と一致すること。満たさなければ、daemon は起動しない。
+- SDK の `options.plugins` は、plugin の skills・hooks・agents・commands をまとめて読む（hooks だけを外せない）。そのまま渡すと `hooks/hooks.json` も読まれ、SDK のフックと二重の判定になる。そこで daemon は、起動のたびに、状態の置き場の下の `child-plugin/` を消して作り直し、**`skills/cso-child/SKILL.md`・`skills/cso-integrator/SKILL.md` と `plugin.json`（名前 `cso-child-skills`）だけ**を写す。hooks・commands・agents・`.mcp.json` は写さない。このため、`childPluginDir` にこの plugin を渡しても、子に plugin の MCP（`plugin:composite-session-orchestrator:node`）は付かず、子のツールは daemon が渡す `mcp__node__*` だけになる（hook-policy は `mcp__node__*` だけを許す。試験: `packages/daemon/test/sdk/child-plugin.test.ts`）。写す先は状態の置き場の下だけ、写す元のシンボリックリンクは辿らない、SKILL.md の `name` はディレクトリ名と一致すること。満たさなければ、daemon は起動しない。
 - 子には `plugins: [{ type: "local", path: <child-plugin>, skipMcpDiscovery: true }]` と `skills: ["cso-child-skills:<skill>"]` を渡す。中間の統合ノード（role が integrator）は `cso-integrator`、それ以外は `cso-child`。`settingSources: []`・`strictMcpConfig: true` は変わらない（利用者の設定・MCP は混ざらない）。
 - 起動の指示には手順の本文を書かず、末尾に「作業の手順は、skill「…」に従う」の 1 行だけを足す。
 - 制約: 写すのは `SKILL.md` だけなので、skill からほかのファイル（`references/`・スクリプトなど）は参照できない。skill は 1 つのファイルで完結させる。

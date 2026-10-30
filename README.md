@@ -11,7 +11,12 @@
 
 ### 1. daemon・cso-mcp・cso を入れる
 
-Node 22 以上と pnpm 10.28.0 が要ります。
+Node 22 以上と pnpm 10.28.0 が要ります。plugin の取得には、`gh auth login` 済みであること（comcreate のリポジトリを読める権限）が前提です。
+
+```sh
+corepack enable    # pnpm 10.28.0（packageManager で固定）を使う
+pnpm setup         # pnpm link --global の置き場を PATH に入れる（初回だけ。シェルを開き直す）
+```
 
 ```sh
 git clone https://github.com/comcreate/composite-session-orchestrator.git
@@ -21,7 +26,7 @@ pnpm build
 for p in daemon mcp cli; do (cd packages/$p && pnpm link --global); done
 ```
 
-`cso-daemon`・`cso-mcp`・`cso` が PATH に入ります（`pnpm link --global` には `pnpm setup` 済みの PATH が要ります）。版を上げたら、`git pull` → `pnpm install --frozen-lockfile` → `pnpm build` をやり直します（daemon と `cso-mcp` は同じ版にそろえます）。
+`cso-daemon`・`cso-mcp`・`cso` が PATH に入ります。`cso-daemon --help` が使い方を出せば、入っています。版を上げたら、`git pull` → `pnpm install --frozen-lockfile` → `pnpm build` をやり直します（daemon と `cso-mcp` は同じ版にそろえます）。
 
 ### 2. 設定を書く
 
@@ -64,20 +69,20 @@ export CSO_ROOT_TOKEN="$(cat <状態の置き場>/root-token)"
 claude
 ```
 
-統合セッションで `/composite-session-orchestrator:start` を実行して、接続を確かめます。以降は skill `cso-integrator` に沿って進めます。くわしくは [`docs/plugin.md`](docs/plugin.md)。
+統合セッションで `/composite-session-orchestrator:start` を実行して、接続を確かめます。`CSO_ROOT_TOKEN` が未設定だと、ヘッダーが `Bearer ${CSO_ROOT_TOKEN}` の文字のまま送られ、`cso-mcp` が 401 で拒否します（`/mcp` で `plugin:composite-session-orchestrator:node` が失敗と出て、`mcp__…node__*` のツールが見えません）。このとき `/composite-session-orchestrator:start` は、ツールが見えないので、起動とトークンの設定の手順を案内します。以降は skill `cso-integrator` に沿って進めます。くわしくは [`docs/plugin.md`](docs/plugin.md)。
 
 - plugin から足した MCP のツールは、`mcp__plugin_composite-session-orchestrator_node__*` という名前で出ます。skill・コマンドは、この名前と `mcp__node__*`（daemon が起動する子・手で足した MCP）のどちらでも動くように書いてあります。Claude Code の版を上げたら `node scripts/plugin-mcp-name-check.mjs` で名前を確かめます（2.1.308 で確認済み）。
 - `CSO_ROOT_TOKEN` は、統合セッションだけに設定します。手で起動する子のセッションの環境に入れないでください（plugin を付けた子が、統合ノードの権限で接続してしまいます）。
 
 ## 既知の問題
 
-- daemon を再起動したら、`cso-mcp` も起動し直します。統合セッションも MCP をつなぎ直します（`/mcp`）。
-- 手動確認 (a) の 4（チップから始めた子）・7（cd）・9a（Desktop の `transcript_path`。`CLAUDE_CONFIG_DIR` が違うとき）は、未確認です。
-- Desktop の子（`childRuntime: "desktop"`）は実験的です。信頼できない入力（他人のリポジトリ・Issue・Web の内容など）を読ませないでください（[`docs/desktop-runtime.md`](docs/desktop-runtime.md)）。
-- 1 人で使う機械だけで使ってください（同じユーザーのプロセスは、状態の置き場のトークンを読めます）。
-- 画面の課題が残っています（T23-ux）。
-- 人間用の受信箱の一覧 `cso inbox` はまだありません（T24-i）。
-- 子 → `cso-mcp` の方向の身元確認がありません（T10m-j）。
+- daemon を再起動したら、`cso-mcp` も起動し直す。統合セッションも MCP をつなぎ直す（`/mcp` から再接続）。
+- 手動確認 (a) の 4（チップから始めた子）・7（cd）・9a（Desktop の `transcript_path`。`CLAUDE_CONFIG_DIR` が違うとき）は、未確認。
+- Desktop の子（`childRuntime: "desktop"`）は実験的。作業範囲外の拒否が十分に効かないので、信頼できない入力（他人のリポジトリ・Issue・Web の内容など）を読ませない（[`docs/desktop-runtime.md`](docs/desktop-runtime.md)）。
+- 1 人で使う機械だけで使う（同じユーザーのプロセスは、状態の置き場のトークンを読める）。
+- 画面の課題が残っている（T23-ux。確認の欄が見えにくい、Desktop の子の停止の代行依頼が「失敗」と出る、など）。
+- 人間用の受信箱の一覧 `cso inbox` がない（T24-i）。受信箱は画面か、統合セッションの `inbox_fetch` で見る。
+- 子 → `cso-mcp` の方向の身元確認がない（T10m-j。子は、`mcpUrl` の偽物にトークンを送りうる）。
 
 一覧は [`CHANGELOG.md`](CHANGELOG.md) にもあります。
 
@@ -113,4 +118,4 @@ pnpm check   # lint、typecheck、build、test、plugin 検証をまとめて実
 
 ## ライセンス
 
-MIT（[`LICENSE`](LICENSE)）。
+MIT（著作権者は COMCREATE。[`LICENSE`](LICENSE)）。

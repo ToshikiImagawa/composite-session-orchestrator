@@ -4,9 +4,11 @@
  * 両方で動くように書いてある。`plugin-check.mjs` の PLUGIN_TOOL_PREFIX）。Claude Code の版を上げたら実行する。
  * claude の起動と、API への失敗する接続を含むので、`pnpm check` には入れない（`mcp-env-expansion-check.mjs` と同じ位置づけ）。
  *
- * 使い方: `node scripts/plugin-mcp-name-check.mjs`（claude は環境変数 `CLAUDE_BIN`、なければ PATH の `claude`）。
+ * 使い方: `node scripts/plugin-mcp-name-check.mjs [--installed]`（claude は環境変数 `CLAUDE_BIN`、なければ PATH の `claude`）。
+ * 既定は `--plugin-dir plugin` で読む。`--installed` は `--plugin-dir` を付けず、marketplace から入れた plugin で確かめる
+ * （先に `claude plugin install composite-session-orchestrator@<marketplace>` をしておく）。
  * 終了コード 0: 期待どおり / 1: 違う・確かめられない。手元に偽の MCP サーバー（ツール whoami だけ）を立て、`CSO_MCP_URL` で向ける。
- * 2026-10-30 に Claude Code 2.1.308 で、期待どおりの名前を確かめた。
+ * 2026-10-30 に Claude Code 2.1.308 で、両方の経路（`--plugin-dir`、手元の marketplace から install）で、期待どおりの名前を確かめた。
  */
 
 import { spawn } from "node:child_process";
@@ -18,6 +20,7 @@ import { PLUGIN_TOOL_PREFIX } from "./plugin-check.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const claude = process.env.CLAUDE_BIN ?? "claude";
 const expected = `${PLUGIN_TOOL_PREFIX}whoami`;
+const installed = process.argv.includes("--installed");
 
 const server = createServer((req, res) => {
   let body = "";
@@ -56,8 +59,7 @@ const { port } = server.address();
 const child = spawn(
   claude,
   [
-    "--plugin-dir",
-    join(root, "plugin"),
+    ...(installed ? [] : ["--plugin-dir", join(root, "plugin")]),
     "-p",
     "hi",
     "--output-format",
