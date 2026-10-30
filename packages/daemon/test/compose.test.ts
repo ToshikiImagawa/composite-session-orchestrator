@@ -1733,7 +1733,17 @@ describe("子に渡す skill（T22-c）", () => {
       const out = await pre?.({ toolName: "Read", toolInput: { file_path: f }, cwd: "/" });
       expect(out?.allow, f).toBe(false);
     }
-    for (const x of [home, realHome, envDir]) rmSync(x, { recursive: true, force: true });
+    // settings.json がリンク（dotfiles）なら、リンクの先も守る（R2。呼び出しのたびに解決する）
+    const dotfiles = mkdtempSync(join(tmpdir(), "cso-dot-"));
+    writeFileSync(join(dotfiles, "claude-settings.json"), "{}");
+    symlinkSync(join(dotfiles, "claude-settings.json"), join(envDir, "settings.json"));
+    const viaLink = await pre?.({
+      toolName: "Read",
+      toolInput: { file_path: join(dotfiles, "claude-settings.json") },
+      cwd: "/",
+    });
+    expect(viaLink?.allow).toBe(false);
+    for (const x of [home, realHome, envDir, dotfiles]) rmSync(x, { recursive: true, force: true });
   });
 
   it("childPluginDir がなければ、plugin を渡さず、起動時に一言記録する", async () => {
@@ -2280,6 +2290,102 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       { timeout: 5000, interval: 100 },
     );
     for (const x of [realHome, envDir, extraDir]) rmSync(x, { recursive: true, force: true });
+  });
+
+  it("T21-cw R5: 人間の受理は done だけ。running・waiting・verified・根は invalidTransition、ないノードは notFound、子のトークンは forbidden", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const accept = (id: string, token = d.humanToken) =>
+      call(d.url, token, "node.review", { nodeId: id, verdict: "accept" });
+    expect((await accept(nodeId)).json.error?.code).toBe("invalidTransition"); // running
+    expect((await accept("root")).json.error?.code).toBe("invalidTransition");
+    expect((await accept("node-missing")).json.error?.code).toBe("notFound");
+    const childToken = readFileSync(join(b.drawer, "token"), "utf8").trim();
+    expect((await accept(nodeId, childToken)).status).toBe(403);
+    const asked = await b.report(
+      JSON.stringify({ question: "どちら？", options: ["a", "b"] }),
+      "decision",
+    );
+    expect(JSON.parse(asked.stdout).ok, asked.stdout + asked.stderr).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("waiting");
+    expect((await accept(nodeId)).json.error?.code).toBe("invalidTransition");
+    const decisionId = JSON.parse(asked.stdout).value.decisionId as string;
+    await call(d.url, d.humanToken, "decision.answer", { decisionId, choice: "a" });
+    const done = await b.report(
+      JSON.stringify({ evidence: [{ criterion: "x", evidence: "済んだ" }] }),
+      "done",
+    );
+    expect(JSON.parse(done.stdout).ok, done.stdout + done.stderr).toBe(true);
+    expect((await accept(nodeId)).json.ok).toBe(true);
+    expect((await accept(nodeId)).json.error?.code).toBe("invalidTransition"); // verified
+  });
+
+  it("T21-cw R1: フック入力の transcript_path の設定の場所が集合の外なら、足して知らせ、その場所の設定も守る", async () => {
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const other = mkdtempSync(join(tmpdir(), "cso-cfg-"));
+    const r = desktopRig();
+    r.deps = { ...r.deps, parentEnv: { ...r.deps.parentEnv, HOME: realHome } } as typeof r.deps;
+    r0 = r;
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const hookLine = b.bindLine.replace(" child bind ", " child hook ");
+    const read = (file_path: string) =>
+      runHook(hookLine, {
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        transcript_path: join(other, "projects", "x", "s.jsonl"),
+        tool_name: "Read",
+        tool_input: { file_path },
+        cwd: b.worktree,
+      });
+    const denied = await read(join(other, "settings.json"));
+    expect(denied.code).toBe(2);
+    const inbox = d.daemon.log.state().inbox.filter((x) => x.summary?.includes("守る集合の外"));
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]?.summary).not.toContain(other); // 場所は書かない
+    await read(join(other, "settings.local.json"));
+    expect(
+      d.daemon.log.state().inbox.filter((x) => x.summary?.includes("守る集合の外")),
+    ).toHaveLength(1); // 2 回目は知らせない
+    for (const x of [realHome, other]) rmSync(x, { recursive: true, force: true });
+  });
+
+  it("T21-cw R4: 始まってから hookFirstSeenMinutes たってもフックが来ない子は、受信箱に 1 度だけ知らせる", async () => {
+    let mono = 0;
+    const r = desktopRig({ hookFirstSeenMinutes: 1, hookSettingsCheckSeconds: 1 });
+    r0 = r;
+    const d = await boot({ ...r, deps: { ...r.deps, monoMs: () => mono } });
+    const nodeId = await spawnDesktop(d);
+    const notices = () =>
+      d.daemon.log
+        .state()
+        .inbox.filter((x) => x.nodeId === nodeId && x.summary?.includes("1 度も通っていない"));
+    await new Promise((res) => setTimeout(res, 1500));
+    expect(notices()).toHaveLength(0);
+    mono += 61_000;
+    await vi.waitFor(() => expect(notices()).toHaveLength(1), { timeout: 5000, interval: 100 });
+    await new Promise((res) => setTimeout(res, 1500));
+    expect(notices()).toHaveLength(1);
+  });
+
+  it("T21-cw R3・N4: 相対の CLAUDE_CONFIG_DIR・ない claudeConfigDirs・作業ツリーと重なる場所は、起動時に警告（場所は書かない）", async () => {
+    const r = desktopRig();
+    const missing = join(tmpdir(), "cso-missing-config-dir");
+    r.config = { ...r.config, claudeConfigDirs: [missing, r.config.worktreeRoot] };
+    r.deps = {
+      ...r.deps,
+      parentEnv: { ...r.deps.parentEnv, CLAUDE_CONFIG_DIR: "relative/dir" },
+    } as typeof r.deps;
+    r0 = r;
+    await boot(r);
+    const warnings = r.logs.filter((l) => l.includes("claudeConfigDirWarning"));
+    expect(warnings.some((l) => l.includes("相対パス"))).toBe(true);
+    expect(warnings.some((l) => l.includes("存在しない"))).toBe(true);
+    expect(warnings.some((l) => l.includes("重なる"))).toBe(true);
+    for (const l of warnings) expect(l).not.toContain(missing);
   });
 
   it("T21-cw: 人間は done の子を受理（verified）にでき、入館証（トークン・hook-token）が失効して引き出しが消える。人間の差し戻しは forbidden", async () => {

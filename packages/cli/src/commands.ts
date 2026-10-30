@@ -72,7 +72,7 @@ const USAGE = `使い方:
   cso accept <nodeId> [--request-id <id>]
       完了報告済み（done）の子を、人間が受理する（done → verified。取り消せない）。確認のために作った子の片付けに使う。
       受理すると、子のトークン・フック専用のトークンが失効し、Desktop の子の引き出しが消える。そのあとは cso reclaim で回収できる。
-      差し戻しは、親の統合ノードだけができる
+      差し戻しは、親の統合ノードだけができる。done 以外の子は invalidTransition（受理できない）
   cso hook-unbind <nodeId> [--request-id <id>]
       子のフック（plugin のファイルで設定するフック）の session_id の結び付けを外す。/clear・--resume で session_id が変わって、
       フックが拒否され続けるときに使う。次に来たセッションに結び直す。外した者（人間）が記録に残る。
@@ -290,6 +290,8 @@ const isHeld = (v: unknown): v is { held: true; until?: string } =>
 const NOTE_FORBIDDEN = /[\p{Cc}\p{Cf}]/u;
 const isConfirmedStopped = (v: unknown): v is { state: string } =>
   isRecord(v) && typeof v.state === "string";
+/** node.review の結果（受理のあとの状態）。 */
+const isReviewed = isConfirmedStopped;
 const HOOK_ENV_TOKEN = /^[A-Za-z0-9_-]{16,512}$/;
 const HOOK_ENV_URL = /^http:\/\/(127\.0\.0\.1|localhost):[0-9]{1,5}$/;
 const isHookToken = (v: unknown): v is { token: string; nodeId: string; daemonUrl: string } =>
@@ -659,7 +661,7 @@ export async function runCommand(
       id,
       "node.review",
       { nodeId, verdict: "accept" },
-      isConfirmedStopped,
+      isReviewed,
     );
     if (res.kind !== "ok") return fail(res);
     return {

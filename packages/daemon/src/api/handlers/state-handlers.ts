@@ -107,6 +107,9 @@ export function createStateHandlers(deps: StateHandlerDeps) {
         "差し戻しは、親の統合ノードに依頼する",
       );
     }
+    if (human && log.state().nodes.find((n) => n.id === nodeId) === undefined) {
+      return fail("notFound", "ノードが見つからない", "ID を確認する");
+    }
     // 認可（directChild）の二重の備え: 完了の判定は、そのノードの親だけ（人間を除く）。
     if (!human && log.state().nodes.find((n) => n.id === nodeId)?.parentId !== caller) {
       return fail(

@@ -329,6 +329,7 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
   6. **アプリを再起動したあとも効くこと**: Desktop のアプリを再起動し、自動で再開した子（`claude --resume`）に `human-token` を Read させる → 拒否。報告が通る。
   7. **cd したあとも動けること**: 子に作業ツリーの下のディレクトリへ cd させてから、道具を使わせる → 動ける。`cd ..` で戻れる（範囲に cd が許されていれば）。
   8. **429 が出るか**: 子に短い間隔で道具を多く使わせ、daemon の記録の `apiSummary` の `rateLimited` と、フックの拒否（429）の有無を数える（混み具合を数える箱を分けるかを決めるため）。
+  9a. **`transcript_path` の形（T21-cw R1）**: Desktop のアプリでも、子のフック入力の `transcript_path` が `<CLAUDE_CONFIG_DIR>/projects/…/<セッション>.jsonl` の形か（`CLAUDE_CONFIG_DIR` を設定しない場合は `~/.claude/projects/…`）。daemon と Desktop のアプリで `CLAUDE_CONFIG_DIR` が違う環境では、受信箱に「守る集合の外だった」が 1 件出て、その場所の `settings.json` の Read が拒否されるか。場所そのものは記録に書かない。
   9. **V2 の再確認**（上の「CLI の子の引数に Bearer が出ないこと」）。**数える命令は、1 回に 1 つずつ、別々の呼び出しで実行する**（2 行まとめて実行すると、数える命令自身の行に当たる）。
 - **止めるとき**: `node.stop` は `{ "nodeId": "<子>", "mode": "graceful" }`（`mode` は必須）。
 - **期待**: 1 は結果を記録する。2・5・6 は拒否。5a は見つけて書き戻す。3・7 は通る。4 は `hooksNotActive`。8 は回数を記録する。9 は上の期待のとおり。

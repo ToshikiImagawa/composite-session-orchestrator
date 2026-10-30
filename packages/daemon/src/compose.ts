@@ -16,6 +16,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -27,7 +28,7 @@ import {
   writeSync,
 } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import {
   DEFAULT_PURGE_TOMBSTONE,
   type EventBody,
@@ -421,41 +422,78 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     }
   }
 
+  /** 今ある一番深い祖先を実パスにし、ない部分を足す（~/.claude がまだなくても、HOME がリンクならずれる。macOS の /var）。 */
+  const realDeep = (p: string): string => {
+    const rest: string[] = [];
+    let head = resolvePath(p);
+    for (;;) {
+      try {
+        return join(realpathSync(head), ...rest);
+      } catch {
+        const parent = dirname(head);
+        if (parent === head) return resolvePath(p);
+        rest.unshift(basename(head));
+        head = parent;
+      }
+    }
+  };
   /**
    * 見張りが守る「利用者の設定のディレクトリ」（T21-cw）。`~/.claude`（常に）、daemon の環境の `CLAUDE_CONFIG_DIR`（あれば）、
-   * 設定 `claudeConfigDirs`。Desktop の子の環境は daemon には見えないので、ありうる場所をすべて守る。重なりは 1 つにまとめる。
+   * 設定 `claudeConfigDirs`、Desktop の子のフック入力の `transcript_path` から分かった場所（R1）。Desktop の子の環境は daemon には
+   * 見えないので、ありうる場所をすべて守る。値は実パス（`..` もそろえる）で持ち、重なりは実パスで 1 つにまとめる（R3）。
+   * 記録には、場所そのものは書かない（NFR_012）。
    */
-  const claudeConfigDirs: readonly string[] = (() => {
-    const envDir = (deps.parentEnv ?? process.env).CLAUDE_CONFIG_DIR;
-    const homeDir = (deps.parentEnv ?? process.env).HOME;
-    const dirs = [
-      ...(homeDir === undefined ? [] : [join(homeDir, ".claude")]),
-      ...(envDir !== undefined && envDir.startsWith("/") ? [envDir] : []),
-      ...(config.claudeConfigDirs ?? []),
-    ];
-    return [...new Set(dirs)];
-  })();
+  const claudeConfigDirs: string[] = [];
+  const addConfigDir = (dir: string): boolean => {
+    const real = realDeep(dir);
+    if (claudeConfigDirs.includes(real)) return false;
+    claudeConfigDirs.push(real);
+    return true;
+  };
+  {
+    const env = deps.parentEnv ?? process.env;
+    const homeDir = env.HOME;
+    if (homeDir !== undefined) addConfigDir(join(homeDir, ".claude"));
+    const envDir = env.CLAUDE_CONFIG_DIR;
+    if (envDir !== undefined && envDir !== "") {
+      if (isAbsolute(envDir)) addConfigDir(envDir);
+      else
+        note("claudeConfigDirWarning", {
+          source: "CLAUDE_CONFIG_DIR",
+          cause: "相対パスなので使わない",
+        });
+    }
+    (config.claudeConfigDirs ?? []).forEach((d, index) => {
+      if (!existsSync(d)) {
+        note("claudeConfigDirWarning", { source: "claudeConfigDirs", index, cause: "存在しない" });
+      }
+      addConfigDir(d);
+    });
+    // 作業ツリーそのもの・その祖先・その配下が、利用者の設定の場所なら知らせる（子が書ける場所と重なる）
+    const wtRoot = realDeep(config.worktreeRoot);
+    const overlaps = (a: string, b: string) => a === b || b.startsWith(`${a}/`);
+    claudeConfigDirs.forEach((d, index) => {
+      if (overlaps(d, wtRoot) || overlaps(wtRoot, d)) {
+        note("claudeConfigDirWarning", {
+          index,
+          cause: "利用者の設定の場所が、作業ツリー（worktreeRoot）と重なる",
+        });
+      }
+    });
+  }
   /** 守る利用者の設定ファイル（各ディレクトリの settings.json・settings.local.json）。 */
   const userSettingsFiles = (): string[] =>
     claudeConfigDirs.flatMap((d) =>
       ["settings.json", "settings.local.json"].map((f) => join(d, f)),
     );
-  /** CLI の子にも、利用者の設定ファイルの読み書きを禁じる（T21-cw。実パスは起動時に決める。ないディレクトリはそのまま）。 */
-  const userSettingsRoots = userSettingsFiles().map((f) => {
-    // 今ある一番深い祖先を実パスにし、ない部分を足す（~/.claude がまだなくても、HOME がリンクならずれる。macOS の /var）
-    const rest: string[] = [];
-    let head = f;
-    for (;;) {
-      try {
-        return { path: join(realpathSync(head), ...rest), kind: "hookSettings" as const };
-      } catch {
-        const parent = dirname(head);
-        if (parent === head) return { path: f, kind: "hookSettings" as const };
-        rest.unshift(basename(head));
-        head = parent;
-      }
-    }
-  });
+  /** CLI の子にも、利用者の設定ファイルの読み書きを禁じる（T21-cw）。呼び出しのたびに解決する（settings.json がリンクでも。R2）。 */
+  const userSettingsRoots = () =>
+    Promise.all(
+      userSettingsFiles().map(async (f) => ({
+        path: await resolveForWrite(f, nodeFsOps),
+        kind: "hookSettings" as const,
+      })),
+    );
 
   // SQLite のファイル（state.db・-wal・-shm）が、他のユーザーから読めないよう、作る間は umask を 077 にする。
   const previousUmask = process.umask(0o077);
@@ -747,8 +785,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     resolvePath: (p) => resolveForWrite(p, nodeFsOps),
     // 読み取りも禁じる場所（FR_014 の例外。T21-pr）: stateDir と daemon の設定ファイル。許すのは、そのノード自身の HOME と、
     // 子に渡す skill の写しだけ。実パスは起動時に決めたもの（全ノード共通）。
-    protectedPaths: (nodeId) => ({
-      roots: [...protectedRoots, ...userSettingsRoots],
+    protectedPaths: async (nodeId) => ({
+      roots: [...protectedRoots, ...(await userSettingsRoots())],
       allow: [
         join(protectedStateDir, CHILD_PLUGIN_DIR),
         ...(config.childHome === "inherit" ? [] : [join(protectedStateDir, "homes", nodeId)]),
@@ -851,7 +889,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   /** 見張りの設定を置いた作業ツリーと、その設定の中身のハッシュ・git の共通ディレクトリの info/exclude（T21-cs。メモリだけ）。 */
   const hookSettings = new Map<
     string,
-    { worktree: string; hash: string; content: string; exclude?: string }
+    { worktree: string; hash: string; content: string; exclude?: string; preparedAt: number }
   >();
   /** 利用者の設定（`~/.claude/settings*.json`）の、フックに関わる値（`disableAllHooks`・`hooks`）の控え（M1。書き戻さない）。 */
   let homeHookSnapshot: string | undefined;
@@ -1024,11 +1062,41 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         .nodes.filter((n) => !["stopped", "verified", "reclaimable", "archived"].includes(n.state))
         .map((n) => n.id),
     );
-    for (const nodeId of hookSettings.keys()) {
+    const firstSeenMs = (config.hookFirstSeenMinutes ?? 5) * 60_000;
+    for (const [nodeId, settings] of hookSettings) {
       if (!live.has(nodeId) || tamperedHooks.has(nodeId)) continue;
       const problem = hookSettingsProblem(nodeId);
       if (problem !== undefined) handleTamper(nodeId, problem);
+      // 始まってから、フックが 1 度も来ない子（R4）。1 度だけ知らせる
+      if (
+        !lastHookAt.has(nodeId) &&
+        !noHookNotified.has(nodeId) &&
+        hookNow() - settings.preparedAt >= firstSeenMs
+      ) {
+        noHookNotified.add(nodeId);
+        notifyNoHookYet(nodeId);
+      }
     }
+  };
+  /** フックが 1 度も来ないことを知らせた子（R4。メモリだけ）。 */
+  const noHookNotified = new Set<string>();
+  const notifyNoHookYet = (nodeId: string): void => {
+    const key = `hook-not-seen/${nodeId}`;
+    const minutes = config.hookFirstSeenMinutes ?? 5;
+    const r = appendAtomically(log, clock, key, { system: true }, [
+      {
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", key, "hook-not-seen"),
+          kind: "info",
+          nodeId,
+          summary: summarize(
+            `子 ${nodeId} が始まってから ${minutes} 分たっても、見張り（フック）が 1 度も通っていない。Desktop で daemon の作業ツリーを「ローカル」で始めたかを確かめる（チップや「ワークツリー」で始めた子には、見張りが効かず、報告もできない）`,
+          ),
+        },
+      },
+    ]);
+    if (!r.ok) note("hookNotSeenNoticeFailure", { nodeId, cause: r.error.code });
   };
   /**
    * 見張りが外されたと分かったとき（M1）: そのノードの bind のトークンとフック専用のトークンを失効させ、設定を書き戻し、受信箱に
@@ -1049,6 +1117,36 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     hookTokens.revoke(nodeId);
     void restoreHookSettings(nodeId);
     notifyHookTampered(nodeId, problem);
+  };
+  /**
+   * フック入力の transcript_path から、子の Claude Code の設定の場所を知る（T21-cw R1）。守る集合の外なら、集合に足し
+   * （読み書きの禁止と M1 の見回りに入る）、受信箱に知らせる。その場所の設定でフックが切られていれば、見張りが外されたと扱う。
+   */
+  const learnConfigDir = (nodeId: string, transcriptPath: string | undefined): void => {
+    if (transcriptPath === undefined || !isAbsolute(transcriptPath)) return;
+    const at = transcriptPath.lastIndexOf("/projects/");
+    if (at <= 0) return;
+    if (!addConfigDir(transcriptPath.slice(0, at))) return;
+    const key = `claude-config-dir-learned/${nodeId}/${claudeConfigDirs.length}`;
+    const r = appendAtomically(log, clock, key, { system: true }, [
+      {
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", key, "config-dir-learned"),
+          kind: "info",
+          nodeId,
+          summary: summarize(
+            `子 ${nodeId} の Claude Code の設定の場所が、守る集合の外だった（CLAUDE_CONFIG_DIR が daemon と違う）。守る集合に足した。起動時から守るには、daemon の設定 claudeConfigDirs に書く`,
+          ),
+        },
+      },
+    ]);
+    if (!r.ok) note("configDirNoticeFailure", { nodeId, cause: r.error.code });
+    if (homeDisablesHooks()) {
+      handleTamper(nodeId, { kind: "home", text: "子の設定の場所で、フックが切られている" });
+    } else {
+      homeHookSnapshot = homeHookKeys();
+    }
   };
   /** 見張りが外されたことを、受信箱に知らせる（見つけるたびに 1 件）。 */
   const notifyHookTampered = (
@@ -1175,6 +1273,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       hash: createHash("sha256").update(content).digest("hex"),
       content,
       ...(exclude === undefined ? {} : { exclude }),
+      preparedAt: hookNow(),
     });
     homeHookSnapshot = homeHookKeys();
     tamperedHooks.delete(nodeId); // R2
@@ -1187,6 +1286,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     toolName: string,
     toolInput: unknown,
     cwd: string | undefined,
+    transcriptPath?: string,
   ): Promise<{ allow: true } | { allow: false; reason: string }> => {
     const scope = desktopAdapter?.scopeOf(nodeId);
     const tree = await deps.worktree.cwdOf(nodeId).catch(() => undefined);
@@ -1218,6 +1318,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           "daemon が用意した作業ツリーの外のセッションなので拒否した（daemon の作業ツリーを Desktop で開き、「ローカル」で始める）。",
       };
     }
+    // 子の Claude Code の設定の場所（transcript_path の /projects/ より前。R1）が、守る集合の外なら、足して知らせ、判定をやり直す
+    learnConfigDir(nodeId, transcriptPath);
     // 見張りの設定が、置いたときのままか（呼び出しのたびにも確かめる。外されていれば、書き戻して失効させ、以後をすべて拒否）
     const settings = hookSettings.get(nodeId);
     if (!tamperedHooks.has(nodeId)) {
@@ -1470,10 +1572,10 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     credentials,
     // ファイルで設定するフック（plugin の hooks.json。T22-h）。SDK のコールバックと同じ判定・同じ記録。
     // Desktop の子のフックの継承は未確認（Spike 01 の項目 4）。確認までは、受け口では許可しない（仮置き）。
-    hook: (nodeId, toolName, toolInput, cwd) =>
+    hook: (nodeId, toolName, toolInput, cwd, transcriptPath) =>
       desktopAdapter === undefined
         ? sdkAdapter.decideHook(nodeId, toolName, toolInput)
-        : decideDesktopHook(nodeId, toolName, toolInput, cwd),
+        : decideDesktopHook(nodeId, toolName, toolInput, cwd, transcriptPath),
     ...(desktopAdapter === undefined
       ? {}
       : {

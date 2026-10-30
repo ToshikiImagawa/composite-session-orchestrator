@@ -74,7 +74,9 @@ export interface SdkAdapterDeps {
   /** 書き込み先・範囲の場所の実パス化（最も深い既存の祖先を実パスにする。`resolveForWrite`）。 */
   readonly resolvePath: ResolvePath;
   /** 読み取りも禁じる場所（FR_014 の例外。T21-pr）。ノードごと（許す場所に、そのノードの HOME を含めるため）。 */
-  readonly protectedPaths?: (nodeId: string) => ProtectedPaths | undefined;
+  readonly protectedPaths?: (
+    nodeId: string,
+  ) => ProtectedPaths | undefined | Promise<ProtectedPaths | undefined>;
   readonly sink: EventSink;
   readonly timers: Timers;
   readonly newRequestId: () => string;
@@ -632,7 +634,7 @@ export class SdkRuntimeAdapter implements RuntimeAdapter {
         input.toolName,
         input.toolInput,
         d.resolvePath,
-        d.protectedPaths?.(nodeId),
+        await d.protectedPaths?.(nodeId),
       );
       if (decision.allow) return { allow: true };
       // 拒否した範囲違反も記録する（NFR_011）。記録に失敗しても拒否は変えない。
