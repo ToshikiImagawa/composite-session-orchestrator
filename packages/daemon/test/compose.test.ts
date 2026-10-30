@@ -2208,7 +2208,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     const again = await bindByInstruction(d, nodeId);
     const ok = await again.report("戻った\n");
     expect(JSON.parse(ok.stdout).ok, ok.stdout + ok.stderr).toBe(true);
-  });
+  }, 15_000); // 中の waitFor（最大 5 秒）と bind のやり直しを含むので、既定の 5 秒では足りないことがある（macOS の CI で時間切れ）
 
   it("T21-cs M1: settings.local.json（disableAllHooks）を置かれても見つけて消す。利用者の設定の disableAllHooks は、書き戻さずに知らせる（人が変えた場合も同じ扱いと書く）", async () => {
     const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
