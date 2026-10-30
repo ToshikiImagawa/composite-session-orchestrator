@@ -355,3 +355,53 @@ describe("cso-mcp（http-server）と身元確認", () => {
     expect(logs.filter((e) => e === "identityUnverified")).toHaveLength(1);
   });
 });
+
+describe("daemon の再起動（要求の中で待ってかけ直す）", () => {
+  it("daemon を止めて起動し直す間に whoami を呼ぶと、relay（cso-mcp）を作り直さずに成功する", async () => {
+    const first = await startDaemon();
+    const port = Number(new URL(first.url).port);
+    const path = identityFile();
+    // 人間のトークン（設定のファイルにあり、daemon を起動し直しても変わらない）。
+    const relay = relayFor(first.url, "human-token-human-token-human-token-1234", path);
+    expect((await relay.whoami()).ok).toBe(true);
+
+    // daemon が止まる（秘密のファイルも消える）。
+    await daemon?.close();
+    daemon = undefined;
+    rmSync(path);
+    const pending = relay.whoami();
+    await new Promise((r) => setTimeout(r, 700));
+    // 同じポート・同じ秘密で起動し直す（トークンは、本物の daemon と同じく引き継ぐ）。
+    const credentials = createCredentialStore({
+      humanToken: "human-token-human-token-human-token-1234",
+    });
+    daemon = createApiServer({
+      credentials,
+      getState: () => state(),
+      handlers: {},
+      identity: () => ({ daemonId: DAEMON_ID, secret: SECRET }),
+    });
+    await daemon.listen(port);
+    identityFile();
+    const r = await pending;
+    expect(r.ok && r.value.role).toBe("human");
+  }, 15_000);
+
+  it("止まっている間にポートを奪った偽の daemon には、トークンが届かない", async () => {
+    const first = await startDaemon();
+    const port = Number(new URL(first.url).port);
+    const path = identityFile();
+    const relay = relayFor(first.url, first.token, path);
+    await daemon?.close();
+    daemon = undefined;
+    rmSync(path);
+    const attacker = await startAttacker(port, "forged");
+    const pending = relay.whoami();
+    await new Promise((r) => setTimeout(r, 700));
+    identityFile(); // 本物の daemon の秘密が戻っても、窓口は偽物のまま
+    const r = await pending;
+    expect(!r.ok && r.error.code).toBe("daemon_identity_failed");
+    expect(attacker.seen.every((s) => s.authorization === undefined)).toBe(true);
+    expect(attacker.seen.every((s) => s.path.startsWith("/v1/identity"))).toBe(true);
+  }, 15_000);
+});

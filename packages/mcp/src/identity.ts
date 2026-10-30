@@ -8,7 +8,11 @@
  * - 新しいランダムな `nonce` で `GET /v1/identity`（Bearer なし）を呼び、`proof`（HMAC-SHA256）を、自分が接続したポート
  *   （`127.0.0.1:<port>`）で計算した値と、定数時間で比べる。キャッシュはしない。
  * - 身元の失敗（不一致・形の不正・404・400/403/405・その他の 3xx/4xx/5xx）は、ファイルを読み直して 1 度だけやり直し、それでも
- *   失敗なら `daemon_identity_failed`。通常の失敗（接続できない・タイムアウト・429・503）は、そのまま通常の失敗として返す。
+ *   失敗なら `daemon_identity_failed`（待たない）。
+ * - daemon の再起動の途中（秘密のファイルがない（ENOENT）・接続を拒否された・503）は、一時的な失敗として、要求の中で待ってかけ直す
+ *   （0.5・1・2・4 秒 + 0〜250ms のジッター。合計 8 秒以内。毎回ファイルを読み直し、新しい nonce で確かめる）。尽きたら
+ *   `daemon_unreachable`。タイムアウトは、そのまま通常の失敗として返す。記録（`daemonRetry`・`daemonRecovered`・`daemonGaveUp`）には、
+ *   トークン・daemonId・nonce・パスを出さない。
  *   どちらでも、トークンは送らない。`secret`・`proof`・トークンは、失敗の原因・記録に出さない。
  * - 検証から送信までの窓の検知: 検証に成功すると、`daemonId` を返す。relay は、トークンつきの要求の応答の `x-cso-daemon-id` を、これと
  *   照合する（不一致・なしなら、応答を捨てて `daemon_identity_failed`）。検知であって、防止ではない（`docs/daemon-identity.md` §5）。
@@ -120,10 +124,35 @@ export type VerifyResult =
   | { readonly ok: true; readonly daemonId: string }
   | { readonly ok: false; readonly kind: "identity" | "transient"; readonly failure: Failure };
 
+export interface VerifyOptions {
+  /** daemon の再起動の途中（ENOENT・接続の拒否・503）を、待ってかけ直すか（既定は true。起動時の確認は、自前の待ちを持つので false）。 */
+  readonly waitForRestart?: boolean;
+}
+
 export interface IdentityVerifier {
   /** トークンつきの要求を送る直前に呼ぶ。毎回、検証する（キャッシュしない）。 */
-  verify(): Promise<VerifyResult>;
+  verify(opts?: VerifyOptions): Promise<VerifyResult>;
 }
+
+/** 再起動を待つときの、かけ直しの間隔（ms）。 */
+export const RESTART_RETRY_MS = [500, 1_000, 2_000, 4_000] as const;
+/** かけ直しの間隔に足すジッターの上限（ms）。 */
+export const RESTART_JITTER_MS = 250;
+/** 待つ合計の上限（ms）。 */
+export const RESTART_BUDGET_MS = 8_000;
+
+export type RestartReason = "identityFileMissing" | "refused" | "unavailable";
+
+/** 標準エラーへ出す記録（秘密・ID・パスは含めない）。 */
+export type VerifierLogEvent =
+  | {
+      readonly event: "daemonRetry";
+      readonly attempt: number;
+      readonly reason: RestartReason;
+      readonly waitMs: number;
+    }
+  | { readonly event: "daemonRecovered"; readonly attempts: number }
+  | { readonly event: "daemonGaveUp" };
 
 export interface IdentityVerifierOptions {
   /** 接続する daemon の窓口（ループバック。ポートが必要）。 */
@@ -139,7 +168,21 @@ export interface IdentityVerifierOptions {
   /** 429 のあとの待ち（テストで差し替える）。 */
   readonly sleep?: (ms: number) => Promise<void>;
   readonly jitter?: () => number;
+  /** 再起動の待ちのジッター（0〜`RESTART_JITTER_MS`。テストで差し替える）。 */
+  readonly restartJitter?: () => number;
+  /** 経過時間の時計（ms。テストで差し替える）。 */
+  readonly now?: () => number;
+  /** 記録の出し先（既定は出さない）。 */
+  readonly log?: (e: VerifierLogEvent) => void;
 }
+
+export const daemonDown = (): Failure =>
+  failure(
+    "daemon_unreachable",
+    "daemon に届かない（止まっているか、起動し直している途中。トークンは送っていない）",
+    "daemon が動いているか確かめる（cso-mcp の起動し直しは不要。daemon が戻れば、次の呼び出しから通る）",
+    "daemonUrl を確認する",
+  );
 
 export const identityFailed = (): Failure =>
   failure(
@@ -154,7 +197,12 @@ const MAX_RETRY_AFTER_SEC = 10;
 type Attempt =
   | { readonly kind: "ok"; readonly daemonId: string }
   | { readonly kind: "identity" }
-  | { readonly kind: "transient"; readonly failure: Failure; readonly retrySec?: number };
+  | {
+      readonly kind: "transient";
+      readonly failure: Failure;
+      readonly retrySec?: number;
+      readonly restart?: RestartReason;
+    };
 
 export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityVerifier {
   const doFetch = opts.fetch ?? globalThis.fetch;
@@ -164,6 +212,16 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
   const maxBytes = opts.maxBytes ?? IDENTITY_MAX_BYTES;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const jitter = opts.jitter ?? (() => Math.floor(Math.random() * 500));
+  const restartJitter =
+    opts.restartJitter ?? (() => Math.floor(Math.random() * (RESTART_JITTER_MS + 1)));
+  const now = opts.now ?? (() => performance.now());
+  const log = (e: VerifierLogEvent): void => {
+    try {
+      opts.log?.(e);
+    } catch {
+      // 記録先の失敗は、処理を変えない
+    }
+  };
   const hostPort = hostPortOf(opts.daemonUrl);
   const origin = (() => {
     try {
@@ -178,7 +236,11 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
     let text: string;
     try {
       text = readFile(opts.identityPath);
-    } catch {
+    } catch (e) {
+      // ファイルがない: daemon が止まっている・起動し直している途中（一時的な失敗）。ほかの読めない理由は、身元の失敗。
+      if ((e as { code?: unknown } | null)?.code === "ENOENT") {
+        return { kind: "transient", restart: "identityFileMissing", failure: daemonDown() };
+      }
       return { kind: "identity" };
     }
     const identity = parseIdentityFile(text);
@@ -209,14 +271,7 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
       }
       if (res.status === 503) {
         await res.body?.cancel().catch(() => undefined);
-        return {
-          kind: "transient",
-          failure: failure(
-            "daemon_unreachable",
-            "daemon がまだ起動の途中（トークンは送っていない）",
-            "少し待ってから、呼び直す",
-          ),
-        };
+        return { kind: "transient", restart: "unavailable", failure: daemonDown() };
       }
       if (res.status !== 200) {
         await res.body?.cancel().catch(() => undefined);
@@ -244,20 +299,14 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
         : { kind: "identity" };
     } catch {
       const timedOut = controller.signal.aborted;
+      if (!timedOut) return { kind: "transient", restart: "refused", failure: daemonDown() };
       return {
         kind: "transient",
-        failure: timedOut
-          ? failure(
-              "daemon_timeout",
-              `daemon の身元確認の応答が ${timeoutMs}ms 以内に返らなかった（トークンは送っていない）`,
-              "daemon の状態を確認する",
-            )
-          : failure(
-              "daemon_unreachable",
-              "daemon に接続できない（トークンは送っていない）",
-              "daemon が起動しているか確認する",
-              "daemonUrl を確認する",
-            ),
+        failure: failure(
+          "daemon_timeout",
+          `daemon の身元確認の応答が ${timeoutMs}ms 以内に返らなかった（トークンは送っていない）`,
+          "daemon の状態を確認する",
+        ),
       };
     } finally {
       clearTimeout(timer);
@@ -265,16 +314,42 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
   }
 
   return {
-    async verify(): Promise<VerifyResult> {
+    async verify(vopts: VerifyOptions = {}): Promise<VerifyResult> {
+      const waitForRestart = vopts.waitForRestart ?? true;
       let identityFailures = 0;
       let busyRetries = 0;
+      let restartRetries = 0;
+      let waitedMs = 0;
       for (;;) {
         const a = await attempt();
-        if (a.kind === "ok") return { ok: true, daemonId: a.daemonId };
+        if (a.kind === "ok") {
+          if (restartRetries > 0) log({ event: "daemonRecovered", attempts: restartRetries + 1 });
+          return { ok: true, daemonId: a.daemonId };
+        }
         if (a.kind === "identity") {
           // daemon の再起動で秘密が変わる。ファイルを読み直して、1 度だけやり直す。
           if (identityFailures++ < 1) continue;
           return { ok: false, kind: "identity", failure: identityFailed() };
+        }
+        if (a.restart !== undefined) {
+          if (!waitForRestart) return { ok: false, kind: "transient", failure: a.failure };
+          // daemon の再起動の途中。待って、ファイルを読み直して、新しい nonce で確かめ直す（トークンは、まだ送っていない）。
+          const base = RESTART_RETRY_MS[restartRetries];
+          const left = RESTART_BUDGET_MS - waitedMs;
+          if (base === undefined || left <= 0) {
+            log({ event: "daemonGaveUp" });
+            return { ok: false, kind: "transient", failure: daemonDown() };
+          }
+          const wait = Math.min(
+            base + Math.max(0, Math.min(RESTART_JITTER_MS, restartJitter())),
+            left,
+          );
+          restartRetries++;
+          log({ event: "daemonRetry", attempt: restartRetries, reason: a.restart, waitMs: wait });
+          const t0 = now();
+          await sleep(wait);
+          waitedMs += Math.max(wait, now() - t0);
+          continue;
         }
         if (a.retrySec !== undefined && busyRetries++ < 1) {
           await sleep(a.retrySec * 1000 + jitter());

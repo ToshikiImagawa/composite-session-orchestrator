@@ -29,6 +29,8 @@ export interface BinDeps {
   readonly newRequestId?: () => string;
   /** 標準入力の全部（`cso child hook` のフック入力）。 */
   readonly readStdin?: () => Promise<string>;
+  /** 待ち（daemon の再起動の待ちなど。試験で差し替える）。 */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 const usage = (cause: string): CommandResult => ({
@@ -57,6 +59,7 @@ export async function runBin(argv: readonly string[], deps: BinDeps): Promise<Co
       ...(deps.readStdin === undefined ? {} : { readStdin: deps.readStdin }),
       newRequestId: deps.newRequestId ?? (() => `cso-child-${randomUUID()}`),
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+      ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
     });
   }
   if (argv.includes("--help") || argv.includes("-h")) {
@@ -81,6 +84,8 @@ export async function runBin(argv: readonly string[], deps: BinDeps): Promise<Co
       daemonUrl,
       identityPath: join(stateDir, IDENTITY_FILE),
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+      ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
+      log: (e) => process.stderr.write(`${JSON.stringify(e)}\n`),
     });
   } else if (deps.env.CSO_CLI_ALLOW_UNVERIFIED !== "1") {
     return usage(

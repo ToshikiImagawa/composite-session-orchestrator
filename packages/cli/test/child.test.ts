@@ -440,9 +440,10 @@ describe("cso child report（T21-cc）", () => {
       env: {},
       isTTY: { stdin: false, stdout: false },
       fetch: fake.fetch,
+      sleep: async () => {},
     });
-    // 環境変数なしで、身元の確認まで進む（本物の検証は、daemon-identity がないので失敗する。送らない）
-    expect(r.stdout).toBe("daemonIdentityFailed\n");
+    // 環境変数なしで、身元の確認まで進む（本物の検証は、daemon-identity がないので、待ってかけ直したあと失敗する。送らない）
+    expect(r.stdout).toBe("daemonUnreachable\n");
     expect(fake.sent).toHaveLength(0);
   });
 });

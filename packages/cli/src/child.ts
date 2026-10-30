@@ -116,7 +116,7 @@ function clean(text: string, secrets: readonly string[], max: number): string {
 async function verifyDaemon(
   dir: string,
   origin: string,
-  deps: Pick<ChildDeps, "verifierFor" | "fetch">,
+  deps: Pick<ChildDeps, "verifierFor" | "fetch" | "sleep">,
 ): Promise<{ readonly verifier: IdentityVerifier } | CommandResult> {
   const identityPath = identityPathOf(dir);
   if (identityPath === undefined) {
@@ -132,8 +132,17 @@ async function verifyDaemon(
       daemonUrl: origin,
       identityPath,
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+      ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
     });
   const v = await verifier.verify();
+  if (!v.ok && v.kind === "transient") {
+    return failed(
+      "daemonUnreachable",
+      1,
+      "daemon に届かない（止まっているか、起動し直している途中。コード・トークンは送っていない）",
+      "daemon が動いているか、人に確かめてもらう。戻ったら、同じコマンドをやり直す",
+    );
+  }
   if (!v.ok) {
     return failed(
       "daemonIdentityFailed",
@@ -726,6 +735,7 @@ async function report(args: readonly string[], deps: ChildDeps): Promise<Command
       daemonUrl: origin,
       identityPath,
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+      ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
     });
   const relay = createRelay({
     daemonUrl: origin,
