@@ -755,3 +755,33 @@ describe("relay の再送と身元の確認", () => {
     expect(budgets.every((b) => typeof b === "number" && b > 0)).toBe(true);
   });
 });
+
+describe("relay の再送と身元の確認（429）", () => {
+  it("429 のあと、再送の前の確認が尽きた: 前の 429（rate_limited）を返す", async () => {
+    let verifies = 0;
+    const relay = createRelay({
+      daemonUrl: URL1,
+      token: "secret-token-0123456789",
+      fetch: (async () =>
+        new Response("", {
+          status: 429,
+          headers: { "retry-after": "1", "x-cso-daemon-id": DAEMON_ID },
+        })) as unknown as typeof fetch,
+      sleep: async () => {},
+      verifier: {
+        verify: async () =>
+          verifies++ === 0
+            ? { ok: true, daemonId: DAEMON_ID }
+            : {
+                ok: false,
+                kind: "transient",
+                failure: { code: "daemon_unreachable", cause: "c", nextActions: ["n"] },
+              },
+      },
+    });
+    if (!relay.ok) throw new Error("relay");
+    const r = await relay.value.request("tree.list", {});
+    expect(!r.ok && r.error.code).toBe("rate_limited");
+    expect(verifies).toBe(2);
+  });
+});

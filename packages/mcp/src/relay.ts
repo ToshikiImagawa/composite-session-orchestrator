@@ -338,10 +338,9 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
       for (let sends = 0; sends < 3; sends++) {
         // 身元の確認の待ちも、締め切りの中に含める。
         const r = await call("/v1/request", init, timeout, deadline - (nowMs() - startedAt));
-        if (r.notSent && transportRetries > 0) {
-          // 前の回は送ったが応答を受け取れず、この再送の前の確認で失敗した。前の回が実行されたかは分からない
-          // （この回の失敗〔「トークンは送っていない」〕を、そのまま返さない）。
-          lastDefinite = false;
+        if (r.notSent && sends > 0) {
+          // 再送の前の確認で失敗した（この回は送っていない）。この回の失敗ではなく、前の回の結果で判断する:
+          // 前の回が応答なしなら、実行されたかは分からない（結果不明）。429・409 なら、その失敗を返す。
           break;
         }
         last = r.result;
