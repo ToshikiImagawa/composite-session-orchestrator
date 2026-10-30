@@ -22,6 +22,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -160,6 +161,11 @@ export interface DaemonDeps {
   readonly clock?: () => string;
   /** 単調時計（ミリ秒）。トークンの期限の経過に使う（T21-te）。既定 `performance.now`。試験で差し込む。 */
   readonly monoMs?: () => number;
+  /**
+   * 見張りの設定に、変更できない印を付ける・外す（T21-cs。既定は macOS の `/usr/bin/chflags uchg|nouchg`。ほかの OS では何もしない）。
+   * 試験で差し替える（印が付くと、試験から書き換え・片付けができないため）。
+   */
+  readonly setImmutable?: (file: string, on: boolean) => Promise<void>;
   readonly timers?: Timers;
   /** 起動オプション `--port` の値（1〜65535）。設定の `port` より優先する（`port-file.ts`）。 */
   readonly port?: number;
@@ -808,7 +814,102 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     return realpath(path);
   };
   /** 見張りの設定を置いた作業ツリーと、その設定の中身のハッシュ・git の共通ディレクトリの info/exclude（T21-cs。メモリだけ）。 */
-  const hookSettings = new Map<string, { worktree: string; hash: string; exclude?: string }>();
+  const hookSettings = new Map<
+    string,
+    { worktree: string; hash: string; content: string; exclude?: string }
+  >();
+  /** 利用者の設定（`~/.claude/settings*.json`）の、フックに関わる値（`disableAllHooks`・`hooks`）の控え（M1。書き戻さない）。 */
+  let homeHookSnapshot: string | undefined;
+  const homeHookKeys = (): string => {
+    if (homeDir === undefined) return "";
+    const out: Record<string, unknown> = {};
+    for (const f of ["settings.json", "settings.local.json"]) {
+      try {
+        const j = JSON.parse(readFileSync(join(homeDir, ".claude", f), "utf8")) as Record<
+          string,
+          unknown
+        >;
+        out[f] = { disableAllHooks: j.disableAllHooks ?? null, hooks: j.hooks ?? null };
+      } catch (e) {
+        out[f] = (e as NodeJS.ErrnoException).code === "ENOENT" ? null : "unreadable";
+      }
+    }
+    return JSON.stringify(out);
+  };
+  const homeDisablesHooks = (): boolean => {
+    try {
+      const v = JSON.parse(homeHookKeys() || "{}") as Record<
+        string,
+        { disableAllHooks?: unknown } | null
+      >;
+      return Object.values(v).some(
+        (x) => x !== null && typeof x === "object" && x.disableAllHooks === true,
+      );
+    } catch {
+      return true;
+    }
+  };
+  /** macOS だけ: 見張りの設定に、変更できない印（uchg）を付ける・外す（歯止め。子も同じユーザーなので外せる。失敗は警告だけ）。 */
+  const setUchg = async (file: string, on: boolean): Promise<void> => {
+    if (deps.setImmutable !== undefined) return deps.setImmutable(file, on);
+    if (process.platform !== "darwin") return;
+    await new Promise<void>((res) => {
+      execFile("/usr/bin/chflags", [on ? "uchg" : "nouchg", file], { timeout: 5000 }, (e) => {
+        if (e)
+          note("hookSettingsWarning", { cause: on ? "uchg を付けられない" : "uchg を外せない" });
+        res();
+      });
+    });
+  };
+  /**
+   * 見張りの設定の問題（M1）。daemon が置いた settings.json と中身が違う・ない、settings.local.json がある、利用者の設定の
+   * `disableAllHooks`・`hooks` が控えと違う、のどれか。問題がなければ undefined。
+   */
+  const hookSettingsProblem = (
+    nodeId: string,
+  ): { kind: "worktree" | "home"; text: string } | undefined => {
+    const settings = hookSettings.get(nodeId);
+    if (settings === undefined) return { kind: "worktree", text: "daemon が置いた設定がない" };
+    try {
+      const now = createHash("sha256")
+        .update(readFileSync(join(settings.worktree, ".claude", "settings.json")))
+        .digest("hex");
+      if (now !== settings.hash) return { kind: "worktree", text: "settings.json が変わった" };
+    } catch {
+      return { kind: "worktree", text: "settings.json がない" };
+    }
+    try {
+      lstatSync(join(settings.worktree, ".claude", "settings.local.json"));
+      return { kind: "worktree", text: "settings.local.json が置かれた" };
+    } catch {
+      // ない（よい）
+    }
+    if (homeHookSnapshot !== undefined && homeHookKeys() !== homeHookSnapshot) {
+      return { kind: "home", text: "利用者の設定（~/.claude）のフックの値が変わった" };
+    }
+    return undefined;
+  };
+  /** daemon が置いた設定に書き戻す（settings.json を置き直し、settings.local.json を消す）。 */
+  const restoreHookSettings = async (nodeId: string): Promise<void> => {
+    const settings = hookSettings.get(nodeId);
+    if (settings === undefined) return;
+    const dir = join(settings.worktree, ".claude");
+    const file = join(dir, "settings.json");
+    try {
+      await setUchg(file, false);
+      mkdirSync(dir, { recursive: true });
+      const tmp = join(dir, `.settings.json.tmp-${randomBytes(6).toString("hex")}`);
+      writeFileSync(tmp, settings.content, { flag: "wx", mode: 0o644 });
+      renameSync(tmp, file);
+      rmSync(join(dir, "settings.local.json"), { force: true, recursive: true });
+      await setUchg(file, true);
+    } catch (e) {
+      note("hookSettingsWarning", {
+        nodeId,
+        cause: `書き戻せない（${safeCauseOfChildrenDir(e)}）`,
+      });
+    }
+  };
   /** 見張りの設定が書き換えられたと分かったノード（以後のフックをすべて拒否する）。 */
   const tamperedHooks = new Set<string>();
   /** Desktop の子の範囲違反の数え上げ（CLI の子と同じ上限。受信箱には、同じ違反につき 1 度、ノードごとに 20 件まで）。 */
@@ -817,11 +918,21 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     { keys: Map<string, number>; total: number; items: number; overflow: boolean }
   >();
   let violationSeq = 0;
+  let violationsAll = 0;
   const recordDesktopViolation = (
     nodeId: string,
     reason: ScopeViolationReason,
-    subject: string,
+    rawSubject: string,
   ): void => {
+    // 件名は長さを切り、トークン・Bearer を含むものは伏せる（R3）
+    const subject = /bearer|token/i.test(rawSubject) ? "（伏せた）" : rawSubject.slice(0, 200);
+    // 全ノードを通した上限（R3）。消えたノードの分は、数え上げから消す
+    if (violationsAll >= 2000) return;
+    if (desktopViolations.size > 0) {
+      const liveIds = new Set(log.state().nodes.map((n) => n.id));
+      for (const id of [...desktopViolations.keys()])
+        if (!liveIds.has(id)) desktopViolations.delete(id);
+    }
     const v = desktopViolations.get(nodeId) ?? {
       keys: new Map(),
       total: 0,
@@ -865,12 +976,51 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     if (!r.ok) return;
     v.keys.set(key, count + 1);
     v.total += 1;
+    violationsAll += 1;
     if (item) v.items += 1;
     if (overflow) v.overflow = true;
   };
-  /** 見張りの設定が書き換えられたことを、受信箱に 1 度だけ知らせる。 */
-  const notifyHookTampered = (nodeId: string): void => {
-    const key = `hook-settings-tampered/${nodeId}`;
+  let tamperSeq = 0;
+  /** 動いている Desktop の子の見張りの設定を、すべて確かめる（M1）。 */
+  const checkAllHookSettings = (): void => {
+    const live = new Set(
+      log
+        .state()
+        .nodes.filter((n) => !["stopped", "verified", "reclaimable", "archived"].includes(n.state))
+        .map((n) => n.id),
+    );
+    for (const nodeId of hookSettings.keys()) {
+      if (!live.has(nodeId) || tamperedHooks.has(nodeId)) continue;
+      const problem = hookSettingsProblem(nodeId);
+      if (problem !== undefined) handleTamper(nodeId, problem);
+    }
+  };
+  /**
+   * 見張りが外されたと分かったとき（M1）: そのノードの bind のトークンとフック専用のトークンを失効させ、設定を書き戻し、受信箱に
+   * 知らせる。以後のフックは、すべて拒否する。印を消すのは、人が node.bindCode を出し直し、daemon が設定を確かめ直して問題が
+   * なかったときだけ。
+   */
+  const handleTamper = (
+    nodeId: string,
+    problem: { kind: "worktree" | "home"; text: string },
+  ): void => {
+    if (tamperedHooks.has(nodeId)) return;
+    tamperedHooks.add(nodeId);
+    try {
+      credentials.expireNode?.(nodeId);
+    } catch {
+      // 記録は下の知らせで
+    }
+    hookTokens.revoke(nodeId);
+    void restoreHookSettings(nodeId);
+    notifyHookTampered(nodeId, problem);
+  };
+  /** 見張りが外されたことを、受信箱に知らせる（見つけるたびに 1 件）。 */
+  const notifyHookTampered = (
+    nodeId: string,
+    problem: { kind: "worktree" | "home"; text: string },
+  ): void => {
+    const key = `hook-settings-tampered/${nodeId}/${++tamperSeq}`;
     const r = appendAtomically(log, clock, key, { system: true }, [
       {
         type: "inbox.added",
@@ -879,7 +1029,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           kind: "info",
           nodeId,
           summary: summarize(
-            `子 ${nodeId} の見張り（フック）の設定が、置いたときから変わっている。以後の道具の呼び出しは、すべて拒否する。子を止めるかどうかを決める`,
+            problem.kind === "home"
+              ? `子 ${nodeId} の見張りが外されうる状態になった（${problem.text}。人が設定を変えた場合も同じ扱い）。子のトークンを失効させた。子を止めるか、node.bindCode を出し直すかを決める`
+              : `子 ${nodeId} の見張り（フック）が外された（${problem.text}）。設定を書き戻し、子のトークンを失効させた。子を止めるか、node.bindCode を出し直すかを決める`,
           ),
         },
       },
@@ -927,10 +1079,33 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       2,
     )}\n`;
     // すでに設定があるとき: daemon が前に置いたものと同じ中身なら（再開など）、そのまま使う。違えば置かずに失敗する
+    // 今ある .claude は、実のディレクトリ（リンクでない）で持ち主が自分であること（R1）
+    try {
+      const d = lstatSync(dir);
+      if (!d.isDirectory() || d.isSymbolicLink() || d.uid !== process.getuid?.()) {
+        return fail(
+          "hookSettingsExists",
+          "子の作業ツリーの .claude が、実のディレクトリでないか、持ち主が自分でない",
+          "作業ツリーの元のリポジトリの .claude を確かめてから、子を作り直す",
+        );
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        return fail(
+          "hookSettingsFailed",
+          "見張りの設定を置く場所を確かめられない",
+          "作業ツリーを確かめる",
+        );
+      }
+    }
     let existing: string | undefined;
     try {
       const st = lstatSync(file);
-      existing = st.isFile() ? readFileSync(file, "utf8") : "";
+      // 使い回す settings.json は、通常のファイル・リンクの数 1・持ち主が自分・ほかの人が書けない（R1）
+      existing =
+        st.isFile() && st.nlink === 1 && st.uid === process.getuid?.() && (st.mode & 0o022) === 0
+          ? readFileSync(file, "utf8")
+          : "";
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
         return fail(
@@ -951,6 +1126,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     try {
       mkdirSync(dir, { recursive: true });
       if (existing === undefined) writeFileSync(file, content, { flag: "wx", mode: 0o644 });
+      await setUchg(file, true);
       exclude = await addToGitExclude(worktreePath, "/.claude/settings.json");
     } catch (e) {
       return fail(
@@ -962,8 +1138,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     hookSettings.set(nodeId, {
       worktree: await realpath(worktreePath),
       hash: createHash("sha256").update(content).digest("hex"),
+      content,
       ...(exclude === undefined ? {} : { exclude }),
     });
+    homeHookSnapshot = homeHookKeys();
+    tamperedHooks.delete(nodeId); // R2
     return { ok: true, value: undefined };
   };
   const hookNow = deps.monoMs ?? (() => performance.now());
@@ -1004,28 +1183,17 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           "daemon が用意した作業ツリーの外のセッションなので拒否した（daemon の作業ツリーを Desktop で開き、「ローカル」で始める）。",
       };
     }
-    // 見張りの設定が、置いたときと同じか（呼び出しのたびに確かめる。違えば、以後をすべて拒否して、受信箱に 1 度知らせる）
+    // 見張りの設定が、置いたときのままか（呼び出しのたびにも確かめる。外されていれば、書き戻して失効させ、以後をすべて拒否）
     const settings = hookSettings.get(nodeId);
-    let same = false;
-    if (settings !== undefined && !tamperedHooks.has(nodeId)) {
-      try {
-        const now = createHash("sha256")
-          .update(readFileSync(join(settings.worktree, ".claude", "settings.json")))
-          .digest("hex");
-        same = now === settings.hash;
-      } catch {
-        same = false;
-      }
-      if (!same) {
-        tamperedHooks.add(nodeId);
-        notifyHookTampered(nodeId);
-      }
+    if (!tamperedHooks.has(nodeId)) {
+      const problem = hookSettingsProblem(nodeId);
+      if (problem !== undefined) handleTamper(nodeId, problem);
     }
-    if (settings === undefined || !same) {
+    if (settings === undefined || tamperedHooks.has(nodeId)) {
       return {
         allow: false,
         reason:
-          "見張り（フック）の設定が、daemon が置いたときから変わっている（または、daemon が置いた設定がない）ため、すべて拒否する。人（親）に知らせる。",
+          "見張り（フック）の設定が外された（または、daemon が置いた設定がない）ため、すべて拒否する。人（親）に知らせる。",
       };
     }
     const resolved = await resolveScope(scope, wt, resolveHookPath);
@@ -1080,7 +1248,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
             (deps.worktree.lossFor as NonNullable<WorktreePorts["lossFor"]>)(id),
         }),
     probe,
-    removeWorktree: (id, opts) => deps.worktree.removeWorktree(id, opts),
+    removeWorktree: async (id, opts) => {
+      const st = hookSettings.get(id);
+      if (st !== undefined) await setUchg(join(st.worktree, ".claude", "settings.json"), false);
+      return deps.worktree.removeWorktree(id, opts);
+    },
     worktreeRoot: config.worktreeRoot,
     onForced: (nodeId, tip, ref) =>
       note("reclaimForced", { nodeId, tip, ...(ref === undefined ? {} : { ref }) }),
@@ -1088,7 +1260,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   const spawn: SpawnPorts = {
     cwdOf,
     provisionWorktree: (req) => deps.worktree.provisionWorktree(req),
-    removeWorktree: (id, opts) => deps.worktree.removeWorktree(id, opts),
+    removeWorktree: async (id, opts) => {
+      const st = hookSettings.get(id);
+      if (st !== undefined) await setUchg(join(st.worktree, ".claude", "settings.json"), false);
+      return deps.worktree.removeWorktree(id, opts);
+    },
     worktreeRoot: config.worktreeRoot,
     mcpUrl: config.mcpUrl,
   };
@@ -1274,6 +1450,13 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       ? {}
       : {
           hookFresh: (nodeId: string) => {
+            // bind・報告の入口でも、見張りの設定を確かめる（M1）
+            if (tamperedHooks.has(nodeId)) return false;
+            const problem = hookSettingsProblem(nodeId);
+            if (problem !== undefined) {
+              handleTamper(nodeId, problem);
+              return false;
+            }
             const at = lastHookAt.get(nodeId);
             return at !== undefined && hookNow() - at <= (config.hookFreshSeconds ?? 30) * 1000;
           },
@@ -1316,6 +1499,15 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         // 引き出しを用意する（なければ作る。node を書き直し、残っている code・token・url・report を消す。T21-cc・R2）。
         // 紐付けは、新しい文面で 1 からやり直す（前の token は、新しいトークンの発行で無効になる）
         prepareDrawer: (nodeId) => {
+          // 見張りが外されていた子の復旧（M1・R2）: 人が出し直したとき、設定を確かめ直し、問題がなければ印を消す。利用者の設定は、
+          // フックを切っていなければ、今の値を控え直す（人が変えた値を受け入れる）
+          if (tamperedHooks.has(nodeId)) {
+            if (!homeDisablesHooks()) homeHookSnapshot = homeHookKeys();
+            if (hookSettingsProblem(nodeId) !== undefined) {
+              throw new ChildrenDirError("見張りの設定に、まだ問題がある");
+            }
+            tamperedHooks.delete(nodeId);
+          }
           const dir = childrenDirs.create(nodeId);
           childrenDirs.writeFile(nodeId, "node", nodeId);
           childrenDirs.removeFiles(nodeId, ["code", "token", "url", "report"]);
@@ -1352,6 +1544,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
 
   let running: RunningDaemon | undefined;
   let tokenSweep: NodeJS.Timeout | undefined;
+  let hookWatch: NodeJS.Timeout | undefined;
   return {
     ok: true,
     value: {
@@ -1443,6 +1636,20 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         // 待ち受けの後で、前回から残った、依存の揃った pending の子を起動する（子が窓口へ接続できるように）。
         void schedule();
         // トークンの期限の見回り（T21-te）: 使われずに放置された・役目の終わったトークンも失効させる。
+        // 見張りの設定の見回り（M1。フックの呼び出しとは別に、動いている Desktop の子の設定を数秒ごとに確かめる）
+        if (desktopAdapter !== undefined) {
+          hookWatch = setInterval(
+            () => {
+              try {
+                checkAllHookSettings();
+              } catch (e) {
+                note("hookSettingsWarning", { cause: e instanceof Error ? e.name : "unknown" });
+              }
+            },
+            (config.hookSettingsCheckSeconds ?? 2) * 1000,
+          );
+          hookWatch.unref();
+        }
         tokenSweep = setInterval(() => {
           try {
             credentials.sweepExpired?.();
@@ -1461,6 +1668,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       },
       async stop() {
         if (tokenSweep !== undefined) clearInterval(tokenSweep);
+        if (hookWatch !== undefined) clearInterval(hookWatch);
+        hookWatch = undefined;
         tokenSweep = undefined;
         await waker?.stop(); // 実行中の 1 回が終わるのを待つ
         await digestIssuer?.stop(); // 実行中の 1 回が終わるのを待つ（終わる前に、ストアを閉じない）

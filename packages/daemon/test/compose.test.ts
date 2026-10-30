@@ -1864,7 +1864,18 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       ...r.deps.worktree,
       cwdOf: async (id: string) => join(r.config.worktreeRoot, id),
     };
-    r0 = { ...r, deps: { ...r.deps, worktree } };
+    immutableCalls.length = 0;
+    r0 = {
+      ...r,
+      deps: {
+        ...r.deps,
+        worktree,
+        // macOS の chflags uchg の代わり（試験から書き換え・片付けできるように。呼ばれたことだけを残す）
+        setImmutable: async (file: string, on: boolean) => {
+          immutableCalls.push([file, on]);
+        },
+      },
+    };
     return r0;
   };
   const spawnDesktop = async (d: Awaited<ReturnType<typeof boot>>) => {
@@ -1895,6 +1906,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     });
   };
   let r0: ReturnType<typeof rig>;
+  const immutableCalls: [string, boolean][] = [];
   const r0Logs = (r: { logs: string[] }) => r.logs.join("\n");
   const bindByInstruction = async (d: Awaited<ReturnType<typeof boot>>, nodeId: string) => {
     const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
@@ -2118,16 +2130,112 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     writeFileSync(join(b.worktree, ".claude", "settings.json"), "{}");
     const after = await b.hook("pnpm test");
     expect(after.code).toBe(2);
-    expect(after.stderr).toContain("変わっている");
+    expect(after.stderr).toContain("外された");
     await b.hook("pnpm test");
     const notices = d.daemon.log
       .state()
-      .inbox.filter((x) =>
-        x.summary?.includes("見張り（フック）の設定が、置いたときから変わっている"),
-      );
+      .inbox.filter((x) => x.summary?.includes("見張り（フック）が外された"));
     expect(notices).toHaveLength(1);
+    // 書き戻している（daemon が置いた中身に戻っている）
+    expect(readFileSync(join(b.worktree, ".claude", "settings.json"), "utf8")).not.toBe("{}");
     rmSync(home, { force: true });
     rmSync(realHome, { recursive: true, force: true });
+  });
+
+  it("T21-cs M1: 子のスクリプトが settings.json を消す → daemon が数秒で見つけ、書き戻し、トークンを失効させ、受信箱に知らせ、以後を拒否 → node.bindCode を出し直すと戻る", async () => {
+    const r = desktopRig({ hookSettingsCheckSeconds: 1 });
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const file = join(b.worktree, ".claude", "settings.json");
+    const original = readFileSync(file, "utf8");
+    rmSync(file); // 子が、許可されたコマンドで動かしたスクリプトで消した形（フックを通らない）
+    await vi.waitFor(
+      () => {
+        expect(existsSync(file)).toBe(true);
+        expect(readFileSync(file, "utf8")).toBe(original);
+      },
+      { timeout: 5000, interval: 100 },
+    );
+    const notices = d.daemon.log
+      .state()
+      .inbox.filter((x) => x.summary?.includes("見張り（フック）が外された"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.summary).toContain("settings.json がない");
+    // 置いたとき・書き戻すときに、変更できない印を付けている（書き戻す前には外す）
+    expect(immutableCalls.some(([f, on]) => f.endsWith("settings.json") && on)).toBe(true);
+    expect(immutableCalls.some(([f, on]) => f.endsWith("settings.json") && !on)).toBe(true);
+    // 以後は拒否（フックも、報告も。トークンは失効）
+    expect((await b.hook("pnpm test")).code).toBe(2);
+    const rep = await b.report("x\n");
+    expect(rep.code).not.toBe(0);
+    // 人が node.bindCode を出し直す → daemon が設定を確かめ直し、問題がなければ戻る
+    const again = await bindByInstruction(d, nodeId);
+    const ok = await again.report("戻った\n");
+    expect(JSON.parse(ok.stdout).ok, ok.stdout + ok.stderr).toBe(true);
+  });
+
+  it("T21-cs M1: settings.local.json（disableAllHooks）を置かれても見つけて消す。利用者の設定の disableAllHooks は、書き戻さずに知らせる（人が変えた場合も同じ扱いと書く）", async () => {
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const r = desktopRig({ hookSettingsCheckSeconds: 1 });
+    r.deps = { ...r.deps, parentEnv: { ...r.deps.parentEnv, HOME: realHome } } as typeof r.deps;
+    r0 = r;
+    const d = await boot(r);
+    const a = await spawnDesktop(d);
+    const b = await bindByInstruction(d, a);
+    const local = join(b.worktree, ".claude", "settings.local.json");
+    writeFileSync(local, JSON.stringify({ disableAllHooks: true }));
+    await vi.waitFor(() => expect(existsSync(local)).toBe(false), { timeout: 5000, interval: 100 });
+    expect(
+      d.daemon.log.state().inbox.some((x) => x.summary?.includes("settings.local.json が置かれた")),
+    ).toBe(true);
+    // 別の子で、利用者の設定を変える
+    const c = await spawnDesktop(d);
+    await bindByInstruction(d, c);
+    mkdirSync(join(realHome, ".claude"), { recursive: true });
+    writeFileSync(
+      join(realHome, ".claude", "settings.json"),
+      JSON.stringify({ disableAllHooks: true }),
+    );
+    await vi.waitFor(
+      () =>
+        expect(
+          d.daemon.log
+            .state()
+            .inbox.some(
+              (x) => x.nodeId === c && x.summary?.includes("人が設定を変えた場合も同じ扱い"),
+            ),
+        ).toBe(true),
+      { timeout: 5000, interval: 100 },
+    );
+    // 利用者の設定は書き戻さない
+    expect(readFileSync(join(realHome, ".claude", "settings.json"), "utf8")).toContain(
+      "disableAllHooks",
+    );
+    rmSync(realHome, { recursive: true, force: true });
+  });
+
+  it("T21-cs R1: 作業ツリーの .claude がリンクなら、spawn は失敗する", async () => {
+    const base = desktopRig();
+    const elsewhere = mkdtempSync(join(tmpdir(), "cso-else-"));
+    const worktree = {
+      ...base.deps.worktree,
+      provisionWorktree: async ({ nodeId }: { nodeId: string }) => {
+        const p = join(base.config.worktreeRoot, nodeId);
+        mkdirSync(p, { recursive: true });
+        symlinkSync(elsewhere, join(p, ".claude"));
+        return ok({ worktreePath: p });
+      },
+    };
+    const d = await boot({ ...base, deps: { ...base.deps, worktree } });
+    const res = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(res.json.ok).toBe(false);
+    expect(base.logs.join("\n")).toContain("hookSettingsExists");
+    rmSync(elsewhere, { recursive: true, force: true });
   });
 
   it("T21-cs: Desktop の木では cso hook-env（node.hookToken）を拒否する（desktopHookEnvNotAllowed。次の操作は node.bindCode）", async () => {

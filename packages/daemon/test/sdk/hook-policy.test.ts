@@ -506,3 +506,83 @@ describe("自分の引き出しの例外（T21-cc）", () => {
     expect(r.allow).toBe(false);
   });
 });
+
+describe("作業ツリーの .claude/ の書き込みの守り（T21-cs M2・M3）", () => {
+  const WT = "/home/u/wt/a";
+  const scope2: Scope = {
+    writableLocations: ["src", "."],
+    forbiddenLocations: [],
+    allowedCommands: ["rm", "mv", "chmod", "cp", "git", "find", "ls", "grep", "cat", "cd", "node"],
+  };
+  const prot = {
+    roots: [{ path: "/home/u/state", kind: "stateDir" as const }],
+    allow: [],
+    writeDenied: [`${WT}/.claude`],
+  };
+  const resolve = async (p: string) => (await import("node:path")).posix.resolve(p);
+  const bash = async (command: string, cwd = WT) => {
+    const r = await decideToolUse(scope2, WT, "Bash", { command }, resolve, prot, cwd);
+    return r.allow;
+  };
+  const tool = async (name: string, input: unknown) =>
+    (await decideToolUse(scope2, WT, name, input, resolve, prot)).allow;
+
+  it("/ を含まない語・グロブ・cd の先からの相対で .claude に当たる命令は拒否", async () => {
+    for (const c of [
+      "rm -rf .claude",
+      "rm -rf .cla*",
+      "mv .claude x",
+      "chmod -R 000 .claude",
+      "cp /dev/null .claude",
+      "rm .claude/settings.json",
+      "cat .claude/settings.local.json",
+      "rm -rf ./.claude/*",
+      "cd src && rm -rf ../.claude",
+      "rm -rf .[c]laude",
+      "rm -rf {.claude,x}",
+    ]) {
+      expect(await bash(c), c).toBe(false);
+    }
+    expect(await bash("rm -rf ../.claude", `${WT}/src`)).toBe(false);
+  });
+
+  it("消す・動かすコマンドが、作業ツリーそのもの・その親を対象にしたら拒否。git clean・stash --all/-a/-u は拒否", async () => {
+    for (const c of [
+      "rm -rf .",
+      `rm -rf ${WT}`,
+      "rm -rf ..",
+      "chmod -R 000 .",
+      "find . -delete",
+      "git clean -fdx",
+      "git stash --all",
+      "git stash -a",
+      "git stash -u",
+    ]) {
+      expect(await bash(c), c).toBe(false);
+    }
+  });
+
+  it("ふだんの作業は通る（git add .・grep -rn ・find .・ls .・rm src/x・git stash）", async () => {
+    for (const c of [
+      "git add .",
+      "grep -rn foo .",
+      "find . -name x",
+      "ls .",
+      "rm -rf src/x",
+      "git stash",
+      "ls src",
+    ]) {
+      expect(await bash(c), c).toBe(true);
+    }
+  });
+
+  it("Read・Glob・Grep は .claude を読める。Write・Edit は拒否", async () => {
+    expect(await tool("Read", { file_path: `${WT}/.claude/settings.json` })).toBe(true);
+    expect(await tool("Glob", { pattern: ".claude/*" })).toBe(true);
+    expect(await tool("Grep", { pattern: "x", path: `${WT}/.claude` })).toBe(true);
+    expect(
+      await tool("Write", { file_path: `${WT}/.claude/settings.local.json`, content: "{}" }),
+    ).toBe(false);
+    expect(await tool("Edit", { file_path: `${WT}/.claude/settings.json` })).toBe(false);
+  });
+});

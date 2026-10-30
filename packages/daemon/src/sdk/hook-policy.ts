@@ -86,12 +86,18 @@ function isCsoChildCommand(words: readonly string[], p: ProtectedPaths): boolean
 /** 引き出しの中で、子が Write で書いてよいファイル（紐付けのコードと、報告の本文。T21-cb R1）。 */
 export const DRAWER_WRITABLE_FILES = ["code", "report"] as const;
 /** 禁じる場所の種類（拒否の文面と記録には、種類だけを出す。実パスは出さない）。 */
-export type ProtectedKind = "stateDir" | "daemonConfig" | "processEnv" | "hookSettings";
+export type ProtectedKind =
+  | "stateDir"
+  | "daemonConfig"
+  | "processEnv"
+  | "hookSettings"
+  | "hookSettingsWrite";
 const KIND_TEXT: Readonly<Record<ProtectedKind, string>> = {
   stateDir: "daemon の状態の置き場",
   daemonConfig: "daemon の設定ファイル",
   processEnv: "プロセスの環境変数（/proc の environ）",
   hookSettings: "見張り（フック）の設定",
+  hookSettingsWrite: "見張り（フック）の設定の置き場",
 };
 
 // APFS は大文字小文字・Unicode の正規化（NFD/NFC）の違いを区別しないので、比べる前にそろえる（区別する FS では、厳しめに倒れる）。
@@ -132,8 +138,89 @@ function protectedKind(
 const denyProtected = (kind: ProtectedKind): ToolDecision => ({
   allow: false,
   violation: { reason: "forbiddenLocation", subject: `protected:${kind}` },
-  reason: `作業範囲の外の操作です（${KIND_TEXT[kind]}は、読み取りもできません）。この場所は、作業に使いません。`,
+  reason:
+    kind === "hookSettingsWrite"
+      ? `作業範囲の外の操作です（${KIND_TEXT[kind]}は、Bash では名前も使えず、消す・動かすコマンドで作業ツリーごと扱うこともできません。読むときは Read の道具を使う）。`
+      : `作業範囲の外の操作です（${KIND_TEXT[kind]}は、読み取りもできません）。この場所は、作業に使いません。`,
 });
+
+/** グロブの 1 段（`*`・`?`・`[...]`）を正規表現にする。拡張グロブ・波括弧は、ここでは扱わない（呼ぶ前に展開・拒否する）。 */
+function globSegment(seg: string): RegExp {
+  let re = "";
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i] as string;
+    if (c === "*") re += ".*";
+    else if (c === "?") re += ".";
+    else if (c === "[") {
+      const j = seg.indexOf("]", i + 1);
+      if (j < 0) re += "\\[";
+      else {
+        const body = seg
+          .slice(i + 1, j)
+          .replace(/^!/, "^")
+          .replace(/\\/g, "\\\\");
+        re += `[${body}]`;
+        i = j;
+      }
+    } else re += c.replace(/[.+^${}()|\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`, "s");
+}
+
+/**
+ * 語（cwd からの相対・絶対、グロブを含む）が、書き込みを禁じる場所 `w`（実パス）そのもの・その中・その祖先に当たりうるか
+ * （T21-cs M2。`rm -rf .claude`・`.cla*`・`mv .claude x` などの、`/` を含まない語も見る）。
+ */
+async function wordHitsWriteDenied(
+  word: string,
+  cwds: readonly string[],
+  denied: readonly string[],
+  resolve: ResolvePath,
+): Promise<boolean> {
+  const candidates = expandBraces(word) ?? [word];
+  for (const c of candidates) {
+    for (const cwd of c.startsWith("/") ? [cwds[0] ?? "/"] : cwds) {
+      const abs = c.startsWith("/") ? c : `${cwd}/${c}`;
+      if (!GLOB.test(abs)) {
+        let real: string;
+        try {
+          real = await resolve(abs);
+        } catch {
+          continue;
+        }
+        if (denied.some((w) => under(real, w))) return true;
+        continue;
+      }
+      // グロブ: 固定の部分を実パスにし、残りの段を、禁じる場所までの段と突き合わせる
+      const parts = abs.split("/");
+      const i = parts.findIndex((x) => GLOB.test(x));
+      let base: string;
+      try {
+        base = await resolve(parts.slice(0, i).join("/") || "/");
+      } catch {
+        continue;
+      }
+      const rest = parts.slice(i).filter((x) => x !== "");
+      for (const w of denied) {
+        if (!under(w, base) || fold(w) === fold(base)) continue;
+        const rel = w
+          .slice(base.length)
+          .split("/")
+          .filter((x) => x !== "");
+        const n = Math.min(rel.length, rest.length);
+        let all = n > 0;
+        for (let k = 0; k < n && all; k++) {
+          if (!globSegment(rest[k] as string).test(rel[k] as string)) all = false;
+        }
+        if (all) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** 消す・動かす・権限を変えるコマンド（作業ツリーそのもの・その親を対象にしたら拒否する。T21-cs M3）。 */
+const DESTRUCTIVE = new Set(["rm", "rmdir", "mv", "chmod", "chown", "chflags", "unlink", "shred"]);
 
 /**
  * 波括弧を展開する（入れ子・カンマ・`a..b` の並びを含む）。候補が多すぎる・対応が取れないときは undefined（確かめきれない）。
@@ -274,6 +361,39 @@ async function checkBash(
   for (const words of segs) {
     const name = words[0];
     if (name === "popd") return "unresolvable";
+    // 書き込みを禁じる場所（作業ツリーの .claude/。T21-cs）があるときの、Bash の守り（M2・M3）
+    const denied = p.writeDenied ?? [];
+    if (denied.length > 0) {
+      // git clean・git stash --all/-a/-u は、対象を問わず拒否（追跡していない .claude/ を消す・退避する）
+      const sub = words[1];
+      if (
+        name === "git" &&
+        (sub === "clean" ||
+          (sub === "stash" &&
+            words.some((w) => ["--all", "-a", "-u", "--include-untracked"].includes(w))))
+      ) {
+        return "hookSettingsWrite";
+      }
+      const destructive =
+        (name !== undefined && DESTRUCTIVE.has(name)) ||
+        (name === "find" && words.includes("-delete"));
+      for (const [i, w] of words.entries()) {
+        if (i === 0) continue;
+        if (await wordHitsWriteDenied(w, cwds, denied, resolve)) return "hookSettingsWrite";
+        // 消す・動かすコマンドが、作業ツリーそのもの・その親（禁じる場所の祖先）を対象にした
+        if (destructive && !w.startsWith("-")) {
+          for (const cwd of w.startsWith("/") ? [cwds[0] ?? "/"] : cwds) {
+            let real: string;
+            try {
+              real = await resolve(w.startsWith("/") ? w : `${cwd}/${w}`);
+            } catch {
+              continue;
+            }
+            if (denied.some((d) => under(d, real))) return "hookSettingsWrite";
+          }
+        }
+      }
+    }
     // `cso child bind|report --dir <自分の引き出し>` の値だけは、禁じる場所の判定から外す（T21-cc）。この命令の --dir は、
     // 自分の引き出しそのものでなければ拒否する。`--dir=値` の形も拒否する（値を別の語にする）
     const childCommand = isCsoChildCommand(words, p);
