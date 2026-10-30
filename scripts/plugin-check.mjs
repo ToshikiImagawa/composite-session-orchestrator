@@ -58,7 +58,12 @@ const walk = (dir) => {
   return out;
 };
 
-const TOOL_RE = /mcp__node__([A-Za-z_]*[A-Za-z])/g;
+/**
+ * plugin の `.mcp.json` から足した MCP のツールは、Claude Code が `mcp__plugin_<plugin 名>_<サーバー名>__<ツール>` の名前で出す
+ * （2.1.308 で確認。`scripts/plugin-mcp-name-check.mjs`）。daemon が起動する子・手で足した MCP は `mcp__node__<ツール>`。両方を検査する。
+ */
+export const PLUGIN_TOOL_PREFIX = "mcp__plugin_composite-session-orchestrator_node__";
+const TOOL_RE = /mcp__(?:node|plugin_composite-session-orchestrator_node)__([A-Za-z_]*[A-Za-z])/g;
 /**
  * NFR_012: 一般の絶対パス（行頭・空白・引用符・`(`・`=` の直後の `/<英数字>/…`）・ホームのパス・Windows のパス・file URL を拒否する。
  * 例外は、URL のパス（`://host` の後）と `${CLAUDE_PLUGIN_ROOT}`（とそれに続く plugin の中のパス。`..` を含むものは除く）だけ（先に取り除いてから、検査する）。
@@ -259,6 +264,23 @@ export function checkPlugin({ pluginDir, tools, forbidden = [] }) {
         errors.push(
           `${rel(file)}: frontmatter の ${key} は複数行の値です（検出できないので、1 行で書いてください）`,
         );
+      }
+      // allowed-tools: どちらの名前で入れても動くよう、mcp__node__X と plugin の名前を対にして書く
+      const allowedTools = (parsed?.values["allowed-tools"] ?? "").split(",").map((t) => t.trim());
+      const set = new Set(allowedTools);
+      for (const t of allowedTools) {
+        const m = /^mcp__node__(.+)$/.exec(t);
+        const pm = t.startsWith(PLUGIN_TOOL_PREFIX)
+          ? t.slice(PLUGIN_TOOL_PREFIX.length)
+          : undefined;
+        if (m !== null && !set.has(`${PLUGIN_TOOL_PREFIX}${m[1]}`)) {
+          errors.push(
+            `${rel(file)}: allowed-tools に ${PLUGIN_TOOL_PREFIX}${m[1]} がありません（plugin から入れたときの名前）`,
+          );
+        }
+        if (pm !== undefined && !set.has(`mcp__node__${pm}`)) {
+          errors.push(`${rel(file)}: allowed-tools に mcp__node__${pm} がありません`);
+        }
       }
     }
   }

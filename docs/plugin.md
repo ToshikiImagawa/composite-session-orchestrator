@@ -10,7 +10,7 @@
 | skill | `cso-child` | 子ノードの手順。進捗・判断・範囲外の申告・完了の報告・範囲拡張の要求（子ロールの全ツールを説明している） |
 | コマンド | `start` | 接続の確認（`mcp__node__whoami`）と、daemon・`cso-mcp` の起動の案内。設定ファイルのパスと窓口の URL は、環境変数 `CSO_DAEMON_CONFIG`・`CSO_DAEMON_URL` か、人間への質問で決める。トークンは `CSO_ROOT_TOKEN` で渡す |
 | コマンド | `status` | 木と受信箱の読み取りだけの要約 |
-| MCP | `node`（`.mcp.json`） | 統合セッションの MCP サーバー（種類 http）。URL は `${CSO_MCP_URL:-http://127.0.0.1:7777/mcp}`、ヘッダは `Authorization: Bearer ${CSO_ROOT_TOKEN}`（参照だけ。値は書かない）。Claude Code は、ツールを `mcp__plugin_composite-session-orchestrator_node__*` の名前で出す |
+| MCP | `node`（`.mcp.json`） | 統合セッションの MCP サーバー（種類 http）。URL は `${CSO_MCP_URL:-http://127.0.0.1:7777/mcp}`、ヘッダは `Authorization: Bearer ${CSO_ROOT_TOKEN}`（参照だけ。値は書かない）。Claude Code は、ツールを `mcp__plugin_composite-session-orchestrator_node__*` の名前で出す（2.1.308 で確認。確かめ方は `node scripts/plugin-mcp-name-check.mjs`）。skill・コマンドは、この名前と `mcp__node__*` のどちらでも動くように書く（`allowed-tools` は両方を対にする。`pnpm validate:plugin` が検査する） |
 
 plugin の名前空間のため、コマンドは `/composite-session-orchestrator:start` のように呼ぶ。
 

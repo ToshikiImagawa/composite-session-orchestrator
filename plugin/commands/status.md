@@ -1,7 +1,9 @@
 ---
 description: 木の状態と、受信箱の未解決の項目を、読み取りだけで確かめて要約する
-allowed-tools: mcp__node__whoami, mcp__node__tree_list, mcp__node__inbox_fetch
+allowed-tools: mcp__node__whoami, mcp__plugin_composite-session-orchestrator_node__whoami, mcp__node__tree_list, mcp__plugin_composite-session-orchestrator_node__tree_list, mcp__node__inbox_fetch, mcp__plugin_composite-session-orchestrator_node__inbox_fetch
 ---
+
+ツール名の `mcp__node__<名前>` は、plugin から入れたセッションでは `mcp__plugin_composite-session-orchestrator_node__<名前>` として見える（同じツール）。見えているほうの名前で呼ぶ。
 
 composite-session-orchestrator の、いまの状態を要約します。書き込む操作は、しません。
 

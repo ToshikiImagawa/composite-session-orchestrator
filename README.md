@@ -66,7 +66,7 @@ claude
 
 統合セッションで `/composite-session-orchestrator:start` を実行して、接続を確かめます。以降は skill `cso-integrator` に沿って進めます。くわしくは [`docs/plugin.md`](docs/plugin.md)。
 
-- plugin から足した MCP のツールは、`mcp__plugin_composite-session-orchestrator_node__*` という名前で出ます（skill の `mcp__node__*` と同じツール）。
+- plugin から足した MCP のツールは、`mcp__plugin_composite-session-orchestrator_node__*` という名前で出ます。skill・コマンドは、この名前と `mcp__node__*`（daemon が起動する子・手で足した MCP）のどちらでも動くように書いてあります。Claude Code の版を上げたら `node scripts/plugin-mcp-name-check.mjs` で名前を確かめます（2.1.308 で確認済み）。
 - `CSO_ROOT_TOKEN` は、統合セッションだけに設定します。手で起動する子のセッションの環境に入れないでください（plugin を付けた子が、統合ノードの権限で接続してしまいます）。
 
 ## 既知の問題

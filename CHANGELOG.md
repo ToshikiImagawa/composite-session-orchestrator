@@ -9,6 +9,7 @@
 - 人間用のコマンド（`cso`）: `purge`・`hook-env`・`hook-unbind`・`child` など
 - plugin: skill `cso-integrator`・`cso-child`、コマンド `start`・`status`、フック（PreToolUse・PostToolUse・Stop）、統合セッションの MCP の設定（`.mcp.json`）
 - ライセンスを MIT（COMCREATE）にした
+- skill・コマンドは、MCP のツールの名前が `mcp__node__*` でも、plugin から入れたときの `mcp__plugin_composite-session-orchestrator_node__*` でも動く（`scripts/plugin-mcp-name-check.mjs` で 2.1.308 の名前を確認）
 - 設定の説明（`docs/config.md`）とリリースの手順（`docs/release.md`）を足した
 
 ## 既知の問題
@@ -20,4 +21,3 @@
 - 画面の課題が残っている（T23-ux。確認の欄が見えにくい、Desktop の子の停止の代行依頼が「失敗」と出る、など）。
 - 人間用の受信箱の一覧 `cso inbox` がない（T24-i）。受信箱は画面か、統合セッションの `inbox_fetch` で見る。
 - 子 → `cso-mcp` の方向の身元確認がない（T10m-j。子は、`mcpUrl` の偽物にトークンを送りうる）。
-- plugin から足した MCP のツールは、Claude Code が `mcp__plugin_composite-session-orchestrator_node__*` の名前で出す。skill に書いた `mcp__node__*` は、これと同じツールを指す。
