@@ -1851,7 +1851,8 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       ...r.deps.worktree,
       cwdOf: async (id: string) => join(r.config.worktreeRoot, id),
     };
-    return { ...r, deps: { ...r.deps, worktree } };
+    r0 = { ...r, deps: { ...r.deps, worktree } };
+    return r0;
   };
   const spawnDesktop = async (d: Awaited<ReturnType<typeof boot>>) => {
     const spawned = await call(d.url, d.rootToken, "node.spawn", {
@@ -1863,6 +1864,24 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     return spawned.json.value.nodeId as string;
   };
   /** node.bindCode の文面のとおりに、子が紐付ける（Write の代わりに code を書き、bind の行を実行する）。 */
+  /** フックのコマンドを、フック入力を標準入力に渡して実行する（Claude Code がするのと同じ）。 */
+  const runHook = async (line: string, payload: unknown) => {
+    const { spawn } = await import("node:child_process");
+    return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+      const c = spawn("bash", ["-c", line], { env: shEnv });
+      let stdout = "";
+      let stderr = "";
+      c.stdout.on("data", (b) => {
+        stdout += b;
+      });
+      c.stderr.on("data", (b) => {
+        stderr += b;
+      });
+      c.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+      c.stdin.end(JSON.stringify(payload));
+    });
+  };
+  let r0: ReturnType<typeof rig>;
   const bindByInstruction = async (d: Awaited<ReturnType<typeof boot>>, nodeId: string) => {
     const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
     expect(bc.json.ok, JSON.stringify(bc.json)).toBe(true);
@@ -1875,15 +1894,29 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     const code = (lines.find((l) => l.startsWith("中身: ")) as string).slice("中身: ".length);
     const bindLine = lines.find((l) => l.includes(" child bind ")) as string;
     const reportLine = lines.find((l) => l.includes(" child report ")) as string;
+    const worktree = join(r0.config.worktreeRoot, nodeId);
+    /** Claude Code の代わりに、PreToolUse のフック（cso child hook）を、Bash の道具の呼び出しとして実行する。 */
+    const hook = (command: string, cwd = worktree) =>
+      runHook(bindLine.replace(" child bind ", " child hook "), {
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        tool_name: "Bash",
+        tool_input: { command },
+        cwd,
+      });
     writeFileSync(codePath, `${code}\n`, { mode: 0o644 });
+    const hooked = await hook(bindLine);
+    expect(hooked.code, hooked.stderr).toBe(0);
     const bound = await sh(bindLine);
     expect(bound.stdout, bound.stderr).toBe("bound\n");
     /** 文面のとおりに報告する（Write の代わりに report を書き、report の行を実行する）。 */
-    const report = (text: string, kind = "progress") => {
+    const report = async (text: string, kind = "progress", withHook = true) => {
       writeFileSync(join(drawer, "report"), text, { mode: 0o644 });
-      return sh(reportLine.replace(/ progress$/, ` ${kind}`));
+      const line = reportLine.replace(/ progress$/, ` ${kind}`);
+      if (withHook) await hook(line);
+      return sh(line);
     };
-    return { instruction, drawer, code, bindLine, reportLine, report, bound };
+    return { instruction, drawer, code, bindLine, reportLine, report, bound, hook, worktree };
   };
   const stateOfNode = (d: Awaited<ReturnType<typeof boot>>, id: string) =>
     d.daemon.log.state().nodes.find((n) => n.id === id)?.state;
@@ -1941,6 +1974,150 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(existsSync(join(b.drawer, "node"))).toBe(true);
     // 止まったあとの報告は、通らない（トークンは失効済み・ファイルもない）
     expect((await b.report("x")).stdout).toBe("urlMissing\n");
+  });
+
+  it("Desktop の子のフック（T21-ch）: spawn で hook-token（0600）を置く。cso child hook で、禁じる場所の Read は拒否・作業ツリーの外の cwd は拒否", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    expect(lstatSync(join(b.drawer, "hook-token")).mode & 0o777).toBe(0o600);
+    const hookLine = b.bindLine.replace(" child bind ", " child hook ");
+    const read = (file: string, cwd = b.worktree) =>
+      runHook(hookLine, {
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        tool_name: "Read",
+        tool_input: { file_path: file },
+        cwd,
+      });
+    const denied = await read(join(r.config.stateDir, "human-token"));
+    expect(denied.code).toBe(2);
+    expect(denied.stderr).toContain("読み取りもできません");
+    expect((await read(join(b.drawer, "token"))).code).toBe(2);
+    expect((await read(join(b.worktree, "README.md"))).code).toBe(0);
+    // daemon の作業ツリーの外（チップで作った子など）は、拒否
+    const elsewhere = await read(join(b.worktree, "README.md"), r.config.repoRoot);
+    expect(elsewhere.code).toBe(2);
+    const token = readFileSync(join(b.drawer, "hook-token"), "utf8").trim();
+    expect(denied.stdout + denied.stderr).not.toContain(token);
+  });
+
+  it("M1: 作業ツリーの配下に cd しても通り、下位からの cd .. も通る。作業ツリーの中のリンクで外に出たら拒否", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    mkdirSync(join(b.worktree, "src", "deep"), { recursive: true });
+    symlinkSync(r.config.stateDir, join(b.worktree, "out"));
+    const ls = "pnpm test"; // 範囲で許されたコマンド
+    const sub = await b.hook(ls, join(b.worktree, "src", "deep"));
+    expect(sub.code, sub.stderr).toBe(0);
+    // 下位からの cd ..: cwd（下位）の照合では止めない。止まるとすれば、範囲のコマンドの許可だけ（この試験の範囲には cd がない）
+    const up = await b.hook("cd ..", join(b.worktree, "src", "deep"));
+    expect(up.stderr).not.toContain("作業ツリーの外");
+    expect(up.stderr).toContain("commandNotAllowed");
+    const back = await b.hook(ls, join(b.worktree, "src"));
+    expect(back.code, back.stderr).toBe(0);
+    expect((await b.hook(ls, join(b.worktree, "out"))).code).toBe(2);
+    expect((await b.hook(ls, r.config.worktreeRoot)).code).toBe(2);
+  });
+
+  it("R2: Desktop の子の /v1/hook は、フック専用のトークンだけ（ノードのトークンは 401）。拒否された呼び出しは、窓を満たさない", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const nodeToken = readFileSync(join(b.drawer, "token"), "utf8").trim();
+    const viaNode = await fetch(`${d.url}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${nodeToken}` },
+      body: JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+        cwd: b.worktree,
+      }),
+    });
+    expect(viaNode.status).toBe(401);
+  });
+
+  it("R2: 拒否された呼び出しだけでは、bind は hooksNotActive のまま", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    const lines = (bc.json.value.instruction as string)
+      .split("\n")
+      .map((l) => l.replace(/^ {3}/, ""));
+    const codePath = (lines.find((l) => l.startsWith("ファイル: ")) as string).slice(
+      "ファイル: ".length,
+    );
+    const code = (lines.find((l) => l.startsWith("中身: ")) as string).slice("中身: ".length);
+    const bindLine = lines.find((l) => l.includes(" child bind ")) as string;
+    const denied = await runHook(bindLine.replace(" child bind ", " child hook "), {
+      hook_event_name: "PreToolUse",
+      session_id: "desktop-session-1",
+      tool_name: "Read",
+      tool_input: { file_path: join(r.config.stateDir, "human-token") },
+      cwd: join(r.config.worktreeRoot, nodeId),
+    });
+    expect(denied.code).toBe(2);
+    writeFileSync(codePath, `${code}\n`, { mode: 0o644 });
+    expect((await sh(bindLine)).stdout).toBe("hooksNotActive\n");
+  });
+
+  it("R1・R4: daemon の再起動のあと、フックは拒否（再起動と分かる言葉）。hook-token は 24 時間で切れる", async () => {
+    let mono = 0;
+    const r = desktopRig();
+    const first = await boot({ ...r, deps: { ...r.deps, monoMs: () => mono } });
+    const nodeId = await spawnDesktop(first);
+    const b = await bindByInstruction(first, nodeId);
+    mono += 24 * 3_600_000 - 1;
+    expect((await b.hook("pnpm test")).code).toBe(0);
+    mono += 1;
+    const expired = await b.hook("pnpm test");
+    expect(expired.code).toBe(2);
+    expect(expired.stderr).toContain("node.bindCode");
+    await first.daemon.stop();
+    cleanups.length = 0;
+    await boot(r);
+    const after = await b.hook("pnpm test");
+    expect(after.code).toBe(2);
+    expect(after.stderr).toContain("再起動");
+  });
+
+  it("フックが直前に動いていなければ（hookFreshSeconds。既定 30 秒）、bind・report は hooksNotActive。bind のコードは使われずに残る", async () => {
+    let mono = 0;
+    const r = desktopRig();
+    const d = await boot({ ...r, deps: { ...r.deps, monoMs: () => mono } });
+    const nodeId = await spawnDesktop(d);
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    const lines = (bc.json.value.instruction as string)
+      .split("\n")
+      .map((l) => l.replace(/^ {3}/, ""));
+    const codePath = (lines.find((l) => l.startsWith("ファイル: ")) as string).slice(
+      "ファイル: ".length,
+    );
+    const code = (lines.find((l) => l.startsWith("中身: ")) as string).slice("中身: ".length);
+    const bindLine = lines.find((l) => l.includes(" child bind ")) as string;
+    writeFileSync(codePath, `${code}\n`, { mode: 0o644 });
+    // フックなしで bind（チップで作った子・フックを外した子の形）→ 断る。コードは cso が消すが、daemon の側では使っていない
+    const noHook = await sh(bindLine);
+    expect(noHook.stdout).toBe("hooksNotActive\n");
+    const again = await fetch(`${d.url}/v1/bind`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nodeId, bindCode: code }),
+    });
+    expect(again.status).toBe(403); // フックがまだないので、コードを使わずに断る
+    const b = await bindByInstruction(d, nodeId);
+    expect(JSON.parse((await b.report("x\n")).stdout).ok).toBe(true);
+    mono += 31_000;
+    const stale = await b.report("y\n", "progress", false);
+    expect(stale.stdout).toBe("hooksNotActive\n");
+    expect(JSON.parse((await b.report("z\n")).stdout).ok).toBe(true);
   });
 
   it("文面の bind・report の行と、Write で書く code・report は、作業範囲の判定（decideToolUse）を通る（Desktop の子にフックが効くようになったときの形。R1）", async () => {

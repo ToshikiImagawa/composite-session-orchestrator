@@ -438,7 +438,10 @@ export async function resolveScope(
   return { ...scope, writableLocations: writable, forbiddenLocations: forbidden };
 }
 
-/** `scope` は `resolveScope` で実パスにしたもの、`cwd` は実パスの作業ツリー。 */
+/**
+ * `scope` は `resolveScope` で実パスにしたもの、`cwd` は実パスの作業ツリー。`toolCwd` は、道具の相対パスの基準（子が作業ツリーの
+ * 配下に cd したときの、そのディレクトリ。実パス。T21-ch M1）。省略すると `cwd`。範囲の判定は、`cwd`（作業ツリー）で行う。
+ */
 export async function decideToolUse(
   scope: Scope,
   cwd: string,
@@ -446,10 +449,11 @@ export async function decideToolUse(
   toolInput: unknown,
   resolve: ResolvePath,
   protectedPaths?: ProtectedPaths,
+  toolCwd: string = cwd,
 ): Promise<ToolDecision> {
   if (typeof toolName !== "string") return denyUnknown("(ツール名が不正)");
   // 禁じる場所（FR_014 の例外）は、読み取りの道具も含めて、ほかの判定より先に見る。
-  const prot = await checkProtected(protectedPaths, cwd, toolName, toolInput, resolve);
+  const prot = await checkProtected(protectedPaths, toolCwd, toolName, toolInput, resolve);
   if (prot !== undefined) return prot;
   if (READ_TOOLS.has(toolName)) return ALLOW;
 
@@ -460,7 +464,7 @@ export async function decideToolUse(
       return deny("invalidPath", `${toolName}（${key} がない）`);
     let target: string;
     try {
-      target = await resolve(path.startsWith("/") ? path : `${cwd}/${path}`);
+      target = await resolve(path.startsWith("/") ? path : `${toolCwd}/${path}`);
     } catch {
       return deny("invalidPath", `${path}（実パスを解決できない）`);
     }

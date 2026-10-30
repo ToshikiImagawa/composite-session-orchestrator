@@ -18,6 +18,8 @@ export interface HookRequest {
   readonly sessionId: string;
   readonly toolName?: string;
   readonly toolInput?: unknown;
+  /** フック入力の cwd（Claude Code が書く。Desktop の子では、daemon の作業ツリーと照らす。T21-ch）。 */
+  readonly cwd?: string;
 }
 
 /** PreToolUse の判定（ノードの範囲で、許可・拒否）。`reason` はモデルへ伝える拒否の理由。 */
@@ -25,6 +27,7 @@ export type HookDecider = (
   nodeId: string,
   toolName: string,
   toolInput: unknown,
+  cwd?: string,
 ) => Promise<{ readonly allow: true } | { readonly allow: false; readonly reason: string }>;
 
 const EVENTS: ReadonlySet<string> = new Set(["PreToolUse", "PostToolUse", "Stop"]);
@@ -54,9 +57,16 @@ export function parseHookRequest(body: unknown): Result<HookRequest, Failure> {
   if (typeof toolName !== "string" || !TOOL_NAME.test(toolName)) {
     return bad("tool_name がないか、形が正しくない");
   }
+  const cwd = typeof b.cwd === "string" && b.cwd.length <= 4096 ? b.cwd : undefined;
   return {
     ok: true,
-    value: { event: event as HookEventName, sessionId, toolName, toolInput: b.tool_input },
+    value: {
+      event: event as HookEventName,
+      sessionId,
+      toolName,
+      toolInput: b.tool_input,
+      ...(cwd === undefined ? {} : { cwd }),
+    },
   };
 }
 

@@ -40,7 +40,7 @@ import type { NodeState } from "@cso/core";
 
 export const CHILDREN_DIR = "children.noindex";
 /** 引き出しの中のファイルの名前（cli の `CHILD_FILES` と同じ。T21-cc）。 */
-export const DRAWER_FILES = ["code", "token", "url", "node", "report"] as const;
+export const DRAWER_FILES = ["code", "token", "url", "node", "report", "hook-token"] as const;
 export type DrawerFile = (typeof DRAWER_FILES)[number];
 export const CHILDREN_KEY_FILE = "children.key";
 /**

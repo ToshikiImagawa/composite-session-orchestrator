@@ -184,6 +184,15 @@ export interface ApiDeps {
   readonly hookSessions?: SessionBinder;
   /** 手動の CLI セッション用の、フック専用のトークン（T22-ht）。`POST /v1/hook` だけで認証に使う。 */
   readonly hookTokens?: HookTokens;
+  /**
+   * Desktop の子のフックが効いているか（T21-ch）。そのノードの PreToolUse のフックを、直前（設定 `hookFreshSeconds`）に
+   * 受けていれば true。渡すと、子のロールの要求（report.*・scope.extend）と `POST /v1/bind` は、false なら `hooksNotActive` で断る。
+   */
+  readonly hookFresh?: (nodeId: string) => boolean;
+  /** PreToolUse のフックを判定して、許可したときに呼ぶ（拒否された呼び出しでは、窓を満たさない。R2）。 */
+  readonly onHookSeen?: (nodeId: string) => void;
+  /** フックの受け口で、フック専用のトークンだけを受け付ける（ノードのトークンは拒否。Desktop の木。R2）。 */
+  readonly hookTokensOnly?: boolean;
   /** bind の入口の、全体のスロットル（1 秒あたりの失敗）。省略すると 1 秒に 10 回。 */
   readonly bindThrottle?: Throttle;
   /** 記録の時刻（ISO 8601 UTC）。既定は現在時刻。 */
@@ -268,6 +277,7 @@ const BIND_MAX_BODY = 1024;
 const STATUS: Readonly<Record<string, number>> = {
   unauthenticated: 401,
   tokenExpired: 401,
+  hooksNotActive: 403,
   forbidden: 403,
   invalidHost: 403,
   notFound: 404,
@@ -462,6 +472,14 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       ),
       { "retry-after": String(retryAfterSec), ...(early ? CLOSE : {}) },
     );
+  /** Desktop の子のフックが効いていない（T21-ch）。 */
+  const hooksNotActive = (): Failure =>
+    failure(
+      "hooksNotActive",
+      "このノードの見張り（フック）が、直前に動いていない（daemon の作業ツリーを、Desktop で「ローカル」で開いて始めた子だけが報告できる）",
+      "人に、daemon の作業ツリーを Desktop で開き、「ローカル」で新しいセッションを始めてもらう（チップで作った子は使えない）",
+      "フックの設定（作業ツリーの .claude/settings.json）を変えていないか、人に確かめてもらう",
+    );
   /** 認証の失敗の理由。直近に期限で失効させたトークンなら expired（T21-te）。 */
   type FailReason = "missing" | "invalid" | "expired" | "hookExpired";
   /** フック専用のトークンの期限切れ（`hookExpired`）は、フックの受け口でだけ見る。 */
@@ -556,6 +574,15 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       counters.count("authFailed", "principalRejected");
       req.resume();
       return reject(res, valid.error, { "www-authenticate": "Bearer", ...CLOSE });
+    }
+    // Desktop の子は、直前にフックが効いていなければ、報告を受けない（T21-ch。見張りの外で動く子を通さない）
+    if (
+      principal.role === "child" &&
+      deps.hookFresh !== undefined &&
+      !deps.hookFresh(principal.nodeId)
+    ) {
+      req.resume();
+      return reject(res, hooksNotActive(), CLOSE);
     }
     // 回数の制限（主体ごと）。ハンドラを呼ぶ前にだけ判定するので、429 の要求は実行されていない。本文は読まない。
     // 同時に処理中の要求の数にも上限がある（ゆっくり本文を送る要求で、接続を塞がれないように）。
@@ -858,7 +885,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
    */
   /** 受け口の主体: ノードのトークンか、フック専用のトークン（T22-ht。子のノードとして扱う。ほかの入口では使えない）。 */
   const hookPrincipal = (token: string | undefined): Principal | undefined => {
-    const p = deps.credentials.authenticate(token);
+    const p = deps.hookTokensOnly === true ? undefined : deps.credentials.authenticate(token);
     if (p !== undefined) return p;
     const nodeId = deps.hookTokens?.authenticate(token);
     return nodeId === undefined ? undefined : { role: "child", nodeId };
@@ -976,7 +1003,9 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       }
       let d: Awaited<ReturnType<HookDecider>>;
       try {
-        d = await decide(principal.nodeId, h.toolName, h.toolInput);
+        d = await decide(principal.nodeId, h.toolName, h.toolInput, h.cwd);
+        // Desktop の子の「直前のフックの呼び出し」（T21-ch。bind・report の前に確かめる）。許可したときだけ数える（R2）
+        if (d.allow) deps.onHookSeen?.(principal.nodeId);
       } catch {
         d = { allow: false, reason: "フックの判定に失敗したため拒否した。" };
       }
@@ -1255,6 +1284,10 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       );
     }
     const nodeId = b?.nodeId as string;
+    // Desktop の子は、直前にフックが効いていなければ、紐付けない（コードは使わずに残す。T21-ch）
+    if (deps.hookFresh !== undefined && !deps.hookFresh(nodeId)) {
+      return reject(res, hooksNotActive(), CLOSE);
+    }
     // 結び付いたノードが、子ロールで、トークンを持てる状態か（統合ノード・木にない・停止後などは不可）を先に確かめ、
     // 許されたときだけコードを消費する。
     const redeemed = bind.redeem(
