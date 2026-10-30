@@ -1513,6 +1513,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           childrenDirs.removeFiles(nodeId, ["code", "token", "url", "report"]);
           // フック専用のトークンを出し直す（T21-ch。24 時間の絶対の期限。結び直しのたびに新しくする）
           childrenDirs.writeFile(nodeId, "hook-token", hookTokens.issue(nodeId));
+          // 前のセッションとの結び付きを解く（次の新しいセッションが、許可された最初の呼び出しで結ばれる）
+          if (hookSessions.unbind(nodeId)) note("hookUnbound", { reason: "bindCodeReissued" });
           return dir;
         },
       }),

@@ -317,7 +317,8 @@ B1〜B6 は、Spike 01 の項目の番号と対応する（[`docs/spikes/01-desk
 
 ### (a). Desktop の子に見張り（FR_014 のフック）が効くこと（T21-ch・T21-cs）
 
-- **前提**: T21-cs を入れた daemon（`childRuntime: "desktop"`、`desktopRequireVerifiedHooks: false`、`csoCommand` を設定。node も絶対パス）。人の端末で起動する。cli を build しておく。フックのない新しいリポジトリを使う。`worktreeRoot` を先に作り、`rootCwd` を `repoRoot` と同じにする。数える命令は、履歴に残さない（先頭に空白）。
+- **前提**: **Desktop では、daemon の作業ツリーを選び、必ず「ローカル」で始める（「ワークツリー」を選ばない）。** 「ワークツリー」で始めたセッションの呼び出しは拒否される（結び付けは起きない）。間違えたときは、そのセッションを閉じ、`node.bindCode` を出し直して、新しいセッションを「ローカル」で始める。
+- **前提（つづき）**: T21-cs を入れた daemon（`childRuntime: "desktop"`、`desktopRequireVerifiedHooks: false`、`csoCommand` を設定。node も絶対パス）。人の端末で起動する。cli を build しておく。フックのない新しいリポジトリを使う。`worktreeRoot` を先に作り、`rootCwd` を `repoRoot` と同じにする。数える命令は、履歴に残さない（先頭に空白）。
 - **手順**:
   1. **開始のあとに置いたときにどうなるか**: 先に、見張りの設定のない作業ツリーで Desktop のセッションを始める。そのあとで、同じ内容の `.claude/settings.json` を手で置き、子に stateDir の `human-token` を Read させる → **拒否されたか、読めてしまったかを記録する**（#135 のレビューの実測では、Claude Code は途中でも設定を読み直す。どちらかで、案 A を捨てた根拠を確かめ直す）。確かめたら、そのセッションは閉じる。
   2. **ローカルで始めると、最初から効くこと**: 親が子を作り（`node.spawn`。応答の `nodeId`）、`node.bindCode`（`{ "nodeId": "<子>" }`）の文面の「0.」の作業ツリーを Desktop で開いて「ローカル」で始める。最初の道具で `human-token` を Read させる → 拒否される。

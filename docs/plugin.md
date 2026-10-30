@@ -47,6 +47,8 @@ daemon が SDK で起動する子は、MCP の設定を daemon が組み立て�
   - `node.hookUnbind`（人間は `cso hook-unbind <nodeId>`、祖先の統合ノードは `mcp__node__node_hookUnbind`）。外したあと、最初に来たセッションに結び直す。**本人の子は外せない**（盗まれたトークンで外して、別のセッションで結び直させない）。外した者は、記録 `node.hookUnbound`（`nodeId`・`hadBinding`・actor。session_id は書かない）に残る。同じ requestId の再送では、もう一度は外さない。
   - トークンの発行し直し・失効（bind など）でも、自動で外れる（daemon の記録 `hookUnbound`、`reason: tokenReissued`）。古いトークンを無効にしてから外すので、古いトークンのセッションが、間に結び直すことはない。
   - daemon の再起動でも外れる（メモリだけのため）。
+  - Desktop の子では、`node.bindCode` の出し直しでも外れる（記録 `hookUnbound`、`reason: bindCodeReissued`）。次の新しいセッションが結ばれ、前のセッションは 403（次の操作は「node.bindCode を出し直し、新しいセッションで始める」）。
+  - 結ぶのは、判定で許可した最初の PreToolUse のときだけ。拒否した呼び出し（cwd が作業ツリーの外など）と、PostToolUse・Stop では結ばない（まだ結ばれていないセッションの PostToolUse・Stop は、受け取るだけ）。
   - トークンが漏れた疑いがあるときは、外さずに、子を止めてトークンを失効させる。
   - 受け口は、本文を読み終えたあと、結ぶ直前に、もう一度トークンを確かめる。本文を読んでいるあいだに発行し直されたら、その要求は 401 で、結び付けも作らない。
   - **互換**: 記録のイベント `node.hookUnbound` を書いたあとは、古い版の daemon に戻せない（ダウングレード不可。古い版は、未知のイベントとしてログを開けない）。状態の形は変えていないので、`STATE_VERSION` は上げていない。

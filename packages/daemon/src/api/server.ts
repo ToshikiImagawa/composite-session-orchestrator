@@ -985,18 +985,19 @@ export function createApiServer(deps: ApiDeps): ApiServer {
           { "www-authenticate": "Bearer" },
         );
       }
-      if (!sessions.check(principal.nodeId, h.sessionId)) {
+      const mismatch = () => {
         log({ event: "hookSessionMismatch", at: now() });
         return reject(
           res,
           failure(
             "forbidden",
-            "このトークンは、別のセッションに結ばれている",
-            "このノードのセッションから呼び出す",
-            "daemon を再起動すると、結び直しになる",
+            "このトークンは、別のセッションに結ばれている。node.bindCode を出し直し、新しいセッションで始める",
+            "node.bindCode を出し直し、新しいセッションで始める",
           ),
         );
-      }
+      };
+      // 結ぶのは、許可した最初の PreToolUse のときだけ（拒否した呼び出し・PostToolUse・Stop では結ばない）
+      if (!sessions.accepts(principal.nodeId, h.sessionId)) return mismatch();
       if (h.event !== "PreToolUse" || h.toolName === undefined) {
         counters.count("hook", "allowed");
         return send(res, 200, { ok: true, value: { decision: "allow" } });
@@ -1009,6 +1010,8 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       } catch {
         d = { allow: false, reason: "フックの判定に失敗したため拒否した。" };
       }
+      // 判定の間に、別のセッションが先に結ばれていたら 403
+      if (d.allow && !sessions.check(principal.nodeId, h.sessionId)) return mismatch();
       counters.count("hook", d.allow ? "allowed" : "denied");
       return send(res, 200, {
         ok: true,
