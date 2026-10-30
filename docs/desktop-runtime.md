@@ -124,6 +124,23 @@ Desktop の実機確認（Spike 01 の項目 1〜7）は、一部済んだ（親
    - Desktop の中間の統合ノード（role が integrator）は、紐付けできない（`node.bindCode` は `integratorNotSupported`。紐付けで渡すのは子のトークンだけ。**仮置き**）。
    - **手動確認 C1 の前回の結果（2026-10-27。curl の手順）**: シェルの変数が次の Bash 呼び出しに残らないので、別の呼び出しで報告すると 401 になった。紐付けのコードは、子のコマンドの文字列として `ps` に出た。この版で、どちらも直した（C1 のやり直しは、[`docs/manual-verification-checklist.md`](manual-verification-checklist.md) の C1'）。
 
+### 見張り（FR_014 のフック）を Desktop の子に効かせる（T21-ch・T21-cs。(a)）
+
+- **置く**: spawn のとき（起動を受け付ける前）に、daemon が自分で作った作業ツリーに `.claude/settings.json`（見張りの設定）を置き、git の共通ディレクトリの `info/exclude` に `/.claude/settings.json` を足す（コミットに混ざらない）。違う中身の設定がすでにあれば、置かずに spawn を失敗にする（`hookSettingsExists`）。daemon が前に置いたものと同じ中身なら（再開など）、そのまま使う。`csoCommand` がなければ、設定を置けないので、spawn を失敗にする（`csoCommandMissing`。見張りのない子を作らない）。
+- **設定の中身**: PreToolUse は `<csoCommand> child hook --dir <引き出し> --url <窓口> || exit 2`、PostToolUse・Stop は `… || true`。timeout は 90 秒（cso の内側の時間〔身元の確認と、送る 8 秒 × 再試行〕より十分長い）。Claude Code は、フックが**終了コード 2 のときだけ**拒否するので、cso が起動できない・例外で落ちたときも、`|| exit 2` で拒否にする。設定には、パスと URL だけを書く（トークンは書かない）。
+- **始め方**: 人は、`node.bindCode` の文面の「0.」にある作業ツリーを Desktop で開き、**「ローカル」で新しいセッションを始める**。最初の道具の呼び出しから見張りが効く。**訂正（#135 のレビューの実測。Claude Code 2.1.314）**: Claude Code は、フックの設定を、**動いている途中でも読み直す**（settings.json を消す・settings.local.json に `disableAllHooks` を置くと、すぐ次の呼び出しからフックが動かない）。そのため、下の「見つける」で、daemon がフックの呼び出しとは別に設定を見張る。**spawn_task のチップから始めた子は、Desktop が別の作業ツリーを作るので、見張りが効かず、紐付けも報告も `hooksNotActive` で断られる（今は使えない）。**
+- **塞ぐ（道具）**: 作業ツリーの `.claude/` の全体（settings.local.json の `disableAllHooks` を含む）は、**書き込みだけ**を禁じる（読み取りは許す。commands などを読めるように。settings.json に秘密は入っていない）。利用者の設定 `~/.claude/settings.json`・`settings.local.json` と、git の共通ディレクトリの `info/exclude` は、読み書きとも禁じる。Write・Edit などの書き込みは、範囲の決まりによらず拒否する。
+- **塞ぐ（Bash）**: 作業ツリーの中に書き込みを禁じる場所（`.claude/`）があるときは、Bash のすべての語を、cwd（cd を追った先も）からの相対として解決して判定する（`/` を含まない語・グロブ〔`.cla*`〕・波括弧も）。`.claude` に当たる語は拒否する（読むときは Read の道具を使う）。消す・動かす・権限を変えるコマンド（`rm`・`rmdir`・`mv`・`chmod`・`chown`・`chflags`・`unlink`・`shred`・`find … -delete`）が、作業ツリーそのもの・その親を対象にしたら拒否する（`git add .`・`grep -rn … .`・`find .`・`ls .` は通る）。`git clean` と `git stash --all`・`-a`・`-u` は、対象を問わず拒否する。範囲のコマンドの許可は、サブコマンドごとに書く（例: `git add`・`git commit` を許し、`git` だけを許さない）。
+- **見つける・書き戻す（M1）**: daemon は、フックの呼び出しとは別に、動いている Desktop の子（stopped・verified・reclaimable・archived 以外）の設定を、数秒ごと（設定 `hookSettingsCheckSeconds`。既定 2 秒）に見回る。bind・報告の入口と、フックの呼び出しのたびにも、同じ確認をする。見るのは、(1) `.claude/settings.json` の中身が、置いたときと同じか、(2) `.claude/settings.local.json` がないか、(3) 利用者の設定 `~/.claude/settings.json`・`settings.local.json` の `disableAllHooks`・`hooks` が、控えと同じか。食い違えば、その場で、そのノードの bind のトークンとフック専用のトークンを失効させ、作業ツリーの設定を書き戻し（settings.json を置き直し、settings.local.json を消す）、受信箱に知らせ、以後のフックをすべて拒否する。**利用者の設定は、書き戻さない**（人の設定ファイルなので）。変わったら、その木の Desktop の子のすべてで、失効と知らせを行う。**人が自分で設定を変えた場合も同じ扱いになる**（受信箱の文にもそう書く）。
+- **戻す**: 印を消すのは、人が `node.bindCode` を出し直し、daemon が設定を確かめ直して問題がなかったときだけ。利用者の設定は、フックを切っていなければ（`disableAllHooks` が true でなければ）、その時点の値を控え直す。子は、新しい文面で 1 から紐付け直す。
+- **uchg（macOS の補助）**: 置いた settings.json に `chflags uchg`（変更できない印）を付ける。子も同じユーザーなので、自分で外せる（歯止めにすぎない）。daemon は、書き戻すときと、回収・最終削除で作業ツリーを消す前に、印を外す。
+- **info/exclude**: daemon は、git の共通ディレクトリ（`git` は既定 `/usr/bin/git`。設定 `gitPath`）の `info/exclude` に `/.claude/settings.json` を 1 行足す（共通ディレクトリなので、同じリポジトリのほかの作業ツリーにも効く）。回収のあとも、この 1 行は残す（無害で、次の子でも使う）。人が消してもよい。
+- **再起動**: daemon を再起動すると、置いた設定の控えと、アダプタの範囲・フック専用のトークン（どれもメモリだけ）が失われ、Desktop の子の道具はすべて拒否される。人は、子を止めたと宣言して、作り直す。
+- 範囲外の操作は、CLI の子と同じく `scope.violation` として記録し、受信箱に出す（同じ違反につき 1 度、ノードごとに 20 件まで。全ノードを通した上限もある。件名は 200 字までで、トークン・Bearer を含むものは伏せる）。
+- **Desktop の木では、`cso hook-env`（`node.hookToken`）は使えない**（`desktopHookEnvNotAllowed`。子の引き出しの見張りのトークンを無効にしてしまうため。見張りのトークンは、`node.bindCode` の出し直しで新しくなる）。
+- **守れないもの**: 子が起動したプログラム（スクリプト・許可したコマンドの中）の読み書きはフックを通らない（設定の書き換え・消去は、見回りで見つけて書き戻すが、見回りの間〔数秒〕は外れうる）。Bash の語の判定は歯止めで、組み立てたパス・ハードリンクは止められない。フックが終了コード 2 以外で終わったとき（`|| exit 2` の外の失敗、フックの時間切れ）は、Claude Code が許可する。管理の設定（managed settings）・環境変数でフックを切る手段があるかは未確認。同じユーザーなので、daemon を止める・ファイルを直接読む手段は残る。`hooksNotActive` は設定の誤りを見つける検査で、敵対的な子は止められない（守りの本体は、上の「塞ぐ」と「見つける」）。
+- **能力表の hooks**: この版の手動確認（チェックリストの (a)）が通るまでは `unverified` のまま（ゲートで、Desktop の子は起動しない。試すときは `desktopRequireVerifiedHooks: false`）。
+
 ### 紐付けコードの扱い
 
 - **コードは記録しない**: イベントログ（SQLite）・受信箱・記録（`note`・API のログ）には書かない。`node.bindCode` の応答（`instruction`）にだけ入る（試験で、SQLite のファイル・記録・受信箱にコードが残らないことを確かめている）。

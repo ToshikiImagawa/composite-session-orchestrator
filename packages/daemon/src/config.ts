@@ -158,6 +158,10 @@ export interface DaemonConfig {
    * 1〜3600 の整数。既定 30。窓の内に呼び出しがなければ `hooksNotActive`。
    */
   readonly hookFreshSeconds?: number;
+  /** Desktop の子の見張りの設定を見回る間隔（秒。T21-cs M1）。1〜60 の整数。既定 2。 */
+  readonly hookSettingsCheckSeconds?: number;
+  /** daemon が使う git の絶対パス（T21-cs N2。info/exclude の場所を調べる）。既定 `/usr/bin/git`。 */
+  readonly gitPath?: string;
   /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
   readonly childHome?: "isolated" | "inherit";
   /**
@@ -221,6 +225,8 @@ const KEYS = [
   "childEnvAllow",
   "csoCommand",
   "hookFreshSeconds",
+  "hookSettingsCheckSeconds",
+  "gitPath",
   "childHome",
   "childPluginDir",
   "childRuntime",
@@ -597,6 +603,19 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     }
     hookFreshSeconds = v;
   }
+  let hookSettingsCheckSeconds: number | undefined;
+  if (raw.hookSettingsCheckSeconds !== undefined) {
+    const v = raw.hookSettingsCheckSeconds;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 60) {
+      return bad("hookSettingsCheckSeconds は 1〜60 の整数（秒）");
+    }
+    hookSettingsCheckSeconds = v;
+  }
+  let gitPath: string | undefined;
+  if (raw.gitPath !== undefined) {
+    gitPath = absPath(raw.gitPath);
+    if (gitPath === undefined) return bad("gitPath は絶対パス（.. を含まない）");
+  }
   let childPluginDir: string | undefined;
   if (raw.childPluginDir !== undefined) {
     childPluginDir = absPath(raw.childPluginDir);
@@ -739,6 +758,8 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
       ...(csoCommand === undefined ? {} : { csoCommand }),
       ...(hookFreshSeconds === undefined ? {} : { hookFreshSeconds }),
+      ...(hookSettingsCheckSeconds === undefined ? {} : { hookSettingsCheckSeconds }),
+      ...(gitPath === undefined ? {} : { gitPath }),
       ...(autoPurge === undefined ? {} : { autoPurge }),
       ...(digest === undefined ? {} : { digest }),
       ...(wake === undefined ? {} : { wake }),

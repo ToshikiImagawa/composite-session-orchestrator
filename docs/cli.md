@@ -48,7 +48,7 @@ cso reclaim <nodeId>
 
 ## Desktop の子が使う `cso child`（T21-cc）
 
-`cso child bind`・`cso child report` は、Desktop の子が、daemon に紐付けて報告するためのコマンド。人間のトークン・環境変数（`CSO_DAEMON_URL` など）は使わない。使うのは、子の引き出し `<D>/<鍵>/`（daemon が 0700 で作る。`docs/desktop-runtime.md` の「子の引き出し」）のファイルと、引数の窓口の URL だけ。手順の文面は、`node.bindCode` が出す（文面の配線は次の PR）。
+`cso child bind`・`cso child report` は、Desktop の子が、daemon に紐付けて報告するためのコマンド。人間のトークン・環境変数（`CSO_DAEMON_URL` など）は使わない。使うのは、子の引き出し `<D>/<鍵>/`（daemon が 0700 で作る。`docs/desktop-runtime.md` の「子の引き出し」）のファイルと、引数の窓口の URL だけ。手順の文面は、`node.bindCode` が出す。
 
 | コマンド | すること | 標準出力 |
 | --- | --- | --- |
@@ -67,10 +67,10 @@ cso reclaim <nodeId>
 - 終了コード: 0 成功・1 失敗・2 使い方の誤り・3 トークンの期限切れ。
 
 **`cso child hook --dir <引き出し> --url <窓口>`（T21-ch）**: Desktop の子のフック（Claude Code の PreToolUse・PostToolUse・Stop）のコマンド。標準入力のフック入力を、引き出しの `hook-token`（daemon が spawn・`node.bindCode` のときに 0600 で置く。24 時間の絶対の期限）で `POST /v1/hook` へ送り、判定を返す（許可は終了コード 0、拒否は 2 で、標準エラーの文が拒否の理由としてモデルに伝わる）。送る前に、daemon の身元を確かめる。PreToolUse は、**cso が走り切ったときだけ**フェイルクローズ（届かない・形が違う・身元を確かめられない・`hook-token` がない・予期しない例外のときは、終了コード 2 で拒否）。429 で `Retry-After` が 2 秒以下なら、2 回まで送り直す。PostToolUse・Stop は判定しないので、失敗しても 0。トークンは出さない。
-  - **守れないもの**: Claude Code は、フックが**終了コード 2 で終わったときだけ**拒否する。終了コード 1・cso が起動できない（127 など）・フックの時間切れは、**許可になる**。そのため、次の PR（T21-cs）の settings.json では、PreToolUse のコマンドを `<cso> child hook … || exit 2`、PostToolUse・Stop を `… || true` にし、`timeout` を、cso の内側の時間の合計（身元の確認と、送る 8 秒）より十分長くする（必須の要件）。
+  - **守れないもの**: Claude Code は、フックが**終了コード 2 で終わったときだけ**拒否する。終了コード 1・cso が起動できない（127 など）・フックの時間切れは、**許可になる**。そのため、daemon が置く settings.json（T21-cs）では、PreToolUse のコマンドを `<cso> child hook … || exit 2`、PostToolUse・Stop を `… || true` にし、`timeout` を、cso の内側の時間の合計（身元の確認と、送る 8 秒）より十分長くする（必須の要件）。
   - Desktop の子の `/v1/hook` は、フック専用のトークンだけを受け付ける（ノードのトークンは 401）。
   - **daemon を再起動すると**、フック専用のトークンと、アダプタが持つ子の範囲（どちらもメモリだけ）が失われ、Desktop の子の道具は、すべて拒否される（拒否の文に「再起動」と出る）。人は、子を止めたと宣言して、作り直す。
-  - **フック専用のトークンは、発行から 24 時間で切れ**、そのあと子の道具はすべて止まる。親か人が `node.bindCode` を出し直すと、フック専用のトークンと、ノードのトークン（結び直しのあと）の両方が新しくなる。起動したときに stopped だった子の引き出しの `hook-token` は、ほかのファイルと一緒に消す。daemon は、Desktop の子の bind・報告を、そのノードの PreToolUse のフックを直前（設定 `hookFreshSeconds`。既定 30 秒）に**許可していなければ** `hooksNotActive` で断る（拒否した呼び出しは数えない。`cso child bind`・`report` の Bash 自体がフックを通るので、フックが効いていれば、いつも通る）。**これは、設定の誤り（チップで作った子・フックのない子）を見つける検査で、敵対的な子は止められない**（子は、引き出しの `hook-token` を読んで、自分で `/v1/hook` を呼べる）。守りの本体は、次の PR の、フックの設定を書き換えさせない守り。フックの設定（作業ツリーの `.claude/settings.json`）を置く処理と、それを書き換えさせない守りは、次の PR。
+  - **フック専用のトークンは、発行から 24 時間で切れ**、そのあと子の道具はすべて止まる。親か人が `node.bindCode` を出し直すと、フック専用のトークンと、ノードのトークン（結び直しのあと）の両方が新しくなる。起動したときに stopped だった子の引き出しの `hook-token` は、ほかのファイルと一緒に消す。daemon は、Desktop の子の bind・報告を、そのノードの PreToolUse のフックを直前（設定 `hookFreshSeconds`。既定 30 秒）に**許可していなければ** `hooksNotActive` で断る（拒否した呼び出しは数えない。`cso child bind`・`report` の Bash 自体がフックを通るので、フックが効いていれば、いつも通る）。**これは、設定の誤り（チップで作った子・フックのない子）を見つける検査で、敵対的な子は止められない**（子は、引き出しの `hook-token` を読んで、自分で `/v1/hook` を呼べる）。守りの本体は、フックの設定を書き換えさせない守り（T21-cs。[`docs/desktop-runtime.md`](desktop-runtime.md) の「見張り（FR_014 のフック）を Desktop の子に効かせる」）。
 
 **子の作業範囲の判定（FR_014。`hook-policy.ts`）での扱い**: そのノード自身の引き出しだけ、禁じる場所（stateDir）の中のまま、次の 2 つを許す。(1) Bash の `cso child bind|report` の `--dir` の値（引き出しそのもの）。例外が効くのは、区切りの先頭の語が `csoCommand`（設定。なければ `cso` か末尾が `/cso` の語）と一致し、続く 2 語が `child` と `bind`・`report` の命令だけ。その命令の `--dir` が自分の引き出しそのものでなければ、拒否する。外すのは `--dir` の値だけで、ほかの語はふつうに判定する。(2) Write の道具で `<引き出し>/code`・`<引き出し>/report` を書くこと。引き出しの中のファイルの語（`token` とその一時ファイル `token.tmp-…` を含む）・グロブ・`cd`・読み取りの道具（Read・Glob・Grep など）は、禁じる場所のまま拒否する。ほかのノードの引き出しも拒否する。今これが効くのは CLI の子だけで、Desktop の子には、作業範囲外の拒否のフックが効くようになってから効く（`docs/desktop-runtime.md` の (a)）。
 

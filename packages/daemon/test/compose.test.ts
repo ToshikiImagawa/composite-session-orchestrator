@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -163,7 +164,11 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
   });
 
   it("ポートのファイルが使えなければ、照合などの記録を何も書く前に止める（portFileInvalid）", async () => {
-    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const r = rig({
+      childRuntime: "desktop",
+      csoCommand: [process.execPath, "/opt/cso/bin.js"],
+      desktopRequireVerifiedHooks: false,
+    });
     const d = await boot(r);
     const spawned = await call(d.url, d.rootToken, "node.spawn", {
       parentId: "root",
@@ -195,7 +200,11 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
     const bad = () => {
       throw new Error("書けない");
     };
-    const desk = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const desk = rig({
+      childRuntime: "desktop",
+      csoCommand: [process.execPath, "/opt/cso/bin.js"],
+      desktopRequireVerifiedHooks: false,
+    });
     const madeD = createDaemon(desk.config, { ...desk.deps, savePort: bad });
     if (!madeD.ok) throw new Error(madeD.error.code);
     cleanups.push(() => madeD.value.stop());
@@ -1730,7 +1739,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
   };
 
   it("フックのゲートが有効（既定）なら、子は起動しない（起動の失敗）", async () => {
-    const r = rig({ childRuntime: "desktop" });
+    const r = rig({ childRuntime: "desktop", csoCommand: [process.execPath, "/opt/cso/bin.js"] });
     const d = await boot(r);
     const res = await call(d.url, d.rootToken, "node.spawn", {
       parentId: "root",
@@ -1745,7 +1754,11 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
   });
 
   it("再起動のあとの依頼（C2-4）: 1 件 → 再起動しても 1 件 → 子を宣言すると解決済み → 新しい子がいれば、次の再起動で新しい依頼", async () => {
-    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const r = rig({
+      childRuntime: "desktop",
+      csoCommand: [process.execPath, "/opt/cso/bin.js"],
+      desktopRequireVerifiedHooks: false,
+    });
     const open = (d: { daemon: Daemon }) =>
       d.daemon.log
         .state()
@@ -1851,7 +1864,18 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       ...r.deps.worktree,
       cwdOf: async (id: string) => join(r.config.worktreeRoot, id),
     };
-    r0 = { ...r, deps: { ...r.deps, worktree } };
+    immutableCalls.length = 0;
+    r0 = {
+      ...r,
+      deps: {
+        ...r.deps,
+        worktree,
+        // macOS の chflags uchg の代わり（試験から書き換え・片付けできるように。呼ばれたことだけを残す）
+        setImmutable: async (file: string, on: boolean) => {
+          immutableCalls.push([file, on]);
+        },
+      },
+    };
     return r0;
   };
   const spawnDesktop = async (d: Awaited<ReturnType<typeof boot>>) => {
@@ -1882,6 +1906,8 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     });
   };
   let r0: ReturnType<typeof rig>;
+  const immutableCalls: [string, boolean][] = [];
+  const r0Logs = (r: { logs: string[] }) => r.logs.join("\n");
   const bindByInstruction = async (d: Awaited<ReturnType<typeof boot>>, nodeId: string) => {
     const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
     expect(bc.json.ok, JSON.stringify(bc.json)).toBe(true);
@@ -2001,6 +2027,224 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(elsewhere.code).toBe(2);
     const token = readFileSync(join(b.drawer, "hook-token"), "utf8").trim();
     expect(denied.stdout + denied.stderr).not.toContain(token);
+  });
+
+  it("T21-cs: spawn で作業ツリーに見張りの設定（PreToolUse は || exit 2、PostToolUse・Stop は || true、timeout 90）を置き、git の info/exclude に足す。文面にローカルで始める手順", async () => {
+    const base = desktopRig();
+    // 作業ツリーを git の作業ツリーにする（info/exclude を確かめる）
+    const worktree = {
+      ...base.deps.worktree,
+      provisionWorktree: async ({ nodeId }: { nodeId: string }) => {
+        const p = join(base.config.worktreeRoot, nodeId);
+        mkdirSync(p, { recursive: true });
+        await promisify(execFile)("git", ["init", "-q", p]);
+        return ok({ worktreePath: p });
+      },
+    };
+    const r = { ...base, deps: { ...base.deps, worktree } };
+    r0 = r;
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const wt = join(r.config.worktreeRoot, nodeId);
+    const settings = JSON.parse(readFileSync(join(wt, ".claude", "settings.json"), "utf8"));
+    const pre = settings.hooks.PreToolUse[0].hooks[0];
+    expect(pre.command).toMatch(
+      / child hook --dir .* --url http:\/\/127\.0\.0\.1:\d+ \|\| exit 2$/,
+    );
+    expect(pre.timeout).toBe(90);
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toMatch(/ \|\| true$/);
+    expect(settings.hooks.Stop[0].hooks[0].command).toMatch(/ \|\| true$/);
+    expect(JSON.stringify(settings)).not.toMatch(/token/i);
+    expect(readFileSync(join(wt, ".git", "info", "exclude"), "utf8")).toContain(
+      "/.claude/settings.json",
+    );
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    expect(bc.json.value.instruction).toContain("「ローカル」");
+    expect(bc.json.value.instruction).toContain(
+      `作業ツリー: ${await (await import("node:fs/promises")).realpath(wt)}`,
+    );
+  });
+
+  it("T21-cs: 作業ツリーに、違う中身の .claude/settings.json がすでにあれば、spawn は失敗する", async () => {
+    const base = desktopRig();
+    const worktree = {
+      ...base.deps.worktree,
+      provisionWorktree: async ({ nodeId }: { nodeId: string }) => {
+        const p = join(base.config.worktreeRoot, nodeId);
+        mkdirSync(join(p, ".claude"), { recursive: true });
+        writeFileSync(join(p, ".claude", "settings.json"), "{}");
+        return ok({ worktreePath: p });
+      },
+    };
+    const d = await boot({ ...base, deps: { ...base.deps, worktree } });
+    const res = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(res.json.ok).toBe(false);
+    expect(r0Logs(base)).toContain("hookSettingsExists");
+  });
+
+  it("T21-cs: 見張りの設定・利用者の設定・info/exclude への書き込みは拒否。設定を書き換えたら、以後はすべて拒否し、受信箱に 1 度知らせる。範囲違反は scope.violation に記録", async () => {
+    // HOME をリンクにする（macOS の /var → /private/var と同じ形。実パスで比べないと外れる）
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const home = `${realHome}-link`;
+    symlinkSync(realHome, home);
+    const r = desktopRig();
+    r.deps = { ...r.deps, parentEnv: { ...r.deps.parentEnv, HOME: home } } as typeof r.deps;
+    r0 = r;
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const hookLine = b.bindLine.replace(" child bind ", " child hook ");
+    const write = (file_path: string) =>
+      runHook(hookLine, {
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        tool_name: "Write",
+        tool_input: { file_path, content: "{}" },
+        cwd: b.worktree,
+      });
+    for (const f of [
+      join(b.worktree, ".claude", "settings.json"),
+      join(b.worktree, ".claude", "settings.local.json"),
+      join(home, ".claude", "settings.json"),
+    ]) {
+      const w = await write(f);
+      expect(w.code, f).toBe(2);
+      expect(w.stderr).toContain("見張り（フック）の設定");
+    }
+    // 作業ツリーの .claude/ は、読むことはできる（commands など）
+    const read = await runHook(hookLine, {
+      hook_event_name: "PreToolUse",
+      session_id: "desktop-session-1",
+      tool_name: "Read",
+      tool_input: { file_path: join(b.worktree, ".claude", "settings.json") },
+      cwd: b.worktree,
+    });
+    expect(read.code, read.stderr).toBe(0);
+    const state = d.daemon.log.state();
+    expect(state.inbox.some((x) => x.kind === "violation" && x.nodeId === nodeId)).toBe(true);
+    // 子がスクリプトなどで書き換えた形
+    writeFileSync(join(b.worktree, ".claude", "settings.json"), "{}");
+    const after = await b.hook("pnpm test");
+    expect(after.code).toBe(2);
+    expect(after.stderr).toContain("外された");
+    await b.hook("pnpm test");
+    const notices = d.daemon.log
+      .state()
+      .inbox.filter((x) => x.summary?.includes("見張り（フック）が外された"));
+    expect(notices).toHaveLength(1);
+    // 書き戻している（daemon が置いた中身に戻っている）
+    expect(readFileSync(join(b.worktree, ".claude", "settings.json"), "utf8")).not.toBe("{}");
+    rmSync(home, { force: true });
+    rmSync(realHome, { recursive: true, force: true });
+  });
+
+  it("T21-cs M1: 子のスクリプトが settings.json を消す → daemon が数秒で見つけ、書き戻し、トークンを失効させ、受信箱に知らせ、以後を拒否 → node.bindCode を出し直すと戻る", async () => {
+    const r = desktopRig({ hookSettingsCheckSeconds: 1 });
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const file = join(b.worktree, ".claude", "settings.json");
+    const original = readFileSync(file, "utf8");
+    rmSync(file); // 子が、許可されたコマンドで動かしたスクリプトで消した形（フックを通らない）
+    await vi.waitFor(
+      () => {
+        expect(existsSync(file)).toBe(true);
+        expect(readFileSync(file, "utf8")).toBe(original);
+      },
+      { timeout: 5000, interval: 100 },
+    );
+    const notices = d.daemon.log
+      .state()
+      .inbox.filter((x) => x.summary?.includes("見張り（フック）が外された"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.summary).toContain("settings.json がない");
+    // 置いたとき・書き戻すときに、変更できない印を付けている（書き戻す前には外す）
+    expect(immutableCalls.some(([f, on]) => f.endsWith("settings.json") && on)).toBe(true);
+    expect(immutableCalls.some(([f, on]) => f.endsWith("settings.json") && !on)).toBe(true);
+    // 以後は拒否（フックも、報告も。トークンは失効）
+    expect((await b.hook("pnpm test")).code).toBe(2);
+    const rep = await b.report("x\n");
+    expect(rep.code).not.toBe(0);
+    // 人が node.bindCode を出し直す → daemon が設定を確かめ直し、問題がなければ戻る
+    const again = await bindByInstruction(d, nodeId);
+    const ok = await again.report("戻った\n");
+    expect(JSON.parse(ok.stdout).ok, ok.stdout + ok.stderr).toBe(true);
+  });
+
+  it("T21-cs M1: settings.local.json（disableAllHooks）を置かれても見つけて消す。利用者の設定の disableAllHooks は、書き戻さずに知らせる（人が変えた場合も同じ扱いと書く）", async () => {
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const r = desktopRig({ hookSettingsCheckSeconds: 1 });
+    r.deps = { ...r.deps, parentEnv: { ...r.deps.parentEnv, HOME: realHome } } as typeof r.deps;
+    r0 = r;
+    const d = await boot(r);
+    const a = await spawnDesktop(d);
+    const b = await bindByInstruction(d, a);
+    const local = join(b.worktree, ".claude", "settings.local.json");
+    writeFileSync(local, JSON.stringify({ disableAllHooks: true }));
+    await vi.waitFor(() => expect(existsSync(local)).toBe(false), { timeout: 5000, interval: 100 });
+    expect(
+      d.daemon.log.state().inbox.some((x) => x.summary?.includes("settings.local.json が置かれた")),
+    ).toBe(true);
+    // 別の子で、利用者の設定を変える
+    const c = await spawnDesktop(d);
+    await bindByInstruction(d, c);
+    mkdirSync(join(realHome, ".claude"), { recursive: true });
+    writeFileSync(
+      join(realHome, ".claude", "settings.json"),
+      JSON.stringify({ disableAllHooks: true }),
+    );
+    await vi.waitFor(
+      () =>
+        expect(
+          d.daemon.log
+            .state()
+            .inbox.some(
+              (x) => x.nodeId === c && x.summary?.includes("人が設定を変えた場合も同じ扱い"),
+            ),
+        ).toBe(true),
+      { timeout: 5000, interval: 100 },
+    );
+    // 利用者の設定は書き戻さない
+    expect(readFileSync(join(realHome, ".claude", "settings.json"), "utf8")).toContain(
+      "disableAllHooks",
+    );
+    rmSync(realHome, { recursive: true, force: true });
+  });
+
+  it("T21-cs R1: 作業ツリーの .claude がリンクなら、spawn は失敗する", async () => {
+    const base = desktopRig();
+    const elsewhere = mkdtempSync(join(tmpdir(), "cso-else-"));
+    const worktree = {
+      ...base.deps.worktree,
+      provisionWorktree: async ({ nodeId }: { nodeId: string }) => {
+        const p = join(base.config.worktreeRoot, nodeId);
+        mkdirSync(p, { recursive: true });
+        symlinkSync(elsewhere, join(p, ".claude"));
+        return ok({ worktreePath: p });
+      },
+    };
+    const d = await boot({ ...base, deps: { ...base.deps, worktree } });
+    const res = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(res.json.ok).toBe(false);
+    expect(base.logs.join("\n")).toContain("hookSettingsExists");
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  it("T21-cs: Desktop の木では cso hook-env（node.hookToken）を拒否する（desktopHookEnvNotAllowed。次の操作は node.bindCode）", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const res = await call(d.url, d.humanToken, "node.hookToken", { nodeId });
+    expect(res.json.error?.code).toBe("desktopHookEnvNotAllowed");
+    expect(res.json.error?.nextActions?.join("")).toContain("node.bindCode");
   });
 
   it("M1: 作業ツリーの配下に cd しても通り、下位からの cd .. も通る。作業ツリーの中のリンクで外に出たら拒否", async () => {
@@ -2236,7 +2480,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(existsSync(join(b.drawer, "node"))).toBe(true);
   });
 
-  it("csoCommand がなければ、node.bindCode は csoCommandMissing", async () => {
+  it("csoCommand がなければ、Desktop の木では spawn を失敗にする（csoCommandMissing。見張りのない子を作らない）", async () => {
     const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
     const d = await boot(r);
     const spawned = await call(d.url, d.rootToken, "node.spawn", {
@@ -2244,13 +2488,16 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       role: "implement",
       ...brief,
     });
-    const nodeId = spawned.json.value.nodeId as string;
-    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
-    expect(bc.json.error?.code).toBe("csoCommandMissing");
+    expect(spawned.json.ok).toBe(false);
+    expect(r.logs.join("\n")).toContain("csoCommandMissing");
   });
 
   it("画面の表示モデルで、Desktop の子は stopDelegated（停止の宣言を出せる）", async () => {
-    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const r = rig({
+      childRuntime: "desktop",
+      csoCommand: [process.execPath, "/opt/cso/bin.js"],
+      desktopRequireVerifiedHooks: false,
+    });
     const d = await boot(r);
     const spawned = await call(d.url, d.rootToken, "node.spawn", {
       parentId: "root",

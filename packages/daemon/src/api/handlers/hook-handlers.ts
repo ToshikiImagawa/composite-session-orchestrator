@@ -31,6 +31,8 @@ export interface HookHandlerDeps {
   readonly managed?: (nodeId: string) => boolean;
   /** 窓口の URL（待ち受けの前は undefined）。 */
   readonly baseUrl?: () => string | undefined;
+  /** Desktop の木か（`node.hookToken` は拒否する。子の引き出しの hook-token を無効にしてしまうため。T21-cs）。 */
+  readonly desktop?: boolean;
 }
 
 const LIVE = new Set(["running", "waiting"]);
@@ -78,6 +80,13 @@ export function createHookHandlers(deps: HookHandlerDeps) {
           "forbidden",
           "フック専用のトークンは、人間だけが発行できる",
           "人間のトークンで呼び出す",
+        );
+      }
+      if (deps.desktop === true) {
+        return fail(
+          "desktopHookEnvNotAllowed",
+          "Desktop の木では、cso hook-env（フック専用のトークンの発行）は使えない（子の引き出しの見張りのトークンを無効にしてしまう）",
+          "Desktop の子の見張りのトークンは、親か人が node.bindCode を出し直すと新しくなる",
         );
       }
       const tokens = deps.hookTokens;

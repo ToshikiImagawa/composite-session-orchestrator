@@ -37,6 +37,8 @@ export interface BindHandlerDeps {
    * T21-cc。コードを出す前に呼ぶ。
    */
   readonly prepareDrawer?: (nodeId: string) => string;
+  /** 見張りの設定を置いた、子の作業ツリー（T21-cs。文面の「ローカルで始める」手順に書く）。 */
+  readonly worktreeOf?: (nodeId: string) => string | undefined;
 }
 
 const LIVE = new Set(["running", "waiting"]);
@@ -62,6 +64,7 @@ export function bindInstruction(
   expiresAt: string,
   drawer: string,
   csoCommand: readonly string[],
+  worktree?: string,
 ): string {
   const cso = csoCommand.map(shellWord).join(" ");
   const dir = shellWord(drawer);
@@ -72,6 +75,12 @@ export function bindInstruction(
     start,
     "",
     "---- daemon への紐付けと報告（cso child）----",
+    ...(worktree === undefined
+      ? []
+      : [
+          "0. 人へ: この子は、次の作業ツリーを Desktop で開き、「ローカル」で始めた新しいセッションで動かす（見張り〔フック〕の設定が、そこに置いてある）。spawn_task のチップから始めると、見張りが効かないので、紐付けも報告も断られる（hooksNotActive）:",
+          `   作業ツリー: ${worktree}`,
+        ]),
     `1. 最初のメッセージを受けたら、Write の道具で、次のファイルに、次のコードだけを書く（コードは一度きり。${expiresAt} まで。Bash のコマンドにはコードを書かない）:`,
     `   ファイル: ${codePath}`,
     `   中身: ${formatBindCodeForDisplay(code)}`,
@@ -175,6 +184,7 @@ export function createBindHandlers(deps: BindHandlerDeps) {
             expiresAt,
             drawer,
             deps.csoCommand,
+            deps.worktreeOf?.(nodeId),
           ),
           expiresAt,
         },
