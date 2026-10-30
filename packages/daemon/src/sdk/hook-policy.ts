@@ -62,6 +62,11 @@ export interface ProtectedPaths {
    * 語がこれと一致し、続く 2 語が `child` と `bind`・`report` のときだけ効く。なければ、先頭の語が `cso`（または末尾が `/cso`）のとき。
    */
   readonly csoCommand?: readonly string[] | undefined;
+  /**
+   * 書き込みだけを禁じる場所（読み取りは許す。T21-cs。Desktop の子の作業ツリーの `.claude/`。見張りの設定を書き換えさせない）。
+   * 書き込みの道具は、範囲の決まりによらず拒否する。
+   */
+  readonly writeDenied?: readonly string[] | undefined;
 }
 
 /** 区切りの語が `cso child bind|report …` か（`csoCommand` と一致する先頭・`child`・`bind|report`）。 */
@@ -483,6 +488,14 @@ export async function decideToolUse(
       (r) => r.kind === "hookSettings" && under(target, r.path),
     );
     if (deniedRoot !== undefined) return denyProtected(deniedRoot.kind);
+    if (protectedPaths?.writeDenied?.some((w) => under(target, w)) === true) {
+      return {
+        allow: false,
+        violation: { reason: "forbiddenLocation", subject: "protected:hookSettings" },
+        reason:
+          "作業範囲の外の操作です（見張り（フック）の設定の置き場には、書き込めません。読むことはできます）。",
+      };
+    }
     const d = evaluateScope(scope, cwd, { kind: "write", path: target });
     if (d.allowed) return ALLOW;
     // 判定は今の範囲の決まりのまま。ただし、対象が禁じる場所の中なら、件名（記録と文面）には種類だけを書く（実パスを出さない）

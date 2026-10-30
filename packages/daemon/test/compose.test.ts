@@ -164,7 +164,11 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
   });
 
   it("ポートのファイルが使えなければ、照合などの記録を何も書く前に止める（portFileInvalid）", async () => {
-    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const r = rig({
+      childRuntime: "desktop",
+      csoCommand: [process.execPath, "/opt/cso/bin.js"],
+      desktopRequireVerifiedHooks: false,
+    });
     const d = await boot(r);
     const spawned = await call(d.url, d.rootToken, "node.spawn", {
       parentId: "root",
@@ -196,7 +200,11 @@ describe("createDaemon（組み立てて、窓口まで起動する）", () => {
     const bad = () => {
       throw new Error("書けない");
     };
-    const desk = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const desk = rig({
+      childRuntime: "desktop",
+      csoCommand: [process.execPath, "/opt/cso/bin.js"],
+      desktopRequireVerifiedHooks: false,
+    });
     const madeD = createDaemon(desk.config, { ...desk.deps, savePort: bad });
     if (!madeD.ok) throw new Error(madeD.error.code);
     cleanups.push(() => madeD.value.stop());
@@ -1731,7 +1739,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
   };
 
   it("フックのゲートが有効（既定）なら、子は起動しない（起動の失敗）", async () => {
-    const r = rig({ childRuntime: "desktop" });
+    const r = rig({ childRuntime: "desktop", csoCommand: [process.execPath, "/opt/cso/bin.js"] });
     const d = await boot(r);
     const res = await call(d.url, d.rootToken, "node.spawn", {
       parentId: "root",
@@ -1746,7 +1754,11 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
   });
 
   it("再起動のあとの依頼（C2-4）: 1 件 → 再起動しても 1 件 → 子を宣言すると解決済み → 新しい子がいれば、次の再起動で新しい依頼", async () => {
-    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const r = rig({
+      childRuntime: "desktop",
+      csoCommand: [process.execPath, "/opt/cso/bin.js"],
+      desktopRequireVerifiedHooks: false,
+    });
     const open = (d: { daemon: Daemon }) =>
       d.daemon.log
         .state()
@@ -2088,6 +2100,15 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       expect(w.code, f).toBe(2);
       expect(w.stderr).toContain("見張り（フック）の設定");
     }
+    // 作業ツリーの .claude/ は、読むことはできる（commands など）
+    const read = await runHook(hookLine, {
+      hook_event_name: "PreToolUse",
+      session_id: "desktop-session-1",
+      tool_name: "Read",
+      tool_input: { file_path: join(b.worktree, ".claude", "settings.json") },
+      cwd: b.worktree,
+    });
+    expect(read.code, read.stderr).toBe(0);
     const state = d.daemon.log.state();
     expect(state.inbox.some((x) => x.kind === "violation" && x.nodeId === nodeId)).toBe(true);
     // 子がスクリプトなどで書き換えた形
@@ -2347,7 +2368,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(existsSync(join(b.drawer, "node"))).toBe(true);
   });
 
-  it("csoCommand がなければ、node.bindCode は csoCommandMissing", async () => {
+  it("csoCommand がなければ、Desktop の木では spawn を失敗にする（csoCommandMissing。見張りのない子を作らない）", async () => {
     const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
     const d = await boot(r);
     const spawned = await call(d.url, d.rootToken, "node.spawn", {
@@ -2355,13 +2376,16 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       role: "implement",
       ...brief,
     });
-    const nodeId = spawned.json.value.nodeId as string;
-    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
-    expect(bc.json.error?.code).toBe("csoCommandMissing");
+    expect(spawned.json.ok).toBe(false);
+    expect(r.logs.join("\n")).toContain("csoCommandMissing");
   });
 
   it("画面の表示モデルで、Desktop の子は stopDelegated（停止の宣言を出せる）", async () => {
-    const r = rig({ childRuntime: "desktop", desktopRequireVerifiedHooks: false });
+    const r = rig({
+      childRuntime: "desktop",
+      csoCommand: [process.execPath, "/opt/cso/bin.js"],
+      desktopRequireVerifiedHooks: false,
+    });
     const d = await boot(r);
     const spawned = await call(d.url, d.rootToken, "node.spawn", {
       parentId: "root",

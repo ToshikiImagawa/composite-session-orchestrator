@@ -897,8 +897,14 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     worktreePath: string,
   ): Promise<Result<undefined, Failure>> => {
     const url = running?.url;
-    // csoCommand がなければ、見張りの設定を作れない（node.bindCode が csoCommandMissing で断る。フックの判定も、設定がないので拒否）
-    if (config.csoCommand === undefined) return { ok: true, value: undefined };
+    // csoCommand がなければ、見張りの設定を作れないので、子を作らない（見張りのない子を作らない）
+    if (config.csoCommand === undefined) {
+      return fail(
+        "csoCommandMissing",
+        "daemon の設定に csoCommand がない（Desktop の子の見張りの設定を作れないので、子を作らない）",
+        "daemon の設定に csoCommand を書いて、daemon を起動し直す",
+      );
+    }
     if (url === undefined) {
       return fail("unavailable", "窓口がまだ待ち受けていない", "少し待って、もう一度試す");
     }
@@ -1032,8 +1038,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       {
         roots: [
           ...protectedRoots,
-          // 見張りの設定（読み書きとも禁じる。T21-cs）: 作業ツリーの .claude/、利用者の設定、git の共通ディレクトリの info/exclude
-          { path: join(settings.worktree, ".claude"), kind: "hookSettings" as const },
+          // 見張りの設定（読み書きとも禁じる。T21-cs）: 利用者の設定、git の共通ディレクトリの info/exclude。作業ツリーの .claude/ は
+          // 書き込みだけを禁じる（下の writeDenied。commands などを読めるように）
           ...(homeDir === undefined
             ? []
             : ["settings.json", "settings.local.json"].map((f) => ({
@@ -1046,6 +1052,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         ],
         allow: [],
         home: (deps.parentEnv ?? process.env).HOME,
+        writeDenied: [join(settings.worktree, ".claude")],
         drawer,
         ...(config.csoCommand === undefined ? {} : { csoCommand: config.csoCommand }),
       },

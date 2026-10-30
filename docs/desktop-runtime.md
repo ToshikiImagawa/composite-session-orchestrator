@@ -126,10 +126,10 @@ Desktop の実機確認（Spike 01 の項目 1〜7）は、一部済んだ（親
 
 ### 見張り（FR_014 のフック）を Desktop の子に効かせる（T21-ch・T21-cs。(a)）
 
-- **置く**: spawn のとき（起動を受け付ける前）に、daemon が自分で作った作業ツリーに `.claude/settings.json`（見張りの設定）を置き、git の共通ディレクトリの `info/exclude` に `/.claude/settings.json` を足す（コミットに混ざらない）。違う中身の設定がすでにあれば、置かずに spawn を失敗にする（`hookSettingsExists`）。daemon が前に置いたものと同じ中身なら（再開など）、そのまま使う。`csoCommand` がなければ置かない（`node.bindCode` が `csoCommandMissing` で断る）。
+- **置く**: spawn のとき（起動を受け付ける前）に、daemon が自分で作った作業ツリーに `.claude/settings.json`（見張りの設定）を置き、git の共通ディレクトリの `info/exclude` に `/.claude/settings.json` を足す（コミットに混ざらない）。違う中身の設定がすでにあれば、置かずに spawn を失敗にする（`hookSettingsExists`）。daemon が前に置いたものと同じ中身なら（再開など）、そのまま使う。`csoCommand` がなければ、設定を置けないので、spawn を失敗にする（`csoCommandMissing`。見張りのない子を作らない）。
 - **設定の中身**: PreToolUse は `<csoCommand> child hook --dir <引き出し> --url <窓口> || exit 2`、PostToolUse・Stop は `… || true`。timeout は 90 秒（cso の内側の時間〔身元の確認と、送る 8 秒 × 再試行〕より十分長い）。Claude Code は、フックが**終了コード 2 のときだけ**拒否するので、cso が起動できない・例外で落ちたときも、`|| exit 2` で拒否にする。設定には、パスと URL だけを書く（トークンは書かない）。
 - **始め方**: 人は、`node.bindCode` の文面の「0.」にある作業ツリーを Desktop で開き、**「ローカル」で新しいセッションを始める**。Claude Code は、フックの設定をセッションの開始時に読むので、最初の道具の呼び出しから見張りが効く。**spawn_task のチップから始めた子は、Desktop が別の作業ツリーを作るので、見張りが効かず、紐付けも報告も `hooksNotActive` で断られる（今は使えない）。**
-- **塞ぐ**: 見張りの設定は、読み書きとも禁じる場所にする（作業ツリーの `.claude/` の全体〔settings.local.json の `disableAllHooks` を含む〕、利用者の設定 `~/.claude/settings.json`・`settings.local.json`、git の共通ディレクトリの `info/exclude`）。Write・Edit などの書き込みは、範囲の決まりによらず拒否する。
+- **塞ぐ**: 作業ツリーの `.claude/` の全体（settings.local.json の `disableAllHooks` を含む）は、**書き込みだけ**を禁じる（読み取りは許す。commands などを読めるように。settings.json に秘密は入っていない）。利用者の設定 `~/.claude/settings.json`・`settings.local.json` と、git の共通ディレクトリの `info/exclude` は、読み書きとも禁じる。Write・Edit などの書き込みは、範囲の決まりによらず拒否する。
 - **見つける**: フックの呼び出しのたびに、作業ツリーの `.claude/settings.json` の中身のハッシュを、置いたときと比べる。違えば（スクリプトなどで書き換えた）、そのノードの以後のフックをすべて拒否し、受信箱に 1 度だけ知らせる（子を止めるかどうかは、人が決める）。
 - 範囲外の操作は、CLI の子と同じく `scope.violation` として記録し、受信箱に出す（同じ違反につき 1 度、ノードごとに 20 件まで）。
 - **Desktop の木では、`cso hook-env`（`node.hookToken`）は使えない**（`desktopHookEnvNotAllowed`。子の引き出しの見張りのトークンを無効にしてしまうため。見張りのトークンは、`node.bindCode` の出し直しで新しくなる）。
