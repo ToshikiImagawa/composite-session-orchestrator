@@ -168,17 +168,29 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
   const newRequestId = (): string =>
     `mcp-${Date.now().toString(36)}-${(counter++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-  /** 1 回の呼び出し。`transport`: 応答を受け取れなかった（接続の失敗・タイムアウト）。操作が実行されたかは分からない。 */
+  /**
+   * 1 回の呼び出し。`transport`: 応答を受け取れなかった（接続の失敗・タイムアウト）。操作が実行されたかは分からない。
+   * `notSent`: 身元の確認に失敗して、送らなかった（この回は実行されていない。前の回の結果は、呼び出し元が判断する）。
+   * `budgetMs`: 身元の確認で、daemon の再起動を待つ時間の上限（呼び出し元の締め切りの残り）。
+   */
   async function call(
     path: string,
     init: RequestInit,
     timeout: number,
-  ): Promise<{ result: Result<unknown>; transport: boolean; retrySec?: number }> {
+    budgetMs?: number,
+  ): Promise<{
+    result: Result<unknown>;
+    transport: boolean;
+    retrySec?: number;
+    notSent?: boolean;
+  }> {
     let expectedDaemonId: string | undefined;
     if (opts.verifier !== undefined) {
-      // トークンを送る前に、毎回、相手が本物の daemon か確かめる。失敗なら、トークンを送らない（操作は実行されていない）。
-      const v = await opts.verifier.verify();
-      if (!v.ok) return { result: { ok: false, error: v.failure }, transport: false };
+      // トークンを送る前に、毎回、相手が本物の daemon か確かめる。失敗なら、トークンを送らない（この回は実行されていない）。
+      const v = await opts.verifier.verify(budgetMs === undefined ? undefined : { budgetMs });
+      if (!v.ok) {
+        return { result: { ok: false, error: v.failure }, transport: false, notSent: true };
+      }
       expectedDaemonId = v.daemonId;
     }
     const controller = new AbortController();
@@ -324,7 +336,13 @@ export function createRelay(opts: RelayOptions): Result<Relay> {
       let last: Result<unknown> | undefined;
       let lastDefinite = false;
       for (let sends = 0; sends < 3; sends++) {
-        const r = await call("/v1/request", init, timeout);
+        // 身元の確認の待ちも、締め切りの中に含める。
+        const r = await call("/v1/request", init, timeout, deadline - (nowMs() - startedAt));
+        if (r.notSent && sends > 0) {
+          // 再送の前の確認で失敗した（この回は送っていない）。この回の失敗ではなく、前の回の結果で判断する:
+          // 前の回が応答なしなら、実行されたかは分からない（結果不明）。429・409 なら、その失敗を返す。
+          break;
+        }
         last = r.result;
         lastDefinite = !r.transport;
         if (r.transport) {

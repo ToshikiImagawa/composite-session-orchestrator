@@ -2825,8 +2825,14 @@ describe("cso（cli の実行ファイル）で、実際の daemon を呼ぶ（T
     expect(stdout + stderr).not.toContain(d.humanToken);
     // 記録に残る（外した者は人間）
     expect(r.logs.join("\n")).not.toContain(d.humanToken);
-    // 身元の秘密が違えば（偽の daemon）、トークンを送らずに失敗する
-    writeFileSync(configPath, JSON.stringify({ stateDir: join(r.config.stateDir, "..") }));
+    // 身元の秘密が違えば（偽の daemon）、トークンを送らずに失敗する（体裁の正しいファイルで proof が合わない。待たない）
+    const otherState = join(r.config.stateDir, "..");
+    writeFileSync(
+      join(otherState, "daemon-identity"),
+      `${JSON.stringify({ version: 1, daemonId: "0".repeat(32), secret: "1".repeat(64) })}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(configPath, JSON.stringify({ stateDir: otherState }));
     const bad = await promisify(execFile)(process.execPath, [BIN, "hook-unbind", nodeId], {
       encoding: "utf8",
       env,

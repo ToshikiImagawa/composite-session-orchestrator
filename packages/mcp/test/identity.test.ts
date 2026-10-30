@@ -13,6 +13,7 @@ import {
   parseIdentityFile,
   proofMatches,
   proofOf,
+  RESTART_BUDGET_MS,
   readIdentityFileSecure,
 } from "../src/identity.js";
 import { createRelay } from "../src/relay.js";
@@ -216,7 +217,7 @@ describe("createIdentityVerifier", () => {
   });
 
   it.each([
-    ["ファイルが読めない", new Error("ENOENT")],
+    ["ファイルが読めない（ENOENT 以外）", new Error("EIO")],
     ["形が違う（version 2）", fileText({ version: 2 })],
   ])(
     "秘密のファイルが使えない（%s）: 身元の失敗。daemon へ呼ばず、読み直しは 1 度",
@@ -239,10 +240,10 @@ describe("createIdentityVerifier", () => {
     expect(r.calls).toHaveLength(0);
   });
 
-  it("接続できない・タイムアウト・503 は通常の失敗（やり直さない）", async () => {
+  it("待たない指定のとき、接続できない・タイムアウト・503 は通常の失敗（やり直さない）", async () => {
     const a = rig();
     a.replies.push(new Error("ECONNREFUSED"));
-    const ra = await a.v.verify();
+    const ra = await a.v.verify({ waitForRestart: false });
     expect(!ra.ok && ra.kind).toBe("transient");
     expect(!ra.ok && ra.failure.code).toBe("daemon_unreachable");
     expect(a.calls).toHaveLength(1);
@@ -263,10 +264,116 @@ describe("createIdentityVerifier", () => {
 
     const u = rig();
     u.replies.push(new Response("", { status: 503 }));
-    const ru = await u.v.verify();
+    const ru = await u.v.verify({ waitForRestart: false });
     expect(!ru.ok && ru.kind).toBe("transient");
     expect(!ru.ok && ru.failure.code).toBe("daemon_unreachable");
     expect(u.calls).toHaveLength(1);
+  });
+
+  describe("daemon の再起動の途中（要求の中で待ってかけ直す）", () => {
+    const enoent = () => Object.assign(new Error("no such file"), { code: "ENOENT" });
+    const fakeClock = () => {
+      let t = 0;
+      return {
+        now: () => t,
+        sleep: async (ms: number) => {
+          t += ms;
+        },
+        get t() {
+          return t;
+        },
+      };
+    };
+
+    it("ENOENT のあと 2 回目で成功: ファイルを読み直し、新しい nonce で確かめる。記録に秘密・ID・パスを出さない", async () => {
+      const logs: unknown[] = [];
+      const r = rig({ restartJitter: () => 100, log: (e) => logs.push(e) });
+      r.files.length = 0;
+      r.files.push(enoent(), fileText());
+      r.replies.push(r.genuine());
+      expect(await r.v.verify()).toEqual({ ok: true, daemonId: DAEMON_ID });
+      expect(r.sleeps).toEqual([600]);
+      expect(r.calls).toHaveLength(1);
+      expect(logs).toEqual([
+        { event: "daemonRetry", attempt: 1, reason: "identityFileMissing", waitMs: 600 },
+        { event: "daemonRecovered", attempts: 2 },
+      ]);
+      const text = JSON.stringify(logs);
+      for (const s of [DAEMON_ID, SECRET, "/s/daemon-identity"]) expect(text).not.toContain(s);
+    });
+
+    it("接続の拒否・503 も待ってかけ直す（毎回、新しい nonce）", async () => {
+      const logs: { reason?: string }[] = [];
+      const r = rig({ restartJitter: () => 0, log: (e) => logs.push(e as { reason?: string }) });
+      r.replies.push(new Error("ECONNREFUSED"), new Response("", { status: 503 }), r.genuine());
+      expect(await r.v.verify()).toEqual({ ok: true, daemonId: DAEMON_ID });
+      expect(r.sleeps).toEqual([500, 1000]);
+      expect(logs.map((l) => l.reason)).toEqual(["refused", "unavailable", undefined]);
+      const nonces = r.calls.map((c) => new URL(c.url).searchParams.get("nonce"));
+      expect(new Set(nonces).size).toBe(3);
+    });
+
+    it("尽きたら daemon_unreachable。待った合計は 8 秒以内（偽の時計）。案内は cso-mcp の起動し直しを求めない", async () => {
+      const clock = fakeClock();
+      const logs: { event: string }[] = [];
+      const r = rig({
+        restartJitter: () => 250,
+        now: clock.now,
+        sleep: clock.sleep,
+        log: (e) => logs.push(e),
+      });
+      r.files.length = 0;
+      r.files.push(enoent());
+      const res = await r.v.verify();
+      expect(res.ok).toBe(false);
+      expect(!res.ok && res.kind).toBe("transient");
+      expect(!res.ok && res.failure.code).toBe("daemon_unreachable");
+      expect(!res.ok && res.failure.nextActions.join(" ")).toContain("cso-mcp の起動し直しは不要");
+      expect(clock.t).toBeLessThanOrEqual(RESTART_BUDGET_MS);
+      expect(clock.t).toBe(750 + 1250 + 2250 + 3750);
+      expect(r.calls).toHaveLength(0);
+      expect(logs.at(-1)).toEqual({ event: "daemonGaveUp" });
+    });
+
+    it("予算は、待ちの合計ではなく、確認を始めてからの経過時間で測る（確認そのものの時間も含む）。budgetMs で狭められる", async () => {
+      let t = 0;
+      const r = rig({
+        restartJitter: () => 0,
+        now: () => t,
+        sleep: async (ms) => {
+          t += ms;
+        },
+        fetch: (async () => {
+          t += 3_000; // 1 回の確認に 3 秒かかる（接続の拒否が遅い）
+          throw new Error("ECONNREFUSED");
+        }) as unknown as typeof fetch,
+      });
+      const res = await r.v.verify();
+      expect(!res.ok && res.failure.code).toBe("daemon_unreachable");
+      expect(t).toBeLessThanOrEqual(RESTART_BUDGET_MS + 3_000); // 最後の確認の 1 回分だけ超えうる
+      t = 0;
+      const narrow = await r.v.verify({ budgetMs: 1_000 });
+      expect(!narrow.ok && narrow.failure.code).toBe("daemon_unreachable");
+      expect(t).toBe(3_000); // 1 回目で予算を使い切り、待たない
+    });
+
+    it("体裁の正しいファイルで proof が合わないときは、待たずに daemon_identity_failed", async () => {
+      const r = rig();
+      r.replies.push(r.genuine("aa".repeat(32)), r.genuine("aa".repeat(32)));
+      const res = await r.v.verify();
+      expect(!res.ok && res.failure.code).toBe("daemon_identity_failed");
+      expect(r.sleeps).toEqual([]);
+      expect(r.calls).toHaveLength(2);
+    });
+
+    it("ENOENT 以外の読めない理由（権限など）は、身元の失敗（待たない）", async () => {
+      const r = rig();
+      r.files.length = 0;
+      r.files.push(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+      const res = await r.v.verify();
+      expect(!res.ok && res.failure.code).toBe("daemon_identity_failed");
+      expect(r.sleeps).toEqual([]);
+    });
   });
 
   it("429: Retry-After（上限 10 秒）+ ジッターを待って 1 度だけやり直す。2 度目も 429 なら rate_limited", async () => {
@@ -506,5 +613,175 @@ describe("readIdentityFileSecure（O_NOFOLLOW・fstat。daemon の assertSecureF
     });
     const res = await v.verify();
     expect(!res.ok && res.failure.code).toBe("daemon_identity_failed");
+  });
+});
+
+describe("relay と再起動の待ち（本物の検証器）", () => {
+  const TOKEN = "secret-token-0123456789";
+  const mk = (identityReplies: (Error | "genuine")[], tokenReplies: (Error | Response)[]) => {
+    const sleeps: number[] = [];
+    const files: (string | Error)[] = [];
+    const tokenSent: string[] = [];
+    let identityCalls = 0;
+    const fetchImpl = (async (u: string, init?: RequestInit) => {
+      const url = new URL(u);
+      if (url.pathname === "/v1/identity") {
+        identityCalls++;
+        const r = identityReplies.shift() ?? "genuine";
+        if (r instanceof Error) throw r;
+        const nonce = url.searchParams.get("nonce") ?? "";
+        const proof = proofOf({ daemonId: DAEMON_ID, secret: SECRET }, `127.0.0.1:${PORT}`, nonce);
+        return Response.json({ ok: true, value: { daemonId: DAEMON_ID, proof } });
+      }
+      const auth = new Headers(init?.headers).get("authorization") ?? "";
+      if (auth.includes(TOKEN)) tokenSent.push(url.pathname);
+      const r = tokenReplies.shift();
+      if (r === undefined) throw new Error("予定外の呼び出し");
+      if (r instanceof Error) throw r;
+      return r;
+    }) as unknown as typeof fetch;
+    const verifier = createIdentityVerifier({
+      daemonUrl: URL1,
+      identityPath: "/s/daemon-identity",
+      fetch: fetchImpl,
+      readFile: () => {
+        const f = files.shift() ?? fileText();
+        if (f instanceof Error) throw f;
+        return f;
+      },
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      restartJitter: () => 0,
+    });
+    const relay = createRelay({
+      daemonUrl: URL1,
+      token: TOKEN,
+      fetch: fetchImpl,
+      verifier,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    if (!relay.ok) throw new Error("relay");
+    return { relay: relay.value, sleeps, files, tokenSent, identityCalls: () => identityCalls };
+  };
+  const whoamiOk = () =>
+    Response.json(
+      { ok: true, value: { role: "human" } },
+      { headers: { "x-cso-daemon-id": DAEMON_ID } },
+    );
+
+  it("ENOENT のあと 2 回目で成功: トークンを送るのは、成功の後の 1 回だけ", async () => {
+    const m = mk([], [whoamiOk()]);
+    m.files.push(Object.assign(new Error("x"), { code: "ENOENT" }));
+    const r = await m.relay.whoami();
+    expect(r).toEqual({ ok: true, value: { role: "human" } });
+    expect(m.tokenSent).toEqual(["/v1/whoami"]);
+    expect(m.sleeps).toEqual([500]);
+    expect(m.identityCalls()).toBe(1);
+  });
+
+  it("401 はやり直さない（身元の確認は 1 回、トークンつきも 1 回、待ちなし）", async () => {
+    const m = mk(
+      [],
+      [
+        Response.json(
+          { ok: false, error: { code: "unauthenticated", cause: "c", nextActions: ["n"] } },
+          { status: 401, headers: { "x-cso-daemon-id": DAEMON_ID } },
+        ),
+      ],
+    );
+    const r = await m.relay.whoami();
+    expect(!r.ok && r.error.code).toBe("unauthenticated");
+    expect(m.tokenSent).toHaveLength(1);
+    expect(m.identityCalls()).toBe(1);
+    expect(m.sleeps).toEqual([]);
+  });
+
+  it("送ったあとの失敗（接続の失敗）は、再起動の待ちでかけ直さない", async () => {
+    const m = mk([], [new Error("ECONNRESET")]);
+    const r = await m.relay.whoami();
+    expect(r.ok).toBe(false);
+    expect(m.tokenSent).toEqual(["/v1/whoami"]);
+    expect(m.sleeps).toEqual([]);
+  });
+
+  it("x-cso-daemon-id の不一致は、やり直さずに daemon_identity_failed", async () => {
+    const m = mk(
+      [],
+      [
+        Response.json(
+          { ok: true, value: { role: "human" } },
+          { headers: { "x-cso-daemon-id": "ff".repeat(16) } },
+        ),
+      ],
+    );
+    const r = await m.relay.whoami();
+    expect(!r.ok && r.error.code).toBe("daemon_identity_failed");
+    expect(m.tokenSent).toHaveLength(1);
+    expect(m.sleeps).toEqual([]);
+  });
+});
+
+describe("relay の再送と身元の確認", () => {
+  it("1 回目は送ったが応答なし、再送の前の確認が尽きた: daemon_result_unknown（「送っていない」にしない）", async () => {
+    let verifies = 0;
+    const budgets: (number | undefined)[] = [];
+    const relay = createRelay({
+      daemonUrl: URL1,
+      token: "secret-token-0123456789",
+      fetch: (async () => {
+        throw new Error("ECONNRESET");
+      }) as unknown as typeof fetch,
+      verifier: {
+        verify: async (o) => {
+          budgets.push(o?.budgetMs);
+          return verifies++ === 0
+            ? { ok: true, daemonId: DAEMON_ID }
+            : {
+                ok: false,
+                kind: "transient",
+                failure: { code: "daemon_unreachable", cause: "c", nextActions: ["n"] },
+              };
+        },
+      },
+    });
+    if (!relay.ok) throw new Error("relay");
+    const r = await relay.value.request("tree.list", {});
+    expect(!r.ok && r.error.code).toBe("daemon_result_unknown");
+    expect(verifies).toBe(2);
+    // 確認には、締め切りの残りを渡す
+    expect(budgets.every((b) => typeof b === "number" && b > 0)).toBe(true);
+  });
+});
+
+describe("relay の再送と身元の確認（429）", () => {
+  it("429 のあと、再送の前の確認が尽きた: 前の 429（rate_limited）を返す", async () => {
+    let verifies = 0;
+    const relay = createRelay({
+      daemonUrl: URL1,
+      token: "secret-token-0123456789",
+      fetch: (async () =>
+        new Response("", {
+          status: 429,
+          headers: { "retry-after": "1", "x-cso-daemon-id": DAEMON_ID },
+        })) as unknown as typeof fetch,
+      sleep: async () => {},
+      verifier: {
+        verify: async () =>
+          verifies++ === 0
+            ? { ok: true, daemonId: DAEMON_ID }
+            : {
+                ok: false,
+                kind: "transient",
+                failure: { code: "daemon_unreachable", cause: "c", nextActions: ["n"] },
+              },
+      },
+    });
+    if (!relay.ok) throw new Error("relay");
+    const r = await relay.value.request("tree.list", {});
+    expect(!r.ok && r.error.code).toBe("rate_limited");
+    expect(verifies).toBe(2);
   });
 });

@@ -107,6 +107,7 @@ describe("cso（bin。T22-cli）", () => {
         if (p === "/x/config.json") return JSON.stringify({ stateDir: "/x/state" });
         throw new Error("no file");
       },
+      sleep: async () => {},
     });
     expect(r.exitCode).toBe(1);
     expect(seen.some((s) => s.headers.authorization !== undefined)).toBe(false);

@@ -217,6 +217,8 @@ export async function main(
           identityPath: args.value.identityPath,
           ...(deps.fetch ? { fetch: deps.fetch } : {}),
           ...(deps.readIdentityFile ? { readFile: deps.readIdentityFile } : {}),
+          ...(deps.sleep ? { sleep: deps.sleep } : {}),
+          log: (e) => io.stderr(`${JSON.stringify(e)}\n`),
         });
   const identity: IdentityMode =
     verifier === undefined ? { kind: "unverified" } : { kind: "verified", verifier };
@@ -259,7 +261,8 @@ export async function main(
     let transientRetries = 0;
     let identityRetries = 0;
     for (;;) {
-      const v = await verifier.verify();
+      // 起動時は、自前の待ち（下）を使う（要求の中の待ちは使わない）。
+      const v = await verifier.verify({ waitForRestart: false });
       if (v.ok) break;
       io.stderr(
         `${JSON.stringify({ event: "identityCheckFailed", code: v.failure.code, at: new Date().toISOString() })}\n`,
