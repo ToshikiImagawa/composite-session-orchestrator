@@ -11,7 +11,7 @@
 
 ### 1. daemon・cso-mcp・cso を入れる
 
-Node 22 以上と pnpm 10.28.0 が要ります。plugin の取得には、`gh auth login` 済みであること（comcreate のリポジトリを読める権限）が前提です。
+Node 22 以上と pnpm 10.28.0 が要ります。
 
 ```sh
 corepack enable    # pnpm 10.28.0（packageManager で固定）を使う

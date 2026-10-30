@@ -27,13 +27,12 @@ plugin は、社内マーケットプレイス（`comcreate/comcreate-marketplac
     "source": "archive",
     "url": "https://api.github.com/repos/comcreate/composite-session-orchestrator/releases/assets/<asset の ID>",
     "sha256": "<zip の sha256>"
-  },
-  "headersHelper": "printf '{\"Authorization\":\"Bearer %s\",\"Accept\":\"application/octet-stream\"}' \"$(gh auth token --hostname github.com)\""
+  }
 }
 ```
 
-- `source` の中は `source`・`url`・`sha256` だけ。`headersHelper` は項目の最上位（`source` と同じ階層）に置く（qiita-mcp と同じ値）。
-- リポジトリは private で使う前提なので、asset の取得に認証が要る。使う人は `gh auth login` 済み（comcreate を読める権限）であること。
+- `source` の中は `source`・`url`・`sha256` だけ。
+- リポジトリは public なので、asset の取得に認証（`headersHelper`）は要らない。
 
 ## 最初の 1 回（手で出す）
 
@@ -59,6 +58,6 @@ plugin は、社内マーケットプレイス（`comcreate/comcreate-marketplac
 2. App を `comcreate/comcreate-marketplace` にだけインストールする。
 3. App の秘密鍵を作り、このリポジトリの Settings → Secrets and variables → Actions に、上の 2 つを登録する。
 
-ジョブは、marketplace.json の `name` が `composite-session-orchestrator` の項目の `source`（`source`・`url`・`sha256`）と `version` を書き換え、ブランチ `release/composite-session-orchestrator-<版>` から `main` へ、題 `[update] composite-session-orchestrator <版> を marketplace.json に反映` の draft の PR を出します（本文に Release の URL）。**項目がまだないとき・version がすでに同じときは何もしません**。`headersHelper` などほかのキーは変えません。
+ジョブは、marketplace.json の `name` が `composite-session-orchestrator` の項目の `source`（`source`・`url`・`sha256`）と `version` を書き換え、ブランチ `release/composite-session-orchestrator-<版>` から `main` へ、題 `[update] composite-session-orchestrator <版> を marketplace.json に反映` の draft の PR を出します（本文に Release の URL）。**項目がまだないとき・version がすでに同じときは何もしません**。ほかのキーは変えません。
 
 タグとの照合: `release` のジョブは、タグと plugin.json・ルートと `packages/*` の `package.json` の version が全部同じでなければ失敗します。zip の中身は許可リスト（plugin.json・.mcp.json・hooks・skills・commands・agents の決まったファイル）と比べ、ほかのファイル（`.env`・`node_modules` など）があれば失敗します。同じタグで再実行すると、Release の asset を付け直します（`--clobber`）。
