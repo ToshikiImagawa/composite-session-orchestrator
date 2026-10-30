@@ -5,8 +5,6 @@
 
 版は 0.1.0-beta.1（ベータ）。変更は [`CHANGELOG.md`](CHANGELOG.md)。要求は [`.sdd/requirement/composite-session-orchestrator.md`](.sdd/requirement/composite-session-orchestrator.md) を参照。
 
-![画面（ダーク）](docs/images/ui-dark.png)
-
 ## はじめかた
 
 社内の人向けの手順です。daemon・`cso-mcp`・`cso` は、plugin とは**別に**入れます（plugin には入っていません）。
