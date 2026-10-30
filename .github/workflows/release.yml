@@ -1,0 +1,157 @@
+name: Release
+
+# タグ（v<plugin.json の version>）を push したら、plugin/ の zip を Release に付け、sha256 を出す。
+# marketplace（comcreate/comcreate-marketplace）への PR は、GitHub App の secrets があるときだけ出す（docs/release.md）。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      asset_url: ${{ steps.upload.outputs.asset_url }}
+      release_url: ${{ steps.upload.outputs.release_url }}
+      sha256: ${{ steps.zip.outputs.sha256 }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: タグと版（plugin.json・ルートと packages/* の package.json）を照らす
+        id: version
+        run: |
+          version="$(jq -r .version plugin/.claude-plugin/plugin.json)"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::タグ ${GITHUB_REF_NAME} と plugin.json の version ${version} が違います"
+            exit 1
+          fi
+          for f in package.json packages/*/package.json; do
+            v="$(jq -r .version "$f")"
+            if [ "$v" != "${version}" ]; then
+              echo "::error::${f} の version ${v} が ${version} と違います"
+              exit 1
+            fi
+          done
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: plugin/ を zip にし、中身を許可リストと比べる
+        id: zip
+        run: |
+          name="composite-session-orchestrator-${{ steps.version.outputs.version }}.zip"
+          (cd plugin && zip -r -X "../${name}" . -x '*.gitkeep')
+          # 許可するのは、plugin の決まった置き場のファイルだけ（.env・node_modules などを入れない）
+          bad="$(unzip -Z1 "${name}" | grep -v '/$' | grep -Ev '^(\.claude-plugin/plugin\.json|\.mcp\.json|hooks/(hooks\.json|cso-hook\.mjs)|skills/[a-z0-9-]+/SKILL\.md|commands/[a-z0-9-]+\.md|agents/[a-z0-9-]+\.md)$' || true)"
+          if [ -n "${bad}" ]; then
+            echo "::error::zip に許可していないファイルがあります: ${bad}"
+            exit 1
+          fi
+          unzip -l "${name}"
+          sha256="$(sha256sum "${name}" | cut -d' ' -f1)"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+          echo "${sha256}  ${name}" > "${name}.sha256"
+          {
+            echo "### plugin の zip"
+            echo
+            echo "- ファイル: \`${name}\`"
+            echo "- sha256: \`${sha256}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release を作り（あれば、付け直す）、zip を付ける
+        id: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="${{ steps.zip.outputs.name }}"
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${name}" "${name}.sha256" --clobber
+          else
+            prerelease=""
+            case "${{ steps.version.outputs.version }}" in *-*) prerelease="--prerelease" ;; esac
+            gh release create "${GITHUB_REF_NAME}" "${name}" "${name}.sha256" \
+              --title "${GITHUB_REF_NAME}" --notes "sha256: ${{ steps.zip.outputs.sha256 }}" ${prerelease}
+          fi
+          info="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
+          asset_url="$(jq -r --arg n "${name}" '.assets[] | select(.name == $n) | .url' <<< "${info}")"
+          release_url="$(jq -r .html_url <<< "${info}")"
+          echo "asset_url=${asset_url}" >> "$GITHUB_OUTPUT"
+          echo "release_url=${release_url}" >> "$GITHUB_OUTPUT"
+          echo "- asset の API URL: ${asset_url}" >> "$GITHUB_STEP_SUMMARY"
+
+  marketplace:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MARKETPLACE_APP_ID: ${{ secrets.MARKETPLACE_APP_ID }}
+    steps:
+      - name: secrets がなければ飛ばす
+        id: gate
+        run: |
+          if [ -z "${MARKETPLACE_APP_ID}" ]; then
+            echo "MARKETPLACE_APP_ID がないので、marketplace への PR は出しません（docs/release.md）" >> "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: GitHub App のトークンを作る
+        if: steps.gate.outputs.run == 'true'
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.MARKETPLACE_APP_ID }}
+          private-key: ${{ secrets.MARKETPLACE_APP_PRIVATE_KEY }}
+          owner: comcreate
+          repositories: comcreate-marketplace
+
+      - name: marketplace.json を書き換えて PR を出す
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          ASSET_URL: ${{ needs.release.outputs.asset_url }}
+          RELEASE_URL: ${{ needs.release.outputs.release_url }}
+          SHA256: ${{ needs.release.outputs.sha256 }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          gh repo clone comcreate/comcreate-marketplace marketplace -- --depth=1
+          cd marketplace
+          file=.claude-plugin/marketplace.json
+          entry='.plugins[] | select(.name == "composite-session-orchestrator")'
+          if [ -z "$(jq -c "${entry}" "${file}")" ]; then
+            echo "marketplace.json に composite-session-orchestrator の項目がありません（最初の 1 回は手で [add] の PR を出す。docs/release.md）" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          current="$(jq -r "${entry} | .version" "${file}")"
+          if [ "${current}" = "${VERSION}" ]; then
+            echo "marketplace.json の version はすでに ${VERSION} です" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          branch="release/composite-session-orchestrator-${VERSION}"
+          title="[update] composite-session-orchestrator ${VERSION} を marketplace.json に反映"
+          git switch -c "${branch}"
+          jq --arg url "${ASSET_URL}" --arg sha "${SHA256}" --arg ver "${VERSION}" '
+            .plugins |= map(if .name == "composite-session-orchestrator"
+              then .source = {source: "archive", url: $url, sha256: $sha} | .version = $ver
+              else . end)' "${file}" > "${file}.new"
+          mv "${file}.new" "${file}"
+          if [ "$(jq -r "${entry} | .version" "${file}")" != "${VERSION}" ]; then
+            echo "::error::marketplace.json の version を ${VERSION} にできませんでした"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "${title}"
+          git push -u origin "${branch}"
+          gh pr create --draft --base main --title "${title}" \
+            --body "Release: ${RELEASE_URL}（sha256: ${SHA256}）。composite-session-orchestrator の release.yml から出した PR です。"

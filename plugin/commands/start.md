@@ -1,7 +1,9 @@
 ---
 description: daemon と cso-mcp の起動を確かめ、統合ノードとして使えるようにする（起動の手順は、設定ファイルのパスを環境変数で受ける）
-allowed-tools: mcp__node__whoami, mcp__node__tree_list
+allowed-tools: mcp__node__whoami, mcp__plugin_composite-session-orchestrator_node__whoami, mcp__node__tree_list, mcp__plugin_composite-session-orchestrator_node__tree_list
 ---
+
+ツール名の `mcp__node__<名前>` は、plugin から入れたセッションでは `mcp__plugin_composite-session-orchestrator_node__<名前>` として見える（同じツール）。見えているほうの名前で呼ぶ。
 
 composite-session-orchestrator を使えるようにします。リポジトリやファイルの場所は、この指示に埋め込まれていません。次のとおり、環境変数か、人間に尋ねて決めます。
 

@@ -24,7 +24,7 @@ const GOOD_INTEGRATOR = skill("cso-integrator", "統合ノードの手順", [
 const GOOD_CHILD = skill("cso-child", "子ノードの手順", ["whoami", "report_done", "scope_extend"]);
 const GOOD_COMMAND = `---
 description: 状態を見る
-allowed-tools: mcp__node__tree_list
+allowed-tools: mcp__node__tree_list, mcp__plugin_composite-session-orchestrator_node__tree_list
 ---
 \`mcp__node__tree_list\` を呼ぶ。
 `;
@@ -243,4 +243,19 @@ test("NFR_012: skill・command の CLAUDE_PLUGIN_ROOT のあとに .. が続く�
   assert.match(text(cmd("`${CLAUDE_PLUGIN_ROOT}/../secret` を見る")), /NFR_012/);
   // biome-ignore lint/suspicious/noTemplateCurlyInString: 同上
   assert.match(text(cmd("`${CLAUDE_PLUGIN_ROOT}/a/../../x` を見る")), /NFR_012/);
+});
+
+test("ツール名: plugin から入れたときの名前（mcp__plugin_…_node__）も検査し、allowed-tools は両方の名前を対にする", () => {
+  const P = "mcp__plugin_composite-session-orchestrator_node__";
+  const typo = text({ "commands/status.md": `${GOOD_COMMAND}\`${P}tree_lst\`\n` });
+  assert.match(typo, /存在しないツール名 mcp__node__tree_lst/);
+  const cmd = (tools) => ({
+    "commands/x.md": `---\ndescription: d\nallowed-tools: ${tools}\n---\n本文\n`,
+  });
+  assert.match(
+    text(cmd("mcp__node__whoami")),
+    /allowed-tools に mcp__plugin_composite-session-orchestrator_node__whoami/,
+  );
+  assert.match(text(cmd(`${P}whoami`)), /allowed-tools に mcp__node__whoami/);
+  assert.deepEqual(run(cmd(`mcp__node__whoami, ${P}whoami`)), []);
 });

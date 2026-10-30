@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "node": {
+      "type": "http",
+      "url": "${CSO_MCP_URL:-http://127.0.0.1:7777/mcp}",
+      "headers": {
+        "Authorization": "Bearer ${CSO_ROOT_TOKEN}"
+      }
+    }
+  }
+}

@@ -1,10 +1,11 @@
 {
   "name": "composite-session-orchestrator",
-  "description": "統合セッション 1 対 作業セッション n の木構造で Claude セッションを束ねるオーケストレーター",
-  "version": "0.0.0",
-  "license": "MIT",
+  "description": "統合セッション 1 対 作業セッション n の木構造で Claude セッションを束ねるオーケストレーター。統合と子の役割の skill、フック、MCP（node）の設定、起動のコマンドを入れる",
+  "version": "0.1.0-beta.1",
   "author": {
-    "name": "Anthony-dena",
-    "url": "https://github.com/Anthony-dena"
-  }
+    "name": "comcreate"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/comcreate/composite-session-orchestrator",
+  "keywords": ["orchestrator", "multi-session", "composite", "mcp", "worktree"]
 }

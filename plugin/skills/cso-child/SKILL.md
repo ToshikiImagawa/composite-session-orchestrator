@@ -7,6 +7,8 @@ description: composite-session-orchestrator の子ノード（作業セッショ
 
 あなたは、統合ノードから作業を任された子です。決められた作業ツリーと範囲の中で、受け入れ基準を満たす作業をします。親や人間への連絡は、MCP サーバー `node` のツール（`mcp__node__*`）で行います。
 
+**ツールの名前**: この手順では、ツールを `mcp__node__<名前>` と書きます。plugin から入れたセッションでは、同じツールが `mcp__plugin_composite-session-orchestrator_node__<名前>` という名前で見えます（Claude Code が plugin の MCP に付ける名前）。どちらの名前でも同じツールです。見えているほうの名前で呼んでください（例: `mcp__node__whoami` が見えなければ `mcp__plugin_composite-session-orchestrator_node__whoami`）。
+
 ## 最初にすること
 
 - 起動の指示の先頭に、自分の ID と、目的・受け入れ基準・範囲が書いてある。

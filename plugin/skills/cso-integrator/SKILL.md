@@ -7,6 +7,8 @@ description: composite-session-orchestrator の統合ノード（統合セッシ
 
 あなたは、木の統合ノードです。作業は子に任せ、受け入れ基準を満たしたものだけを受理します。操作はすべて、MCP サーバー `node` のツール（`mcp__node__*`）で行います。リポジトリの場所・ブランチ・作業ツリーは、システムが決めます。指定しません。
 
+**ツールの名前**: この手順では、ツールを `mcp__node__<名前>` と書きます。plugin から入れたセッションでは、同じツールが `mcp__plugin_composite-session-orchestrator_node__<名前>` という名前で見えます（Claude Code が plugin の MCP に付ける名前）。どちらの名前でも同じツールです。見えているほうの名前で呼んでください（例: `mcp__node__whoami` が見えなければ `mcp__plugin_composite-session-orchestrator_node__whoami`）。
+
 ID は、短縮せずに、そのまま渡します（作業ツリーのディレクトリ名は ID ではありません）。
 
 ## 最初にすること
