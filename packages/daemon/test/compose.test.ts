@@ -1710,8 +1710,11 @@ describe("子に渡す skill（T22-c）", () => {
     expect(impl?.settingSources).toEqual([]);
   });
 
-  it("T21-cw: CLI の子にも、利用者の設定（~/.claude と CLAUDE_CONFIG_DIR）の読み書きを禁じる", async () => {
-    const home = mkdtempSync(join(tmpdir(), "cso-home-"));
+  it("T21-cw: CLI の子にも、利用者の設定（~/.claude と CLAUDE_CONFIG_DIR）の読み書きを禁じる（HOME がリンクで、.claude がまだなくても）", async () => {
+    // HOME をリンクにし、~/.claude を作らない（macOS の /var → /private/var で、ない場所の実パスがずれた形）
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const home = `${realHome}-link`;
+    symlinkSync(realHome, home);
     const envDir = mkdtempSync(join(tmpdir(), "cso-cfg-"));
     const r = rig();
     r.deps = {
@@ -1730,7 +1733,7 @@ describe("子に渡す skill（T22-c）", () => {
       const out = await pre?.({ toolName: "Read", toolInput: { file_path: f }, cwd: "/" });
       expect(out?.allow, f).toBe(false);
     }
-    for (const x of [home, envDir]) rmSync(x, { recursive: true, force: true });
+    for (const x of [home, realHome, envDir]) rmSync(x, { recursive: true, force: true });
   });
 
   it("childPluginDir がなければ、plugin を渡さず、起動時に一言記録する", async () => {

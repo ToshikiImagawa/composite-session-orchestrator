@@ -442,13 +442,19 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     );
   /** CLI の子にも、利用者の設定ファイルの読み書きを禁じる（T21-cw。実パスは起動時に決める。ないディレクトリはそのまま）。 */
   const userSettingsRoots = userSettingsFiles().map((f) => {
-    let path = f;
-    try {
-      path = join(realpathSync(dirname(f)), basename(f));
-    } catch {
-      // ない（そのまま）
+    // 今ある一番深い祖先を実パスにし、ない部分を足す（~/.claude がまだなくても、HOME がリンクならずれる。macOS の /var）
+    const rest: string[] = [];
+    let head = f;
+    for (;;) {
+      try {
+        return { path: join(realpathSync(head), ...rest), kind: "hookSettings" as const };
+      } catch {
+        const parent = dirname(head);
+        if (parent === head) return { path: f, kind: "hookSettings" as const };
+        rest.unshift(basename(head));
+        head = parent;
+      }
     }
-    return { path, kind: "hookSettings" as const };
   });
 
   // SQLite のファイル（state.db・-wal・-shm）が、他のユーザーから読めないよう、作る間は umask を 077 にする。
