@@ -996,10 +996,9 @@ export function createApiServer(deps: ApiDeps): ApiServer {
           ),
         );
       };
-      // 結ぶのは、許可した最初の呼び出しのときだけ（拒否した呼び出しでは結ばない）
+      // 結ぶのは、許可した最初の PreToolUse のときだけ（拒否した呼び出し・PostToolUse・Stop では結ばない）
       if (!sessions.accepts(principal.nodeId, h.sessionId)) return mismatch();
       if (h.event !== "PreToolUse" || h.toolName === undefined) {
-        if (!sessions.check(principal.nodeId, h.sessionId)) return mismatch();
         counters.count("hook", "allowed");
         return send(res, 200, { ok: true, value: { decision: "allow" } });
       }

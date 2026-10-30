@@ -2331,6 +2331,13 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       cwd: r.config.stateDir,
     });
     expect(outside.code).toBe(2);
+    // ターンの終わりの Stop も、結ぶ理由にしない（受け取るだけ）
+    const stop = await runHook(hookLine, {
+      hook_event_name: "Stop",
+      session_id: "worktree-session",
+      cwd: r.config.stateDir,
+    });
+    expect(stop.code, stop.stderr).toBe(0);
     // 「ローカル」で開き直したセッションは通る（bind まで）
     const b = await bindByInstruction(d, nodeId);
     expect(b.bound.stdout).toBe("bound\n");
