@@ -108,7 +108,7 @@ Desktop の実機確認（Spike 01 の項目 1〜7）は、一部済んだ（親
 
 ### 紐付けの手順（T21-cc。`cso child`。コードは Write でファイルに書く）
 
-1. 親（統合セッション）が `node_spawn` で子を作る。daemon は、記録した時点で、子の引き出し `<D>/<鍵>/` を空にして作り直し（ノード ID の再利用で、前の中身を残さない）、`node`（ノード ID。0600）を書く。
+1. 親（統合セッション）が `node_spawn` で子を作る（応答の値の `nodeId` が、子のノード ID）。daemon は、記録した時点で、子の引き出し `<D>/<鍵>/` を空にして作り直し（ノード ID の再利用で、前の中身を残さない）、`node`（ノード ID。0600）を書く。
 2. 親が `node_bindCode`（`{ nodeId }`）を呼ぶ。daemon は、引き出しを確かめ（なければ作り、`node` を書き直し、残っている `code`・`token`・`url`・`report` を消す。新しい文面で 1 からやり直す）、一度きりの紐付けコード（10 分で失効）を発行して、起動の文面（`instruction`）を返す。**daemon の設定 `csoCommand`（Desktop の子が cso を起動する語。例: `["/usr/local/bin/node", "<cli の dist/bin.js の絶対パス>"]`。node も絶対パスにする）がなければ、`csoCommandMissing` で失敗する。**
 3. 親は、`instruction` を、そのまま Desktop のタスク生成（spawn_task）に渡す。
 4. 子は、最初のメッセージを受けたら、文面のとおりに:
