@@ -335,6 +335,28 @@ describe("createIdentityVerifier", () => {
       expect(logs.at(-1)).toEqual({ event: "daemonGaveUp" });
     });
 
+    it("予算は、待ちの合計ではなく、確認を始めてからの経過時間で測る（確認そのものの時間も含む）。budgetMs で狭められる", async () => {
+      let t = 0;
+      const r = rig({
+        restartJitter: () => 0,
+        now: () => t,
+        sleep: async (ms) => {
+          t += ms;
+        },
+        fetch: (async () => {
+          t += 3_000; // 1 回の確認に 3 秒かかる（接続の拒否が遅い）
+          throw new Error("ECONNREFUSED");
+        }) as unknown as typeof fetch,
+      });
+      const res = await r.v.verify();
+      expect(!res.ok && res.failure.code).toBe("daemon_unreachable");
+      expect(t).toBeLessThanOrEqual(RESTART_BUDGET_MS + 3_000); // 最後の確認の 1 回分だけ超えうる
+      t = 0;
+      const narrow = await r.v.verify({ budgetMs: 1_000 });
+      expect(!narrow.ok && narrow.failure.code).toBe("daemon_unreachable");
+      expect(t).toBe(3_000); // 1 回目で予算を使い切り、待たない
+    });
+
     it("体裁の正しいファイルで proof が合わないときは、待たずに daemon_identity_failed", async () => {
       const r = rig();
       r.replies.push(r.genuine("aa".repeat(32)), r.genuine("aa".repeat(32)));
@@ -699,5 +721,37 @@ describe("relay と再起動の待ち（本物の検証器）", () => {
     expect(!r.ok && r.error.code).toBe("daemon_identity_failed");
     expect(m.tokenSent).toHaveLength(1);
     expect(m.sleeps).toEqual([]);
+  });
+});
+
+describe("relay の再送と身元の確認", () => {
+  it("1 回目は送ったが応答なし、再送の前の確認が尽きた: daemon_result_unknown（「送っていない」にしない）", async () => {
+    let verifies = 0;
+    const budgets: (number | undefined)[] = [];
+    const relay = createRelay({
+      daemonUrl: URL1,
+      token: "secret-token-0123456789",
+      fetch: (async () => {
+        throw new Error("ECONNRESET");
+      }) as unknown as typeof fetch,
+      verifier: {
+        verify: async (o) => {
+          budgets.push(o?.budgetMs);
+          return verifies++ === 0
+            ? { ok: true, daemonId: DAEMON_ID }
+            : {
+                ok: false,
+                kind: "transient",
+                failure: { code: "daemon_unreachable", cause: "c", nextActions: ["n"] },
+              };
+        },
+      },
+    });
+    if (!relay.ok) throw new Error("relay");
+    const r = await relay.value.request("tree.list", {});
+    expect(!r.ok && r.error.code).toBe("daemon_result_unknown");
+    expect(verifies).toBe(2);
+    // 確認には、締め切りの残りを渡す
+    expect(budgets.every((b) => typeof b === "number" && b > 0)).toBe(true);
   });
 });

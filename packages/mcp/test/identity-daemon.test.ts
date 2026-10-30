@@ -357,45 +357,100 @@ describe("cso-mcp（http-server）と身元確認", () => {
 });
 
 describe("daemon の再起動（要求の中で待ってかけ直す）", () => {
-  it("daemon を止めて起動し直す間に whoami を呼ぶと、relay（cso-mcp）を作り直さずに成功する", async () => {
-    const first = await startDaemon();
-    const port = Number(new URL(first.url).port);
-    const path = identityFile();
-    // 人間のトークン（設定のファイルにあり、daemon を起動し直しても変わらない）。
-    const relay = relayFor(first.url, "human-token-human-token-human-token-1234", path);
-    expect((await relay.whoami()).ok).toBe(true);
-
-    // daemon が止まる（秘密のファイルも消える）。
+  const HUMAN = "human-token-human-token-human-token-1234";
+  const ID2 = "ffeeddccbbaa99887766554433221100";
+  const SECRET2 = "cd".repeat(32);
+  /** 資格の倉庫を引き継いで（本物の daemon は、トークンのハッシュをファイルから読み戻す）、別の秘密・daemonId で起動し直す。 */
+  const restart = async (
+    port: number,
+    credentials: ReturnType<typeof createCredentialStore>,
+    path: string,
+  ) => {
     await daemon?.close();
     daemon = undefined;
     rmSync(path);
-    const pending = relay.whoami();
-    await new Promise((r) => setTimeout(r, 700));
-    // 同じポート・同じ秘密で起動し直す（トークンは、本物の daemon と同じく引き継ぐ）。
-    const credentials = createCredentialStore({
-      humanToken: "human-token-human-token-human-token-1234",
-    });
+    return async () => {
+      daemon = createApiServer({
+        credentials,
+        getState: () => state(),
+        handlers: {},
+        identity: () => ({ daemonId: ID2, secret: SECRET2 }),
+      });
+      await daemon.listen(port);
+      identityFile(SECRET2, ID2);
+    };
+  };
+  const boot = async () => {
+    const credentials = createCredentialStore({ humanToken: HUMAN });
     daemon = createApiServer({
       credentials,
       getState: () => state(),
       handlers: {},
       identity: () => ({ daemonId: DAEMON_ID, secret: SECRET }),
     });
-    await daemon.listen(port);
-    identityFile();
+    const { url } = await daemon.listen(0);
+    return {
+      url,
+      port: Number(new URL(url).port),
+      credentials,
+      token: credentials.issueNodeToken("a", "child"),
+    };
+  };
+
+  it("daemon を止めて、別の秘密・daemonId で起動し直す間に whoami を呼ぶと、relay を作り直さずに成功する", async () => {
+    const d = await boot();
+    const path = identityFile();
+    const relay = relayFor(d.url, HUMAN, path);
+    expect((await relay.whoami()).ok).toBe(true);
+    const start = await restart(d.port, d.credentials, path);
+    const pending = relay.whoami();
+    await new Promise((r) => setTimeout(r, 700));
+    await start();
     const r = await pending;
     expect(r.ok && r.value.role).toBe("human");
   }, 15_000);
 
-  it("止まっている間にポートを奪った偽の daemon には、トークンが届かない", async () => {
-    const first = await startDaemon();
-    const port = Number(new URL(first.url).port);
+  it("cso-mcp（createMcpHttpServer）: tools/list → daemon の再起動 → tools/list が、cso-mcp を起動し直さずに成功する", async () => {
+    const d = await boot();
     const path = identityFile();
-    const relay = relayFor(first.url, first.token, path);
+    const verifier = createIdentityVerifier({ daemonUrl: d.url, identityPath: path });
+    const created = createMcpHttpServer({
+      daemonUrl: d.url,
+      identity: { kind: "verified", verifier },
+    });
+    if (!created.ok) throw new Error(created.error.cause);
+    mcp = created.value;
+    const { url } = await mcp.listen(0);
+    const call = () =>
+      fetch(`${url}/mcp`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${d.token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+    const before = await call();
+    expect(before.status).toBe(200);
+    expect(await before.text()).toContain("report_done");
+    const start = await restart(d.port, d.credentials, path);
+    const pending = call();
+    await new Promise((r) => setTimeout(r, 700));
+    await start();
+    const after = await pending;
+    expect(after.status).toBe(200);
+    expect(await after.text()).toContain("report_done");
+  }, 15_000);
+
+  it("止まっている間にポートを奪った偽の daemon には、トークンが届かない", async () => {
+    const d = await boot();
+    const path = identityFile();
+    const relay = relayFor(d.url, d.token, path);
     await daemon?.close();
     daemon = undefined;
     rmSync(path);
-    const attacker = await startAttacker(port, "forged");
+    const attacker = await startAttacker(d.port, "forged");
     const pending = relay.whoami();
     await new Promise((r) => setTimeout(r, 700));
     identityFile(); // 本物の daemon の秘密が戻っても、窓口は偽物のまま

@@ -127,6 +127,8 @@ export type VerifyResult =
 export interface VerifyOptions {
   /** daemon の再起動の途中（ENOENT・接続の拒否・503）を、待ってかけ直すか（既定は true。起動時の確認は、自前の待ちを持つので false）。 */
   readonly waitForRestart?: boolean;
+  /** 待つ時間の上限（ms。既定は `RESTART_BUDGET_MS`。呼び出し元の締め切りの残りを渡す。小さい方を使う）。 */
+  readonly budgetMs?: number;
 }
 
 export interface IdentityVerifier {
@@ -319,7 +321,9 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
       let identityFailures = 0;
       let busyRetries = 0;
       let restartRetries = 0;
-      let waitedMs = 0;
+      // 予算は、待ちの合計ではなく、この確認を始めてからの経過時間で測る（身元の確認そのものの時間も含める）。
+      const budget = Math.min(RESTART_BUDGET_MS, Math.max(0, vopts.budgetMs ?? RESTART_BUDGET_MS));
+      const startedAt = now();
       for (;;) {
         const a = await attempt();
         if (a.kind === "ok") {
@@ -335,7 +339,7 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
           if (!waitForRestart) return { ok: false, kind: "transient", failure: a.failure };
           // daemon の再起動の途中。待って、ファイルを読み直して、新しい nonce で確かめ直す（トークンは、まだ送っていない）。
           const base = RESTART_RETRY_MS[restartRetries];
-          const left = RESTART_BUDGET_MS - waitedMs;
+          const left = budget - (now() - startedAt);
           if (base === undefined || left <= 0) {
             log({ event: "daemonGaveUp" });
             return { ok: false, kind: "transient", failure: daemonDown() };
@@ -346,9 +350,7 @@ export function createIdentityVerifier(opts: IdentityVerifierOptions): IdentityV
           );
           restartRetries++;
           log({ event: "daemonRetry", attempt: restartRetries, reason: a.restart, waitMs: wait });
-          const t0 = now();
           await sleep(wait);
-          waitedMs += Math.max(wait, now() - t0);
           continue;
         }
         if (a.retrySec !== undefined && busyRetries++ < 1) {
