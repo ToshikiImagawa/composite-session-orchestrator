@@ -63,7 +63,7 @@ Desktop の子は、統合セッションが Desktop のタスク生成機能で
 | `send` | `unsupported` | daemon から直接指示を届けない。`node.send`・判断の回答の配送・起こす（wake）・差し戻しは、記録する前に失敗する（または届けない） |
 | `stopGraceful`・`stopImmediate` | `false` | 直接は止めない |
 | `stopDelegated` | `true` | 停止は、受信箱を通じて親に代行を依頼する（停止未完了として記録し、受信箱の `stopIncomplete` の項目に依頼の文面を出す） |
-| `hooks` | `unverified` | Desktop の子にフックが効くかは未確認（Spike 01 の項目 4） |
+| `hooks` | `unverified` | 手動確認 (a) は 2026-10-30 に通った（チェックリストの (a)）。`ok` への変更は別の PR で行う |
 | `sessionId` | `false` | タスク生成の戻り値に、子のセッション識別子がない |
 
 値は `DESKTOP_CAPABILITIES` の 1 か所にある。Spike 01 の項目 1〜7 の確認が済んだら、値を差し替えるだけでよい。
@@ -139,7 +139,7 @@ Desktop の実機確認（Spike 01 の項目 1〜7）は、一部済んだ（親
 - 範囲外の操作は、CLI の子と同じく `scope.violation` として記録し、受信箱に出す（同じ違反につき 1 度、ノードごとに 20 件まで。全ノードを通した上限もある。件名は 200 字までで、トークン・Bearer を含むものは伏せる）。
 - **Desktop の木では、`cso hook-env`（`node.hookToken`）は使えない**（`desktopHookEnvNotAllowed`。子の引き出しの見張りのトークンを無効にしてしまうため。見張りのトークンは、`node.bindCode` の出し直しで新しくなる）。
 - **守れないもの**: 子が起動したプログラム（スクリプト・許可したコマンドの中）の読み書きはフックを通らない（設定の書き換え・消去は、見回りで見つけて書き戻すが、見回りの間〔数秒〕は外れうる）。Bash の語の判定は歯止めで、組み立てたパス・ハードリンクは止められない。フックが終了コード 2 以外で終わったとき（`|| exit 2` の外の失敗、フックの時間切れ）は、Claude Code が許可する。管理の設定（managed settings）・環境変数でフックを切る手段があるかは未確認。同じユーザーなので、daemon を止める・ファイルを直接読む手段は残る。`hooksNotActive` は設定の誤りを見つける検査で、敵対的な子は止められない（守りの本体は、上の「塞ぐ」と「見つける」）。
-- **能力表の hooks**: この版の手動確認（チェックリストの (a)）が通るまでは `unverified` のまま（ゲートで、Desktop の子は起動しない。試すときは `desktopRequireVerifiedHooks: false`）。
+- **能力表の hooks**: `ok` にする条件（チェックリストの (a) の手動確認が通ること）は、2026-10-30 に満たした（手順 4 は代わりの確認、手順 7 は一部。チェックリストの (a) の結果）。コードの値（`desktop-adapter.ts`）は、まだ `unverified` のまま。`ok` に変える変更は、別の PR で行う（ゲートの振る舞いが変わるため）。それまでは、ゲートで Desktop の子は起動しない（試すときは `desktopRequireVerifiedHooks: false`）。
 
 ### 紐付けコードの扱い
 
