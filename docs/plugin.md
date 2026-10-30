@@ -10,6 +10,7 @@
 | skill | `cso-child` | 子ノードの手順。進捗・判断・範囲外の申告・完了の報告・範囲拡張の要求（子ロールの全ツールを説明している） |
 | コマンド | `start` | 接続の確認（`mcp__node__whoami`）と、daemon・`cso-mcp` の起動の案内。設定ファイルのパスと窓口の URL は、環境変数 `CSO_DAEMON_CONFIG`・`CSO_DAEMON_URL` か、人間への質問で決める。トークンは `CSO_ROOT_TOKEN` で渡す |
 | コマンド | `status` | 木と受信箱の読み取りだけの要約 |
+| MCP | `node`（`.mcp.json`） | 統合セッションの MCP サーバー（種類 http）。URL は `${CSO_MCP_URL:-http://127.0.0.1:7777/mcp}`、ヘッダは `Authorization: Bearer ${CSO_ROOT_TOKEN}`（参照だけ。値は書かない）。Claude Code は、ツールを `mcp__plugin_composite-session-orchestrator_node__*` の名前で出す |
 
 plugin の名前空間のため、コマンドは `/composite-session-orchestrator:start` のように呼ぶ。
 
@@ -17,7 +18,7 @@ plugin の名前空間のため、コマンドは `/composite-session-orchestrat
 
 1. daemon を起動する（`cso-daemon --config <設定ファイル> [--port <1〜65535>]`）。窓口のポートは、`--port` → 設定の `port`（0 以外）→ stateDir の `port` のファイル（前回のポート。0600）→ 空いているポート（そのファイルに保存する）の順で決まり、再起動しても変わらない。保存したポートが使われていれば、別のポートには移らず、起動しない（理由と直し方を出す）。起動の記録（`started`）の `portSource` に、どこから決まったか（`option`・`config`・`saved`・`new`）が出る。OS が選ぶポートは一時的なポートの範囲なので、まれにほかの接続が使う。止まったら `--port` で範囲外の番号を指定する。ファイルが壊れている・権限が緩い・リンクのときは `portFileInvalid` で起動しない（権限を 0600 にするか、ファイルを消す）。新規のポートを保存できないとき、Desktop の子（`childRuntime: "desktop"`）では `portSaveFailed` で起動しない。同じ stateDir で、2 つの daemon を動かさない。
 2. `cso-mcp` を起動する（`cso-mcp --daemon-url <窓口の URL> --config <設定ファイル>`）。手順と確かめ方は `docs/manual-verification-sdk.md` の「MCP サーバーの起動」。
-3. 統合ノードのトークンを、環境変数 `CSO_ROOT_TOKEN` に設定する（daemon の状態ディレクトリの `root-token` の中身。例: `export CSO_ROOT_TOKEN="$(cat <状態ディレクトリ>/root-token)"`）。次に、統合セッションを、この plugin つきで起動し（`claude --plugin-dir <plugin のパス>`）、MCP サーバー `node` を足す（種類 `http`、URL は設定の `mcpUrl`、ヘッダ `Authorization: Bearer ${CSO_ROOT_TOKEN}`。例: `.mcp.json` の `headers` に、この変数の参照を書く）。**トークンの値は、設定ファイルに書かない**（書くと、コミットすれば漏れる）。設定ファイルには変数の参照だけが残る。やむを得ず値を書いたファイルは、`.gitignore` に入れ、コミットしない。チャットにも貼らない。
+3. 統合ノードのトークンを、環境変数 `CSO_ROOT_TOKEN` に設定する（daemon の状態ディレクトリの `root-token` の中身。例: `export CSO_ROOT_TOKEN="$(cat <状態ディレクトリ>/root-token)"`）。次に、統合セッションを、この plugin つきで起動する（marketplace から入れるか、`claude --plugin-dir <plugin のパス>`）。MCP サーバー `node` は、plugin の `.mcp.json` が足す（URL は環境変数 `CSO_MCP_URL`〔設定の `mcpUrl` と同じ値。省略すると `http://127.0.0.1:7777/mcp`〕、ヘッダは `Authorization: Bearer ${CSO_ROOT_TOKEN}`）。**トークンの値は、設定ファイルに書かない**（書くと、コミットすれば漏れる）。設定ファイルには変数の参照だけが残る。やむを得ず値を書いたファイルは、`.gitignore` に入れ、コミットしない。チャットにも貼らない。
 4. `/composite-session-orchestrator:start` で接続を確かめ、`cso-integrator` の skill に沿って作業する。
 
 daemon が SDK で起動する子は、MCP の設定を daemon が組み立てて渡す（`docs/manual-verification-sdk.md` の 4）。子が `cso-child` の skill を使うには、子の起動に plugin を渡す必要があるが、これはこの版の範囲外（子は、起動の指示に手順が入っている）。

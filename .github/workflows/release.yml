@@ -1,0 +1,124 @@
+name: Release
+
+# タグ（v<plugin.json の version>）を push したら、plugin/ の zip を Release に付け、sha256 を出す。
+# marketplace（comcreate/comcreate-marketplace）への PR は、GitHub App の secrets があるときだけ出す（docs/release.md）。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      asset_url: ${{ steps.upload.outputs.asset_url }}
+      sha256: ${{ steps.zip.outputs.sha256 }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: タグと plugin.json の version を照らす
+        id: version
+        run: |
+          version="$(jq -r .version plugin/.claude-plugin/plugin.json)"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::タグ ${GITHUB_REF_NAME} と plugin.json の version ${version} が違います"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: plugin/ を zip にする
+        id: zip
+        run: |
+          name="composite-session-orchestrator-${{ steps.version.outputs.version }}.zip"
+          (cd plugin && zip -r -X "../${name}" . -x '*.gitkeep')
+          sha256="$(sha256sum "${name}" | cut -d' ' -f1)"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+          echo "${sha256}  ${name}" > "${name}.sha256"
+          {
+            echo "### plugin の zip"
+            echo
+            echo "- ファイル: \`${name}\`"
+            echo "- sha256: \`${sha256}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release を作り、zip を付ける
+        id: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="${{ steps.zip.outputs.name }}"
+          prerelease=""
+          case "${{ steps.version.outputs.version }}" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "${GITHUB_REF_NAME}" "${name}" "${name}.sha256" \
+            --title "${GITHUB_REF_NAME}" --notes "sha256: ${{ steps.zip.outputs.sha256 }}" ${prerelease}
+          asset_url="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            --jq ".assets[] | select(.name == \"${name}\") | .url")"
+          echo "asset_url=${asset_url}" >> "$GITHUB_OUTPUT"
+          echo "- asset の API URL: ${asset_url}" >> "$GITHUB_STEP_SUMMARY"
+
+  marketplace:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      MARKETPLACE_APP_ID: ${{ secrets.MARKETPLACE_APP_ID }}
+    steps:
+      - name: secrets がなければ飛ばす
+        id: gate
+        run: |
+          if [ -z "${MARKETPLACE_APP_ID}" ]; then
+            echo "MARKETPLACE_APP_ID がないので、marketplace への PR は出しません（docs/release.md）" >> "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: GitHub App のトークンを作る
+        if: steps.gate.outputs.run == 'true'
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.MARKETPLACE_APP_ID }}
+          private-key: ${{ secrets.MARKETPLACE_APP_PRIVATE_KEY }}
+          owner: comcreate
+          repositories: comcreate-marketplace
+
+      - name: marketplace.json を書き換えて PR を出す
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          ASSET_URL: ${{ needs.release.outputs.asset_url }}
+          SHA256: ${{ needs.release.outputs.sha256 }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          gh repo clone comcreate/comcreate-marketplace marketplace -- --depth=1
+          cd marketplace
+          file=.claude-plugin/marketplace.json
+          branch="composite-session-orchestrator-v${VERSION}"
+          git switch -c "${branch}"
+          jq --arg url "${ASSET_URL}" --arg sha "${SHA256}" --arg ver "${VERSION}" '
+            .plugins |= map(if .name == "composite-session-orchestrator"
+              then .source = (.source + {source: "archive", url: $url, sha256: $sha}) | .version = $ver
+              else . end)' "${file}" > "${file}.new"
+          mv "${file}.new" "${file}"
+          if git diff --quiet; then
+            echo "marketplace.json に composite-session-orchestrator の項目がないか、変わりません（最初の 1 回は手で足す。docs/release.md）" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "composite-session-orchestrator を v${VERSION} にする"
+          git push -u origin "${branch}"
+          gh pr create --draft --title "composite-session-orchestrator を v${VERSION} にする" \
+            --body "Release の asset と sha256 を更新する（composite-session-orchestrator の release.yml から）。"
