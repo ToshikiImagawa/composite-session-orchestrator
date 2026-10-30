@@ -189,8 +189,10 @@ export interface ApiDeps {
    * 受けていれば true。渡すと、子のロールの要求（report.*・scope.extend）と `POST /v1/bind` は、false なら `hooksNotActive` で断る。
    */
   readonly hookFresh?: (nodeId: string) => boolean;
-  /** PreToolUse のフックを受けたとき（認証・セッションの結び付けのあと）に呼ぶ。 */
+  /** PreToolUse のフックを判定して、許可したときに呼ぶ（拒否された呼び出しでは、窓を満たさない。R2）。 */
   readonly onHookSeen?: (nodeId: string) => void;
+  /** フックの受け口で、フック専用のトークンだけを受け付ける（ノードのトークンは拒否。Desktop の木。R2）。 */
+  readonly hookTokensOnly?: boolean;
   /** bind の入口の、全体のスロットル（1 秒あたりの失敗）。省略すると 1 秒に 10 回。 */
   readonly bindThrottle?: Throttle;
   /** 記録の時刻（ISO 8601 UTC）。既定は現在時刻。 */
@@ -883,7 +885,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
    */
   /** 受け口の主体: ノードのトークンか、フック専用のトークン（T22-ht。子のノードとして扱う。ほかの入口では使えない）。 */
   const hookPrincipal = (token: string | undefined): Principal | undefined => {
-    const p = deps.credentials.authenticate(token);
+    const p = deps.hookTokensOnly === true ? undefined : deps.credentials.authenticate(token);
     if (p !== undefined) return p;
     const nodeId = deps.hookTokens?.authenticate(token);
     return nodeId === undefined ? undefined : { role: "child", nodeId };
@@ -1001,9 +1003,9 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       }
       let d: Awaited<ReturnType<HookDecider>>;
       try {
-        // Desktop の子の「直前のフックの呼び出し」（T21-ch。bind・report の前に確かめる）
-        deps.onHookSeen?.(principal.nodeId);
         d = await decide(principal.nodeId, h.toolName, h.toolInput, h.cwd);
+        // Desktop の子の「直前のフックの呼び出し」（T21-ch。bind・report の前に確かめる）。許可したときだけ数える（R2）
+        if (d.allow) deps.onHookSeen?.(principal.nodeId);
       } catch {
         d = { allow: false, reason: "フックの判定に失敗したため拒否した。" };
       }

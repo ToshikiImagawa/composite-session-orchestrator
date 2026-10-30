@@ -786,7 +786,12 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     const scope = desktopAdapter?.scopeOf(nodeId);
     const tree = await deps.worktree.cwdOf(nodeId).catch(() => undefined);
     if (scope === undefined || tree === undefined) {
-      return { allow: false, reason: "このノードの作業範囲を daemon が持っていないため拒否した。" };
+      // アダプタの範囲とフック専用のトークンはメモリだけなので、daemon を再起動すると失われる（R1）
+      return {
+        allow: false,
+        reason:
+          "daemon がこの子の作業範囲を持っていないため拒否した（daemon を再起動したあとなど）。人（親）に、子を止めたと宣言して、作り直してもらう。",
+      };
     }
     let wt: string;
     let here: string;
@@ -798,7 +803,10 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     } catch {
       return { allow: false, reason: "作業ツリーを確かめられないため拒否した。" };
     }
-    if (here !== wt) {
+    // 作業ツリーそのもの、またはその配下（子が cd すると、Claude Code は移った先を cwd に入れる。M1）。実パスで比べるので、
+    // 作業ツリーの中のリンクで外に出たら拒否になる。大文字小文字・正規化の違いはそろえて比べる
+    const folded = (x: string) => x.normalize("NFC").toLowerCase();
+    if (!(folded(here) === folded(wt) || folded(here).startsWith(`${folded(wt)}/`))) {
       return {
         allow: false,
         reason:
@@ -806,13 +814,21 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       };
     }
     const resolved = await resolveScope(scope, wt, resolveHookPath);
-    const d = await decideToolUse(resolved, wt, toolName, toolInput, resolveHookPath, {
-      roots: protectedRoots,
-      allow: [],
-      home: (deps.parentEnv ?? process.env).HOME,
-      drawer,
-      ...(config.csoCommand === undefined ? {} : { csoCommand: config.csoCommand }),
-    });
+    const d = await decideToolUse(
+      resolved,
+      wt,
+      toolName,
+      toolInput,
+      resolveHookPath,
+      {
+        roots: protectedRoots,
+        allow: [],
+        home: (deps.parentEnv ?? process.env).HOME,
+        drawer,
+        ...(config.csoCommand === undefined ? {} : { csoCommand: config.csoCommand }),
+      },
+      here,
+    );
     if (d.allow) return { allow: true };
     if (d.violation !== undefined) note("scopeViolation", { nodeId, reason: d.violation.reason });
     return { allow: false, reason: d.reason };
@@ -1027,6 +1043,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
             return at !== undefined && hookNow() - at <= (config.hookFreshSeconds ?? 30) * 1000;
           },
           onHookSeen: (nodeId: string) => lastHookAt.set(nodeId, hookNow()),
+          // Desktop の子の受け口は、フック専用のトークンだけ（ノードのトークンでは呼べない。R2）
+          hookTokensOnly: true,
         }),
     hookSessions,
     ...(hookTokens === undefined ? {} : { hookTokens }),

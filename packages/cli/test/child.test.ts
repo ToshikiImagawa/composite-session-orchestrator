@@ -685,3 +685,71 @@ describe("cso child hook（T21-ch）", () => {
     expect(f.sent).toHaveLength(0); // 身元を確かめられなければ、トークンを送らない
   });
 });
+
+describe("cso child hook のレビューの指摘（T21-ch M2・R3）", () => {
+  const HOOK_TOKEN = "hook-token-0123456789abcdef0123456789";
+  const withHook = () => {
+    const d = drawer();
+    writeFileSync(join(d, CHILD_FILES.hookToken), `${HOOK_TOKEN}\n`, { mode: 0o600 });
+    return d;
+  };
+  const pre = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    session_id: "s1",
+    tool_name: "Read",
+    tool_input: {},
+  });
+
+  it("R3: 429 で Retry-After が短ければ、2 回まで送り直す。長ければ送り直さずに拒否", async () => {
+    const d = withHook();
+    const replies = [429, 429, 200];
+    let n = 0;
+    const slept: number[] = [];
+    const f = (async () => {
+      const status = replies[n++] ?? 200;
+      return status === 429
+        ? new Response("{}", { status, headers: { "retry-after": "1" } })
+        : new Response(JSON.stringify({ ok: true, value: { decision: "allow" } }), { status });
+    }) as typeof globalThis.fetch;
+    const r = await runChild(["hook", "--dir", d, "--url", URL], {
+      ...deps(f),
+      readStdin: async () => pre,
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(slept).toEqual([1000, 1000]);
+    const long = (async () =>
+      new Response("{}", {
+        status: 429,
+        headers: { "retry-after": "30" },
+      })) as typeof globalThis.fetch;
+    const r2 = await runChild(["hook", "--dir", d, "--url", URL], {
+      ...deps(long),
+      readStdin: async () => pre,
+    });
+    expect(r2.exitCode).toBe(2);
+  });
+
+  it("M2: 予期しない例外でも、PreToolUse は終了コード 2（Claude Code は 2 のときだけ拒否する）", async () => {
+    const d = withHook();
+    const r = await runChild(["hook", "--dir", d, "--url", URL], {
+      ...deps((async () => new Response("{}")) as typeof globalThis.fetch),
+      readStdin: async () => {
+        throw new Error("boom");
+      },
+    });
+    expect(r.exitCode).toBe(2);
+    const r2 = await runChild(["hook", "--dir", d, "--url", URL], {
+      ...deps((async () => new Response("{}")) as typeof globalThis.fetch),
+      readStdin: async () => pre,
+      verifierFor: () => ({
+        verify: async () => {
+          throw new Error("boom");
+        },
+      }),
+    });
+    expect(r2.exitCode).toBe(2);
+  });
+});

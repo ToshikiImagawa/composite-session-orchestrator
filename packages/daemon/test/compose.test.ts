@@ -2003,6 +2003,91 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect(denied.stdout + denied.stderr).not.toContain(token);
   });
 
+  it("M1: 作業ツリーの配下に cd しても通り、下位からの cd .. も通る。作業ツリーの中のリンクで外に出たら拒否", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    mkdirSync(join(b.worktree, "src", "deep"), { recursive: true });
+    symlinkSync(r.config.stateDir, join(b.worktree, "out"));
+    const ls = "pnpm test"; // 範囲で許されたコマンド
+    const sub = await b.hook(ls, join(b.worktree, "src", "deep"));
+    expect(sub.code, sub.stderr).toBe(0);
+    // 下位からの cd ..: cwd（下位）の照合では止めない。止まるとすれば、範囲のコマンドの許可だけ（この試験の範囲には cd がない）
+    const up = await b.hook("cd ..", join(b.worktree, "src", "deep"));
+    expect(up.stderr).not.toContain("作業ツリーの外");
+    expect(up.stderr).toContain("commandNotAllowed");
+    const back = await b.hook(ls, join(b.worktree, "src"));
+    expect(back.code, back.stderr).toBe(0);
+    expect((await b.hook(ls, join(b.worktree, "out"))).code).toBe(2);
+    expect((await b.hook(ls, r.config.worktreeRoot)).code).toBe(2);
+  });
+
+  it("R2: Desktop の子の /v1/hook は、フック専用のトークンだけ（ノードのトークンは 401）。拒否された呼び出しは、窓を満たさない", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const nodeToken = readFileSync(join(b.drawer, "token"), "utf8").trim();
+    const viaNode = await fetch(`${d.url}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${nodeToken}` },
+      body: JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+        cwd: b.worktree,
+      }),
+    });
+    expect(viaNode.status).toBe(401);
+  });
+
+  it("R2: 拒否された呼び出しだけでは、bind は hooksNotActive のまま", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    const lines = (bc.json.value.instruction as string)
+      .split("\n")
+      .map((l) => l.replace(/^ {3}/, ""));
+    const codePath = (lines.find((l) => l.startsWith("ファイル: ")) as string).slice(
+      "ファイル: ".length,
+    );
+    const code = (lines.find((l) => l.startsWith("中身: ")) as string).slice("中身: ".length);
+    const bindLine = lines.find((l) => l.includes(" child bind ")) as string;
+    const denied = await runHook(bindLine.replace(" child bind ", " child hook "), {
+      hook_event_name: "PreToolUse",
+      session_id: "desktop-session-1",
+      tool_name: "Read",
+      tool_input: { file_path: join(r.config.stateDir, "human-token") },
+      cwd: join(r.config.worktreeRoot, nodeId),
+    });
+    expect(denied.code).toBe(2);
+    writeFileSync(codePath, `${code}\n`, { mode: 0o644 });
+    expect((await sh(bindLine)).stdout).toBe("hooksNotActive\n");
+  });
+
+  it("R1・R4: daemon の再起動のあと、フックは拒否（再起動と分かる言葉）。hook-token は 24 時間で切れる", async () => {
+    let mono = 0;
+    const r = desktopRig();
+    const first = await boot({ ...r, deps: { ...r.deps, monoMs: () => mono } });
+    const nodeId = await spawnDesktop(first);
+    const b = await bindByInstruction(first, nodeId);
+    mono += 24 * 3_600_000 - 1;
+    expect((await b.hook("pnpm test")).code).toBe(0);
+    mono += 1;
+    const expired = await b.hook("pnpm test");
+    expect(expired.code).toBe(2);
+    expect(expired.stderr).toContain("node.bindCode");
+    await first.daemon.stop();
+    cleanups.length = 0;
+    await boot(r);
+    const after = await b.hook("pnpm test");
+    expect(after.code).toBe(2);
+    expect(after.stderr).toContain("再起動");
+  });
+
   it("フックが直前に動いていなければ（hookFreshSeconds。既定 30 秒）、bind・report は hooksNotActive。bind のコードは使われずに残る", async () => {
     let mono = 0;
     const r = desktopRig();

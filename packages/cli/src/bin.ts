@@ -115,6 +115,8 @@ export function redact(result: CommandResult, token: string): CommandResult {
 // 直接実行されたときだけ動く（試験では runBin を呼ぶ）。
 const entry = process.argv[1];
 if (entry !== undefined && realpathSync(entry) === fileURLToPath(import.meta.url)) {
+  // `cso child hook` が例外で落ちたら、終了コード 2（Claude Code は 2 のときだけ拒否する。M2）
+  const childHook = process.argv[2] === "child" && process.argv[3] === "hook";
   const result = await runBin(process.argv.slice(2), {
     env: process.env,
     isTTY: { stdin: process.stdin.isTTY === true, stdout: process.stdout.isTTY === true },
@@ -133,7 +135,15 @@ if (entry !== undefined && realpathSync(entry) === fileURLToPath(import.meta.url
           },
         }
       : {}),
-  });
+  }).catch(
+    (): CommandResult => ({
+      exitCode: childHook ? 2 : 1,
+      stdout: "",
+      stderr: childHook
+        ? "[cso child hook] 拒否: 予期しない失敗（人に知らせる）\n"
+        : "予期しない失敗\n",
+    }),
+  );
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   process.exitCode = result.exitCode;

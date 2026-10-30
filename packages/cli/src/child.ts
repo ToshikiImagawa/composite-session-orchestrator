@@ -79,6 +79,8 @@ const BIND_TIMEOUT_MS = 30_000;
 export interface ChildDeps {
   /** 標準入力の全部（`cso child hook` のフック入力）。 */
   readonly readStdin?: () => Promise<string>;
+  /** 待ち（429 のあとの再試行。試験で差し替える）。 */
+  readonly sleep?: (ms: number) => Promise<void>;
   readonly fetch?: typeof fetch;
   readonly newRequestId: () => string;
   /** 自分の uid（既定は `process.getuid()`）。 */
@@ -368,7 +370,42 @@ const HOOK_INPUT_MAX = 1024 * 1024;
  * のどれでも拒否）。PostToolUse・Stop は判定しないので、失敗しても 0（作業を止めない）。トークンは出さない。
  */
 async function hook(args: readonly string[], deps: ChildDeps): Promise<CommandResult> {
-  const input = (await deps.readStdin?.()) ?? "";
+  let input = "";
+  try {
+    input = (await deps.readStdin?.()) ?? "";
+    return await hookOnce(args, deps, input);
+  } catch {
+    // Claude Code は、終了コード 2 のときだけ拒否する（1・起動の失敗・時間切れは許可になる。M2）。予期しない例外でも、
+    // 判定するイベント（PreToolUse・名前の分からないもの）なら 2 を返す
+    return isPassive(input)
+      ? { exitCode: 0, stdout: "", stderr: "[cso child hook] 記録できなかった（予期しない失敗）\n" }
+      : {
+          exitCode: 2,
+          stdout: "",
+          stderr: "[cso child hook] 拒否: 予期しない失敗（人に知らせる）\n",
+        };
+  }
+}
+
+/** 判定しないイベント（PostToolUse・Stop）か。 */
+function isPassive(input: string): boolean {
+  try {
+    const e = (JSON.parse(input) as { hook_event_name?: unknown })?.hook_event_name;
+    return e === "PostToolUse" || e === "Stop";
+  } catch {
+    return false;
+  }
+}
+
+/** 429 のあと、Retry-After がこの秒数以下なら、もう一度送る（1〜2 回だけ。R3）。 */
+const HOOK_RETRY_MAX_SEC = 2;
+const HOOK_RETRIES = 2;
+
+async function hookOnce(
+  args: readonly string[],
+  deps: ChildDeps,
+  input: string,
+): Promise<CommandResult> {
   let event: unknown;
   try {
     event = (JSON.parse(input) as { hook_event_name?: unknown })?.hook_event_name;
@@ -405,7 +442,7 @@ async function hook(args: readonly string[], deps: ChildDeps): Promise<CommandRe
   if (!("verifier" in verified))
     return fail("窓口の相手が、引き出しを作った daemon か確かめられない");
   const doFetch = deps.fetch ?? globalThis.fetch;
-  let status: number;
+  let status = 0;
   let json:
     | {
         ok?: unknown;
@@ -414,23 +451,42 @@ async function hook(args: readonly string[], deps: ChildDeps): Promise<CommandRe
       }
     | undefined;
   try {
-    const res = await doFetch(`${origin}/v1/hook`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: input,
-      redirect: "error",
-      signal: AbortSignal.timeout(HOOK_TIMEOUT_MS),
-    });
-    status = res.status;
-    const text = await res.text();
-    json = text.length > HOOK_INPUT_MAX ? undefined : JSON.parse(text);
+    for (let attempt = 0; ; attempt++) {
+      const res = await doFetch(`${origin}/v1/hook`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: input,
+        redirect: "error",
+        signal: AbortSignal.timeout(HOOK_TIMEOUT_MS),
+      });
+      status = res.status;
+      const text = await res.text();
+      const wait = Number(res.headers.get("retry-after"));
+      if (
+        status === 429 &&
+        attempt < HOOK_RETRIES &&
+        Number.isFinite(wait) &&
+        wait >= 0 &&
+        wait <= HOOK_RETRY_MAX_SEC
+      ) {
+        await (deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms))))(wait * 1000);
+        continue;
+      }
+      json = text.length > HOOK_INPUT_MAX ? undefined : JSON.parse(text);
+      break;
+    }
   } catch {
     return fail("daemon の受け口に届かない（daemon が動いているか、人に確かめてもらう）");
   }
   const hide = (s: string): string => clean(s, [token], 1000);
   if (status !== 200 || json?.ok !== true) {
     const cause = typeof json?.error?.cause === "string" ? `: ${hide(json.error.cause)}` : "";
-    return fail(`daemon が受け付けなかった（HTTP ${status}${cause}）`);
+    // 401: フック専用のトークンが期限切れ（24 時間）か、daemon の再起動で失われた（メモリだけ。R1・R4）
+    const hint =
+      status === 401
+        ? "。フック専用のトークンが期限切れか、daemon を再起動したあと。人（親）に、node.bindCode を出し直してもらう（再起動のあとなら、子を止めたと宣言して作り直す）"
+        : "";
+    return fail(`daemon が受け付けなかった（HTTP ${status}${cause}）${hint}`);
   }
   const decision = json.value?.decision;
   if (decision === "allow") return { exitCode: 0, stdout: "", stderr: "" };
