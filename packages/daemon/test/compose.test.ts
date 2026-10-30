@@ -2075,7 +2075,10 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
   });
 
   it("T21-cs: 見張りの設定・利用者の設定・info/exclude への書き込みは拒否。設定を書き換えたら、以後はすべて拒否し、受信箱に 1 度知らせる。範囲違反は scope.violation に記録", async () => {
-    const home = mkdtempSync(join(tmpdir(), "cso-home-"));
+    // HOME をリンクにする（macOS の /var → /private/var と同じ形。実パスで比べないと外れる）
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const home = `${realHome}-link`;
+    symlinkSync(realHome, home);
     const r = desktopRig();
     r.deps = { ...r.deps, parentEnv: { ...r.deps.parentEnv, HOME: home } } as typeof r.deps;
     r0 = r;
@@ -2123,7 +2126,8 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
         x.summary?.includes("見張り（フック）の設定が、置いたときから変わっている"),
       );
     expect(notices).toHaveLength(1);
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { force: true });
+    rmSync(realHome, { recursive: true, force: true });
   });
 
   it("T21-cs: Desktop の木では cso hook-env（node.hookToken）を拒否する（desktopHookEnvNotAllowed。次の操作は node.bindCode）", async () => {

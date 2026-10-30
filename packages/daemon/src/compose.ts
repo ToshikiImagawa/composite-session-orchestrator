@@ -1029,6 +1029,14 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       };
     }
     const resolved = await resolveScope(scope, wt, resolveHookPath);
+    const homeSettings =
+      homeDir === undefined
+        ? []
+        : await Promise.all(
+            ["settings.json", "settings.local.json"].map((f) =>
+              resolveHookPath(join(homeDir, ".claude", f)),
+            ),
+          );
     const d = await decideToolUse(
       resolved,
       wt,
@@ -1040,12 +1048,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           ...protectedRoots,
           // 見張りの設定（読み書きとも禁じる。T21-cs）: 利用者の設定、git の共通ディレクトリの info/exclude。作業ツリーの .claude/ は
           // 書き込みだけを禁じる（下の writeDenied。commands などを読めるように）
-          ...(homeDir === undefined
-            ? []
-            : ["settings.json", "settings.local.json"].map((f) => ({
-                path: join(homeDir, ".claude", f),
-                kind: "hookSettings" as const,
-              }))),
+          // 実パスにして比べる（macOS の /var は /private/var へのリンク。HOME が /var の下でも外さない）
+          ...homeSettings.map((path) => ({ path, kind: "hookSettings" as const })),
           ...(settings.exclude === undefined
             ? []
             : [{ path: settings.exclude, kind: "hookSettings" as const }]),
