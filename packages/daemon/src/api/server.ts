@@ -1004,7 +1004,7 @@ export function createApiServer(deps: ApiDeps): ApiServer {
       }
       let d: Awaited<ReturnType<HookDecider>>;
       try {
-        d = await decide(principal.nodeId, h.toolName, h.toolInput, h.cwd);
+        d = await decide(principal.nodeId, h.toolName, h.toolInput, h.cwd, h.transcriptPath);
         // Desktop の子の「直前のフックの呼び出し」（T21-ch。bind・report の前に確かめる）。許可したときだけ数える（R2）
         if (d.allow) deps.onHookSeen?.(principal.nodeId);
       } catch {

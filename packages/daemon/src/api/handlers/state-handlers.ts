@@ -98,8 +98,20 @@ export function createStateHandlers(deps: StateHandlerDeps) {
   const reviewOnce = async (req: HandlerRequest<"node.review">): Promise<R<"node.review">> => {
     const caller = callerOf(req);
     const { nodeId, verdict } = req.params;
-    // 認可（directChild）の二重の備え: 完了の判定は、そのノードの親だけ。
-    if (log.state().nodes.find((n) => n.id === nodeId)?.parentId !== caller) {
+    const human = req.role === "human";
+    // 人間は、受理（done → verified。片付けのため。T21-cw）だけができる。差し戻しは、親だけ（届け先の指示を書けるのは親）。
+    if (human && verdict !== "accept") {
+      return fail(
+        "forbidden",
+        "人間ができる完了の判定は、受理（accept）だけ",
+        "差し戻しは、親の統合ノードに依頼する",
+      );
+    }
+    if (human && log.state().nodes.find((n) => n.id === nodeId) === undefined) {
+      return fail("notFound", "ノードが見つからない", "ID を確認する");
+    }
+    // 認可（directChild）の二重の備え: 完了の判定は、そのノードの親だけ（人間を除く）。
+    if (!human && log.state().nodes.find((n) => n.id === nodeId)?.parentId !== caller) {
       return fail(
         "forbidden",
         "完了の判定は、そのノードの親（統合ノード）だけができる",
@@ -129,7 +141,7 @@ export function createStateHandlers(deps: StateHandlerDeps) {
       bodies.push({
         type: "report.added",
         payload: {
-          reportId: deriveId("report", caller, req.requestId, "review"),
+          reportId: deriveId("report", human ? "human" : caller, req.requestId, "review"),
           nodeId,
           kind: "review",
           text: req.params.feedback,
@@ -139,7 +151,13 @@ export function createStateHandlers(deps: StateHandlerDeps) {
     if (req.params.verdict === "reject") {
       bodies.push({ type: "node.instructed", payload: { nodeId, text: req.params.feedback } });
     }
-    const r = appendAtomically(log, clock, req.requestId, { nodeId: caller }, bodies);
+    const r = appendAtomically(
+      log,
+      clock,
+      req.requestId,
+      human ? ({ human: true } as const) : { nodeId: caller },
+      bodies,
+    );
     if (!r.ok) return r;
     // 差し戻しの理由を、再開した子へ届ける（未配送のときだけ。再送で、送り直せる）。
     if (req.params.verdict === "reject" && deps.deliver !== undefined) {
@@ -392,8 +410,10 @@ export function createStateHandlers(deps: StateHandlerDeps) {
 
     // 同じ requestId の同時の判定は、1 つにまとめる（配送が 1 回だけになる）。
     "node.review": (req: HandlerRequest<"node.review">): Promise<R<"node.review">> =>
-      exclusive(`${callerOf(req)}\0${req.requestId}`, JSON.stringify(req.params), () =>
-        reviewOnce(req),
+      exclusive(
+        `${req.role === "human" ? "human" : callerOf(req)}\0${req.requestId}`,
+        JSON.stringify(req.params),
+        () => reviewOnce(req),
       ),
   };
 }

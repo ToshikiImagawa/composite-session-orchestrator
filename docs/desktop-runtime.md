@@ -46,7 +46,7 @@ Desktop の子は、統合セッションが Desktop のタスク生成機能で
 
 課題 1 の ①（`cso child bind`・`report`）で、子が紐付けのコード・トークン・窓口の URL を置く場所。この版では、置き場と、子ごとの引き出しを作る・消す仕組みだけを入れた（子はまだ使わない。作る・消すを、紐付け・停止の宣言などにつなぐのは順番 5）。
 
-- **置き場**: `<stateDir>/children.noindex`（0700）。daemon が起動時に作る。すでにあれば、自分のもの・0700・リンクでないことを確かめ、違っていれば**直さずに起動を止める**（`stateDirInvalid`。理由には実パスを出さず、種類とエラーの code だけ）。名前の `.noindex` で Spotlight の索引から外れる。macOS では、起動時に、まず `/usr/bin/tmutil isexcluded <置き場>` で確かめ、すでに外されていれば何もしない（前に人が外した置き場で、警告を出さない）。外されていなければ `/usr/bin/tmutil addexclusion <置き場>`（引数はパスだけ。それぞれ 5 秒で打ち切る）で Time Machine から外す。失敗は警告（`childrenDirWarning`）で、起動は続ける。警告には、理由の種類だけを出す（`exit <終了コード>`・`timeout`・`permission, exit <終了コード>`〔フルディスクアクセスなど〕・起動できないときの code。実パスと tmutil の出力そのものは出さない）。以前は、終了コードが数で返るのを見落として `unknown` と出していた（C1' で見つけた）。
+- **置き場**: `<stateDir>/children.noindex`（0700）。daemon が起動時に作る。すでにあれば、自分のもの・0700・リンクでないことを確かめ、違っていれば**直さずに起動を止める**（`stateDirInvalid`。理由には実パスを出さず、種類とエラーの code だけ）。名前の `.noindex` で Spotlight の索引から外れる。macOS では、起動時に、まず `/usr/bin/tmutil isexcluded <置き場>` で確かめ、すでに外されていれば何もしない（前に人が外した置き場で、警告を出さない）。外されていなければ `/usr/bin/tmutil addexclusion <置き場>`（引数はパスだけ。それぞれ 15 秒で打ち切る。新しい置き場では 5 秒で足りなかった。T21-cw）で Time Machine から外す。失敗は警告（`childrenDirWarning`）で、起動は続ける。警告には、理由の種類だけを出す（`exit <終了コード>`・`timeout`・`permission, exit <終了コード>`〔フルディスクアクセスなど〕・起動できないときの code。実パスと tmutil の出力そのものは出さない）。以前は、終了コードが数で返るのを見落として `unknown` と出していた（C1' で見つけた）。
 - **子ごとの引き出し**: `<置き場>/<鍵>/`（0700。daemon が先に作る）。鍵は、ノード ID を、置き場の秘密（`<stateDir>/children.key`。0600）で HMAC-SHA256 にかけた先頭 32 桁。**ほかのユーザーと、stateDir を読めない子に対して**、推測できない。daemon を再起動しても、同じ鍵を計算し直せる（ノード ID と鍵の対応を記録に持たないので、STATE_VERSION は変えない）。
 - **鍵のファイル**: 初回に、一時ファイル（O_EXCL・O_NOFOLLOW・0600）に書いてから link で置く。同じ stateDir で 2 つの daemon が同時に起動したときは、先に置いたほうの秘密を、両方が使う（同じ stateDir で 2 つ動かすこと自体は、想定していない）。
   - **鍵のファイルがないのに、鍵の形の引き出しが残っているときは、起動を止める**（新しい鍵を黙って作ると、掃除で、動いている子の引き出しまで消してしまうため）。鍵を新しく作った起動では、念のため、掃除をしない。
@@ -63,7 +63,7 @@ Desktop の子は、統合セッションが Desktop のタスク生成機能で
 | `send` | `unsupported` | daemon から直接指示を届けない。`node.send`・判断の回答の配送・起こす（wake）・差し戻しは、記録する前に失敗する（または届けない） |
 | `stopGraceful`・`stopImmediate` | `false` | 直接は止めない |
 | `stopDelegated` | `true` | 停止は、受信箱を通じて親に代行を依頼する（停止未完了として記録し、受信箱の `stopIncomplete` の項目に依頼の文面を出す） |
-| `hooks` | `unverified` | 手動確認 (a) は 2026-10-30 に通った（チェックリストの (a)）。`ok` への変更は別の PR で行う |
+| `hooks` | `ok` | 手動確認 (a) が 2026-10-30 に通った（チェックリストの (a)）。**チップの経路は未確認**（手順 4 は代わりの確認。「ワークツリー」で始めたセッションの拒否で確かめた） |
 | `sessionId` | `false` | タスク生成の戻り値に、子のセッション識別子がない |
 
 値は `DESKTOP_CAPABILITIES` の 1 か所にある。Spike 01 の項目 1〜7 の確認が済んだら、値を差し替えるだけでよい。
@@ -94,6 +94,8 @@ Desktop の子は、統合セッションが Desktop のタスク生成機能で
 同じ `requestId` の再送は同じ結果を返し、記録は 1 回。宣言の後、アダプタは、そのノードを管理から外す（`release`）。
 
 人間は、cli の `cso confirm-stopped <nodeId> [--note <根拠>]` か、画面の「止めたと宣言…」（ノード ID の打ち込みが要る。`docs/ui.md`）から宣言できる。
+
+**done の子の片付け（T21-cw）**: 完了報告済み（done）の子は、止める（`alreadyFinished`）ことも、止めたと宣言する（`invalidTransition`）こともできない。人間は `cso accept <nodeId>`（`node.review` の `verdict: "accept"`。人間ができるのは受理だけで、差し戻しは親だけ）で verified にできる。verified になると、ノードのトークンとフック専用のトークンが失効し、引き出しが消える（24 時間の期限を待たない）。**人間のトークンは、受理（accept）を含む**。受理は、その子に依存するノードにとって依存先の完了になる（依存する子が動き出しうる）ので、中身を確かめてから受理する。done 以外の子は `invalidTransition`、ないノードは `notFound`。そのあとは `cso reclaim` で回収できる。
 
 ## 配線と紐付け（T21。**仮置き**）
 
@@ -129,9 +131,10 @@ Desktop の実機確認（Spike 01 の項目 1〜7）は、一部済んだ（親
 - **置く**: spawn のとき（起動を受け付ける前）に、daemon が自分で作った作業ツリーに `.claude/settings.json`（見張りの設定）を置き、git の共通ディレクトリの `info/exclude` に `/.claude/settings.json` を足す（コミットに混ざらない）。違う中身の設定がすでにあれば、置かずに spawn を失敗にする（`hookSettingsExists`）。daemon が前に置いたものと同じ中身なら（再開など）、そのまま使う。`csoCommand` がなければ、設定を置けないので、spawn を失敗にする（`csoCommandMissing`。見張りのない子を作らない）。
 - **設定の中身**: PreToolUse は `<csoCommand> child hook --dir <引き出し> --url <窓口> || exit 2`、PostToolUse・Stop は `… || true`。timeout は 90 秒（cso の内側の時間〔身元の確認と、送る 8 秒 × 再試行〕より十分長い）。Claude Code は、フックが**終了コード 2 のときだけ**拒否するので、cso が起動できない・例外で落ちたときも、`|| exit 2` で拒否にする。設定には、パスと URL だけを書く（トークンは書かない）。
 - **始め方**: 人は、`node.bindCode` の文面の「0.」にある作業ツリーを Desktop で開き、**「ローカル」で新しいセッションを始める**。最初の道具の呼び出しから見張りが効く。**訂正（#135 のレビューの実測。Claude Code 2.1.314）**: Claude Code は、フックの設定を、**動いている途中でも読み直す**（settings.json を消す・settings.local.json に `disableAllHooks` を置くと、すぐ次の呼び出しからフックが動かない）。そのため、下の「見つける」で、daemon がフックの呼び出しとは別に設定を見張る。**spawn_task のチップから始めた子は、Desktop が別の作業ツリーを作るので、見張りが効かず、紐付けも報告も `hooksNotActive` で断られる（今は使えない）。**
-- **塞ぐ（道具）**: 作業ツリーの `.claude/` の全体（settings.local.json の `disableAllHooks` を含む）は、**書き込みだけ**を禁じる（読み取りは許す。commands などを読めるように。settings.json に秘密は入っていない）。利用者の設定 `~/.claude/settings.json`・`settings.local.json` と、git の共通ディレクトリの `info/exclude` は、読み書きとも禁じる。Write・Edit などの書き込みは、範囲の決まりによらず拒否する。
+- **塞ぐ（道具）**: 作業ツリーの `.claude/` の全体（settings.local.json の `disableAllHooks` を含む）は、**書き込みだけ**を禁じる（読み取りは許す。commands などを読めるように。settings.json に秘密は入っていない）。利用者の設定（下の「利用者の設定のディレクトリ」の `settings.json`・`settings.local.json`）と、git の共通ディレクトリの `info/exclude` は、読み書きとも禁じる。
+- **利用者の設定のディレクトリ（T21-cw）**: Claude Code は、`CLAUDE_CONFIG_DIR` があれば、`~/.claude` ではなくそこを利用者の設定に使う（direnv で書き換える環境がある）。Desktop の子の環境は daemon には見えないので、ありうる場所をすべて守る: (1) `~/.claude`（常に）、(2) daemon の環境の `CLAUDE_CONFIG_DIR`（あれば）、(3) 設定 `claudeConfigDirs`（絶対パスの配列。20 件以下。daemon と Desktop のアプリで `CLAUDE_CONFIG_DIR` が違うときに、人が書き足す）。(4) Desktop の子のフック入力の `transcript_path`（`<CLAUDE_CONFIG_DIR>/projects/…/<セッション>.jsonl`）の `/projects/` より前の場所。PreToolUse のたびに見て、集合の外なら集合に足し、受信箱に知らせ、新しい場所も含めて判定する（その場所の設定でフックが切られていれば、見張りが外されたと扱う）。`claudeConfigDirs` は補助として残す。読み書きの禁止と M1 の見回りの両方に使う。CLI の子にも、同じ場所の読み書きを禁じる（CLI の子は daemon の環境を引き継ぐので、子の `CLAUDE_CONFIG_DIR` は (2) と同じ）。場所は、呼び出しのたびに実パスにして比べる（`settings.json` が dotfiles へのリンクでも、リンクの先を守る）。集合は実パス（`..` もそろえる）で持ち、重なりは 1 つにまとめる。**起動時の警告**（`claudeConfigDirWarning`。場所そのものは書かない）: 相対の `CLAUDE_CONFIG_DIR`（使わない）、`claudeConfigDirs` にあって存在しない場所、作業ツリー（`worktreeRoot`）と重なる場所。Write・Edit などの書き込みは、範囲の決まりによらず拒否する。
 - **塞ぐ（Bash）**: 作業ツリーの中に書き込みを禁じる場所（`.claude/`）があるときは、Bash のすべての語を、cwd（cd を追った先も）からの相対として解決して判定する（`/` を含まない語・グロブ〔`.cla*`〕・波括弧も）。`.claude` に当たる語は拒否する（読むときは Read の道具を使う）。消す・動かす・権限を変えるコマンド（`rm`・`rmdir`・`mv`・`chmod`・`chown`・`chflags`・`unlink`・`shred`・`find … -delete`）が、作業ツリーそのもの・その親を対象にしたら拒否する（`git add .`・`grep -rn … .`・`find .`・`ls .` は通る）。`git clean` と `git stash --all`・`-a`・`-u` は、対象を問わず拒否する。範囲のコマンドの許可は、サブコマンドごとに書く（例: `git add`・`git commit` を許し、`git` だけを許さない）。
-- **見つける・書き戻す（M1）**: daemon は、フックの呼び出しとは別に、動いている Desktop の子（stopped・verified・reclaimable・archived 以外）の設定を、数秒ごと（設定 `hookSettingsCheckSeconds`。既定 2 秒）に見回る。bind・報告の入口と、フックの呼び出しのたびにも、同じ確認をする。見るのは、(1) `.claude/settings.json` の中身が、置いたときと同じか、(2) `.claude/settings.local.json` がないか、(3) 利用者の設定 `~/.claude/settings.json`・`settings.local.json` の `disableAllHooks`・`hooks` が、控えと同じか。食い違えば、その場で、そのノードの bind のトークンとフック専用のトークンを失効させ、作業ツリーの設定を書き戻し（settings.json を置き直し、settings.local.json を消す）、受信箱に知らせ、以後のフックをすべて拒否する。**利用者の設定は、書き戻さない**（人の設定ファイルなので）。変わったら、その木の Desktop の子のすべてで、失効と知らせを行う。**人が自分で設定を変えた場合も同じ扱いになる**（受信箱の文にもそう書く）。
+- **見つける・書き戻す（M1）**: daemon は、フックの呼び出しとは別に、動いている Desktop の子（stopped・verified・reclaimable・archived 以外）の設定を、数秒ごと（設定 `hookSettingsCheckSeconds`。既定 2 秒）に見回る。bind・報告の入口と、フックの呼び出しのたびにも、同じ確認をする。見るのは、(1) `.claude/settings.json` の中身が、置いたときと同じか、(2) `.claude/settings.local.json` がないか、(3) 利用者の設定（上の「利用者の設定のディレクトリ」のすべて）の `settings.json`・`settings.local.json` の `disableAllHooks`・`hooks` が、控えと同じか。食い違えば、その場で、そのノードの bind のトークンとフック専用のトークンを失効させ、作業ツリーの設定を書き戻し（settings.json を置き直し、settings.local.json を消す）、受信箱に知らせ、以後のフックをすべて拒否する。**利用者の設定は、書き戻さない**（人の設定ファイルなので）。変わったら、その木の Desktop の子のすべてで、失効と知らせを行う。**人が自分で設定を変えた場合も同じ扱いになる**（受信箱の文にもそう書く）。
 - **戻す**: 印を消すのは、人が `node.bindCode` を出し直し、daemon が設定を確かめ直して問題がなかったときだけ。利用者の設定は、フックを切っていなければ（`disableAllHooks` が true でなければ）、その時点の値を控え直す。子は、新しい文面で 1 から紐付け直す。
 - **uchg（macOS の補助）**: 置いた settings.json に `chflags uchg`（変更できない印）を付ける。子も同じユーザーなので、自分で外せる（歯止めにすぎない）。daemon は、書き戻すときと、回収・最終削除で作業ツリーを消す前に、印を外す。
 - **info/exclude**: daemon は、git の共通ディレクトリ（`git` は既定 `/usr/bin/git`。設定 `gitPath`）の `info/exclude` に `/.claude/settings.json` を 1 行足す（共通ディレクトリなので、同じリポジトリのほかの作業ツリーにも効く）。回収のあとも、この 1 行は残す（無害で、次の子でも使う）。人が消してもよい。
@@ -139,7 +142,9 @@ Desktop の実機確認（Spike 01 の項目 1〜7）は、一部済んだ（親
 - 範囲外の操作は、CLI の子と同じく `scope.violation` として記録し、受信箱に出す（同じ違反につき 1 度、ノードごとに 20 件まで。全ノードを通した上限もある。件名は 200 字までで、トークン・Bearer を含むものは伏せる）。
 - **Desktop の木では、`cso hook-env`（`node.hookToken`）は使えない**（`desktopHookEnvNotAllowed`。子の引き出しの見張りのトークンを無効にしてしまうため。見張りのトークンは、`node.bindCode` の出し直しで新しくなる）。
 - **守れないもの**: 子が起動したプログラム（スクリプト・許可したコマンドの中）の読み書きはフックを通らない（設定の書き換え・消去は、見回りで見つけて書き戻すが、見回りの間〔数秒〕は外れうる）。Bash の語の判定は歯止めで、組み立てたパス・ハードリンクは止められない。フックが終了コード 2 以外で終わったとき（`|| exit 2` の外の失敗、フックの時間切れ）は、Claude Code が許可する。管理の設定（managed settings）・環境変数でフックを切る手段があるかは未確認。同じユーザーなので、daemon を止める・ファイルを直接読む手段は残る。`hooksNotActive` は設定の誤りを見つける検査で、敵対的な子は止められない（守りの本体は、上の「塞ぐ」と「見つける」）。
-- **能力表の hooks**: `ok` にする条件（チェックリストの (a) の手動確認が通ること）は、2026-10-30 に満たした（手順 4 は代わりの確認、手順 7 は一部。チェックリストの (a) の結果）。コードの値（`desktop-adapter.ts`）は、まだ `unverified` のまま。`ok` に変える変更は、別の PR で行う（ゲートの振る舞いが変わるため）。それまでは、ゲートで Desktop の子は起動しない（試すときは `desktopRequireVerifiedHooks: false`）。
+- **能力表の hooks**: `ok`（T21-cw）。条件（チェックリストの (a) の手動確認が通ること）は、2026-10-30 に満たした（手順 4 は代わりの確認で、**チップの経路は未確認**。手順 7 は一部）。**ゲートの振る舞いの変化**: `desktopRequireVerifiedHooks` の既定は `true` のまま。hooks が `ok` なので、既定のままで Desktop の子を起動できる（`hooksUnverified` で止まらない。ゲートを外した警告 `desktopHooksGateDisabled` も出ない）。`desktopRequireVerifiedHooks: false` は、もう要らない。**`desktopRequireVerifiedHooks` は、今はスイッチとしての意味を失っている**（hooks が `ok` なので、true でも false でも起動できる。能力表を `unverified` に戻したときだけ、また効く）。
+- **更新したら、手動確認 (a) をやり直す**: Claude Desktop・Claude Code を更新したら、フックの継承・設定の読み直し・`transcript_path` の形が変わりうるので、チェックリストの (a) をやり直す。通るまでは、Desktop の子を動かさない。
+- **フックが来ない子の知らせ（R4）**: Desktop の子が始まってから（見張りの設定を置いてから）、設定 `hookFirstSeenMinutes`（既定 5 分）たっても、そのノードのフックが 1 度も許可されていなければ、受信箱に 1 度だけ知らせる（チップや「ワークツリー」で始めた子が、黙って止まって見えないように）。
 
 ### 紐付けコードの扱い
 

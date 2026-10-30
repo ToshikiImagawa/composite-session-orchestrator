@@ -1710,6 +1710,42 @@ describe("子に渡す skill（T22-c）", () => {
     expect(impl?.settingSources).toEqual([]);
   });
 
+  it("T21-cw: CLI の子にも、利用者の設定（~/.claude と CLAUDE_CONFIG_DIR）の読み書きを禁じる（HOME がリンクで、.claude がまだなくても）", async () => {
+    // HOME をリンクにし、~/.claude を作らない（macOS の /var → /private/var で、ない場所の実パスがずれた形）
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const home = `${realHome}-link`;
+    symlinkSync(realHome, home);
+    const envDir = mkdtempSync(join(tmpdir(), "cso-cfg-"));
+    const r = rig();
+    r.deps = {
+      ...r.deps,
+      parentEnv: { ...r.deps.parentEnv, HOME: home, CLAUDE_CONFIG_DIR: envDir },
+    } as typeof r.deps;
+    const d = await boot(r);
+    const res = await call(d.url, d.rootToken, "node.spawn", {
+      parentId: "root",
+      role: "implement",
+      ...brief,
+    });
+    expect(res.json.ok, JSON.stringify(res.json)).toBe(true);
+    const pre = r.launcher.sessions[0]?.options.hooks.preToolUse;
+    for (const f of [join(envDir, "settings.json"), join(home, ".claude", "settings.local.json")]) {
+      const out = await pre?.({ toolName: "Read", toolInput: { file_path: f }, cwd: "/" });
+      expect(out?.allow, f).toBe(false);
+    }
+    // settings.json がリンク（dotfiles）なら、リンクの先も守る（R2。呼び出しのたびに解決する）
+    const dotfiles = mkdtempSync(join(tmpdir(), "cso-dot-"));
+    writeFileSync(join(dotfiles, "claude-settings.json"), "{}");
+    symlinkSync(join(dotfiles, "claude-settings.json"), join(envDir, "settings.json"));
+    const viaLink = await pre?.({
+      toolName: "Read",
+      toolInput: { file_path: join(dotfiles, "claude-settings.json") },
+      cwd: "/",
+    });
+    expect(viaLink?.allow).toBe(false);
+    for (const x of [home, realHome, envDir, dotfiles]) rmSync(x, { recursive: true, force: true });
+  });
+
   it("childPluginDir がなければ、plugin を渡さず、起動時に一言記録する", async () => {
     const r = rig();
     const d = await boot(r);
@@ -1738,7 +1774,7 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     },
   };
 
-  it("フックのゲートが有効（既定）なら、子は起動しない（起動の失敗）", async () => {
+  it("hooks が ok（T21-cw）なら、フックのゲートが有効（既定）のままで子を起動でき、ゲートを外した警告は出ない", async () => {
     const r = rig({ childRuntime: "desktop", csoCommand: [process.execPath, "/opt/cso/bin.js"] });
     const d = await boot(r);
     const res = await call(d.url, d.rootToken, "node.spawn", {
@@ -1746,11 +1782,10 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       role: "implement",
       ...brief,
     });
-    expect(res.json.ok).toBe(false);
-    expect(res.json.error?.code).toBe("startFailed");
-    // 原因（ゲート）は、記録（logLine）に残る
-    expect(r.logs.join("\n")).toContain("hooksUnverified");
-    expect(r.launcher.sessions).toHaveLength(0);
+    expect(res.json.ok, JSON.stringify(res.json)).toBe(true);
+    expect(r.logs.join("\n")).not.toContain("hooksUnverified");
+    expect(r.logs.join("\n")).not.toContain("desktopHooksGateDisabled");
+    expect(r.launcher.sessions).toHaveLength(0); // SDK では起動しない
   });
 
   it("再起動のあとの依頼（C2-4）: 1 件 → 再起動しても 1 件 → 子を宣言すると解決済み → 新しい子がいれば、次の再起動で新しい依頼", async () => {
@@ -2213,6 +2248,179 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
       "disableAllHooks",
     );
     rmSync(realHome, { recursive: true, force: true });
+  });
+
+  it("T21-cw: CLAUDE_CONFIG_DIR と claudeConfigDirs の設定も守る（読み書きの禁止と見回り）", async () => {
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const envDir = mkdtempSync(join(tmpdir(), "cso-cfg-"));
+    const extraDir = mkdtempSync(join(tmpdir(), "cso-cfg2-"));
+    const r = desktopRig({ hookSettingsCheckSeconds: 1, claudeConfigDirs: [extraDir] });
+    r.deps = {
+      ...r.deps,
+      parentEnv: { ...r.deps.parentEnv, HOME: realHome, CLAUDE_CONFIG_DIR: envDir },
+    } as typeof r.deps;
+    r0 = r;
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const hookLine = b.bindLine.replace(" child bind ", " child hook ");
+    for (const f of [
+      join(envDir, "settings.json"),
+      join(extraDir, "settings.local.json"),
+      join(realHome, ".claude", "settings.json"),
+    ]) {
+      const rd = await runHook(hookLine, {
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        tool_name: "Read",
+        tool_input: { file_path: f },
+        cwd: b.worktree,
+      });
+      expect(rd.code, f).toBe(2);
+    }
+    // CLAUDE_CONFIG_DIR の設定で disableAllHooks にされたら、見回りで見つける
+    writeFileSync(join(envDir, "settings.json"), JSON.stringify({ disableAllHooks: true }));
+    await vi.waitFor(
+      () =>
+        expect(
+          d.daemon.log
+            .state()
+            .inbox.some((x) => x.nodeId === nodeId && x.summary?.includes("CLAUDE_CONFIG_DIR")),
+        ).toBe(true),
+      { timeout: 5000, interval: 100 },
+    );
+    for (const x of [realHome, envDir, extraDir]) rmSync(x, { recursive: true, force: true });
+  });
+
+  it("T21-cw R5: 人間の受理は done だけ。running・waiting・verified・根は invalidTransition、ないノードは notFound、子のトークンは forbidden", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const accept = (id: string, token = d.humanToken) =>
+      call(d.url, token, "node.review", { nodeId: id, verdict: "accept" });
+    expect((await accept(nodeId)).json.error?.code).toBe("invalidTransition"); // running
+    expect((await accept("root")).json.error?.code).toBe("invalidTransition");
+    expect((await accept("node-missing")).json.error?.code).toBe("notFound");
+    const childToken = readFileSync(join(b.drawer, "token"), "utf8").trim();
+    expect((await accept(nodeId, childToken)).status).toBe(403);
+    const asked = await b.report(
+      JSON.stringify({ question: "どちら？", options: ["a", "b"] }),
+      "decision",
+    );
+    expect(JSON.parse(asked.stdout).ok, asked.stdout + asked.stderr).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("waiting");
+    expect((await accept(nodeId)).json.error?.code).toBe("invalidTransition");
+    const decisionId = JSON.parse(asked.stdout).value.decisionId as string;
+    await call(d.url, d.humanToken, "decision.answer", { decisionId, choice: "a" });
+    const done = await b.report(
+      JSON.stringify({ evidence: [{ criterion: "x", evidence: "済んだ" }] }),
+      "done",
+    );
+    expect(JSON.parse(done.stdout).ok, done.stdout + done.stderr).toBe(true);
+    expect((await accept(nodeId)).json.ok).toBe(true);
+    expect((await accept(nodeId)).json.error?.code).toBe("invalidTransition"); // verified
+  });
+
+  it("T21-cw R1: フック入力の transcript_path の設定の場所が集合の外なら、足して知らせ、その場所の設定も守る", async () => {
+    const realHome = mkdtempSync(join(tmpdir(), "cso-home-"));
+    const other = mkdtempSync(join(tmpdir(), "cso-cfg-"));
+    const r = desktopRig();
+    r.deps = { ...r.deps, parentEnv: { ...r.deps.parentEnv, HOME: realHome } } as typeof r.deps;
+    r0 = r;
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const hookLine = b.bindLine.replace(" child bind ", " child hook ");
+    const read = (file_path: string) =>
+      runHook(hookLine, {
+        hook_event_name: "PreToolUse",
+        session_id: "desktop-session-1",
+        transcript_path: join(other, "projects", "x", "s.jsonl"),
+        tool_name: "Read",
+        tool_input: { file_path },
+        cwd: b.worktree,
+      });
+    const denied = await read(join(other, "settings.json"));
+    expect(denied.code).toBe(2);
+    const inbox = d.daemon.log.state().inbox.filter((x) => x.summary?.includes("守る集合の外"));
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]?.summary).not.toContain(other); // 場所は書かない
+    await read(join(other, "settings.local.json"));
+    expect(
+      d.daemon.log.state().inbox.filter((x) => x.summary?.includes("守る集合の外")),
+    ).toHaveLength(1); // 2 回目は知らせない
+    for (const x of [realHome, other]) rmSync(x, { recursive: true, force: true });
+  });
+
+  it("T21-cw R4: 始まってから hookFirstSeenMinutes たってもフックが来ない子は、受信箱に 1 度だけ知らせる", async () => {
+    let mono = 0;
+    const r = desktopRig({ hookFirstSeenMinutes: 1, hookSettingsCheckSeconds: 1 });
+    r0 = r;
+    const d = await boot({ ...r, deps: { ...r.deps, monoMs: () => mono } });
+    const nodeId = await spawnDesktop(d);
+    const notices = () =>
+      d.daemon.log
+        .state()
+        .inbox.filter((x) => x.nodeId === nodeId && x.summary?.includes("1 度も通っていない"));
+    await new Promise((res) => setTimeout(res, 1500));
+    expect(notices()).toHaveLength(0);
+    mono += 61_000;
+    await vi.waitFor(() => expect(notices()).toHaveLength(1), { timeout: 5000, interval: 100 });
+    await new Promise((res) => setTimeout(res, 1500));
+    expect(notices()).toHaveLength(1);
+  });
+
+  it("T21-cw R3・N4: 相対の CLAUDE_CONFIG_DIR・ない claudeConfigDirs・作業ツリーと重なる場所は、起動時に警告（場所は書かない）", async () => {
+    const r = desktopRig();
+    const missing = join(tmpdir(), "cso-missing-config-dir");
+    r.config = { ...r.config, claudeConfigDirs: [missing, r.config.worktreeRoot] };
+    r.deps = {
+      ...r.deps,
+      parentEnv: { ...r.deps.parentEnv, CLAUDE_CONFIG_DIR: "relative/dir" },
+    } as typeof r.deps;
+    r0 = r;
+    await boot(r);
+    const warnings = r.logs.filter((l) => l.includes("claudeConfigDirWarning"));
+    expect(warnings.some((l) => l.includes("相対パス"))).toBe(true);
+    expect(warnings.some((l) => l.includes("存在しない"))).toBe(true);
+    expect(warnings.some((l) => l.includes("重なる"))).toBe(true);
+    for (const l of warnings) expect(l).not.toContain(missing);
+  });
+
+  it("T21-cw: 人間は done の子を受理（verified）にでき、入館証（トークン・hook-token）が失効して引き出しが消える。人間の差し戻しは forbidden", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const b = await bindByInstruction(d, nodeId);
+    const token = readFileSync(join(b.drawer, "token"), "utf8").trim();
+    const hookToken = readFileSync(join(b.drawer, "hook-token"), "utf8").trim();
+    const done = await b.report(
+      JSON.stringify({ evidence: [{ criterion: "x", evidence: "済んだ" }] }),
+      "done",
+    );
+    expect(JSON.parse(done.stdout).ok, done.stdout + done.stderr).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("done");
+    const rejected = await call(d.url, d.humanToken, "node.review", {
+      nodeId,
+      verdict: "reject",
+      feedback: "やり直し",
+    });
+    expect(rejected.json.error?.code).toBe("forbidden");
+    const accepted = await call(d.url, d.humanToken, "node.review", { nodeId, verdict: "accept" });
+    expect(accepted.json.ok, JSON.stringify(accepted.json)).toBe(true);
+    expect(stateOfNode(d, nodeId)).toBe("verified");
+    const who = await fetch(`${d.url}/v1/whoami`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(who.status).toBe(401);
+    const hooked = await fetch(`${d.url}/v1/hook`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${hookToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ hook_event_name: "Stop", session_id: "desktop-session-1" }),
+    });
+    expect(hooked.status).toBe(401);
+    expect(existsSync(b.drawer)).toBe(false);
   });
 
   it("T21-cs R1: 作業ツリーの .claude がリンクなら、spawn は失敗する", async () => {

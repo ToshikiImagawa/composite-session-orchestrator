@@ -1128,6 +1128,27 @@ describe("discarded（T13f-r レビュー）", () => {
   });
 });
 
+describe("accept（人間の受理。T21-cw）", () => {
+  it("node.review（verdict: accept）を送り、結果の状態と requestId を出す。オプションは受け付けない", async () => {
+    const { client, sent } = fakeClient({ "node.review": ok({ state: "verified" }) });
+    const r = await runCommand(["accept", "a"], deps(client));
+    expect(sent).toEqual([
+      {
+        requestId: "req-1",
+        role: "human",
+        operation: "node.review",
+        params: { nodeId: "a", verdict: "accept" },
+      },
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("verified");
+    expect(r.stdout).toContain("req-1");
+    const bad = fakeClient({});
+    expect((await runCommand(["accept", "a", "--note", "x"], deps(bad.client))).exitCode).toBe(2);
+    expect(bad.sent).toEqual([]);
+  });
+});
+
 describe("confirm-stopped（停止の宣言。T22d）", () => {
   it("node.confirmStopped を送る（--note つき・なし）。結果の状態と requestId を出す", async () => {
     const { client, sent } = fakeClient({ "node.confirmStopped": ok({ state: "stopped" }) });

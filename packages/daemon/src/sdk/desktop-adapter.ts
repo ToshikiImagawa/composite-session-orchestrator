@@ -21,13 +21,13 @@ import type {
   StopValue,
 } from "./runtime.js";
 
-/** 実機確認前の能力表。確認が済んだら、この値を差し替える。 */
+/** 能力表。hooks は、手動確認 (a)（2026-10-30）で ok にした（チップの経路は未確認で、代わりの確認。T21-cw）。 */
 export const DESKTOP_CAPABILITIES: Capabilities = {
   send: "unsupported",
   stopGraceful: false,
   stopImmediate: false,
   stopDelegated: true,
-  hooks: "unverified",
+  hooks: "ok",
   sessionId: false,
 };
 

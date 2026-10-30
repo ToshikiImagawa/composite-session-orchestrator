@@ -61,7 +61,7 @@ export const CHILD_DIR_NEEDED: Readonly<Record<NodeState, boolean>> = {
 };
 const KEY_SHAPE = /^[0-9a-f]{32}$/;
 const TMUTIL = "/usr/bin/tmutil";
-const TMUTIL_TIMEOUT_MS = 5000;
+const TMUTIL_TIMEOUT_MS = 15_000;
 
 /** 引き出しの置き場の失敗（文には実パスを入れない）。`recovery` は、人がとる次の操作。 */
 export class ChildrenDirError extends Error {
