@@ -102,6 +102,7 @@ import { reconcileOnStartup } from "./reconcile.js";
 import type { AgentLauncher } from "./sdk/agent.js";
 import { buildChildPlugin, CHILD_PLUGIN_DIR } from "./sdk/child-plugin.js";
 import { csoChildCommands, DesktopRuntimeAdapter } from "./sdk/desktop-adapter.js";
+import { decideToolUse, resolveScope } from "./sdk/hook-policy.js";
 import { createLsofProbe, nodeExec, type ProcessProbe } from "./sdk/lsof-probe.js";
 import { nodeTimers } from "./sdk/node-timers.js";
 import { nodeFsOps, resolveForWrite } from "./sdk/path-resolve.js";
@@ -499,13 +500,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   // 手動の CLI セッション用の、フック専用のトークン（T22-ht）。CLI の子のときだけ。ノードのトークンが変わったら、一緒に無効にする。
   const minutes = (m: number | undefined, d: number): number => (m ?? d) * 60_000;
   const te = config.tokenExpiryMinutes;
-  const hookTokens =
-    config.childRuntime === "desktop"
-      ? undefined
-      : createHookTokens({
-          maxAgeMs: minutes(te?.hookAbsolute, 1440),
-          ...(deps.monoMs === undefined ? {} : { nowMs: deps.monoMs }),
-        });
+  // フック専用のトークン。CLI の手動のセッション（cso hook-env）と、Desktop の子（引き出しの hook-token。T21-ch）で使う
+  const hookTokens: ReturnType<typeof createHookTokens> | undefined = createHookTokens({
+    maxAgeMs: minutes(te?.hookAbsolute, 1440),
+    ...(deps.monoMs === undefined ? {} : { nowMs: deps.monoMs }),
+  });
   // 認証。
   let humanToken: string;
   // トークンの期限（T21-te）: ノードの状態と、期限切れの受信箱への知らせ（同じトークンについて 1 回だけ。要求 ID を、ノードと
@@ -550,7 +549,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       nowMs: () => Date.parse(clock()),
       monoMs: deps.monoMs ?? (() => performance.now()),
       onNodeTokenChanged: (nodeId) => {
-        hookTokens?.revoke(nodeId);
+        // Desktop の子のフック専用のトークンは、bind（ノードのトークンの発行）では変えない（フックは bind より前から動く。
+        // 止まった・役目の終わった・期限切れは、下の revokeEntered と、引き出しの片付けで失効させる。T21-ch）
+        if (config.childRuntime !== "desktop") hookTokens?.revoke(nodeId);
         if (hookSessions.unbind(nodeId)) note("hookUnbound", { reason: "tokenReissued" });
       },
       // トークンの期限（T21-te・M5）。根には付けない。
@@ -595,8 +596,10 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
             if (action === "create") {
               childrenDirs.reset(n.id);
               childrenDirs.writeFile(n.id, "node", n.id);
+              // フック専用のトークン（T21-ch。子のフック〔cso child hook〕が読む。最初の道具の呼び出しから効く）
+              childrenDirs.writeFile(n.id, "hook-token", hookTokens.issue(n.id));
             } else if (action === "clearSecrets") {
-              childrenDirs.removeFiles(n.id, ["token", "url", "code", "report"]);
+              childrenDirs.removeFiles(n.id, ["token", "url", "code", "report", "hook-token"]);
             } else if (action === "remove") {
               childrenDirs.remove(n.id);
             }
@@ -607,6 +610,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           }
         }
         if (prev === n.state || !TOKEN_REVOKE_ON_ENTER.has(n.state)) continue;
+        if (desktopTree) hookTokens.revoke(n.id);
         try {
           live.expireNode?.(n.id);
         } catch (e) {
@@ -766,6 +770,53 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         })
       : undefined;
   const adapter: RuntimeAdapter & { has(nodeId: string): boolean } = desktopAdapter ?? sdkAdapter;
+
+  // Desktop の子のフック（T21-ch。`cso child hook` → POST /v1/hook）。範囲は Desktop のアダプタが持つもの（cso child の 2 つを
+  // 足したもの）、作業ツリーは daemon が作ったもの、禁じる場所は CLI の子と同じ（stateDir・設定ファイル）に、そのノードの
+  // 引き出しの例外を加える。フック入力の cwd が、daemon の作業ツリーと違えば拒否する（チップで作った子など）。
+  const lastHookAt = new Map<string, number>();
+  const hookNow = deps.monoMs ?? (() => performance.now());
+  const resolveHookPath = (p: string) => resolveForWrite(p, nodeFsOps);
+  const decideDesktopHook = async (
+    nodeId: string,
+    toolName: string,
+    toolInput: unknown,
+    cwd: string | undefined,
+  ): Promise<{ allow: true } | { allow: false; reason: string }> => {
+    const scope = desktopAdapter?.scopeOf(nodeId);
+    const tree = await deps.worktree.cwdOf(nodeId).catch(() => undefined);
+    if (scope === undefined || tree === undefined) {
+      return { allow: false, reason: "このノードの作業範囲を daemon が持っていないため拒否した。" };
+    }
+    let wt: string;
+    let here: string;
+    let drawer: string;
+    try {
+      wt = await realpath(tree);
+      here = cwd === undefined ? "" : await realpath(cwd);
+      drawer = await realpath(childrenDirs.pathOf(nodeId));
+    } catch {
+      return { allow: false, reason: "作業ツリーを確かめられないため拒否した。" };
+    }
+    if (here !== wt) {
+      return {
+        allow: false,
+        reason:
+          "daemon が用意した作業ツリーの外のセッションなので拒否した（daemon の作業ツリーを Desktop で開き、「ローカル」で始める）。",
+      };
+    }
+    const resolved = await resolveScope(scope, wt, resolveHookPath);
+    const d = await decideToolUse(resolved, wt, toolName, toolInput, resolveHookPath, {
+      roots: protectedRoots,
+      allow: [],
+      home: (deps.parentEnv ?? process.env).HOME,
+      drawer,
+      ...(config.csoCommand === undefined ? {} : { csoCommand: config.csoCommand }),
+    });
+    if (d.allow) return { allow: true };
+    if (d.violation !== undefined) note("scopeViolation", { nodeId, reason: d.violation.reason });
+    return { allow: false, reason: d.reason };
+  };
 
   const cwdOf = async (nodeId: string): Promise<string | undefined> =>
     nodeId === config.rootNodeId ? config.rootCwd : deps.worktree.cwdOf(nodeId);
@@ -964,13 +1015,19 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
     credentials,
     // ファイルで設定するフック（plugin の hooks.json。T22-h）。SDK のコールバックと同じ判定・同じ記録。
     // Desktop の子のフックの継承は未確認（Spike 01 の項目 4）。確認までは、受け口では許可しない（仮置き）。
-    hook: (nodeId, toolName, toolInput) =>
+    hook: (nodeId, toolName, toolInput, cwd) =>
       desktopAdapter === undefined
         ? sdkAdapter.decideHook(nodeId, toolName, toolInput)
-        : Promise.resolve({
-            allow: false as const,
-            reason: "Desktop の子のフックの受け口は、実機確認までは使わない（仮置き）",
-          }),
+        : decideDesktopHook(nodeId, toolName, toolInput, cwd),
+    ...(desktopAdapter === undefined
+      ? {}
+      : {
+          hookFresh: (nodeId: string) => {
+            const at = lastHookAt.get(nodeId);
+            return at !== undefined && hookNow() - at <= (config.hookFreshSeconds ?? 30) * 1000;
+          },
+          onHookSeen: (nodeId: string) => lastHookAt.set(nodeId, hookNow()),
+        }),
     hookSessions,
     ...(hookTokens === undefined ? {} : { hookTokens }),
     getState: () => log.state(),
@@ -1006,6 +1063,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           const dir = childrenDirs.create(nodeId);
           childrenDirs.writeFile(nodeId, "node", nodeId);
           childrenDirs.removeFiles(nodeId, ["code", "token", "url", "report"]);
+          // フック専用のトークンを出し直す（T21-ch。24 時間の絶対の期限。結び直しのたびに新しくする）
+          childrenDirs.writeFile(nodeId, "hook-token", hookTokens.issue(nodeId));
           return dir;
         },
       }),

@@ -48,6 +48,8 @@ export const CHILD_FILES = {
   node: "node",
   /** 報告の本文（子が Write で書く。cso が読んだらすぐ消す。T21-cb R1）。 */
   report: "report",
+  /** フック専用のトークン（daemon が spawn・bindCode で書く。0600。`cso child hook` が読む。T21-ch）。 */
+  hookToken: "hook-token",
 } as const;
 /** 一時ファイルの名前の頭（`token.tmp-<乱数>` など）。hook-policy が、Bash の語でこの名前を拒む。 */
 export const TMP_SUFFIX = ".tmp-";
@@ -75,6 +77,8 @@ const TOKEN_FORMAT = /^[\x21-\x7e]+$/;
 const BIND_TIMEOUT_MS = 30_000;
 
 export interface ChildDeps {
+  /** 標準入力の全部（`cso child hook` のフック入力）。 */
+  readonly readStdin?: () => Promise<string>;
   readonly fetch?: typeof fetch;
   readonly newRequestId: () => string;
   /** 自分の uid（既定は `process.getuid()`）。 */
@@ -350,7 +354,92 @@ export async function runChild(argv: readonly string[], deps: ChildDeps): Promis
   const [sub, ...rest] = argv;
   if (sub === "bind") return bind(rest, deps);
   if (sub === "report") return report(rest, deps);
-  return usage("cso child の次に、bind か report を指定する");
+  if (sub === "hook") return hook(rest, deps);
+  return usage("cso child の次に、bind・report・hook のどれかを指定する");
+}
+
+const HOOK_TIMEOUT_MS = 8000;
+const HOOK_INPUT_MAX = 1024 * 1024;
+
+/**
+ * `cso child hook --dir <引き出し> --url <窓口>`（Claude Code のフックのコマンド。T21-ch）。標準入力のフック入力を、引き出しの
+ * `hook-token` で `POST /v1/hook` へ送り、判定を Claude Code の形で返す: 許可は終了コード 0、拒否は 2（標準エラーの文が、拒否の
+ * 理由としてモデルに伝わる）。PreToolUse（と、名前の分からないイベント）は、フェイルクローズ（届かない・形が違う・身元を確かめられない
+ * のどれでも拒否）。PostToolUse・Stop は判定しないので、失敗しても 0（作業を止めない）。トークンは出さない。
+ */
+async function hook(args: readonly string[], deps: ChildDeps): Promise<CommandResult> {
+  const input = (await deps.readStdin?.()) ?? "";
+  let event: unknown;
+  try {
+    event = (JSON.parse(input) as { hook_event_name?: unknown })?.hook_event_name;
+  } catch {
+    event = undefined;
+  }
+  const guarding = !(event === "PostToolUse" || event === "Stop");
+  const PREFIX = "[cso child hook]";
+  const fail = (why: string): CommandResult =>
+    guarding
+      ? { exitCode: 2, stdout: "", stderr: `${PREFIX} 拒否: ${why}\n` }
+      : { exitCode: 0, stdout: "", stderr: `${PREFIX} 記録できなかった: ${why}\n` };
+  const p = parse(args, false);
+  if (typeof p === "string") return fail(`フックのコマンドの指定が正しくない（${p}）`);
+  const origin = loopbackOrigin(p.url);
+  if (origin === undefined) return fail("フックのコマンドの --url が、ループバックの窓口でない");
+  if (input.length > HOOK_INPUT_MAX) return fail("フック入力が大きすぎる");
+  if (event === undefined) return fail("フック入力が JSON でない");
+  const uid = uidOf(deps);
+  let token: string;
+  try {
+    checkDir(p.dir, uid);
+    token = readChecked(
+      join(p.dir, CHILD_FILES.hookToken),
+      { max: TOKEN_MAX, strict: true, name: "hookToken" },
+      deps,
+      uid,
+    );
+  } catch (e) {
+    if (e instanceof FileCheckError) return fail(`${e.message}（人に知らせる）`);
+    throw e;
+  }
+  const verified = await verifyDaemon(p.dir, origin, deps);
+  if (!("verifier" in verified))
+    return fail("窓口の相手が、引き出しを作った daemon か確かめられない");
+  const doFetch = deps.fetch ?? globalThis.fetch;
+  let status: number;
+  let json:
+    | {
+        ok?: unknown;
+        value?: { decision?: unknown; reason?: unknown };
+        error?: { cause?: unknown };
+      }
+    | undefined;
+  try {
+    const res = await doFetch(`${origin}/v1/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: input,
+      redirect: "error",
+      signal: AbortSignal.timeout(HOOK_TIMEOUT_MS),
+    });
+    status = res.status;
+    const text = await res.text();
+    json = text.length > HOOK_INPUT_MAX ? undefined : JSON.parse(text);
+  } catch {
+    return fail("daemon の受け口に届かない（daemon が動いているか、人に確かめてもらう）");
+  }
+  const hide = (s: string): string => clean(s, [token], 1000);
+  if (status !== 200 || json?.ok !== true) {
+    const cause = typeof json?.error?.cause === "string" ? `: ${hide(json.error.cause)}` : "";
+    return fail(`daemon が受け付けなかった（HTTP ${status}${cause}）`);
+  }
+  const decision = json.value?.decision;
+  if (decision === "allow") return { exitCode: 0, stdout: "", stderr: "" };
+  if (decision === "deny" && guarding) {
+    const reason =
+      typeof json.value?.reason === "string" ? hide(json.value.reason) : "範囲外の操作";
+    return { exitCode: 2, stdout: "", stderr: `${reason}\n` };
+  }
+  return fail("daemon の応答の形が正しくない");
 }
 
 async function bind(args: readonly string[], deps: ChildDeps): Promise<CommandResult> {

@@ -613,3 +613,75 @@ describe("cso child report の本文のファイル（T21-cb R1）", () => {
     expect(readFileSync(join(outside, "secret"), "utf8")).toBe("x");
   });
 });
+
+describe("cso child hook（T21-ch）", () => {
+  const HOOK_TOKEN = "hook-token-0123456789abcdef0123456789";
+  const withHook = () => {
+    const d = drawer();
+    writeFileSync(join(d, CHILD_FILES.hookToken), `${HOOK_TOKEN}\n`, { mode: 0o600 });
+    return d;
+  };
+  const pre = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    session_id: "s1",
+    tool_name: "Read",
+    tool_input: {},
+    cwd: "/wt",
+  });
+  const post = JSON.stringify({
+    hook_event_name: "PostToolUse",
+    session_id: "s1",
+    tool_name: "Read",
+    tool_input: {},
+  });
+  const hookFetch = (reply: { status: number; json: unknown } | "throw") => {
+    const sent: { url: string; auth: string | null; body: string }[] = [];
+    const f = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (reply === "throw") throw new TypeError("fetch failed");
+      sent.push({
+        url: String(input),
+        auth: new Headers(init?.headers).get("authorization"),
+        body: String(init?.body),
+      });
+      return new Response(JSON.stringify(reply.json), { status: reply.status });
+    }) as typeof globalThis.fetch;
+    return { f, sent };
+  };
+  const run = (d: string, input: string, f: typeof globalThis.fetch) =>
+    runChild(["hook", "--dir", d, "--url", URL], { ...deps(f), readStdin: async () => input });
+
+  it("フック入力を hook-token で /v1/hook へ送る。許可は 0、拒否は 2 で理由を標準エラーに。トークンは出さない", async () => {
+    const d = withHook();
+    const ok = hookFetch({ status: 200, json: { ok: true, value: { decision: "allow" } } });
+    const r = await run(d, pre, ok.f);
+    expect(r).toEqual({ exitCode: 0, stdout: "", stderr: "" });
+    expect(ok.sent[0]).toEqual({ url: `${URL}/v1/hook`, auth: `Bearer ${HOOK_TOKEN}`, body: pre });
+    const no = hookFetch({
+      status: 200,
+      json: { ok: true, value: { decision: "deny", reason: `範囲外です ${HOOK_TOKEN}` } },
+    });
+    const r2 = await run(d, pre, no.f);
+    expect(r2.exitCode).toBe(2);
+    expect(r2.stderr).toContain("範囲外です");
+    expect(r2.stdout + r2.stderr).not.toContain(HOOK_TOKEN);
+  });
+
+  it("PreToolUse はフェイルクローズ（届かない・200 以外・形が違う・hook-token がない・身元を確かめられない）。PostToolUse は 0", async () => {
+    const d = withHook();
+    expect((await run(d, pre, hookFetch("throw").f)).exitCode).toBe(2);
+    expect(
+      (await run(d, pre, hookFetch({ status: 403, json: { ok: false, error: { cause: "x" } } }).f))
+        .exitCode,
+    ).toBe(2);
+    expect(
+      (await run(d, pre, hookFetch({ status: 200, json: { ok: true, value: {} } }).f)).exitCode,
+    ).toBe(2);
+    expect((await run(d, "not json", hookFetch("throw").f)).exitCode).toBe(2);
+    expect((await run(drawer(), pre, hookFetch("throw").f)).exitCode).toBe(2); // hook-token がない
+    expect((await run(d, post, hookFetch("throw").f)).exitCode).toBe(0);
+    identityOk = false;
+    const f = hookFetch({ status: 200, json: { ok: true, value: { decision: "allow" } } });
+    expect((await run(d, pre, f.f)).exitCode).toBe(2);
+    expect(f.sent).toHaveLength(0); // 身元を確かめられなければ、トークンを送らない
+  });
+});

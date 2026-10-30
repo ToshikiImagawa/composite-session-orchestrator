@@ -568,3 +568,15 @@ describe("csoCommand（T21-cc）", () => {
     }
   });
 });
+
+describe("hookFreshSeconds（T21-ch）", () => {
+  it("1〜3600 の整数（秒）だけを受け付ける", () => {
+    const ok1 = parseConfig(JSON.stringify({ ...base, hookFreshSeconds: 30 }));
+    expect(ok1.ok && ok1.value.hookFreshSeconds).toBe(30);
+    for (const bad of [0, 3601, 1.5, "30"]) {
+      expect(parseConfig(JSON.stringify({ ...base, hookFreshSeconds: bad })).ok, String(bad)).toBe(
+        false,
+      );
+    }
+  });
+});

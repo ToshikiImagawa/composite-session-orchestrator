@@ -27,6 +27,8 @@ export interface BinDeps {
   readonly fetch?: typeof fetch;
   readonly readFile?: (path: string) => string;
   readonly newRequestId?: () => string;
+  /** 標準入力の全部（`cso child hook` のフック入力）。 */
+  readonly readStdin?: () => Promise<string>;
 }
 
 const usage = (cause: string): CommandResult => ({
@@ -52,6 +54,7 @@ function stateDirOf(path: string, readFile: (p: string) => string): string | und
 export async function runBin(argv: readonly string[], deps: BinDeps): Promise<CommandResult> {
   if (argv[0] === "child") {
     return runChild(argv.slice(1), {
+      ...(deps.readStdin === undefined ? {} : { readStdin: deps.readStdin }),
       newRequestId: deps.newRequestId ?? (() => `cso-child-${randomUUID()}`),
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
     });
@@ -115,6 +118,21 @@ if (entry !== undefined && realpathSync(entry) === fileURLToPath(import.meta.url
   const result = await runBin(process.argv.slice(2), {
     env: process.env,
     isTTY: { stdin: process.stdin.isTTY === true, stdout: process.stdout.isTTY === true },
+    // `cso child hook` だけが読む（フック入力）。ほかのコマンドでは読まない（端末で待たない）
+    ...(process.argv[2] === "child" && process.argv[3] === "hook"
+      ? {
+          readStdin: async () => {
+            const chunks: Buffer[] = [];
+            let size = 0;
+            for await (const c of process.stdin) {
+              size += (c as Buffer).length;
+              if (size > 2 * 1024 * 1024) break;
+              chunks.push(c as Buffer);
+            }
+            return Buffer.concat(chunks).toString("utf8");
+          },
+        }
+      : {}),
   });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);

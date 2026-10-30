@@ -153,6 +153,11 @@ export interface DaemonConfig {
    * `/` を含む語は絶対パス（`..` なし）で、絶対パスの語が 1 つ以上要る。ないと、`node.bindCode` は `csoCommandMissing` で失敗する。
    */
   readonly csoCommand?: readonly string[];
+  /**
+   * Desktop の子の報告・紐付けの前に、そのノードのフック（PreToolUse）を受けている必要がある時間の窓（秒。T21-ch）。
+   * 1〜3600 の整数。既定 30。窓の内に呼び出しがなければ `hooksNotActive`。
+   */
+  readonly hookFreshSeconds?: number;
   /** 子の `HOME`。`isolated`（既定）は、子ごとの空のディレクトリ。`inherit` は、daemon の `HOME` をそのまま渡す。 */
   readonly childHome?: "isolated" | "inherit";
   /**
@@ -215,6 +220,7 @@ const KEYS = [
   "maxBudgetUsd",
   "childEnvAllow",
   "csoCommand",
+  "hookFreshSeconds",
   "childHome",
   "childPluginDir",
   "childRuntime",
@@ -583,6 +589,14 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
     }
     csoCommand = [...(v as string[])];
   }
+  let hookFreshSeconds: number | undefined;
+  if (raw.hookFreshSeconds !== undefined) {
+    const v = raw.hookFreshSeconds;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 3600) {
+      return bad("hookFreshSeconds は 1〜3600 の整数（秒）");
+    }
+    hookFreshSeconds = v;
+  }
   let childPluginDir: string | undefined;
   if (raw.childPluginDir !== undefined) {
     childPluginDir = absPath(raw.childPluginDir);
@@ -724,6 +738,7 @@ export function parseConfig(text: string): Result<DaemonConfig, Failure> {
       ...(tokenExpiryMinutes === undefined ? {} : { tokenExpiryMinutes }),
       ...(childEnvAllow === undefined ? {} : { childEnvAllow }),
       ...(csoCommand === undefined ? {} : { csoCommand }),
+      ...(hookFreshSeconds === undefined ? {} : { hookFreshSeconds }),
       ...(autoPurge === undefined ? {} : { autoPurge }),
       ...(digest === undefined ? {} : { digest }),
       ...(wake === undefined ? {} : { wake }),

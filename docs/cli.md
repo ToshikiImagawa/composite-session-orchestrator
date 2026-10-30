@@ -66,6 +66,8 @@ cso reclaim <nodeId>
 - 結果が分からない失敗（窓口から応答がない）は、同じ本文で `--request-id <出した ID>` を付けて送り直す（同じ要求として扱われる）。
 - 終了コード: 0 成功・1 失敗・2 使い方の誤り・3 トークンの期限切れ。
 
+**`cso child hook --dir <引き出し> --url <窓口>`（T21-ch）**: Desktop の子のフック（Claude Code の PreToolUse・PostToolUse・Stop）のコマンド。標準入力のフック入力を、引き出しの `hook-token`（daemon が spawn・`node.bindCode` のときに 0600 で置く。24 時間の絶対の期限）で `POST /v1/hook` へ送り、判定を返す（許可は終了コード 0、拒否は 2 で、標準エラーの文が拒否の理由としてモデルに伝わる）。送る前に、daemon の身元を確かめる。PreToolUse はフェイルクローズ（届かない・形が違う・身元を確かめられない・`hook-token` がないときは拒否）。PostToolUse・Stop は判定しないので、失敗しても 0。トークンは出さない。daemon は、Desktop の子の bind・報告を、そのノードの PreToolUse のフックを直前（設定 `hookFreshSeconds`。既定 30 秒）に受けていなければ `hooksNotActive` で断る（`cso child bind`・`report` の Bash 自体がフックを通るので、フックが効いていれば、いつも通る）。フックの設定（作業ツリーの `.claude/settings.json`）を置く処理と、それを書き換えさせない守りは、次の PR。
+
 **子の作業範囲の判定（FR_014。`hook-policy.ts`）での扱い**: そのノード自身の引き出しだけ、禁じる場所（stateDir）の中のまま、次の 2 つを許す。(1) Bash の `cso child bind|report` の `--dir` の値（引き出しそのもの）。例外が効くのは、区切りの先頭の語が `csoCommand`（設定。なければ `cso` か末尾が `/cso` の語）と一致し、続く 2 語が `child` と `bind`・`report` の命令だけ。その命令の `--dir` が自分の引き出しそのものでなければ、拒否する。外すのは `--dir` の値だけで、ほかの語はふつうに判定する。(2) Write の道具で `<引き出し>/code`・`<引き出し>/report` を書くこと。引き出しの中のファイルの語（`token` とその一時ファイル `token.tmp-…` を含む）・グロブ・`cd`・読み取りの道具（Read・Glob・Grep など）は、禁じる場所のまま拒否する。ほかのノードの引き出しも拒否する。今これが効くのは CLI の子だけで、Desktop の子には、作業範囲外の拒否のフックが効くようになってから効く（`docs/desktop-runtime.md` の (a)）。
 
 ## 子の認証（daemon の起動の環境）
