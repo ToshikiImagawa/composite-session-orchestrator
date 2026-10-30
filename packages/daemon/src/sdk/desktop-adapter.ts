@@ -44,6 +44,14 @@ export interface DesktopAdapterDeps {
    * 前方一致）。人が書いた範囲の決まりは、ほかは変えない。記録（node.created の scope）は変えず、アダプタが持つ範囲にだけ足す。
    */
   readonly extraAllowedCommands?: readonly string[];
+  /**
+   * 起動を受け付ける前に、子の作業ツリーを用意する（T21-cs。見張りの設定 `.claude/settings.json` を置き、info/exclude に足す）。
+   * 失敗したら、起動しない（spawn は失敗する）。
+   */
+  readonly prepareWorktree?: (
+    nodeId: string,
+    worktreePath: string,
+  ) => Promise<Result<undefined, Failure>>;
 }
 
 /** `csoCommand` から、Desktop の子に足すコマンドの許可（`cso child bind`・`cso child report` の 2 つ）。 */
@@ -100,6 +108,10 @@ export class DesktopRuntimeAdapter implements RuntimeAdapter {
         );
       }
       this.deps.onWarning?.(request.nodeId, `フックのゲートを設定で外して起動した: ${UNSAFE}`);
+    }
+    if (this.deps.prepareWorktree !== undefined) {
+      const prepared = await this.deps.prepareWorktree(request.nodeId, request.worktreePath);
+      if (!prepared.ok) return prepared;
     }
     this.nodes.set(request.nodeId, {
       scope: this.withExtra(request.scope),

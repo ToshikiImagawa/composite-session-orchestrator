@@ -81,11 +81,12 @@ function isCsoChildCommand(words: readonly string[], p: ProtectedPaths): boolean
 /** 引き出しの中で、子が Write で書いてよいファイル（紐付けのコードと、報告の本文。T21-cb R1）。 */
 export const DRAWER_WRITABLE_FILES = ["code", "report"] as const;
 /** 禁じる場所の種類（拒否の文面と記録には、種類だけを出す。実パスは出さない）。 */
-export type ProtectedKind = "stateDir" | "daemonConfig" | "processEnv";
+export type ProtectedKind = "stateDir" | "daemonConfig" | "processEnv" | "hookSettings";
 const KIND_TEXT: Readonly<Record<ProtectedKind, string>> = {
   stateDir: "daemon の状態の置き場",
   daemonConfig: "daemon の設定ファイル",
   processEnv: "プロセスの環境変数（/proc の environ）",
+  hookSettings: "見張り（フック）の設定",
 };
 
 // APFS は大文字小文字・Unicode の正規化（NFD/NFC）の違いを区別しないので、比べる前にそろえる（区別する FS では、厳しめに倒れる）。
@@ -477,6 +478,11 @@ export async function decideToolUse(
     ) {
       return ALLOW;
     }
+    // 見張りの設定への書き込みは、範囲の決まりによらず拒否する（書き換えて見張りを外させない。T21-cs）
+    const deniedRoot = protectedPaths?.roots.find(
+      (r) => r.kind === "hookSettings" && under(target, r.path),
+    );
+    if (deniedRoot !== undefined) return denyProtected(deniedRoot.kind);
     const d = evaluateScope(scope, cwd, { kind: "write", path: target });
     if (d.allowed) return ALLOW;
     // 判定は今の範囲の決まりのまま。ただし、対象が禁じる場所の中なら、件名（記録と文面）には種類だけを書く（実パスを出さない）

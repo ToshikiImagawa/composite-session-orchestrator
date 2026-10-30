@@ -12,7 +12,8 @@
  * - ポートの `cwdOf` は、根のノードだけ設定の `rootCwd` を返し、ほかはポートに任せる。
  */
 
-import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   lstatSync,
@@ -25,7 +26,7 @@ import {
   writeSync,
 } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import {
   DEFAULT_PURGE_TOMBSTONE,
   type EventBody,
@@ -33,11 +34,12 @@ import {
   failure,
   isPathUnder,
   type Result,
+  type ScopeViolationReason,
 } from "@cso/core";
 import { createConfirmationGate } from "./api/confirmation-gate.js";
 import { assertSecureDirectory, assertSecureFile, processUid } from "./api/fs-safety.js";
 import { recoverAnswerDeliveries } from "./api/handlers/answer-delivery.js";
-import { createBindHandlers } from "./api/handlers/bind-handlers.js";
+import { createBindHandlers, shellWord } from "./api/handlers/bind-handlers.js";
 import { appendAtomically, deriveId, summarize, waitRequestKey } from "./api/handlers/context.js";
 import { createHookHandlers } from "./api/handlers/hook-handlers.js";
 import { createInstructionDelivery } from "./api/handlers/instruction-delivery.js";
@@ -767,6 +769,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           ...(config.csoCommand === undefined
             ? {}
             : { extraAllowedCommands: csoChildCommands(config.csoCommand) }),
+          prepareWorktree: (nodeId, worktreePath) => prepareDesktopWorktree(nodeId, worktreePath),
         })
       : undefined;
   const adapter: RuntimeAdapter & { has(nodeId: string): boolean } = desktopAdapter ?? sdkAdapter;
@@ -775,6 +778,188 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
   // 足したもの）、作業ツリーは daemon が作ったもの、禁じる場所は CLI の子と同じ（stateDir・設定ファイル）に、そのノードの
   // 引き出しの例外を加える。フック入力の cwd が、daemon の作業ツリーと違えば拒否する（チップで作った子など）。
   const lastHookAt = new Map<string, number>();
+  const homeDir = (deps.parentEnv ?? process.env).HOME;
+  /**
+   * git の共通ディレクトリの info/exclude に、行を足す（なければ）。作業ツリーが git の作業ツリーでなければ、何もしない
+   * （コミットに混ざる心配がない）。足したファイルの実パスを返す。
+   */
+  const addToGitExclude = async (worktree: string, line: string): Promise<string | undefined> => {
+    const common = await new Promise<string | undefined>((res) => {
+      execFile(
+        "git",
+        ["rev-parse", "--git-common-dir"],
+        { cwd: worktree, timeout: 5000 },
+        (e, out) => res(e ? undefined : String(out).trim()),
+      );
+    });
+    if (common === undefined || common === "") return undefined;
+    const info = join(isAbsolute(common) ? common : join(worktree, common), "info");
+    mkdirSync(info, { recursive: true });
+    const path = join(info, "exclude");
+    let text = "";
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
+    if (!text.split("\n").includes(line)) {
+      writeFileSync(path, `${text}${text === "" || text.endsWith("\n") ? "" : "\n"}${line}\n`);
+    }
+    return realpath(path);
+  };
+  /** 見張りの設定を置いた作業ツリーと、その設定の中身のハッシュ・git の共通ディレクトリの info/exclude（T21-cs。メモリだけ）。 */
+  const hookSettings = new Map<string, { worktree: string; hash: string; exclude?: string }>();
+  /** 見張りの設定が書き換えられたと分かったノード（以後のフックをすべて拒否する）。 */
+  const tamperedHooks = new Set<string>();
+  /** Desktop の子の範囲違反の数え上げ（CLI の子と同じ上限。受信箱には、同じ違反につき 1 度、ノードごとに 20 件まで）。 */
+  const desktopViolations = new Map<
+    string,
+    { keys: Map<string, number>; total: number; items: number; overflow: boolean }
+  >();
+  let violationSeq = 0;
+  const recordDesktopViolation = (
+    nodeId: string,
+    reason: ScopeViolationReason,
+    subject: string,
+  ): void => {
+    const v = desktopViolations.get(nodeId) ?? {
+      keys: new Map(),
+      total: 0,
+      items: 0,
+      overflow: false,
+    };
+    desktopViolations.set(nodeId, v);
+    const key = `${reason}\0${subject}`;
+    const count = v.keys.get(key) ?? 0;
+    if (count >= 10 || v.total >= 200) return;
+    const bodies: EventBody[] = [{ type: "scope.violation", payload: { nodeId, reason, subject } }];
+    const requestId = `desktop-violation-${randomBytes(8).toString("hex")}-${++violationSeq}`;
+    let item = false;
+    let overflow = false;
+    if (count === 0 && v.items < 20) {
+      item = true;
+      bodies.push({
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", requestId, "violation"),
+          kind: "violation",
+          nodeId,
+          summary: summarize(`範囲違反（${reason}）: ${subject}`),
+        },
+      });
+    } else if (count === 0 && !v.overflow) {
+      overflow = true;
+      bodies.push({
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", requestId, "violation"),
+          kind: "violation",
+          nodeId,
+          summary: summarize(
+            "ほかにも範囲違反がある（受信箱には、これ以上出さない。記録を確認する）",
+          ),
+        },
+      });
+    }
+    const r = appendAtomically(log, clock, requestId, { system: true }, bodies);
+    if (!r.ok) return;
+    v.keys.set(key, count + 1);
+    v.total += 1;
+    if (item) v.items += 1;
+    if (overflow) v.overflow = true;
+  };
+  /** 見張りの設定が書き換えられたことを、受信箱に 1 度だけ知らせる。 */
+  const notifyHookTampered = (nodeId: string): void => {
+    const key = `hook-settings-tampered/${nodeId}`;
+    const r = appendAtomically(log, clock, key, { system: true }, [
+      {
+        type: "inbox.added",
+        payload: {
+          id: deriveId("inbox", "system", key, "hook-tampered"),
+          kind: "info",
+          nodeId,
+          summary: summarize(
+            `子 ${nodeId} の見張り（フック）の設定が、置いたときから変わっている。以後の道具の呼び出しは、すべて拒否する。子を止めるかどうかを決める`,
+          ),
+        },
+      },
+    ]);
+    if (!r.ok) note("hookTamperedNoticeFailure", { nodeId, cause: r.error.code });
+  };
+  /**
+   * Desktop の子の作業ツリーに、見張りの設定を置く（T21-cs）。PreToolUse は `… || exit 2`（Claude Code は終了コード 2 のときだけ
+   * 拒否するので、cso が起動できない・例外で落ちたときも拒否にする）、PostToolUse・Stop は `… || true`。timeout は、cso の内側の
+   * 時間（身元の確認と、送る 8 秒 × 再試行）より十分長い 90 秒。すでに設定があれば、置かずに失敗する。info/exclude に足して、
+   * 設定がコミットに混ざらないようにする。
+   */
+  const prepareDesktopWorktree = async (
+    nodeId: string,
+    worktreePath: string,
+  ): Promise<Result<undefined, Failure>> => {
+    const url = running?.url;
+    // csoCommand がなければ、見張りの設定を作れない（node.bindCode が csoCommandMissing で断る。フックの判定も、設定がないので拒否）
+    if (config.csoCommand === undefined) return { ok: true, value: undefined };
+    if (url === undefined) {
+      return fail("unavailable", "窓口がまだ待ち受けていない", "少し待って、もう一度試す");
+    }
+    const dir = join(worktreePath, ".claude");
+    const file = join(dir, "settings.json");
+    const cso = config.csoCommand.map(shellWord).join(" ");
+    const command = `${cso} child hook --dir ${shellWord(childrenDirs.pathOf(nodeId))} --url ${shellWord(url)}`;
+    const entry = (suffix: string) => [
+      { type: "command", command: `${command} ${suffix}`, timeout: 90 },
+    ];
+    const content = `${JSON.stringify(
+      {
+        hooks: {
+          PreToolUse: [{ matcher: "*", hooks: entry("|| exit 2") }],
+          PostToolUse: [{ matcher: "*", hooks: entry("|| true") }],
+          Stop: [{ hooks: entry("|| true") }],
+        },
+      },
+      null,
+      2,
+    )}\n`;
+    // すでに設定があるとき: daemon が前に置いたものと同じ中身なら（再開など）、そのまま使う。違えば置かずに失敗する
+    let existing: string | undefined;
+    try {
+      const st = lstatSync(file);
+      existing = st.isFile() ? readFileSync(file, "utf8") : "";
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        return fail(
+          "hookSettingsFailed",
+          "見張りの設定を置く場所を確かめられない",
+          "作業ツリーを確かめる",
+        );
+      }
+    }
+    if (existing !== undefined && existing !== content) {
+      return fail(
+        "hookSettingsExists",
+        "子の作業ツリーに、すでに .claude/settings.json がある（見張りの設定を置けない）",
+        "作業ツリーの元のリポジトリに .claude/settings.json があるなら、それを外してから、子を作り直す",
+      );
+    }
+    let exclude: string | undefined;
+    try {
+      mkdirSync(dir, { recursive: true });
+      if (existing === undefined) writeFileSync(file, content, { flag: "wx", mode: 0o644 });
+      exclude = await addToGitExclude(worktreePath, "/.claude/settings.json");
+    } catch (e) {
+      return fail(
+        "hookSettingsFailed",
+        `見張りの設定を置けない（${safeCauseOfChildrenDir(e)}）`,
+        "作業ツリーの権限と、git の共通ディレクトリ（info/exclude）を確かめる",
+      );
+    }
+    hookSettings.set(nodeId, {
+      worktree: await realpath(worktreePath),
+      hash: createHash("sha256").update(content).digest("hex"),
+      ...(exclude === undefined ? {} : { exclude }),
+    });
+    return { ok: true, value: undefined };
+  };
   const hookNow = deps.monoMs ?? (() => performance.now());
   const resolveHookPath = (p: string) => resolveForWrite(p, nodeFsOps);
   const decideDesktopHook = async (
@@ -813,6 +998,30 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
           "daemon が用意した作業ツリーの外のセッションなので拒否した（daemon の作業ツリーを Desktop で開き、「ローカル」で始める）。",
       };
     }
+    // 見張りの設定が、置いたときと同じか（呼び出しのたびに確かめる。違えば、以後をすべて拒否して、受信箱に 1 度知らせる）
+    const settings = hookSettings.get(nodeId);
+    let same = false;
+    if (settings !== undefined && !tamperedHooks.has(nodeId)) {
+      try {
+        const now = createHash("sha256")
+          .update(readFileSync(join(settings.worktree, ".claude", "settings.json")))
+          .digest("hex");
+        same = now === settings.hash;
+      } catch {
+        same = false;
+      }
+      if (!same) {
+        tamperedHooks.add(nodeId);
+        notifyHookTampered(nodeId);
+      }
+    }
+    if (settings === undefined || !same) {
+      return {
+        allow: false,
+        reason:
+          "見張り（フック）の設定が、daemon が置いたときから変わっている（または、daemon が置いた設定がない）ため、すべて拒否する。人（親）に知らせる。",
+      };
+    }
     const resolved = await resolveScope(scope, wt, resolveHookPath);
     const d = await decideToolUse(
       resolved,
@@ -821,7 +1030,20 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       toolInput,
       resolveHookPath,
       {
-        roots: protectedRoots,
+        roots: [
+          ...protectedRoots,
+          // 見張りの設定（読み書きとも禁じる。T21-cs）: 作業ツリーの .claude/、利用者の設定、git の共通ディレクトリの info/exclude
+          { path: join(settings.worktree, ".claude"), kind: "hookSettings" as const },
+          ...(homeDir === undefined
+            ? []
+            : ["settings.json", "settings.local.json"].map((f) => ({
+                path: join(homeDir, ".claude", f),
+                kind: "hookSettings" as const,
+              }))),
+          ...(settings.exclude === undefined
+            ? []
+            : [{ path: settings.exclude, kind: "hookSettings" as const }]),
+        ],
         allow: [],
         home: (deps.parentEnv ?? process.env).HOME,
         drawer,
@@ -830,7 +1052,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
       here,
     );
     if (d.allow) return { allow: true };
-    if (d.violation !== undefined) note("scopeViolation", { nodeId, reason: d.violation.reason });
+    // CLI の子と同じく、範囲違反として記録する（受信箱にも出す）
+    if (d.violation !== undefined)
+      recordDesktopViolation(nodeId, d.violation.reason, d.violation.subject);
     return { allow: false, reason: d.reason };
   };
 
@@ -1067,6 +1291,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         ...(hookTokens === undefined ? {} : { hookTokens }),
         managed: (id) => adapter.has(id),
         baseUrl: () => running?.url,
+        desktop: desktopAdapter !== undefined,
       }),
       // Desktop の子の紐付けの文面（T21・仮置き）。コードは記録しない（応答だけ）。
       ...createBindHandlers({
@@ -1075,6 +1300,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps): Result<Dae
         ...(desktopAdapter === undefined ? {} : { desktop: desktopAdapter }),
         baseUrl: () => running?.url,
         ...(config.csoCommand === undefined ? {} : { csoCommand: config.csoCommand }),
+        // 見張りの設定を置いた作業ツリー（文面の「ローカルで始める」手順に書く。T21-cs）
+        worktreeOf: (id) => hookSettings.get(id)?.worktree,
         // 引き出しを用意する（なければ作る。node を書き直し、残っている code・token・url・report を消す。T21-cc・R2）。
         // 紐付けは、新しい文面で 1 からやり直す（前の token は、新しいトークンの発行で無効になる）
         prepareDrawer: (nodeId) => {
