@@ -73,6 +73,8 @@ export function parseHookRequest(body: unknown): Result<HookRequest, Failure> {
 export interface SessionBinder {
   /** 最初の値なら結び、結んだ値と同じなら真。別の値なら偽。 */
   check(nodeId: string, sessionId: string): boolean;
+  /** 結ばずに確かめる。結び付けがないか、結んだ値と同じなら真（判定で拒否した呼び出しでは結ばないため）。 */
+  accepts(nodeId: string, sessionId: string): boolean;
   /** 結び付けを外す（T22-hu）。外したら真（結び付けがなければ偽）。次に来た session_id に結び直す。 */
   unbind(nodeId: string): boolean;
   /** 結び付けがあるか（記録の `hadBinding` 用）。 */
@@ -89,6 +91,10 @@ export function createSessionBinder(): SessionBinder {
         return true;
       }
       return s === sessionId;
+    },
+    accepts(nodeId, sessionId) {
+      const s = bound.get(nodeId);
+      return s === undefined || s === sessionId;
     },
     unbind(nodeId) {
       return bound.delete(nodeId);

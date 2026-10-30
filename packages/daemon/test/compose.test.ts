@@ -2312,6 +2312,51 @@ describe("Desktop の子（childRuntime: desktop。T21・仮置き）", () => {
     expect((await sh(bindLine)).stdout).toBe("hooksNotActive\n");
   });
 
+  it("フックの結び付け: 拒否された呼び出しでは結ばない。node.bindCode の出し直しで別のセッションが使え、前のセッションは 403（次の操作は bindCode の出し直し）", async () => {
+    const r = desktopRig();
+    const d = await boot(r);
+    const nodeId = await spawnDesktop(d);
+    const bc = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    const hookLine = (bc.json.value.instruction as string)
+      .split("\n")
+      .map((l) => l.replace(/^ {3}/, ""))
+      .find((l) => l.includes(" child bind "))
+      ?.replace(" child bind ", " child hook ") as string;
+    // 「ワークツリー」で始めたセッション: cwd が作業ツリーの外なので拒否。結び付けは起きない
+    const outside = await runHook(hookLine, {
+      hook_event_name: "PreToolUse",
+      session_id: "worktree-session",
+      tool_name: "Read",
+      tool_input: { file_path: join(r.config.worktreeRoot, nodeId, "a.txt") },
+      cwd: r.config.stateDir,
+    });
+    expect(outside.code).toBe(2);
+    // 「ローカル」で開き直したセッションは通る（bind まで）
+    const b = await bindByInstruction(d, nodeId);
+    expect(b.bound.stdout).toBe("bound\n");
+    // bind はトークンを出し直すので、結び付けが外れる。許可された呼び出しで結び直す
+    expect((await b.hook("pnpm test")).code).toBe(0);
+    const payload = (sessionId: string) => ({
+      hook_event_name: "PreToolUse",
+      session_id: sessionId,
+      tool_name: "Bash",
+      tool_input: { command: "pnpm test" },
+      cwd: b.worktree,
+    });
+    const before = await runHook(hookLine, payload("desktop-session-2"));
+    expect(before.stderr).toContain("別のセッション");
+    // 出し直したら、別のセッションが結ばれる
+    const again = await call(d.url, d.rootToken, "node.bindCode", { nodeId });
+    expect(again.json.ok, JSON.stringify(again.json)).toBe(true);
+    const fresh = await runHook(hookLine, payload("desktop-session-2"));
+    expect(fresh.code, fresh.stderr).toBe(0);
+    const stale = await runHook(hookLine, payload("desktop-session-1"));
+    expect(stale.code).not.toBe(0);
+    expect(stale.stderr).toContain("別のセッション");
+    expect(stale.stderr).toContain("node.bindCode を出し直し、新しいセッションで始める");
+    expect(r0Logs(r)).toContain("bindCodeReissued");
+  });
+
   it("R1・R4: daemon の再起動のあと、フックは拒否（再起動と分かる言葉）。hook-token は 24 時間で切れる", async () => {
     let mono = 0;
     const r = desktopRig();
